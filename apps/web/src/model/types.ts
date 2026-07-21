@@ -1,0 +1,17 @@
+export type SectionSummary = { id:string; position:number; title:string; question:string; status:string; generated?:boolean; bestScore:number; totalScore:number; askMeUnlocked:boolean };
+export type Attachment = { id:string; filename:string; mediaType:string; byteSize:number; sha256:string; createdAt:string };
+export type Practice = { id:string; title:string; instructions:Record<string,unknown>; submission:Record<string,unknown>; attachments:Attachment[]; evidenceMode:'file_attachment'|'structured_only_legacy'; status:string };
+export type Capstone = { id:string; title:string; brief:Record<string,unknown>; submission:Record<string,unknown>; attachments:Attachment[]; evidenceMode:'file_attachment'|'structured_only_legacy'; status:string };
+export type Chapter = { id:string; position:number; title:string; objective:string; status:string; generated:boolean; sections:SectionSummary[]; practice:null|Practice };
+export type Book = { id:string; position:number; title:string; description:string; estimatedMinutes:number; status:string; progress:number; practiceProgress:number; chapters:Chapter[]; capstone:null|Capstone };
+export type Series = { id:string; title:string; rationale:string; progress:number; progressBasis?:string; books:Book[] };
+export type Shelf = { id:string; name:string; domain:string; specialty:string; tags:string[]; series:Series[] };
+export type Bootstrap = { user:{id:string;name:string}; shelves:Shelf[] };
+export type Source = { title:string; url:string; kind:string; version:string };
+export type Block = { id:string; version:number; kind:string; role:string; heading:string; content:string; source_indexes:number[] };
+export type Question = { prompt:string; options:string[]; core:boolean; objective:string; explanation:string };
+export type Generation = {id:string;operation:string;attempt:number;status:string;model:string;trace:Record<string,unknown>;errorCode?:string;error?:string;startedAt:string;finishedAt?:string};
+export type Remediation = {id:string;attemptId:string;replacementQuizId:string;blocks:Block[];objectives:string[];strategy:string};
+export type Note = {id:string;aiContent:Record<string,unknown>;userContent:Record<string,unknown>;version:number};
+export type AskMe = {id:string;status:string;round:number;dimension:string;prompt:string|null;entries:{dimension:string;prompt:string;answer:string|null;evaluation:string;rationale:string}[]};
+export type Section = SectionSummary & { generation:null|Generation; content:null|{id:string;version:number;blocks:Block[];sources:Source[];sourceVerification:{url:string;reachable:boolean;statusCode:number;pinned:boolean}[];confidence:string}; quiz:null|{id:string;generation:number;questions:Question[]}; remediations:Remediation[]; note:null|Note };

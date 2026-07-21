@@ -1,0 +1,73 @@
+from typing import Literal
+from pydantic import BaseModel, ConfigDict, Field
+
+
+def camel(value: str):
+    first, *rest = value.split("_")
+    return first + "".join(x.title() for x in rest)
+
+
+class ApiModel(BaseModel):
+    model_config = ConfigDict(alias_generator=camel, populate_by_name=True)
+
+
+class ShelfCreate(ApiModel):
+    name: str = Field(min_length=1, max_length=100)
+    domain: str = Field(min_length=1, max_length=100)
+    specialty: str = Field(default="", max_length=120)
+    tags: list[str] = Field(default_factory=list, max_length=12)
+
+
+class PlanCreate(ApiModel):
+    shelf_id: str
+    topic: str = Field(min_length=1, max_length=160)
+    role: str = Field(min_length=1, max_length=80)
+    experience: str = Field(min_length=1, max_length=500)
+    purpose: str = Field(default="", max_length=1000)
+    depth: Literal["overview", "deep", "mastery"]
+    details: str = Field(default="", max_length=3000)
+
+
+class QuizSubmit(ApiModel):
+    quiz_set_id: str
+    answers: list[list[int]]
+
+
+class AskRequest(ApiModel):
+    block_id: str
+    question: str = Field(min_length=1, max_length=3000)
+    thread_id: str | None = None
+    force_relation: Literal["follow_up", "new_question"] | None = None
+
+
+class QaClassificationUpdate(ApiModel):
+    relation: Literal["follow_up", "new_question"]
+    target_thread_id: str | None = None
+
+
+class NoteUpdate(ApiModel):
+    content: dict
+
+
+class AskMeReply(ApiModel):
+    answer: str = Field(default="", max_length=3000)
+
+
+class AttachmentSubmit(ApiModel):
+    content: dict
+    attachment_ids: list[str] = Field(min_length=1, max_length=20)
+
+
+class ChapterCreate(ApiModel):
+    title: str = Field(min_length=1, max_length=240)
+    objective: str = Field(min_length=1, max_length=2000)
+    position: int | None = Field(default=None, ge=1)
+
+
+class ChapterUpdate(ApiModel):
+    title: str | None = Field(default=None, min_length=1, max_length=240)
+    objective: str | None = Field(default=None, min_length=1, max_length=2000)
+
+
+class ChapterOrder(ApiModel):
+    chapter_ids: list[str] = Field(min_length=1)

@@ -1,0 +1,15 @@
+.env
+config
+.DS_Store
+.venv/
+.pnpm-store/
+apps/web/node_modules/
+apps/web/dist/
+__pycache__/
+*.pyc
+*.tsbuildinfo
+.pytest_cache/
+data/*.db
+data/*.db-shm
+data/*.db-wal
+reports/evaluations/evidence/*.db

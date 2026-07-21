@@ -1,0 +1,11 @@
+{
+  "name": "zhi-xing-bookshelf",
+  "version": "0.2.0",
+  "private": true,
+  "description": "React + FastAPI front-end/back-end separated learning MVP",
+  "scripts": {
+    "dev": "./start.sh",
+    "dev:api": "./start-api.sh",
+    "dev:web": "./start-web.sh"
+  }
+}
