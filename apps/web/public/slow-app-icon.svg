@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title>Slow</title>
+  <rect width="64" height="64" rx="15" fill="#12382E"/>
+  <path
+    d="M49.85 25.16A19 19 0 1 1 40.19 14.15"
+    fill="none"
+    stroke="#F7F6EF"
+    stroke-linecap="round"
+    stroke-width="8"
+  />
+  <path
+    d="M40.56 14.36A19 19 0 0 1 46.97 19.79"
+    fill="none"
+    stroke="#B8F23D"
+    stroke-linecap="round"
+    stroke-width="8"
+  />
+</svg>
