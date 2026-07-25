@@ -131,8 +131,8 @@ export default function App() {
         {view === 'shelf' && shelf && (
           <ShelfPage
             shelf={shelf}
-            onCreate={async (body) => {
-              const value = await run('AI 正在规划系列…', () => api.createPlan({ ...body, shelfId: shelf.id }));
+            onCreate={async (body, idempotencyKey) => {
+              const value = await run('AI 正在规划系列…', () => api.createPlan({ ...body, shelfId: shelf.id }, idempotencyKey));
               setSeries(value);
               setSection(null);
               setView('learn');
@@ -230,7 +230,7 @@ function ShelfPage({
   onDelete,
 }: {
   shelf: Shelf;
-  onCreate: (body: object) => Promise<void>;
+  onCreate: (body: object, idempotencyKey: string) => Promise<void>;
   onOpen: (id: string) => void;
   onDelete: (id: string) => Promise<void>;
 }) {
@@ -359,34 +359,45 @@ function TrashIcon({ size = 16 }: { size?: number }) {
   );
 }
 
-function PlanForm({ submit }: { submit: (body: object) => Promise<void> }) {
+function PlanForm({ submit }: { submit: (body: object, idempotencyKey: string) => Promise<void> }) {
   const [topic, setTopic] = useState('Kubernetes');
   const [role, setRole] = useState('技术人员');
   const [experience, setExperience] = useState('熟悉 Linux、Docker 和基础网络，但没有实际使用过 K8s');
   const [purpose, setPurpose] = useState('即将参与基于 K8s 的应用部署与日常排障项目');
   const [depth, setDepth] = useState('deep');
+  const [submitting, setSubmitting] = useState(false);
+  const idempotencyKey = useRef(crypto.randomUUID());
   const send = async (event: FormEvent) => {
     event.preventDefault();
-    await submit({ topic, role, experience, purpose, depth, details: '希望理解核心机制，而不只是记命令' });
+    if (submitting) return;
+    setSubmitting(true);
+    try {
+      await submit(
+        { topic, role, experience, purpose, depth, details: '希望理解核心机制，而不只是记命令' },
+        idempotencyKey.current,
+      );
+    } catch {
+      setSubmitting(false);
+    }
   };
   return (
     <form className="plan-form" onSubmit={send}>
-      <label>学习内容<input value={topic} onChange={(event) => setTopic(event.target.value)} /></label>
-      <fieldset>
+      <label>学习内容<input disabled={submitting} value={topic} onChange={(event) => setTopic(event.target.value)} /></label>
+      <fieldset disabled={submitting}>
         <legend>你的角色</legend>
         {['技术人员', '产品或运营', '管理人员', '猎头或人力'].map((item) => (
           <button type="button" className={role === item ? 'selected' : ''} onClick={() => setRole(item)} key={item}>{item}</button>
         ))}
       </fieldset>
-      <label>相关经验<textarea value={experience} onChange={(event) => setExperience(event.target.value)} /></label>
-      <label>学习目的<textarea value={purpose} onChange={(event) => setPurpose(event.target.value)} /></label>
-      <fieldset>
+      <label>相关经验<textarea disabled={submitting} value={experience} onChange={(event) => setExperience(event.target.value)} /></label>
+      <label>学习目的<textarea disabled={submitting} value={purpose} onChange={(event) => setPurpose(event.target.value)} /></label>
+      <fieldset disabled={submitting}>
         <legend>目标深度</legend>
         {[['overview', '简单了解'], ['deep', '深度学习'], ['mastery', '掌握路径']].map(([value, label]) => (
           <button type="button" className={depth === value ? 'selected' : ''} onClick={() => setDepth(value)} key={value}>{label}</button>
         ))}
       </fieldset>
-      <button className="primary-button">生成目录方案</button>
+      <button className="primary-button" disabled={submitting}>{submitting ? '正在生成，请稍候…' : '生成目录方案'}</button>
     </form>
   );
 }

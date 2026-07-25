@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 from urllib.parse import unquote
@@ -6,6 +7,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..ai.port import AiPort
@@ -25,6 +27,7 @@ from ..infrastructure.tables import (
     LearningMemory,
     LearningNote,
     LearningPlan,
+    PlanCreationRequest,
     QaMessage,
     QaSession,
     QaThread,
@@ -125,10 +128,54 @@ class SlowService:
         self.db.commit()
         return self._shelf(row)
 
-    async def create_plan(self, body):
+    async def create_plan(self, body, idempotency_key: str | None = None):
         self.shelf(body.shelf_id)
         request = body.model_dump(by_alias=False)
-        generated = await self.ai.plan(request, self._memory(body.shelf_id))
+        request_key = (idempotency_key or uid("plan_request")).strip()
+        if len(request_key) < 8 or len(request_key) > 128:
+            raise AppError("创建请求标识无效", code="IDEMPOTENCY_KEY_INVALID", status=400)
+        request_hash = hashlib.sha256(
+            json.dumps(request, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        reservation = self.db.get(PlanCreationRequest, request_key)
+        owns_reservation = False
+        if not reservation:
+            reservation = PlanCreationRequest(
+                idempotency_key=request_key,
+                user_id=USER_ID,
+                request_hash=request_hash,
+                status="pending",
+            )
+            self.db.add(reservation)
+            try:
+                self.db.commit()
+                owns_reservation = True
+            except IntegrityError:
+                self.db.rollback()
+                reservation = self.db.get(PlanCreationRequest, request_key)
+        if not reservation or reservation.user_id != USER_ID or reservation.request_hash != request_hash:
+            raise AppError("创建请求标识已用于其他学习计划", code="IDEMPOTENCY_KEY_REUSED", status=409)
+        if reservation.status == "completed" and reservation.series_id:
+            return self.series(reservation.series_id)
+        if reservation.status == "failed":
+            reservation.status = "pending"
+            reservation.error_code = ""
+            reservation.updated_at = now()
+            self.db.commit()
+            owns_reservation = True
+        elif not owns_reservation:
+            raise AppError("相同学习计划正在生成，请勿重复提交", code="PLAN_CREATION_IN_PROGRESS", status=409)
+        try:
+            generated = await self.ai.plan(request, self._memory(body.shelf_id))
+        except Exception as error:
+            self.db.rollback()
+            failed = self.db.get(PlanCreationRequest, request_key)
+            if failed:
+                failed.status = "failed"
+                failed.error_code = getattr(error, "code", error.__class__.__name__)[:80]
+                failed.updated_at = now()
+                self.db.commit()
+            raise
         plan = LearningPlan(
             id=uid("plan"),
             **request,
@@ -144,6 +191,9 @@ class SlowService:
             rationale=generated.rationale,
         )
         self.db.add_all([plan, series])
+        reservation.status = "completed"
+        reservation.series_id = series.id
+        reservation.updated_at = now()
         self.db.flush()
         for book_position, item in enumerate(generated.books, 1):
             book = Book(

@@ -123,6 +123,19 @@ def create_series(client):
     return client.post("/api/plans", json={"shelfId":"shelf_technology","topic":"Kubernetes","role":"技术人员","experience":"会 Docker","depth":"deep"}).json()
 
 
+def test_plan_creation_is_idempotent(client):
+    body = {"shelfId":"shelf_technology","topic":"并发创建保护","role":"技术人员","experience":"会 Docker","depth":"deep"}
+    headers = {"Idempotency-Key": "test-plan-creation-idempotency"}
+    first = client.post("/api/plans", json=body, headers=headers)
+    replay = client.post("/api/plans", json=body, headers=headers)
+    assert first.status_code == 201 and replay.status_code == 201
+    assert replay.json()["id"] == first.json()["id"]
+
+    conflict = client.post("/api/plans", json={**body, "topic": "不同主题"}, headers=headers)
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "IDEMPOTENCY_KEY_REUSED"
+
+
 def generate_and_pass(client, section_id):
     section = client.post(f"/api/sections/{section_id}/generate").json()
     answers = [[1] for _ in section["quiz"]["questions"]]

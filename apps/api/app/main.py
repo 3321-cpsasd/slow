@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -72,7 +72,12 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
     def create_shelf(body: ShelfCreate, s: SlowService = Depends(service)): return s.create_shelf(body)
 
     @app.post("/api/plans", status_code=201)
-    async def create_plan(body: PlanCreate, s: SlowService = Depends(service)): return await s.create_plan(body)
+    async def create_plan(
+        body: PlanCreate,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return await s.create_plan(body, idempotency_key)
 
     @app.get("/api/series/{series_id}")
     def series(series_id: str, s: SlowService = Depends(service)): return s.series(series_id)

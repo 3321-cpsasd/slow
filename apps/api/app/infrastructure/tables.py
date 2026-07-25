@@ -43,6 +43,18 @@ class LearningPlan(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class PlanCreationRequest(Base):
+    __tablename__ = "plan_creation_requests"
+    idempotency_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    request_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    series_id: Mapped[str | None] = mapped_column(ForeignKey("series.id"), nullable=True)
+    error_code: Mapped[str] = mapped_column(String(80), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class Series(Base):
     __tablename__ = "series"
     id: Mapped[str] = mapped_column(String, primary_key=True)
