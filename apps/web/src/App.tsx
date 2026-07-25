@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api/client';
 import type {
   AskMe,
@@ -15,6 +15,8 @@ import type {
 
 type View = 'home' | 'shelf' | 'learn';
 type ReaderTab = 'content' | 'quiz' | 'note' | 'askme';
+type TextQuote = { text: string; blockId: string };
+type SelectionPopup = TextQuote & { top: number; left: number };
 
 export default function App() {
   const [data, setData] = useState<Bootstrap | null>(null);
@@ -264,13 +266,19 @@ function LearningWorkspace({
   onRefreshSeries: () => Promise<void>;
 }) {
   const [selectedBlockId, setSelectedBlockId] = useState('');
+  const [selectedQuote, setSelectedQuote] = useState<TextQuote | null>(null);
 
   useEffect(() => {
     setSelectedBlockId(section?.content?.blocks[0]?.id || '');
+    setSelectedQuote(null);
   }, [section?.id, section?.content?.id]);
 
   const location = useMemo(() => findSectionLocation(series, section?.id), [series, section?.id]);
   const activeBlockId = selectedBlockId || section?.content?.blocks[0]?.id || '';
+  const selectBlock = (blockId: string) => {
+    setSelectedBlockId(blockId);
+    setSelectedQuote(null);
+  };
 
   return (
     <div className="learning-workspace">
@@ -285,7 +293,11 @@ function LearningWorkspace({
         section={section}
         location={location}
         selectedBlockId={activeBlockId}
-        onAnchor={setSelectedBlockId}
+        onAnchor={selectBlock}
+        onQuote={(quote) => {
+          setSelectedBlockId(quote.blockId);
+          setSelectedQuote(quote);
+        }}
         onGenerate={() => section && onGenerateSection(section.id)}
         onSectionChange={onSectionChange}
       />
@@ -293,7 +305,9 @@ function LearningWorkspace({
         key={section?.id || 'empty'}
         section={section}
         selectedBlockId={activeBlockId}
-        onAnchor={setSelectedBlockId}
+        selectedQuote={selectedQuote}
+        onAnchor={selectBlock}
+        onClearQuote={() => setSelectedQuote(null)}
       />
     </div>
   );
@@ -487,6 +501,7 @@ function ReaderPanel({
   location,
   selectedBlockId,
   onAnchor,
+  onQuote,
   onGenerate,
   onSectionChange,
 }: {
@@ -494,12 +509,41 @@ function ReaderPanel({
   location: ReturnType<typeof findSectionLocation>;
   selectedBlockId: string;
   onAnchor: (id: string) => void;
+  onQuote: (quote: TextQuote) => void;
   onGenerate: () => void;
   onSectionChange: (section: Section) => void;
 }) {
   const [tab, setTab] = useState<ReaderTab>('content');
+  const [selectionPopup, setSelectionPopup] = useState<SelectionPopup | null>(null);
 
-  useEffect(() => setTab('content'), [section?.id]);
+  useEffect(() => {
+    setTab('content');
+    setSelectionPopup(null);
+  }, [section?.id]);
+
+  const captureTextSelection = () => {
+    const selection = window.getSelection();
+    const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+    const anchorElement =
+      selection?.anchorNode instanceof Element
+        ? selection.anchorNode
+        : selection?.anchorNode?.parentElement;
+    const blockElement = anchorElement?.closest<HTMLElement>('[data-block-id]');
+    const text = selection?.toString().replace(/\s+/g, ' ').trim() || '';
+
+    if (!range || range.collapsed || !blockElement || text.length < 2) {
+      setSelectionPopup(null);
+      return;
+    }
+
+    const rect = range.getBoundingClientRect();
+    setSelectionPopup({
+      text: text.slice(0, 600),
+      blockId: blockElement.dataset.blockId || '',
+      top: Math.min(rect.bottom + 9, window.innerHeight - 48),
+      left: Math.min(Math.max(rect.left + rect.width / 2, 54), window.innerWidth - 54),
+    });
+  };
 
   if (!section) {
     return (
@@ -537,7 +581,12 @@ function ReaderPanel({
         <button className={tab === 'askme' ? 'active' : ''} disabled={!section.askMeUnlocked} onClick={() => setTab('askme')}>Ask Me</button>
       </div>
 
-      <div className="reader-scroll">
+      <div
+        className="reader-scroll"
+        onMouseUp={captureTextSelection}
+        onKeyUp={captureTextSelection}
+        onScroll={() => setSelectionPopup(null)}
+      >
         {tab === 'content' && (
           <LessonContent
             section={section}
@@ -554,6 +603,24 @@ function ReaderPanel({
         )}
         {tab === 'askme' && <AskMePanel sectionId={section.id} />}
       </div>
+      {selectionPopup && (
+        <button
+          className="selection-qa-button"
+          style={{ top: selectionPopup.top, left: selectionPopup.left }}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            onQuote({ text: selectionPopup.text, blockId: selectionPopup.blockId });
+            setSelectionPopup(null);
+            const currentSelection = window.getSelection();
+            if (typeof currentSelection?.removeAllRanges === 'function') {
+              currentSelection.removeAllRanges();
+            }
+          }}
+        >
+          <span>?</span>
+          答疑
+        </button>
+      )}
     </main>
   );
 }
@@ -638,7 +705,10 @@ function ContentBlock({
     practice: '连接实践',
   };
   return (
-    <section className={`content-block role-${block.role} ${selected ? 'selected' : ''}`}>
+    <section
+      className={`content-block role-${block.role} ${selected ? 'selected' : ''}`}
+      data-block-id={block.id}
+    >
       <div className="block-meta"><span>{String(index + 1).padStart(2, '0')}</span><b>{labels[block.role] || block.role}</b></div>
       <h2>{block.heading}</h2>
       <pre className={block.kind === 'code' ? 'code-block' : ''}>{block.content}</pre>
@@ -801,35 +871,48 @@ function AskMePanel({ sectionId }: { sectionId: string }) {
 function QaPanel({
   section,
   selectedBlockId,
+  selectedQuote,
   onAnchor,
+  onClearQuote,
 }: {
   section: Section | null;
   selectedBlockId: string;
+  selectedQuote: TextQuote | null;
   onAnchor: (id: string) => void;
+  onClearQuote: () => void;
 }) {
   const [threadId, setThreadId] = useState<string>();
   const [newQuestion, setNewQuestion] = useState(false);
   const [question, setQuestion] = useState('');
   const [messages, setMessages] = useState<{ question: string; answer: string; relation: string }[]>([]);
   const [asking, setAsking] = useState(false);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
   const selectedBlock =
     section?.content?.blocks.find((block) => block.id === selectedBlockId) ??
     section?.content?.blocks[0];
   const effectiveBlockId = selectedBlock?.id ?? selectedBlockId;
 
+  useEffect(() => {
+    if (selectedQuote) composerRef.current?.focus();
+  }, [selectedQuote]);
+
   const ask = async () => {
     if (!section || !effectiveBlockId || !question.trim()) return;
+    const visibleQuestion = question.trim();
+    const submittedQuestion = selectedQuote
+      ? `请基于以下选中的正文回答。\n\n选中内容：${selectedQuote.text}\n\n问题：${visibleQuestion}`
+      : visibleQuestion;
     setAsking(true);
     try {
       const result = await api.ask(
         section.id,
         effectiveBlockId,
-        question.trim(),
+        submittedQuestion,
         newQuestion ? undefined : threadId,
         newQuestion ? 'new_question' : undefined,
       );
       setThreadId(result.threadId);
-      setMessages((current) => [...current, { question: question.trim(), answer: result.answer, relation: result.relation }]);
+      setMessages((current) => [...current, { question: visibleQuestion, answer: result.answer, relation: result.relation }]);
       setQuestion('');
       setNewQuestion(false);
     } finally {
@@ -861,6 +944,15 @@ function QaPanel({
               ))}
             </select>
           </div>
+          {selectedQuote && (
+            <div className="selected-quote-card">
+              <div>
+                <span>已选内容</span>
+                <button aria-label="移除已选内容" onClick={onClearQuote}>×</button>
+              </div>
+              <blockquote>{selectedQuote.text}</blockquote>
+            </div>
+          )}
           <div className="qa-messages">
             {messages.length === 0 && (
               <div className="qa-suggestion">
@@ -877,7 +969,12 @@ function QaPanel({
             ))}
           </div>
           <div className="qa-composer">
-            <textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="基于当前段落继续追问…" />
+            <textarea
+              ref={composerRef}
+              value={question}
+              onChange={(event) => setQuestion(event.target.value)}
+              placeholder={selectedQuote ? '针对选中的内容输入问题…' : '基于当前段落继续追问…'}
+            />
             <div>
               <label><input type="checkbox" checked={newQuestion} onChange={(event) => setNewQuestion(event.target.checked)} /> 新问题</label>
               <button disabled={asking || !question.trim()} onClick={ask}>{asking ? '回答中…' : '发送 ↑'}</button>
