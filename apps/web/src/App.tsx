@@ -655,11 +655,19 @@ function ReaderPanel({
 }) {
   const [tab, setTab] = useState<ReaderTab>('content');
   const [selectionPopup, setSelectionPopup] = useState<SelectionPopup | null>(null);
+  const readerScrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setTab('content');
     setSelectionPopup(null);
   }, [section?.id]);
+
+  const switchTab = (nextTab: ReaderTab) => {
+    setTab(nextTab);
+    requestAnimationFrame(() => {
+      if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
+    });
+  };
 
   const captureTextSelection = () => {
     const selection = window.getSelection();
@@ -715,14 +723,15 @@ function ReaderPanel({
       </div>
 
       <div className="reader-tabs" role="tablist">
-        <button className={tab === 'content' ? 'active' : ''} onClick={() => setTab('content')}>正文</button>
-        <button className={tab === 'quiz' ? 'active' : ''} disabled={!section.quiz} onClick={() => setTab('quiz')}>验证</button>
-        <button className={tab === 'note' ? 'active' : ''} disabled={!section.note} onClick={() => setTab('note')}>笔记</button>
-        <button className={tab === 'askme' ? 'active' : ''} disabled={!section.askMeUnlocked} onClick={() => setTab('askme')}>Ask Me</button>
+        <button className={tab === 'content' ? 'active' : ''} onClick={() => switchTab('content')}>正文</button>
+        <button className={tab === 'quiz' ? 'active' : ''} disabled={!section.quiz} onClick={() => switchTab('quiz')}>验证</button>
+        <button className={tab === 'note' ? 'active' : ''} disabled={!section.note} onClick={() => switchTab('note')}>笔记</button>
+        <button className={tab === 'askme' ? 'active' : ''} disabled={!section.askMeUnlocked} onClick={() => switchTab('askme')}>Ask Me</button>
       </div>
 
       <div
         className="reader-scroll"
+        ref={readerScrollRef}
         onMouseUp={captureTextSelection}
         onKeyUp={captureTextSelection}
         onScroll={() => setSelectionPopup(null)}
@@ -732,10 +741,11 @@ function ReaderPanel({
             section={section}
             selectedBlockId={selectedBlockId}
             onGenerate={onGenerate}
+            onStartQuiz={() => switchTab('quiz')}
           />
         )}
         {tab === 'quiz' && section.quiz && (
-          <Quiz section={section} onSectionChange={onSectionChange} onComplete={() => setTab('note')} />
+          <Quiz section={section} onSectionChange={onSectionChange} onComplete={() => switchTab('note')} />
         )}
         {tab === 'note' && section.note && (
           <Note sectionId={section.id} note={section.note} onSaved={onSectionChange} />
@@ -768,10 +778,12 @@ function LessonContent({
   section,
   selectedBlockId,
   onGenerate,
+  onStartQuiz,
 }: {
   section: Section;
   selectedBlockId: string;
   onGenerate: () => void;
+  onStartQuiz: () => void;
 }) {
   if (!section.content) {
     return (
@@ -818,6 +830,12 @@ function LessonContent({
           </a>
         ))}
       </details>
+      <div className="lesson-complete-action">
+        <span>正文阅读完成</span>
+        <h3>现在，验证你是否真正理解。</h3>
+        <p>完成选择题并达到及格线，才会解锁下一节；满分后还会开放 Ask Me 隐藏关卡。</p>
+        <button className="primary-button" onClick={onStartQuiz}>开始验证 <i>→</i></button>
+      </div>
     </article>
   );
 }
