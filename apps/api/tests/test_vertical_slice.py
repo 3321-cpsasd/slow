@@ -70,6 +70,22 @@ def test_locked_boundary(client):
     assert client.post(f"/api/chapters/{locked}/generate").status_code == 403
 
 
+def test_series_soft_delete_hides_it_without_destroying_history(client):
+    series = create_series(client)
+    before = client.get("/api/bootstrap").json()
+    assert any(item["id"] == series["id"] for item in before["shelves"][0]["series"])
+
+    deleted = client.delete(f"/api/series/{series['id']}")
+    assert deleted.status_code == 204
+    assert client.get(f"/api/series/{series['id']}").status_code == 404
+
+    after = client.get("/api/bootstrap").json()
+    assert all(item["id"] != series["id"] for item in after["shelves"][0]["series"])
+    repeated = client.delete(f"/api/series/{series['id']}")
+    assert repeated.status_code == 404
+    assert repeated.json()["code"] == "SERIES_NOT_FOUND"
+
+
 def create_series(client):
     return client.post("/api/plans", json={"shelfId":"shelf_technology","topic":"Kubernetes","role":"技术人员","experience":"会 Docker","depth":"deep"}).json()
 

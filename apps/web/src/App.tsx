@@ -138,6 +138,16 @@ export default function App() {
               setView('learn');
             }}
             onOpen={openSeries}
+            onDelete={async (seriesId) => {
+              await run('正在从书架移除系列…', async () => {
+                await api.deleteSeries(seriesId);
+                const refreshed = await api.bootstrap();
+                const refreshedShelf = refreshed.shelves.find((item) => item.id === shelf.id) || null;
+                setData(refreshed);
+                setShelf(refreshedShelf);
+                if (!refreshedShelf) setView('home');
+              });
+            }}
           />
         )}
         {view === 'learn' && series && (
@@ -217,12 +227,26 @@ function ShelfPage({
   shelf,
   onCreate,
   onOpen,
+  onDelete,
 }: {
   shelf: Shelf;
   onCreate: (body: object) => Promise<void>;
   onOpen: (id: string) => void;
+  onDelete: (id: string) => Promise<void>;
 }) {
   const [showPlan, setShowPlan] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Series | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  useEffect(() => {
+    if (!deleteTarget) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !deleting) setDeleteTarget(null);
+    };
+    document.addEventListener('keydown', closeOnEscape);
+    return () => document.removeEventListener('keydown', closeOnEscape);
+  }, [deleteTarget, deleting]);
+
   return (
     <section className="landing-section">
       <p className="eyebrow">{shelf.domain} · {shelf.specialty}</p>
@@ -236,19 +260,78 @@ function ShelfPage({
       {showPlan && <PlanForm submit={onCreate} />}
       <div className="series-grid">
         {shelf.series.map((item) => (
-          <button className="series-card" key={item.id} onClick={() => onOpen(item.id)}>
-            <span className="series-kicker">学习系列</span>
-            <h2>{item.title}</h2>
-            <p>{item.rationale}</p>
-            <div className="series-card-footer">
-              <span className="progress-track"><i style={{ width: `${item.progress}%` }} /></span>
-              <b>{item.progress}%</b>
-              <em>进入学习 →</em>
-            </div>
-          </button>
+          <article className="series-card" key={item.id}>
+            <button className="series-card-main" onClick={() => onOpen(item.id)}>
+              <span className="series-kicker">学习系列</span>
+              <h2>{item.title}</h2>
+              <p>{item.rationale}</p>
+              <div className="series-card-footer">
+                <span className="progress-track"><i style={{ width: `${item.progress}%` }} /></span>
+                <b>{item.progress}%</b>
+                <em>进入学习 →</em>
+              </div>
+            </button>
+            <button
+              className="series-delete-button"
+              aria-label={`删除 ${item.title}`}
+              title="删除系列"
+              onClick={() => setDeleteTarget(item)}
+            >
+              <TrashIcon />
+            </button>
+          </article>
         ))}
       </div>
+      {deleteTarget && (
+        <div
+          className="confirm-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !deleting) setDeleteTarget(null);
+          }}
+        >
+          <section
+            className="delete-confirm"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-series-title"
+          >
+            <span className="delete-confirm-icon"><TrashIcon size={20} /></span>
+            <p className="eyebrow">删除学习系列</p>
+            <h2 id="delete-series-title">{deleteTarget.title}</h2>
+            <p>该系列及其书、章节会从书架和学习入口中移除。历史学习证据会保留用于审计，当前界面暂不支持恢复。</p>
+            <div>
+              <button className="quiet-button" disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button>
+              <button
+                className="danger-button"
+                disabled={deleting}
+                onClick={async () => {
+                  setDeleting(true);
+                  try {
+                    await onDelete(deleteTarget.id);
+                    setDeleteTarget(null);
+                  } catch {
+                    // App-level error presentation already explains the failure.
+                  } finally {
+                    setDeleting(false);
+                  }
+                }}
+              >
+                {deleting ? '正在删除…' : '确认删除'}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </section>
+  );
+}
+
+function TrashIcon({ size = 16 }: { size?: number }) {
+  return (
+    <svg aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M4 7h16M9 3h6l1 4H8l1-4Z" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="m7 7 1 13h8l1-13M10 11v5M14 11v5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
   );
 }
 

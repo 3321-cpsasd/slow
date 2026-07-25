@@ -50,6 +50,7 @@ class Series(Base):
     shelf_id: Mapped[str] = mapped_column(ForeignKey("shelves.id"), index=True)
     title: Mapped[str] = mapped_column(String(240))
     rationale: Mapped[str] = mapped_column(Text)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 
 class Book(Base):

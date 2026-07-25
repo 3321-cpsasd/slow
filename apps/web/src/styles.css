@@ -156,12 +156,8 @@ button:disabled { cursor: not-allowed; }
   border: 1px solid #dddcd4;
   background: var(--paper);
   border-radius: 18px;
-  padding: 25px;
-  text-align: left;
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
   position: relative;
+  overflow: hidden;
   transition: border-color .2s, transform .2s, box-shadow .2s;
 }
 .series-card:hover {
@@ -348,12 +344,103 @@ button:disabled { cursor: not-allowed; }
 .bookshelf-card:hover .shelf-plaque em i { margin-left: 9px; }
 .series-kicker { color: var(--green-2); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; font-weight: 750; }
 .series-card { min-height: 320px; }
+.series-card-main {
+  width: 100%;
+  min-height: 320px;
+  border: 0;
+  background: transparent;
+  padding: 25px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  color: inherit;
+}
 .series-card h2 { margin: 9px 0 0; font-size: 26px; line-height: 1.2; letter-spacing: -.03em; }
-.series-card > p { color: var(--muted); line-height: 1.65; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; }
+.series-card-main > p { color: var(--muted); line-height: 1.65; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; }
 .series-card-footer { margin-top: auto; display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; }
 .series-card-footer em { color: var(--green); font-style: normal; font-weight: 700; }
+.series-delete-button {
+  width: 34px;
+  height: 34px;
+  position: absolute;
+  top: 17px;
+  right: 17px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: #9ba19a;
+  opacity: 0;
+  transition: opacity .16s ease, color .16s ease, background .16s ease, border-color .16s ease;
+}
+.series-card:hover .series-delete-button,
+.series-delete-button:focus-visible {
+  opacity: 1;
+}
+.series-delete-button:hover {
+  border-color: #eccac3;
+  background: #fff1ee;
+  color: var(--danger);
+}
 .progress-track, .series-progress > span { height: 5px; background: #e6e9e4; border-radius: 99px; overflow: hidden; }
 .progress-track i, .series-progress > span i { display: block; height: 100%; background: #8bad3d; border-radius: inherit; }
+
+.confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(24, 29, 25, .38);
+  backdrop-filter: blur(5px);
+}
+.delete-confirm {
+  width: min(480px, 100%);
+  padding: 30px;
+  border: 1px solid #e2ded7;
+  border-radius: 18px;
+  background: #fffefb;
+  box-shadow: 0 25px 70px rgba(29, 36, 31, .24);
+  animation: confirm-in .18s ease-out;
+}
+@keyframes confirm-in {
+  from { opacity: 0; transform: translateY(6px) scale(.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.delete-confirm-icon {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 18px;
+  border-radius: 12px;
+  background: #fff0ed;
+  color: var(--danger);
+}
+.delete-confirm .eyebrow { color: var(--danger); }
+.delete-confirm h2 { margin: 5px 0 12px; font-size: 25px; line-height: 1.3; letter-spacing: -.025em; }
+.delete-confirm > p:not(.eyebrow) { margin: 0; color: var(--muted); line-height: 1.7; font-size: 13px; }
+.delete-confirm > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 26px;
+}
+.danger-button {
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 13px;
+  background: #a24233;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+}
+.danger-button:hover { background: #8f372b; }
+.danger-button:disabled { opacity: .55; }
 
 .plan-form {
   margin: 28px 0;
@@ -715,6 +802,7 @@ button:disabled { cursor: not-allowed; }
   .book-spine:nth-of-type(3n) { width: 62px; }
   .shelf-board { margin-left: -18px; margin-right: -18px; }
   .shelf-plaque { width: calc(100% - 28px); }
+  .series-delete-button { opacity: 1; }
   .learning-workspace { height: auto; min-height: 100%; display: block; }
   .learn-main { height: auto; overflow: visible; }
   .directory-panel, .qa-panel { border: 0; }
@@ -733,4 +821,5 @@ button:disabled { cursor: not-allowed; }
   .shelf-plaque { grid-template-columns: 36px 1fr; }
   .shelf-plaque em { grid-column: 2; margin-top: -4px; }
   .shelf-monogram { width: 34px; height: 34px; }
+  .delete-confirm { padding: 24px 21px; }
 }

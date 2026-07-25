@@ -12,6 +12,7 @@ export const api = {
   bootstrap:()=>call<import('../model/types').Bootstrap>('/api/bootstrap'),
   createPlan:(body:object)=>call<import('../model/types').Series>('/api/plans',{method:'POST',body:JSON.stringify(body)}),
   series:(id:string)=>call<import('../model/types').Series>(`/api/series/${id}`),
+  deleteSeries:(id:string)=>call<void>(`/api/series/${id}`,{method:'DELETE'}),
   chapter:(id:string)=>call<import('../model/types').Chapter>(`/api/chapters/${id}/generate`,{method:'POST'}),
   section:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}`),
   generateSection:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}/generate`,{method:'POST'}),

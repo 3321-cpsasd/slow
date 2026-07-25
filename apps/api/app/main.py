@@ -77,6 +77,9 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
     @app.get("/api/series/{series_id}")
     def series(series_id: str, s: SlowService = Depends(service)): return s.series(series_id)
 
+    @app.delete("/api/series/{series_id}", status_code=204)
+    def delete_series(series_id: str, s: SlowService = Depends(service)): s.delete_series(series_id)
+
     @app.get("/api/books/{book_id}")
     def book(book_id: str, s: SlowService = Depends(service)): return s.book(book_id)
 

@@ -100,7 +100,9 @@ class SlowService:
         }
 
     def _shelf(self, shelf):
-        series = self.db.scalars(select(Series).where(Series.shelf_id == shelf.id)).all()
+        series = self.db.scalars(
+            select(Series).where(Series.shelf_id == shelf.id, Series.deleted_at.is_(None))
+        ).all()
         return {
             "id": shelf.id,
             "name": shelf.name,
@@ -187,7 +189,7 @@ class SlowService:
 
     def series(self, series_id):
         series = self.db.get(Series, series_id)
-        if not series:
+        if not series or series.deleted_at is not None:
             raise AppError("系列不存在", code="SERIES_NOT_FOUND", status=404)
         books = self.db.scalars(select(Book).where(Book.series_id == series.id).order_by(Book.position)).all()
         payload = [self.book(item.id) for item in books]
@@ -201,6 +203,24 @@ class SlowService:
             "progressBasis": "bookEstimatedMinutesWithFutureChapterProjection",
             "books": payload,
         }
+
+    def delete_series(self, series_id):
+        series = self.db.scalar(
+            select(Series)
+            .join(Shelf, Shelf.id == Series.shelf_id)
+            .where(
+                Series.id == series_id,
+                Series.deleted_at.is_(None),
+                Shelf.user_id == USER_ID,
+            )
+        )
+        if not series:
+            raise AppError("系列不存在", code="SERIES_NOT_FOUND", status=404)
+        series.deleted_at = now()
+        plan = self.db.get(LearningPlan, series.plan_id)
+        if plan:
+            plan.status = "deleted"
+        self.db.commit()
 
     def _book_progress(self, book):
         chapters = self.db.scalars(select(Chapter).where(Chapter.book_id == book.id)).all()
