@@ -1,49 +1,889 @@
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { api } from './api/client';
-import type { Bootstrap, Chapter, Section, Series, Shelf } from './model/types';
+import type {
+  AskMe,
+  Block,
+  Book,
+  Bootstrap,
+  Chapter,
+  Note as NoteType,
+  Section,
+  SectionSummary,
+  Series,
+  Shelf,
+} from './model/types';
 
-type View='home'|'shelf'|'series'|'learn';
+type View = 'home' | 'shelf' | 'learn';
+type ReaderTab = 'content' | 'quiz' | 'note' | 'askme';
 
-export default function App(){
-  const [data,setData]=useState<Bootstrap|null>(null), [view,setView]=useState<View>('home');
-  const [shelf,setShelf]=useState<Shelf|null>(null), [series,setSeries]=useState<Series|null>(null), [section,setSection]=useState<Section|null>(null);
-  const [busy,setBusy]=useState(''), [error,setError]=useState('');
-  useEffect(()=>{api.bootstrap().then(setData).catch(e=>setError(e.message))},[]);
-  const run=async<T,>(label:string,fn:()=>Promise<T>)=>{setBusy(label);setError('');try{return await fn()}catch(e){setError(e instanceof Error?e.message:'操作失败');throw e}finally{setBusy('')}};
-  const openShelf=(item:Shelf)=>{setShelf(item);setView('shelf')};
-  const openSeries=async(id:string)=>{const value=await run('读取系列…',()=>api.series(id));setSeries(value);setView('series')};
-  const openChapter=async(chapter:Chapter)=>{const updated=await run('正在规划本章小节…',()=>api.chapter(chapter.id));setSeries(current=>current?{...current,books:current.books.map(b=>({...b,chapters:b.chapters.map(c=>c.id===updated.id?updated:c)}))}:current)};
-  const openSection=async(id:string)=>{let value=await run('正在读取小节…',()=>api.section(id));if(!value.content){try{value=await run('正在核查来源并生成本节…',()=>api.generateSection(id))}catch{value=await api.section(id)}}setSection(value);setView('learn')};
-  return <><header><button className="brand" onClick={()=>setView('home')} aria-label="返回 Slow 首页"><img src="/slow-mark.svg" alt=""/><span className="brand-word">slow</span></button><small>{busy||'一步一步，学成自己的书'}</small></header><main>{error&&<div className="error">{error}</div>}{view==='home'&&<Home data={data} onOpen={openShelf}/>} {view==='shelf'&&shelf&&<ShelfPage shelf={shelf} onCreate={async body=>{const value=await run('AI 正在规划系列…',()=>api.createPlan({...body,shelfId:shelf.id}));setSeries(value);setView('series')}} onOpen={openSeries}/>} {view==='series'&&series&&<SeriesPage value={series} onChapter={openChapter} onSection={openSection} onRefresh={()=>openSeries(series.id)}/>} {view==='learn'&&section&&<Reader value={section} onChange={setSection} onBack={()=>{setView('series');series&&openSeries(series.id)}}/>}</main></>;
+export default function App() {
+  const [data, setData] = useState<Bootstrap | null>(null);
+  const [view, setView] = useState<View>('home');
+  const [shelf, setShelf] = useState<Shelf | null>(null);
+  const [series, setSeries] = useState<Series | null>(null);
+  const [section, setSection] = useState<Section | null>(null);
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    api.bootstrap().then(setData).catch((reason) => setError(reason.message));
+  }, []);
+
+  const run = async <T,>(label: string, action: () => Promise<T>) => {
+    setBusy(label);
+    setError('');
+    try {
+      return await action();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '操作失败');
+      throw reason;
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const openShelf = (value: Shelf) => {
+    setShelf(value);
+    setView('shelf');
+  };
+
+  const loadSection = async (sectionId: string) => {
+    const value = await run('正在读取小节…', () => api.section(sectionId));
+    setSection(value);
+    return value;
+  };
+
+  const firstUsableSection = (value: Series) => {
+    for (const book of value.books) {
+      for (const chapter of book.chapters) {
+        const match = chapter.sections.find((item) => item.status !== 'locked');
+        if (match) return match.id;
+      }
+    }
+    return null;
+  };
+
+  const openSeries = async (seriesId: string) => {
+    const value = await run('正在进入学习空间…', () => api.series(seriesId));
+    setSeries(value);
+    setView('learn');
+    const initial = firstUsableSection(value);
+    if (initial) await loadSection(initial);
+    else setSection(null);
+  };
+
+  const refreshSeries = async () => {
+    if (!series) return;
+    const value = await api.series(series.id);
+    setSeries(value);
+  };
+
+  const openChapter = async (chapter: Chapter) => {
+    const updated = await run('正在规划本章小节…', () => api.chapter(chapter.id));
+    await refreshSeries();
+    const first = updated.sections.find((item) => item.status !== 'locked');
+    if (first) await loadSection(first.id);
+  };
+
+  const generateSection = async (sectionId: string) => {
+    const value = await run('正在核查来源并生成本节…', () => api.generateSection(sectionId));
+    setSection(value);
+    await refreshSeries();
+  };
+
+  return (
+    <div className="app-shell">
+      <header className="app-header">
+        <button
+          className="brand"
+          aria-label="返回 Slow 首页"
+          onClick={() => {
+            setView('home');
+            setSeries(null);
+            setSection(null);
+          }}
+        >
+          <span className="brand-mark"><i /></span>
+          <b>slow</b>
+        </button>
+        {view === 'learn' && series ? (
+          <div className="header-context">
+            <span>{series.title}</span>
+            <i>·</i>
+            <span>{series.progress}%</span>
+          </div>
+        ) : (
+          <small>一步一步，学成自己的书</small>
+        )}
+        <div className="header-actions">
+          {busy && <span className="busy-indicator"><i />{busy}</span>}
+          {view === 'learn' && (
+            <button className="quiet-button" onClick={() => setView('home')}>返回书架</button>
+          )}
+        </div>
+      </header>
+
+      <main className={view === 'learn' ? 'learn-main' : 'marketing-main'}>
+        {error && <div className="global-error">{error}</div>}
+        {view === 'home' && <Home data={data} onOpen={openShelf} />}
+        {view === 'shelf' && shelf && (
+          <ShelfPage
+            shelf={shelf}
+            onCreate={async (body) => {
+              const value = await run('AI 正在规划系列…', () => api.createPlan({ ...body, shelfId: shelf.id }));
+              setSeries(value);
+              setSection(null);
+              setView('learn');
+            }}
+            onOpen={openSeries}
+          />
+        )}
+        {view === 'learn' && series && (
+          <LearningWorkspace
+            series={series}
+            section={section}
+            onSelectSection={loadSection}
+            onGenerateSection={generateSection}
+            onGenerateChapter={openChapter}
+            onSectionChange={setSection}
+            onRefreshSeries={refreshSeries}
+          />
+        )}
+      </main>
+    </div>
+  );
 }
 
-function Home({data,onOpen}:{data:Bootstrap|null;onOpen:(s:Shelf)=>void}){return <section><p className="eyebrow">AI 时代的个人学习书架</p><h1>我的书架</h1><p className="lead">一本书是一个台阶。慢一点，真正理解、验证并留下自己的笔记。</p><div className="shelf-grid">{data?.shelves.map(s=><button className="shelf" key={s.id} onClick={()=>onOpen(s)}><b>{s.name}</b><span>{s.domain} · {s.specialty}</span><small>{s.series.length} 个学习系列</small><i>→</i></button>)}</div></section>}
-
-function ShelfPage({shelf,onCreate,onOpen}:{shelf:Shelf;onCreate:(b:object)=>Promise<void>;onOpen:(id:string)=>void}){
-  const [show,setShow]=useState(false);
-  return <section><p className="eyebrow">{shelf.domain} · {shelf.specialty}</p><div className="title-row"><div><h1>{shelf.name}</h1><p className="lead">先确定基调，再让 AI 规划书或系列。</p></div><button className="primary" onClick={()=>setShow(!show)}>＋ 新的台阶</button></div>{show&&<PlanForm submit={onCreate}/>}<div className="series-grid">{shelf.series.map(s=><button className="series-card" key={s.id} onClick={()=>onOpen(s.id)}><span>系列</span><h2>{s.title}</h2><p>{s.rationale}</p><b>{s.progress}%</b></button>)}</div></section>}
-
-function PlanForm({submit}:{submit:(b:object)=>Promise<void>}){const [topic,setTopic]=useState('Kubernetes'),[role,setRole]=useState('技术人员'),[experience,setExperience]=useState('熟悉 Linux、Docker 和基础网络，但没有实际使用过 K8s'),[purpose,setPurpose]=useState('即将参与基于 K8s 的应用部署与日常排障项目'),[depth,setDepth]=useState('deep');const send=async(e:FormEvent)=>{e.preventDefault();await submit({topic,role,experience,purpose,depth,details:'希望理解核心机制，而不只是记命令'})};return <form className="plan" onSubmit={send}><label>学习内容<input value={topic} onChange={e=>setTopic(e.target.value)}/></label><fieldset><legend>你的角色</legend>{['技术人员','产品或运营','管理人员','猎头或人力'].map(x=><button type="button" className={role===x?'selected':''} onClick={()=>setRole(x)} key={x}>{x}</button>)}</fieldset><label>相关经验<textarea value={experience} onChange={e=>setExperience(e.target.value)}/></label><label>学习目的<textarea value={purpose} onChange={e=>setPurpose(e.target.value)}/></label><fieldset><legend>目标深度</legend>{[['overview','简单了解'],['deep','深度学习'],['mastery','掌握路径']].map(([v,l])=><button type="button" className={depth===v?'selected':''} onClick={()=>setDepth(v)} key={v}>{l}</button>)}</fieldset><button className="primary">生成目录方案</button></form>}
-
-function SeriesPage({value,onChapter,onSection,onRefresh}:{value:Series;onChapter:(c:Chapter)=>void;onSection:(id:string)=>void;onRefresh:()=>Promise<void>}){const refresh=async(action:()=>Promise<unknown>)=>{try{await action();await onRefresh()}catch(e){window.alert(e instanceof Error?e.message:'操作失败')}};return <section><p className="eyebrow">系列进度 {value.progress}% · 已包含未来章节预计工作量</p><h1>{value.title}</h1><p className="lead">{value.rationale}</p>{value.books.map(book=><article className={`book ${book.status}`} key={book.id}><div className="book-head"><span>第 {book.position} 本</span><div><h2>{book.title}</h2><p>{book.description}</p></div><b>{book.progress}% · {Math.round(book.estimatedMinutes/60)} 小时</b></div>{book.chapters.map(c=><div className="chapter" key={c.id}><div><span>{c.position}</span><div><b>{c.title}</b><small>{c.objective}</small>{!c.generated&&<button className="ask-link" onClick={()=>{const title=window.prompt('未来章节标题',c.title);if(title)refresh(()=>api.updateChapter(c.id,{title}))}}>调整未来章</button>}</div></div>{!c.generated?<button disabled={c.status==='locked'} onClick={()=>onChapter(c)}>{c.status==='locked'?'未解锁':'生成小节'}</button>:<><div className="section-list">{c.sections.map(s=><button disabled={s.status==='locked'} onClick={()=>onSection(s.id)} key={s.id}><span>{s.position}</span>{s.title}<i>{s.status==='completed'?'✓':s.status==='locked'?'锁定':'开始'}</i></button>)}</div>{c.practice&&<ArtifactSubmission kind="practice" id={c.id} status={c.practice.status} attachmentCount={c.practice.attachments.length} onSubmit={refresh}/>}</>}</div>)}<button onClick={()=>{const title=window.prompt('新增未来章节标题');if(title)refresh(()=>api.addChapter(book.id,{title,objective:'由学习者补充的未来学习目标'}))}}>＋ 新增未来章</button>{book.capstone&&<ArtifactSubmission kind="capstone" id={book.id} status={book.capstone.status} attachmentCount={book.capstone.attachments.length} onSubmit={refresh}/>}</article>)}</section>}
-
-function ArtifactSubmission({kind,id,status,attachmentCount,onSubmit}:{kind:'practice'|'capstone';id:string;status:string;attachmentCount:number;onSubmit:(action:()=>Promise<unknown>)=>Promise<void>}){const label=kind==='practice'?'章末实践':'全书大作业';const needsLegacyFile=status==='completed'&&attachmentCount===0;const enabled=status==='available'||needsLegacyFile;const upload=async(file:File)=>{const attachment=kind==='practice'?await api.uploadPractice(id,file):await api.uploadCapstone(id,file);return kind==='practice'?api.practice(id,{evidence:'由学习者提交',reflection:'已完成章末实践'},[attachment.id]):api.capstone(id,{artifact:'全书综合成果',verification:'学习者复核记录'},[attachment.id])};return <label className={kind==='capstone'?'primary':''}>{label}：{needsLegacyFile?'补充真实附件':status==='completed'?'已完成':status==='locked'?'未解锁':'选择成果文件'}<input type="file" hidden disabled={!enabled} onChange={event=>{const file=event.target.files?.[0];if(file)onSubmit(()=>upload(file))}}/></label>}
-
-function Reader({value,onChange,onBack}:{value:Section;onChange:(s:Section)=>void;onBack:()=>void}){
-  const [tab,setTab]=useState<'content'|'note'|'quiz'|'askme'>(value.status==='completed'?'note':'content');
-  const [thread,setThread]=useState<string|undefined>(),[newQuestion,setNewQuestion]=useState(false),[selectedBlock,setSelectedBlock]=useState(value.content?.blocks[0]?.id||''),[answer,setAnswer]=useState('');
-  const [qa,setQa]=useState<{q:string;a:string;relation:string}[]>([]),[answers,setAnswers]=useState<number[][]>(value.quiz?.questions.map(()=>[])||[]),[result,setResult]=useState<any>(),[askMe,setAskMe]=useState<import('./model/types').AskMe|null>(null),[oralAnswer,setOralAnswer]=useState('');
-  const reload=async()=>{const next=await api.section(value.id);onChange(next);return next};
-  const retryGeneration=async()=>{const next=await api.generateSection(value.id);onChange(next);setSelectedBlock(next.content?.blocks[0]?.id||'')};
-  const ask=async()=>{if(!answer||!selectedBlock)return;const r=await api.ask(value.id,selectedBlock,answer,newQuestion?undefined:thread,newQuestion?'new_question':undefined);setThread(r.threadId);setQa([...qa,{q:answer,a:r.answer,relation:r.relation}]);setAnswer('');setNewQuestion(false)};
-  const submit=async()=>{if(!value.quiz)return;const r=await api.quiz(value.id,value.quiz.id,answers);setResult(r);const next=await reload();setAnswers(next.quiz?.questions.map(()=>[])||[]);if(r.passed)setTab('note')};
-  const runAskMe=async()=>{const next=await api.askMe(value.id,oralAnswer);setAskMe(next);setOralAnswer('')};
-  return <div className="workspace"><aside><button onClick={onBack}>← 返回目录</button><p className="eyebrow">第 {value.position} 节</p><h2>{value.title}</h2><p>{value.question}</p>{value.generation&&<small>生成 #{value.generation.attempt}：{value.generation.status}{value.generation.error&&` · ${value.generation.error}`}</small>}<nav><button onClick={()=>setTab('content')}>正文</button><button disabled={!value.note} onClick={()=>setTab('note')}>我的笔记</button><button onClick={()=>setTab('quiz')}>验证</button><button disabled={!value.askMeUnlocked} onClick={()=>setTab('askme')}>Ask Me</button></nav></aside><article className="reading">
-    {tab==='content'&&<>{!value.content&&<div className="error"><p>{value.generation?.error||'正文尚未生成。'}</p><button onClick={retryGeneration}>安全重试</button></div>}{value.content?.blocks.map(b=><section className={`block ${b.role}`} key={b.id}><small>{b.role} · {b.id}</small><h2>{b.heading}</h2><pre className={b.kind==='code'?'code':''}>{b.content}</pre><button className="ask-link" onClick={()=>setSelectedBlock(b.id)}>以此段为答疑锚点</button></section>)}{value.content&&<details><summary>已核验来源</summary>{value.content.sources.map((source,index)=><p key={source.url}><a href={source.url} target="_blank" rel="noreferrer">{source.title}</a> · {source.version} · {value.content?.sourceVerification[index]?.reachable?'服务端可达':'核验失败'}</p>)}</details>}</>}
-    {tab==='note'&&<Note sectionId={value.id} note={value.note} onSaved={reload}/>} 
-    {tab==='quiz'&&<div><h1>小节验证</h1>{value.remediations.map(item=><section className="block boundary" key={item.id}><small>错题补充教学 · {item.objectives.join('、')}</small>{item.blocks.map(block=><div key={block.id}><h3>{block.heading}</h3><pre>{block.content}</pre></div>)}</section>)}{value.quiz?.questions.map((q,i)=><fieldset className="question" key={`${value.quiz?.id}-${i}`}><legend>{i+1}. {q.prompt}{q.core&&<em>核心题</em>}</legend>{q.options.map((o,j)=><label key={j}><input type="checkbox" checked={answers[i]?.includes(j)} onChange={e=>setAnswers(a=>a.map((x,k)=>k===i?(e.target.checked?[...x,j]:x.filter(v=>v!==j)):x))}/>{o}</label>)}</fieldset>)}<button className="primary" onClick={submit}>提交验证</button>{result&&<p className={result.passed?'success':'error'}>{result.passed?'通过，笔记已经生成。':'未通过：补充教学已持久化，并换成实质不同的新题。'}</p>}</div>}
-    {tab==='askme'&&<div><p className="eyebrow">满分隐藏关卡 · 机制 → 边界 → 迁移</p><h1>Ask Me</h1>{!askMe?<button className="primary" onClick={runAskMe}>开始三轮口试</button>:<>{askMe.entries.map(entry=><section key={entry.dimension}><b>{entry.dimension}</b><p>{entry.prompt}</p>{entry.answer&&<p>你的回答：{entry.answer} · 评估：{entry.evaluation}</p>}</section>)}{askMe.status!=='completed'?<><textarea value={oralAnswer} onChange={e=>setOralAnswer(e.target.value)} placeholder="只作答；考核过程中不会继续教学"/><button className="primary" onClick={runAskMe}>提交本轮</button></>:<p className="success">三轮口试完成，证据已写入掌握画像。</p>}</>}</div>}
-  </article><aside className="qa"><h3>本节答疑</h3><small>锚点：{selectedBlock||'请选择正文段落'}</small>{qa.map((x,i)=><div key={i}><b>你 · {x.relation==='follow_up'?'追问':'新问题'}</b><p>{x.q}</p><b>Slow</b><p>{x.a}</p></div>)}<textarea value={answer} onChange={e=>setAnswer(e.target.value)} placeholder="引用一个段落，继续追问…"/><label><input type="checkbox" checked={newQuestion} onChange={e=>setNewQuestion(e.target.checked)}/> 这是一个新问题</label><button className="primary" onClick={ask}>提问</button></aside></div>
+function Home({ data, onOpen }: { data: Bootstrap | null; onOpen: (shelf: Shelf) => void }) {
+  return (
+    <section className="landing-section">
+      <p className="eyebrow">AI 时代的个人学习书架</p>
+      <h1>我的书架</h1>
+      <p className="lead">一本书是一个台阶。慢一点，真正理解、验证并留下自己的笔记。</p>
+      <div className="shelf-grid">
+        {data?.shelves.map((item) => (
+          <button className="shelf-card" key={item.id} onClick={() => onOpen(item)}>
+            <span className="shelf-icon">{item.name.slice(0, 1)}</span>
+            <b>{item.name}</b>
+            <span>{item.domain} · {item.specialty}</span>
+            <small>{item.series.length} 个学习系列</small>
+            <i>→</i>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
 }
 
-function Note({sectionId,note,onSaved}:{sectionId:string;note:Section['note'];onSaved:()=>Promise<Section>}){const [editing,setEditing]=useState(JSON.stringify(note?.userContent||{},null,2)),[message,setMessage]=useState('');if(!note)return null;const save=async()=>{try{await api.note(sectionId,JSON.parse(editing));await onSaved();setMessage('已保存；AI 笔记未被覆盖。')}catch(e){setMessage(e instanceof Error?e.message:'保存失败')}};return <div><p className="eyebrow">完成后的核心资产</p><h1>AI 整理笔记</h1><pre className="note">{JSON.stringify(note.aiContent,null,2)}</pre><h2>我的补充</h2><textarea value={editing} onChange={e=>setEditing(e.target.value)}/><button className="primary" onClick={save}>保存我的内容</button>{message&&<p>{message}</p>}</div>}
+function ShelfPage({
+  shelf,
+  onCreate,
+  onOpen,
+}: {
+  shelf: Shelf;
+  onCreate: (body: object) => Promise<void>;
+  onOpen: (id: string) => void;
+}) {
+  const [showPlan, setShowPlan] = useState(false);
+  return (
+    <section className="landing-section">
+      <p className="eyebrow">{shelf.domain} · {shelf.specialty}</p>
+      <div className="title-row">
+        <div>
+          <h1>{shelf.name}</h1>
+          <p className="lead">选择一个系列继续学习，或创建新的学习台阶。</p>
+        </div>
+        <button className="primary-button" onClick={() => setShowPlan(!showPlan)}>＋ 新的台阶</button>
+      </div>
+      {showPlan && <PlanForm submit={onCreate} />}
+      <div className="series-grid">
+        {shelf.series.map((item) => (
+          <button className="series-card" key={item.id} onClick={() => onOpen(item.id)}>
+            <span className="series-kicker">学习系列</span>
+            <h2>{item.title}</h2>
+            <p>{item.rationale}</p>
+            <div className="series-card-footer">
+              <span className="progress-track"><i style={{ width: `${item.progress}%` }} /></span>
+              <b>{item.progress}%</b>
+              <em>进入学习 →</em>
+            </div>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function PlanForm({ submit }: { submit: (body: object) => Promise<void> }) {
+  const [topic, setTopic] = useState('Kubernetes');
+  const [role, setRole] = useState('技术人员');
+  const [experience, setExperience] = useState('熟悉 Linux、Docker 和基础网络，但没有实际使用过 K8s');
+  const [purpose, setPurpose] = useState('即将参与基于 K8s 的应用部署与日常排障项目');
+  const [depth, setDepth] = useState('deep');
+  const send = async (event: FormEvent) => {
+    event.preventDefault();
+    await submit({ topic, role, experience, purpose, depth, details: '希望理解核心机制，而不只是记命令' });
+  };
+  return (
+    <form className="plan-form" onSubmit={send}>
+      <label>学习内容<input value={topic} onChange={(event) => setTopic(event.target.value)} /></label>
+      <fieldset>
+        <legend>你的角色</legend>
+        {['技术人员', '产品或运营', '管理人员', '猎头或人力'].map((item) => (
+          <button type="button" className={role === item ? 'selected' : ''} onClick={() => setRole(item)} key={item}>{item}</button>
+        ))}
+      </fieldset>
+      <label>相关经验<textarea value={experience} onChange={(event) => setExperience(event.target.value)} /></label>
+      <label>学习目的<textarea value={purpose} onChange={(event) => setPurpose(event.target.value)} /></label>
+      <fieldset>
+        <legend>目标深度</legend>
+        {[['overview', '简单了解'], ['deep', '深度学习'], ['mastery', '掌握路径']].map(([value, label]) => (
+          <button type="button" className={depth === value ? 'selected' : ''} onClick={() => setDepth(value)} key={value}>{label}</button>
+        ))}
+      </fieldset>
+      <button className="primary-button">生成目录方案</button>
+    </form>
+  );
+}
+
+function LearningWorkspace({
+  series,
+  section,
+  onSelectSection,
+  onGenerateSection,
+  onGenerateChapter,
+  onSectionChange,
+  onRefreshSeries,
+}: {
+  series: Series;
+  section: Section | null;
+  onSelectSection: (id: string) => Promise<Section>;
+  onGenerateSection: (id: string) => Promise<void>;
+  onGenerateChapter: (chapter: Chapter) => Promise<void>;
+  onSectionChange: (section: Section) => void;
+  onRefreshSeries: () => Promise<void>;
+}) {
+  const [selectedBlockId, setSelectedBlockId] = useState('');
+
+  useEffect(() => {
+    setSelectedBlockId(section?.content?.blocks[0]?.id || '');
+  }, [section?.id, section?.content?.id]);
+
+  const location = useMemo(() => findSectionLocation(series, section?.id), [series, section?.id]);
+  const activeBlockId = selectedBlockId || section?.content?.blocks[0]?.id || '';
+
+  return (
+    <div className="learning-workspace">
+      <DirectoryPanel
+        series={series}
+        currentSectionId={section?.id}
+        onSelectSection={onSelectSection}
+        onGenerateChapter={onGenerateChapter}
+        onRefreshSeries={onRefreshSeries}
+      />
+      <ReaderPanel
+        section={section}
+        location={location}
+        selectedBlockId={activeBlockId}
+        onAnchor={setSelectedBlockId}
+        onGenerate={() => section && onGenerateSection(section.id)}
+        onSectionChange={onSectionChange}
+      />
+      <QaPanel
+        key={section?.id || 'empty'}
+        section={section}
+        selectedBlockId={activeBlockId}
+        onAnchor={setSelectedBlockId}
+      />
+    </div>
+  );
+}
+
+function findSectionLocation(series: Series, sectionId?: string) {
+  if (!sectionId) return null;
+  for (const book of series.books) {
+    for (const chapter of book.chapters) {
+      const section = chapter.sections.find((item) => item.id === sectionId);
+      if (section) return { book, chapter, section };
+    }
+  }
+  return null;
+}
+
+function DirectoryPanel({
+  series,
+  currentSectionId,
+  onSelectSection,
+  onGenerateChapter,
+  onRefreshSeries,
+}: {
+  series: Series;
+  currentSectionId?: string;
+  onSelectSection: (id: string) => Promise<Section>;
+  onGenerateChapter: (chapter: Chapter) => Promise<void>;
+  onRefreshSeries: () => Promise<void>;
+}) {
+  return (
+    <aside className="directory-panel" aria-label="课程目录">
+      <div className="directory-heading">
+        <span className="panel-label">目录</span>
+        <h2>{series.title}</h2>
+        <div className="series-progress">
+          <span><i style={{ width: `${series.progress}%` }} /></span>
+          <b>{series.progress}%</b>
+        </div>
+      </div>
+      <nav className="book-tree">
+        {series.books.map((book) => (
+          <BookTree
+            key={book.id}
+            book={book}
+            currentSectionId={currentSectionId}
+            onSelectSection={onSelectSection}
+            onGenerateChapter={onGenerateChapter}
+            onRefreshSeries={onRefreshSeries}
+          />
+        ))}
+      </nav>
+    </aside>
+  );
+}
+
+function BookTree({
+  book,
+  currentSectionId,
+  onSelectSection,
+  onGenerateChapter,
+  onRefreshSeries,
+}: {
+  book: Book;
+  currentSectionId?: string;
+  onSelectSection: (id: string) => Promise<Section>;
+  onGenerateChapter: (chapter: Chapter) => Promise<void>;
+  onRefreshSeries: () => Promise<void>;
+}) {
+  const containsCurrent = book.chapters.some((chapter) => chapter.sections.some((item) => item.id === currentSectionId));
+  return (
+    <details className="book-node" open={containsCurrent || book.status !== 'locked'}>
+      <summary>
+        <span className="book-number">{book.position}</span>
+        <span><b>{book.title}</b><small>{book.progress}% · {Math.round(book.estimatedMinutes / 60)} 小时</small></span>
+        <i>{book.status === 'locked' ? '锁' : '⌄'}</i>
+      </summary>
+      <div className="chapter-tree">
+        {book.chapters.map((chapter) => (
+          <div className="chapter-node" key={chapter.id}>
+            <div className="chapter-title">
+              <span>{book.position}.{chapter.position}</span>
+              <b>{chapter.title}</b>
+            </div>
+            {chapter.generated ? (
+              <div className="section-tree">
+                {chapter.sections.map((item) => (
+                  <SectionTreeButton
+                    key={item.id}
+                    item={item}
+                    active={item.id === currentSectionId}
+                    onClick={() => onSelectSection(item.id)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <button
+                className="generate-chapter-button"
+                disabled={chapter.status === 'locked'}
+                onClick={() => onGenerateChapter(chapter)}
+              >
+                {chapter.status === 'locked' ? '尚未解锁' : '生成本章小节'}
+              </button>
+            )}
+            {chapter.practice && (
+              <ArtifactSubmission
+                kind="practice"
+                id={chapter.id}
+                status={chapter.practice.status}
+                attachmentCount={chapter.practice.attachments.length}
+                onSubmit={async (action) => {
+                  await action();
+                  await onRefreshSeries();
+                }}
+              />
+            )}
+          </div>
+        ))}
+        {book.capstone && (
+          <ArtifactSubmission
+            kind="capstone"
+            id={book.id}
+            status={book.capstone.status}
+            attachmentCount={book.capstone.attachments.length}
+            onSubmit={async (action) => {
+              await action();
+              await onRefreshSeries();
+            }}
+          />
+        )}
+      </div>
+    </details>
+  );
+}
+
+function SectionTreeButton({ item, active, onClick }: { item: SectionSummary; active: boolean; onClick: () => void }) {
+  const state = item.status === 'completed' ? '✓' : item.status === 'locked' ? '·' : item.position;
+  return (
+    <button
+      className={`section-tree-button ${active ? 'active' : ''} ${item.status}`}
+      disabled={item.status === 'locked'}
+      onClick={onClick}
+    >
+      <span>{state}</span>
+      <b>{item.title}</b>
+    </button>
+  );
+}
+
+function ReaderPanel({
+  section,
+  location,
+  selectedBlockId,
+  onAnchor,
+  onGenerate,
+  onSectionChange,
+}: {
+  section: Section | null;
+  location: ReturnType<typeof findSectionLocation>;
+  selectedBlockId: string;
+  onAnchor: (id: string) => void;
+  onGenerate: () => void;
+  onSectionChange: (section: Section) => void;
+}) {
+  const [tab, setTab] = useState<ReaderTab>('content');
+
+  useEffect(() => setTab('content'), [section?.id]);
+
+  if (!section) {
+    return (
+      <main className="reader-panel empty-reader">
+        <span className="empty-symbol">S</span>
+        <p className="eyebrow">选择左侧目录开始</p>
+        <h1>今天，学清楚一个问题。</h1>
+        <p>完成一节、通过验证、留下笔记。下一节会在掌握后自动解锁。</p>
+      </main>
+    );
+  }
+
+  return (
+    <main className="reader-panel">
+      <div className="reader-toolbar">
+        <div>
+          <p className="breadcrumb">
+            第 {location?.book.position} 本
+            <i>›</i>
+            {location?.chapter.title}
+            <i>›</i>
+            第 {section.position} 节
+          </p>
+          <h1>{section.title}</h1>
+        </div>
+        <span className={`lesson-status ${section.status}`}>
+          {section.status === 'completed' ? '已完成' : section.status === 'available' ? '学习中' : '未解锁'}
+        </span>
+      </div>
+
+      <div className="reader-tabs" role="tablist">
+        <button className={tab === 'content' ? 'active' : ''} onClick={() => setTab('content')}>正文</button>
+        <button className={tab === 'quiz' ? 'active' : ''} disabled={!section.quiz} onClick={() => setTab('quiz')}>验证</button>
+        <button className={tab === 'note' ? 'active' : ''} disabled={!section.note} onClick={() => setTab('note')}>笔记</button>
+        <button className={tab === 'askme' ? 'active' : ''} disabled={!section.askMeUnlocked} onClick={() => setTab('askme')}>Ask Me</button>
+      </div>
+
+      <div className="reader-scroll">
+        {tab === 'content' && (
+          <LessonContent
+            section={section}
+            selectedBlockId={selectedBlockId}
+            onAnchor={onAnchor}
+            onGenerate={onGenerate}
+          />
+        )}
+        {tab === 'quiz' && section.quiz && (
+          <Quiz section={section} onSectionChange={onSectionChange} onComplete={() => setTab('note')} />
+        )}
+        {tab === 'note' && section.note && (
+          <Note sectionId={section.id} note={section.note} onSaved={onSectionChange} />
+        )}
+        {tab === 'askme' && <AskMePanel sectionId={section.id} />}
+      </div>
+    </main>
+  );
+}
+
+function LessonContent({
+  section,
+  selectedBlockId,
+  onAnchor,
+  onGenerate,
+}: {
+  section: Section;
+  selectedBlockId: string;
+  onAnchor: (id: string) => void;
+  onGenerate: () => void;
+}) {
+  if (!section.content) {
+    return (
+      <div className="lesson-intro">
+        <p className="eyebrow">本节只解决一个问题</p>
+        <h2>{section.question}</h2>
+        <div className="objective-list">
+          {(section.objectives || []).map((objective, index) => (
+            <div key={objective}><span>{index + 1}</span><p>{objective}</p></div>
+          ))}
+        </div>
+        {section.generation?.status === 'failed' && (
+          <div className="inline-error">{section.generation.error || '上次生成失败，可安全重试。'}</div>
+        )}
+        <button className="primary-button large" onClick={onGenerate}>
+          {section.generation?.status === 'failed' ? '安全重试' : '生成正文并开始学习'}
+        </button>
+        <small className="generation-note">正文和题目会经过结构校验，引用由服务端核验后才会保存。</small>
+      </div>
+    );
+  }
+
+  return (
+    <article className="lesson-document">
+      <div className="lesson-question">
+        <span>本节问题</span>
+        <h2>{section.question}</h2>
+      </div>
+      {section.content.blocks.map((block, index) => (
+        <ContentBlock
+          key={block.id}
+          block={block}
+          index={index}
+          selected={block.id === selectedBlockId}
+          onAnchor={() => onAnchor(block.id)}
+        />
+      ))}
+      <details className="source-list">
+        <summary>来源与核验记录 · {section.content.sources.length}</summary>
+        {section.content.sources.map((source, index) => (
+          <a href={source.url} target="_blank" rel="noreferrer" key={`${source.url}-${index}`}>
+            <span>{index + 1}</span>
+            <b>{source.title}</b>
+            <small>{source.version} · {section.content?.sourceVerification[index]?.reachable ? '服务端可达' : '核验失败'}</small>
+          </a>
+        ))}
+      </details>
+    </article>
+  );
+}
+
+function ContentBlock({
+  block,
+  index,
+  selected,
+  onAnchor,
+}: {
+  block: Block;
+  index: number;
+  selected: boolean;
+  onAnchor: () => void;
+}) {
+  const labels: Record<string, string> = {
+    conclusion: '先说结论',
+    mechanism: '理解机制',
+    example: '看一个例子',
+    boundary: '边界与反例',
+    practice: '连接实践',
+  };
+  return (
+    <section className={`content-block role-${block.role} ${selected ? 'selected' : ''}`}>
+      <div className="block-meta"><span>{String(index + 1).padStart(2, '0')}</span><b>{labels[block.role] || block.role}</b></div>
+      <h2>{block.heading}</h2>
+      <pre className={block.kind === 'code' ? 'code-block' : ''}>{block.content}</pre>
+      <button className="anchor-button" onClick={onAnchor}>{selected ? '答疑已定位到这里' : '就这一段提问'} <span>→</span></button>
+    </section>
+  );
+}
+
+function Quiz({
+  section,
+  onSectionChange,
+  onComplete,
+}: {
+  section: Section;
+  onSectionChange: (section: Section) => void;
+  onComplete: () => void;
+}) {
+  const [answers, setAnswers] = useState<number[][]>(section.quiz?.questions.map(() => []) || []);
+  const [result, setResult] = useState<{ passed: boolean } | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    setAnswers(section.quiz?.questions.map(() => []) || []);
+    setResult(null);
+  }, [section.id, section.quiz?.id]);
+
+  const submit = async () => {
+    if (!section.quiz) return;
+    setSubmitting(true);
+    try {
+      const value = await api.quiz(section.id, section.quiz.id, answers);
+      setResult(value);
+      const next = await api.section(section.id);
+      onSectionChange(next);
+      if (value.passed) onComplete();
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="quiz-view">
+      <p className="eyebrow">完成验证后解锁下一节</p>
+      <h2>小节验证</h2>
+      <p className="quiz-rule">核心题必须答对，且总正确率至少达到 80%。</p>
+      {section.remediations.map((item) => (
+        <section className="remediation-card" key={item.id}>
+          <span>错题补充教学 · {item.strategy}</span>
+          {item.blocks.map((block) => <div key={block.id}><h3>{block.heading}</h3><p>{block.content}</p></div>)}
+        </section>
+      ))}
+      {section.quiz?.questions.map((question, questionIndex) => (
+        <fieldset className="question-card" key={`${section.quiz?.id}-${questionIndex}`}>
+          <legend>
+            <span>{questionIndex + 1}</span>
+            <b>{question.prompt}</b>
+            {question.core && <em>核心题</em>}
+          </legend>
+          {question.options.map((option, optionIndex) => (
+            <label key={optionIndex}>
+              <input
+                type="checkbox"
+                checked={answers[questionIndex]?.includes(optionIndex)}
+                onChange={(event) => setAnswers((current) => current.map((value, index) => (
+                  index === questionIndex
+                    ? event.target.checked
+                      ? [...value, optionIndex]
+                      : value.filter((item) => item !== optionIndex)
+                    : value
+                )))}
+              />
+              <span>{String.fromCharCode(65 + optionIndex)}</span>
+              {option}
+            </label>
+          ))}
+        </fieldset>
+      ))}
+      <button className="primary-button large" disabled={submitting} onClick={submit}>
+        {submitting ? '正在评分…' : '提交验证'}
+      </button>
+      {result && <p className={result.passed ? 'result success' : 'result failure'}>{result.passed ? '通过，笔记已经生成。' : '未通过：补充教学已保存，并换成一组新题。'}</p>}
+    </div>
+  );
+}
+
+function Note({
+  sectionId,
+  note,
+  onSaved,
+}: {
+  sectionId: string;
+  note: NoteType;
+  onSaved: (section: Section) => void;
+}) {
+  const [editing, setEditing] = useState(JSON.stringify(note.userContent || {}, null, 2));
+  const [message, setMessage] = useState('');
+  const save = async () => {
+    try {
+      await api.note(sectionId, JSON.parse(editing));
+      onSaved(await api.section(sectionId));
+      setMessage('已保存；AI 笔记未被覆盖。');
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : '保存失败');
+    }
+  };
+  return (
+    <div className="note-view">
+      <p className="eyebrow">完成后的核心资产</p>
+      <h2>AI 整理笔记</h2>
+      <div className="note-paper"><pre>{JSON.stringify(note.aiContent, null, 2)}</pre></div>
+      <h3>我的补充</h3>
+      <textarea value={editing} onChange={(event) => setEditing(event.target.value)} />
+      <button className="primary-button" onClick={save}>保存我的内容</button>
+      {message && <p className="save-message">{message}</p>}
+    </div>
+  );
+}
+
+function AskMePanel({ sectionId }: { sectionId: string }) {
+  const [askMe, setAskMe] = useState<AskMe | null>(null);
+  const [answer, setAnswer] = useState('');
+  const runAskMe = async () => {
+    const next = await api.askMe(sectionId, answer);
+    setAskMe(next);
+    setAnswer('');
+  };
+  return (
+    <div className="askme-view">
+      <p className="eyebrow">满分隐藏关卡</p>
+      <h2>机制 → 边界 → 迁移</h2>
+      <p>这里是口试，不是继续教学。系统会依次探测你能否解释机制、识别边界，并迁移到新场景。</p>
+      {!askMe ? (
+        <button className="primary-button large" onClick={runAskMe}>开始三轮口试</button>
+      ) : (
+        <>
+          <div className="oral-timeline">
+            {askMe.entries.map((entry) => (
+              <section key={entry.dimension}>
+                <span>{entry.dimension}</span>
+                <h3>{entry.prompt}</h3>
+                {entry.answer && <p>你的回答：{entry.answer}</p>}
+                {entry.evaluation !== 'not_evaluated' && <b>评估：{entry.evaluation}</b>}
+              </section>
+            ))}
+          </div>
+          {askMe.status !== 'completed' ? (
+            <>
+              <textarea value={answer} onChange={(event) => setAnswer(event.target.value)} placeholder="在这里作答…" />
+              <button className="primary-button" onClick={runAskMe}>提交本轮</button>
+            </>
+          ) : (
+            <p className="result success">三轮口试完成，证据已写入掌握画像。</p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function QaPanel({
+  section,
+  selectedBlockId,
+  onAnchor,
+}: {
+  section: Section | null;
+  selectedBlockId: string;
+  onAnchor: (id: string) => void;
+}) {
+  const [threadId, setThreadId] = useState<string>();
+  const [newQuestion, setNewQuestion] = useState(false);
+  const [question, setQuestion] = useState('');
+  const [messages, setMessages] = useState<{ question: string; answer: string; relation: string }[]>([]);
+  const [asking, setAsking] = useState(false);
+  const selectedBlock =
+    section?.content?.blocks.find((block) => block.id === selectedBlockId) ??
+    section?.content?.blocks[0];
+  const effectiveBlockId = selectedBlock?.id ?? selectedBlockId;
+
+  const ask = async () => {
+    if (!section || !effectiveBlockId || !question.trim()) return;
+    setAsking(true);
+    try {
+      const result = await api.ask(
+        section.id,
+        effectiveBlockId,
+        question.trim(),
+        newQuestion ? undefined : threadId,
+        newQuestion ? 'new_question' : undefined,
+      );
+      setThreadId(result.threadId);
+      setMessages((current) => [...current, { question: question.trim(), answer: result.answer, relation: result.relation }]);
+      setQuestion('');
+      setNewQuestion(false);
+    } finally {
+      setAsking(false);
+    }
+  };
+
+  return (
+    <aside className="qa-panel" aria-label="本节答疑">
+      <div className="qa-heading">
+        <span className="panel-label">答疑</span>
+        <h2>围绕当前小节追问</h2>
+        <p>答疑独立保存，不会打断正文阅读。</p>
+      </div>
+      {!section?.content ? (
+        <div className="qa-empty">
+          <span>?</span>
+          <b>正文生成后即可提问</b>
+          <p>选择正文中的具体段落，AI 会带着当前位置回答。</p>
+        </div>
+      ) : (
+        <>
+          <div className="anchor-card">
+            <span>当前锚点</span>
+            <b>{selectedBlock?.heading || '请选择正文段落'}</b>
+            <select value={effectiveBlockId} onChange={(event) => onAnchor(event.target.value)}>
+              {section.content.blocks.map((block, index) => (
+                <option value={block.id} key={block.id}>{index + 1}. {block.heading}</option>
+              ))}
+            </select>
+          </div>
+          <div className="qa-messages">
+            {messages.length === 0 && (
+              <div className="qa-suggestion">
+                <span>可以这样问</span>
+                <button onClick={() => setQuestion('这个机制最容易被误解的地方是什么？')}>这个机制最容易被误解的地方是什么？</button>
+                <button onClick={() => setQuestion('它在什么边界条件下会失效？')}>它在什么边界条件下会失效？</button>
+              </div>
+            )}
+            {messages.map((message, index) => (
+              <div className="qa-exchange" key={index}>
+                <div className="user-message"><span>你</span><p>{message.question}</p></div>
+                <div className="assistant-message"><span>S</span><p>{message.answer}</p></div>
+              </div>
+            ))}
+          </div>
+          <div className="qa-composer">
+            <textarea value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="基于当前段落继续追问…" />
+            <div>
+              <label><input type="checkbox" checked={newQuestion} onChange={(event) => setNewQuestion(event.target.checked)} /> 新问题</label>
+              <button disabled={asking || !question.trim()} onClick={ask}>{asking ? '回答中…' : '发送 ↑'}</button>
+            </div>
+          </div>
+        </>
+      )}
+    </aside>
+  );
+}
+
+function ArtifactSubmission({
+  kind,
+  id,
+  status,
+  attachmentCount,
+  onSubmit,
+}: {
+  kind: 'practice' | 'capstone';
+  id: string;
+  status: string;
+  attachmentCount: number;
+  onSubmit: (action: () => Promise<unknown>) => Promise<void>;
+}) {
+  const label = kind === 'practice' ? '章末实践' : '全书大作业';
+  const needsLegacyFile = status === 'completed' && attachmentCount === 0;
+  const enabled = status === 'available' || needsLegacyFile;
+  const upload = async (file: File) => {
+    const attachment = kind === 'practice' ? await api.uploadPractice(id, file) : await api.uploadCapstone(id, file);
+    return kind === 'practice'
+      ? api.practice(id, { evidence: '由学习者提交', reflection: '已完成章末实践' }, [attachment.id])
+      : api.capstone(id, { artifact: '全书综合成果', verification: '学习者复核记录' }, [attachment.id]);
+  };
+  return (
+    <label className={`artifact-submit ${kind} ${enabled ? 'enabled' : ''}`}>
+      <span>{kind === 'practice' ? '◇' : '◆'}</span>
+      {label} · {needsLegacyFile ? '补充附件' : status === 'completed' ? '已完成' : status === 'locked' ? '未解锁' : '提交成果'}
+      <input
+        type="file"
+        hidden
+        disabled={!enabled}
+        onChange={(event) => {
+          const file = event.target.files?.[0];
+          if (file) onSubmit(() => upload(file));
+        }}
+      />
+    </label>
+  );
+}

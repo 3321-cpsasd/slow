@@ -1,4 +1,4 @@
-export type SectionSummary = { id:string; position:number; title:string; question:string; status:string; generated?:boolean; bestScore:number; totalScore:number; askMeUnlocked:boolean };
+export type SectionSummary = { id:string; position:number; title:string; question:string; objectives:string[]; status:string; generated?:boolean; bestScore:number; totalScore:number; askMeUnlocked:boolean };
 export type Attachment = { id:string; filename:string; mediaType:string; byteSize:number; sha256:string; createdAt:string };
 export type Practice = { id:string; title:string; instructions:Record<string,unknown>; submission:Record<string,unknown>; attachments:Attachment[]; evidenceMode:'file_attachment'|'structured_only_legacy'; status:string };
 export type Capstone = { id:string; title:string; brief:Record<string,unknown>; submission:Record<string,unknown>; attachments:Attachment[]; evidenceMode:'file_attachment'|'structured_only_legacy'; status:string };
