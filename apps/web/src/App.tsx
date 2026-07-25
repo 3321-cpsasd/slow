@@ -156,6 +156,11 @@ export default function App() {
   );
 }
 
+function compactSpineTitle(title: string) {
+  const seriesName = title.split(/[：:]/)[0].trim();
+  return seriesName.length > 18 ? `${seriesName.slice(0, 18)}…` : seriesName;
+}
+
 function Home({ data, onOpen }: { data: Bootstrap | null; onOpen: (shelf: Shelf) => void }) {
   return (
     <section className="landing-section">
@@ -164,12 +169,43 @@ function Home({ data, onOpen }: { data: Bootstrap | null; onOpen: (shelf: Shelf)
       <p className="lead">一本书是一个台阶。慢一点，真正理解、验证并留下自己的笔记。</p>
       <div className="shelf-grid">
         {data?.shelves.map((item) => (
-          <button className="shelf-card" key={item.id} onClick={() => onOpen(item)}>
-            <span className="shelf-icon">{item.name.slice(0, 1)}</span>
-            <b>{item.name}</b>
-            <span>{item.domain} · {item.specialty}</span>
-            <small>{item.series.length} 个学习系列</small>
-            <i>→</i>
+          <button
+            className="shelf-card bookshelf-card"
+            key={item.id}
+            aria-label={`进入${item.name}书架，共 ${item.series.length} 个学习系列`}
+            onClick={() => onOpen(item)}
+          >
+            <div className="shelf-card-top">
+              <span>{item.name}书架</span>
+              <small>{item.series.length} 册在架</small>
+            </div>
+            <div className="bookshelf-scene">
+              <div className="book-row">
+                <span className="bookend left" aria-hidden="true" />
+                {item.series.map((series, index) => (
+                  <span
+                    className={`book-spine book-tone-${index % 6}`}
+                    style={{ height: `${154 + ((index * 23) % 48)}px` }}
+                    title={series.title}
+                    key={series.id}
+                  >
+                    <i />
+                    <b>{compactSpineTitle(series.title)}</b>
+                    <small>{series.progress}%</small>
+                  </span>
+                ))}
+                <span className="bookend right" aria-hidden="true" />
+              </div>
+              <span className="shelf-board" aria-hidden="true"><i /></span>
+            </div>
+            <div className="shelf-plaque">
+              <span className="shelf-monogram">{item.name.slice(0, 1)}</span>
+              <span>
+                <b>{item.name}</b>
+                <small>{item.domain} · {item.specialty}</small>
+              </span>
+              <em>进入书架 <i>→</i></em>
+            </div>
           </button>
         ))}
       </div>
