@@ -1,3 +1,5 @@
+import asyncio
+
 from .contracts import (
     AskMeTurn,
     ChoiceQuestion,
@@ -94,6 +96,11 @@ class LocalDemoAdapter:
             answer="这是本地演示答疑：请回到锚定段落，对照机制、前提与边界逐项检查。",
             thread_summary="围绕锚定段落核对机制和边界",
         )
+
+    async def answer_stream(self, request):
+        for chunk in ["这是本地演示答疑：", "请回到锚定段落，", "对照机制、前提与边界", "逐项检查。"]:
+            await asyncio.sleep(0.03)
+            yield chunk
 
     async def note(self, request):
         return GeneratedNote(

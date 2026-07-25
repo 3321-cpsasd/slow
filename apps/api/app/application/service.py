@@ -861,7 +861,7 @@ class SlowService:
         self.db.commit()
         return self._note(note)
 
-    async def ask(self, section_id, body):
+    def prepare_ask(self, section_id, body):
         section_view = self.section(section_id)
         if not section_view["content"]:
             raise AppError("请先生成本节", code="SECTION_NOT_GENERATED")
@@ -873,7 +873,7 @@ class SlowService:
         if not session:
             session = QaSession(id=uid("qa"), section_id=section_id, user_id=USER_ID)
             self.db.add(session)
-            self.db.flush()
+            self.db.commit()
         messages = self.db.scalars(select(QaMessage).where(QaMessage.session_id == session.id).order_by(QaMessage.created_at)).all()
         threads = self.db.scalars(select(QaThread).where(QaThread.session_id == session.id).order_by(QaThread.updated_at.desc())).all()
         current_history = [
@@ -887,8 +887,10 @@ class SlowService:
             if item.thread_id != body.thread_id and item.summary
         ][:5]
         suggested = uid("thread")
-        result = await self.ai.answer(
-            {
+        return {
+            "session": session,
+            "suggestedThreadId": suggested,
+            "request": {
                 "section": section_view,
                 "anchorBlockId": body.block_id,
                 "question": body.question,
@@ -900,9 +902,13 @@ class SlowService:
                     "relatedThreadSummaries": related_summaries,
                     "crossSectionMemory": self._memory(self._book_for_section(section_row).shelf_id, 10),
                 },
-            }
-        )
-        relation = body.force_relation or result.relation
+            },
+        }
+
+    def _save_qa_answer(self, context, body, answer, suggested_relation, thread_summary=""):
+        session = context["session"]
+        suggested = context["suggestedThreadId"]
+        relation = body.force_relation or suggested_relation
         if relation == "follow_up" and body.thread_id:
             thread_id = body.thread_id
         else:
@@ -911,12 +917,12 @@ class SlowService:
         if not thread:
             thread = QaThread(id=uid("qathread"), session_id=session.id, thread_id=thread_id, classification=relation)
             self.db.add(thread)
-        thread_summary = result.thread_summary.strip() or result.answer.strip()[:240]
+        thread_summary = thread_summary.strip() or answer.strip()[:240]
         thread.summary, thread.updated_at = thread_summary, now()
         self.db.add_all(
             [
                 QaMessage(id=uid("msg"), session_id=session.id, thread_id=thread_id, block_id=body.block_id, role="user", content=body.question),
-                QaMessage(id=uid("msg"), session_id=session.id, thread_id=thread_id, block_id=body.block_id, role="assistant", content=result.answer),
+                QaMessage(id=uid("msg"), session_id=session.id, thread_id=thread_id, block_id=body.block_id, role="assistant", content=answer),
             ]
         )
         memory = load(session.memory_json, {"threads": {}}) or {"threads": {}}
@@ -924,7 +930,38 @@ class SlowService:
         memory["lastThread"] = thread_id
         session.memory_json = dump(memory)
         self.db.commit()
-        return {"sessionId": session.id, "threadId": thread_id, "relation": relation, "answer": result.answer, "classificationCorrectable": True}
+        return {"sessionId": session.id, "threadId": thread_id, "relation": relation, "answer": answer, "classificationCorrectable": True}
+
+    async def ask(self, section_id, body):
+        context = self.prepare_ask(section_id, body)
+        result = await self.ai.answer(context["request"])
+        return self._save_qa_answer(context, body, result.answer, result.relation, result.thread_summary)
+
+    async def ask_stream(self, context, body):
+        parts = []
+        stream_answer = getattr(self.ai, "answer_stream", None)
+        if callable(stream_answer):
+            async for delta in stream_answer(context["request"]):
+                if delta:
+                    parts.append(delta)
+                    yield {"type": "delta", "delta": delta}
+            suggested_relation = "follow_up" if body.thread_id else "new_question"
+        else:
+            result = await self.ai.answer(context["request"])
+            parts.append(result.answer)
+            suggested_relation = result.relation
+            yield {"type": "delta", "delta": result.answer}
+        answer = "".join(parts).strip()
+        if not answer:
+            raise AiError("答疑模型未返回有效内容")
+        saved = self._save_qa_answer(context, body, answer, suggested_relation)
+        yield {
+            "type": "done",
+            "sessionId": saved["sessionId"],
+            "threadId": saved["threadId"],
+            "relation": saved["relation"],
+            "classificationCorrectable": True,
+        }
 
     def correct_qa_classification(self, section_id, thread_id, body):
         session = self.db.scalar(select(QaSession).where(QaSession.section_id == section_id, QaSession.user_id == USER_ID))

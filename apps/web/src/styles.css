@@ -955,6 +955,28 @@ button:disabled { cursor: not-allowed; }
 .assistant-message > span { background: var(--green); color: #fff; }
 .user-message p, .assistant-message p { margin: 1px 0 11px; color: #505750; font-size: 11px; line-height: 1.65; }
 .assistant-message p { color: #353b35; }
+.markdown-answer { min-width: 0; color: #353b35; font-size: 11px; line-height: 1.65; overflow-wrap: anywhere; }
+.markdown-answer > :first-child { margin-top: 1px; }
+.markdown-answer > :last-child { margin-bottom: 11px; }
+.markdown-answer p, .markdown-answer ul, .markdown-answer ol, .markdown-answer pre, .markdown-answer table, .markdown-answer blockquote { margin: 0 0 10px; }
+.markdown-answer ul, .markdown-answer ol { padding-left: 18px; }
+.markdown-answer li + li { margin-top: 4px; }
+.markdown-answer h1, .markdown-answer h2, .markdown-answer h3, .markdown-answer h4 { margin: 12px 0 6px; color: #253128; font-size: 12px; line-height: 1.45; }
+.markdown-answer code { padding: 1px 4px; border-radius: 4px; background: #edf0ec; font: 10px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.markdown-answer pre { padding: 10px; overflow-x: auto; border-radius: 7px; background: #222a24; color: #eef3ef; }
+.markdown-answer pre code { padding: 0; background: transparent; color: inherit; }
+.markdown-answer blockquote { padding-left: 10px; border-left: 2px solid #a8bbaa; color: #667067; }
+.markdown-answer table { width: 100%; border-collapse: collapse; font-size: 10px; }
+.markdown-answer th, .markdown-answer td { padding: 5px; border: 1px solid #dfe4de; text-align: left; }
+.markdown-answer a { color: var(--green); text-underline-offset: 2px; }
+.qa-exchange.error .markdown-answer { color: var(--danger); }
+.streaming-dots { height: 20px; display: flex; align-items: center; gap: 3px; }
+.streaming-dots i { width: 4px; height: 4px; border-radius: 50%; background: #8ba092; animation: qa-dot 1s infinite ease-in-out; }
+.streaming-dots i:nth-child(2) { animation-delay: .12s; }
+.streaming-dots i:nth-child(3) { animation-delay: .24s; }
+.stream-caret { display: inline-block; width: 1px; height: 12px; margin-left: 2px; vertical-align: -2px; background: var(--green); animation: qa-caret .8s infinite; }
+@keyframes qa-dot { 0%, 60%, 100% { opacity: .25; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-2px); } }
+@keyframes qa-caret { 50% { opacity: 0; } }
 .qa-composer { padding: 13px 15px 15px; border-top: 1px solid var(--line); background: #fbfbf8; }
 .qa-composer textarea { width: 100%; min-height: 74px; resize: none; border: 1px solid #d8dad5; border-radius: 8px; padding: 10px; background: #fff; font-size: 11px; }
 .qa-composer > div { display: flex; justify-content: space-between; align-items: center; margin-top: 7px; }

@@ -133,6 +133,63 @@ class OpenAiAdapter:
     async def answer(self, request: dict):
         return await self._parse(ClassifiedAnswer, """你是绑定当前小节的答疑助手。先判断这是当前问题线程追问还是新问题；追问沿用 thread_id，新问题创建 payload 建议的新 ID。当前线程完整历史权重最高，其他线程摘要只在相关时使用。只回答锚定内容块及必要前置，不替用户答测验。输出简洁准确中文。""", request, 2200)
 
+    async def answer_stream(self, request: dict):
+        if not self.client:
+            raise AiError("未配置 OPENAI_API_KEY；Slow v0 只接受真实 AI 生成")
+        developer = """你是绑定当前小节的答疑助手。当前线程完整历史权重最高，其他线程摘要只在相关时使用。只回答锚定内容块及必要前置，不替用户答测验。输出简洁准确中文，可使用 Markdown 的短标题、列表、表格和代码块。只输出答案正文，不要输出 JSON、线程分类或包裹答案的代码围栏。"""
+        emitted = False
+        if not self.prefer_chat:
+            try:
+                async with self.client.responses.stream(
+                    model=self.model,
+                    input=[
+                        {"role": "developer", "content": developer},
+                        {"role": "user", "content": json.dumps(request, ensure_ascii=False)},
+                    ],
+                    reasoning={"effort": "low"},
+                    max_output_tokens=2200,
+                    store=False,
+                ) as stream:
+                    async for event in stream:
+                        if event.type == "response.output_text.delta" and event.delta:
+                            emitted = True
+                            yield event.delta
+                    response = await stream.get_final_response()
+                    self._record_usage(response.usage)
+                    return
+            except Exception:
+                if emitted:
+                    raise
+
+        options = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": developer},
+                {"role": "user", "content": json.dumps(request, ensure_ascii=False)},
+            ],
+            "max_tokens": 2200,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if self.disable_compatible_thinking:
+            options["extra_body"] = {"enable_thinking": False}
+        try:
+            stream = await self.client.chat.completions.create(**options)
+        except BadRequestError as error:
+            if "enable_thinking parameter is restricted to True" not in str(error):
+                raise
+            options["extra_body"] = {"enable_thinking": True, "thinking_budget": 600}
+            stream = await self.client.chat.completions.create(**options)
+        usage = None
+        async for chunk in stream:
+            if getattr(chunk, "usage", None):
+                usage = chunk.usage
+            if chunk.choices:
+                content = getattr(chunk.choices[0].delta, "content", None)
+                if content:
+                    yield content
+        self._record_usage(usage)
+
     async def note(self, request: dict):
         return await self._parse(GeneratedNote, """把已完成小节整理为用户长期拥有的个人笔记。正文只是教学过程；笔记必须保留核心机制，同时突出用户错题、答疑、边界、实践检查点、来源和未解决问题。不得编造用户经历。中文输出。""", request, 3500)
 

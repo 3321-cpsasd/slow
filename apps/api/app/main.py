@@ -1,8 +1,9 @@
 from contextlib import asynccontextmanager
+import json
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from .ai.openai_adapter import OpenAiAdapter
 from .ai.local_adapter import LocalDemoAdapter
@@ -120,6 +121,26 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
 
     @app.post("/api/sections/{section_id}/ask")
     async def ask(section_id: str, body: AskRequest, s: SlowService = Depends(service)): return await s.ask(section_id, body)
+
+    @app.post("/api/sections/{section_id}/ask/stream")
+    async def ask_stream(section_id: str, body: AskRequest, s: SlowService = Depends(service)):
+        context = s.prepare_ask(section_id, body)
+
+        async def events():
+            try:
+                async for event in s.ask_stream(context, body):
+                    yield json.dumps(event, ensure_ascii=False) + "\n"
+            except Exception as error:
+                yield json.dumps(
+                    {
+                        "type": "error",
+                        "code": getattr(error, "code", "QA_STREAM_FAILED"),
+                        "error": str(error) if isinstance(error, AppError) else "答疑生成失败，请稍后重试",
+                    },
+                    ensure_ascii=False,
+                ) + "\n"
+
+        return StreamingResponse(events(), media_type="application/x-ndjson")
 
     @app.patch("/api/sections/{section_id}/qa/threads/{thread_id}")
     def correct_qa(section_id: str, thread_id: str, body: QaClassificationUpdate, s: SlowService = Depends(service)): return s.correct_qa_classification(section_id, thread_id, body)

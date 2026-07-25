@@ -1,4 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { api } from './api/client';
 import type {
   AskMe,
@@ -17,6 +19,13 @@ type View = 'home' | 'shelf' | 'learn';
 type ReaderTab = 'content' | 'quiz' | 'note';
 type TextQuote = { text: string; blockId: string };
 type SelectionPopup = TextQuote & { top: number; left: number };
+type QaExchange = {
+  id: string;
+  question: string;
+  answer: string;
+  relation: string;
+  status: 'streaming' | 'done' | 'error';
+};
 
 export default function App() {
   const [data, setData] = useState<Bootstrap | null>(null);
@@ -453,6 +462,7 @@ function LearningWorkspace({
         }}
         onGenerate={() => section && onGenerateSection(section.id)}
         onSectionChange={onSectionChange}
+        onRefreshSeries={onRefreshSeries}
       />
       <QaPanel
         key={section?.id || 'empty'}
@@ -656,6 +666,7 @@ function ReaderPanel({
   onQuote,
   onGenerate,
   onSectionChange,
+  onRefreshSeries,
 }: {
   section: Section | null;
   location: ReturnType<typeof findSectionLocation>;
@@ -663,6 +674,7 @@ function ReaderPanel({
   onQuote: (quote: TextQuote) => void;
   onGenerate: () => void;
   onSectionChange: (section: Section) => void;
+  onRefreshSeries: () => Promise<void>;
 }) {
   const [tab, setTab] = useState<ReaderTab>('content');
   const [selectionPopup, setSelectionPopup] = useState<SelectionPopup | null>(null);
@@ -755,7 +767,12 @@ function ReaderPanel({
           />
         )}
         {tab === 'quiz' && section.quiz && (
-          <Quiz key={section.quiz.id} section={section} onSectionChange={onSectionChange} />
+          <Quiz
+            key={section.quiz.id}
+            section={section}
+            onSectionChange={onSectionChange}
+            onRefreshSeries={onRefreshSeries}
+          />
         )}
         {tab === 'note' && section.note && (
           <Note sectionId={section.id} note={section.note} onSaved={onSectionChange} />
@@ -880,9 +897,11 @@ function ContentBlock({
 function Quiz({
   section,
   onSectionChange,
+  onRefreshSeries,
 }: {
   section: Section;
   onSectionChange: (section: Section) => void;
+  onRefreshSeries: () => Promise<void>;
 }) {
   const quizDraftKey = `slow:quiz-draft:${section.id}:${section.quiz?.id || 'none'}`;
   const [answers, setAnswers] = useState<number[][]>(() => {
@@ -929,6 +948,7 @@ function Quiz({
       localStorage.removeItem(quizDraftKey);
       const next = await api.section(section.id);
       onSectionChange(next);
+      await onRefreshSeries();
     } finally {
       setSubmitting(false);
     }
@@ -1075,9 +1095,10 @@ function QaPanel({
   const [threadId, setThreadId] = useState<string>();
   const [newQuestion, setNewQuestion] = useState(false);
   const [question, setQuestion] = useState('');
-  const [messages, setMessages] = useState<{ question: string; answer: string; relation: string }[]>([]);
+  const [messages, setMessages] = useState<QaExchange[]>([]);
   const [asking, setAsking] = useState(false);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
   const selectedBlock =
     section?.content?.blocks.find((block) => block.id === selectedBlockId) ??
     section?.content?.blocks[0];
@@ -1087,25 +1108,50 @@ function QaPanel({
     if (selectedQuote) composerRef.current?.focus();
   }, [selectedQuote]);
 
+  useEffect(() => {
+    const node = messagesRef.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }, [messages]);
+
   const ask = async () => {
     if (!section || !effectiveBlockId || !question.trim()) return;
     const visibleQuestion = question.trim();
     const submittedQuestion = selectedQuote
       ? `请基于以下选中的正文回答。\n\n选中内容：${selectedQuote.text}\n\n问题：${visibleQuestion}`
       : visibleQuestion;
+    const exchangeId = crypto.randomUUID();
+    setMessages((current) => [
+      ...current,
+      { id: exchangeId, question: visibleQuestion, answer: '', relation: 'pending', status: 'streaming' },
+    ]);
+    setQuestion('');
     setAsking(true);
     try {
-      const result = await api.ask(
+      const result = await api.askStream(
         section.id,
         effectiveBlockId,
         submittedQuestion,
+        (delta) => setMessages((current) => current.map((message) => (
+          message.id === exchangeId ? { ...message, answer: message.answer + delta } : message
+        ))),
         newQuestion ? undefined : threadId,
         newQuestion ? 'new_question' : undefined,
       );
       setThreadId(result.threadId);
-      setMessages((current) => [...current, { question: visibleQuestion, answer: result.answer, relation: result.relation }]);
-      setQuestion('');
+      setMessages((current) => current.map((message) => (
+        message.id === exchangeId ? { ...message, relation: result.relation, status: 'done' } : message
+      )));
       setNewQuestion(false);
+    } catch (reason) {
+      setMessages((current) => current.map((message) => (
+        message.id === exchangeId
+          ? {
+              ...message,
+              answer: message.answer || (reason instanceof Error ? reason.message : '答疑生成失败'),
+              status: 'error',
+            }
+          : message
+      )));
     } finally {
       setAsking(false);
     }
@@ -1144,7 +1190,7 @@ function QaPanel({
               <blockquote>{selectedQuote.text}</blockquote>
             </div>
           )}
-          <div className="qa-messages">
+          <div className="qa-messages" ref={messagesRef}>
             {messages.length === 0 && (
               <div className="qa-suggestion">
                 <span>可以这样问</span>
@@ -1152,10 +1198,27 @@ function QaPanel({
                 <button onClick={() => setQuestion('它在什么边界条件下会失效？')}>它在什么边界条件下会失效？</button>
               </div>
             )}
-            {messages.map((message, index) => (
-              <div className="qa-exchange" key={index}>
+            {messages.map((message) => (
+              <div className={`qa-exchange ${message.status}`} key={message.id}>
                 <div className="user-message"><span>你</span><p>{message.question}</p></div>
-                <div className="assistant-message"><span>S</span><p>{message.answer}</p></div>
+                <div className="assistant-message">
+                  <span>S</span>
+                  <div className="markdown-answer">
+                    {message.answer ? (
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                          a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
+                        }}
+                      >
+                        {message.answer}
+                      </ReactMarkdown>
+                    ) : (
+                      <span className="streaming-dots"><i /><i /><i /></span>
+                    )}
+                    {message.status === 'streaming' && message.answer && <span className="stream-caret" />}
+                  </div>
+                </div>
               </div>
             ))}
           </div>
@@ -1164,6 +1227,9 @@ function QaPanel({
               ref={composerRef}
               value={question}
               onChange={(event) => setQuestion(event.target.value)}
+              onKeyDown={(event) => {
+                if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') ask();
+              }}
               placeholder={selectedQuote ? '针对选中的内容输入问题…' : '基于当前段落继续追问…'}
             />
             <div>

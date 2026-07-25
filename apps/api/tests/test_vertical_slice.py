@@ -1,4 +1,5 @@
 import hashlib
+import json
 import sqlite3
 
 import pytest
@@ -63,6 +64,10 @@ def test_complete_real_shape_vertical_slice(client):
     assert passed["passed"] is True
     completed = client.get(f"/api/sections/{section_id}").json()
     assert completed["note"]
+    refreshed_series = client.get(f"/api/series/{series['id']}").json()
+    refreshed_sections = refreshed_series["books"][0]["chapters"][0]["sections"]
+    assert refreshed_sections[0]["status"] == "completed"
+    assert refreshed_sections[1]["status"] == "available"
     assert client.get("/api/learning-memory?shelf_id=shelf_technology").json()
 
 
@@ -151,6 +156,15 @@ def test_qa_correction_and_three_round_ask_me(client):
     block_id = section["content"]["blocks"][0]["id"]
     invalid_block = client.post(f"/api/sections/{section['id']}/ask", json={"blockId":"0","question":"旧数组下标锚点"})
     assert invalid_block.status_code == 409 and invalid_block.json()["code"] == "BLOCK_INVALID"
+    with client.stream(
+        "POST",
+        f"/api/sections/{section['id']}/ask/stream",
+        json={"blockId": block_id, "question": "请用 Markdown 列出机制和边界"},
+    ) as streamed:
+        events = [json.loads(line) for line in streamed.iter_lines() if line]
+    assert streamed.status_code == 200
+    assert events[0]["type"] == "delta" and events[-1]["type"] == "done"
+    assert events[-1]["threadId"]
     first = client.post(f"/api/sections/{section['id']}/ask", json={"blockId":block_id,"question":"机制是什么？"}).json()
     second = client.post(f"/api/sections/{section['id']}/ask", json={"blockId":block_id,"question":"另一个问题","forceRelation":"new_question"}).json()
     corrected = client.patch(f"/api/sections/{section['id']}/qa/threads/{second['threadId']}", json={"relation":"follow_up","targetThreadId":first["threadId"]})
