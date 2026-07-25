@@ -52,6 +52,8 @@ def test_complete_real_shape_vertical_slice(client):
     assert len(section["content"]["blocks"]) == 5
     assert all(block["id"].startswith(f"block_{section['content']['id']}_") for block in section["content"]["blocks"])
     assert all(item["reachable"] for item in section["content"]["sourceVerification"])
+    assert all(question["selectionMode"] == "single" for question in section["quiz"]["questions"])
+    assert all("correct" not in question for question in section["quiz"]["questions"])
     quiz_id = section["quiz"]["id"]
     failed = client.post(f"/api/sections/{section_id}/quiz", json={"quizSetId":quiz_id,"answers":[[0],[1],[1],[1],[1]]}).json()
     assert failed["passed"] is False and failed["nextQuiz"]["generation"] == 2 and failed["remediation"]["blocks"]
@@ -62,6 +64,37 @@ def test_complete_real_shape_vertical_slice(client):
     completed = client.get(f"/api/sections/{section_id}").json()
     assert completed["note"]
     assert client.get("/api/learning-memory?shelf_id=shelf_technology").json()
+
+
+def test_quiz_exposes_selection_mode_without_leaking_answers(tmp_path):
+    class MixedChoiceAi(FakeAi):
+        async def lesson(self, request, memory, prior_questions=None):
+            lesson = await super().lesson(request, memory, prior_questions)
+            first = lesson.questions[0]
+            lesson.questions[0] = ChoiceQuestion(
+                prompt=first.prompt,
+                options=first.options,
+                correct=[0, 1],
+                core=first.core,
+                objective=first.objective,
+                explanation=first.explanation,
+            )
+            return lesson
+
+    storage = LocalAttachmentStorage(tmp_path / "mixed-choice-attachments")
+    with TestClient(create_app("sqlite+pysqlite:///:memory:", MixedChoiceAi(), AcceptingSourceVerifier(), storage)) as mixed:
+        series = create_series(mixed)
+        chapter = mixed.post(f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate").json()
+        section = mixed.post(f"/api/sections/{chapter['sections'][0]['id']}/generate").json()
+        questions = section["quiz"]["questions"]
+        assert [question["selectionMode"] for question in questions] == ["multiple", "single", "single", "single", "single"]
+        assert all("correct" not in question for question in questions)
+        answers = [[0, 1], [1], [1], [1], [1]]
+        result = mixed.post(
+            f"/api/sections/{section['id']}/quiz",
+            json={"quizSetId": section["quiz"]["id"], "answers": answers},
+        )
+        assert result.status_code == 200 and result.json()["perfect"] is True
 
 
 def test_locked_boundary(client):

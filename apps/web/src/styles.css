@@ -865,10 +865,23 @@ button:disabled { cursor: not-allowed; }
   padding: 36px 0 0;
   border-top: 1px solid var(--line);
 }
+.quiz-draft-note {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border-left: 2px solid #9ab2a0;
+  background: #f5f8f5;
+  color: #6d756e;
+  font-size: 11px;
+  line-height: 1.6;
+}
 .question-card { margin: 25px 0; padding: 20px 0 8px; border: 0; border-top: 1px solid var(--line); }
 .question-card legend { width: 100%; display: grid; grid-template-columns: 28px 1fr auto; gap: 10px; align-items: start; line-height: 1.55; }
-.question-card legend > span { color: var(--green); font-family: Georgia, serif; }
-.question-card legend em { color: #a45b3d; background: #f7eae3; border-radius: 99px; padding: 3px 7px; font-size: 9px; font-style: normal; }
+.question-card legend > .question-number { color: var(--green); font-family: Georgia, serif; }
+.question-badges { display: flex; gap: 5px; align-items: center; }
+.question-card legend em { border-radius: 99px; padding: 3px 7px; font-size: 9px; font-style: normal; white-space: nowrap; }
+.question-kind { color: #537061; background: #e9f0eb; }
+.question-kind.multiple { color: #5e6280; background: #eeedf5; }
+.core-question { color: #a45b3d; background: #f7eae3; }
 .question-card label { margin: 8px 0 8px 38px; padding: 10px 12px; display: grid; grid-template-columns: auto 22px 1fr; gap: 8px; border: 1px solid #e5e6e0; border-radius: 8px; color: #505750; cursor: pointer; }
 .question-card label:has(input:checked) { border-color: #86a18e; background: var(--green-soft); }
 .question-card label > span { color: #929892; font-size: 11px; }

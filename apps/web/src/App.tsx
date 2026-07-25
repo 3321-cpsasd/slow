@@ -744,7 +744,7 @@ function ReaderPanel({
           />
         )}
         {tab === 'quiz' && section.quiz && (
-          <Quiz section={section} onSectionChange={onSectionChange} />
+          <Quiz key={section.quiz.id} section={section} onSectionChange={onSectionChange} />
         )}
         {tab === 'note' && section.note && (
           <Note sectionId={section.id} note={section.note} onSaved={onSectionChange} />
@@ -873,14 +873,41 @@ function Quiz({
   section: Section;
   onSectionChange: (section: Section) => void;
 }) {
-  const [answers, setAnswers] = useState<number[][]>(section.quiz?.questions.map(() => []) || []);
+  const quizDraftKey = `slow:quiz-draft:${section.id}:${section.quiz?.id || 'none'}`;
+  const [answers, setAnswers] = useState<number[][]>(() => {
+    const empty = section.quiz?.questions.map(() => []) || [];
+    try {
+      const saved = JSON.parse(localStorage.getItem(quizDraftKey) || 'null');
+      if (
+        Array.isArray(saved) &&
+        saved.length === empty.length &&
+        saved.every((answer, questionIndex) => (
+          Array.isArray(answer) &&
+          new Set(answer).size === answer.length &&
+          (
+            section.quiz?.questions[questionIndex]?.selectionMode === 'multiple' ||
+            answer.length <= 1
+          ) &&
+          answer.every((optionIndex) => (
+            Number.isInteger(optionIndex) &&
+            optionIndex >= 0 &&
+            optionIndex < (section.quiz?.questions[questionIndex]?.options.length || 0)
+          ))
+        ))
+      ) {
+        return saved;
+      }
+    } catch {
+      localStorage.removeItem(quizDraftKey);
+    }
+    return empty;
+  });
   const [result, setResult] = useState<{ passed: boolean } | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    setAnswers(section.quiz?.questions.map(() => []) || []);
-    setResult(null);
-  }, [section.id, section.quiz?.id]);
+    localStorage.setItem(quizDraftKey, JSON.stringify(answers));
+  }, [answers, quizDraftKey]);
 
   const submit = async () => {
     if (!section.quiz) return;
@@ -888,6 +915,7 @@ function Quiz({
     try {
       const value = await api.quiz(section.id, section.quiz.id, answers);
       setResult(value);
+      localStorage.removeItem(quizDraftKey);
       const next = await api.section(section.id);
       onSectionChange(next);
     } finally {
@@ -900,6 +928,7 @@ function Quiz({
       <p className="eyebrow">完成验证后解锁下一节</p>
       <h2>小节验证</h2>
       <p className="quiz-rule">核心题必须答对，且总正确率至少达到 80%。</p>
+      <p className="quiz-draft-note">单选题只能选择一个答案，多选题可选择多个；切回正文查阅时，当前作答会自动保留。</p>
       {section.remediations.map((item) => (
         <section className="remediation-card" key={item.id}>
           <span>错题补充教学 · {item.strategy}</span>
@@ -909,22 +938,26 @@ function Quiz({
       {section.quiz?.questions.map((question, questionIndex) => (
         <fieldset className="question-card" key={`${section.quiz?.id}-${questionIndex}`}>
           <legend>
-            <span>{questionIndex + 1}</span>
+            <span className="question-number">{questionIndex + 1}</span>
             <b>{question.prompt}</b>
-            {question.core && <em>核心题</em>}
+            <span className="question-badges">
+              <em className={`question-kind ${question.selectionMode}`}>{question.selectionMode === 'multiple' ? '多选' : '单选'}</em>
+              {question.core && <em className="core-question">核心题</em>}
+            </span>
           </legend>
           {question.options.map((option, optionIndex) => (
             <label key={optionIndex}>
               <input
-                type="checkbox"
+                type={question.selectionMode === 'multiple' ? 'checkbox' : 'radio'}
+                name={`question-${section.quiz?.id}-${questionIndex}`}
                 checked={answers[questionIndex]?.includes(optionIndex)}
-                onChange={(event) => setAnswers((current) => current.map((value, index) => (
-                  index === questionIndex
-                    ? event.target.checked
-                      ? [...value, optionIndex]
-                      : value.filter((item) => item !== optionIndex)
-                    : value
-                )))}
+                onChange={(event) => setAnswers((current) => current.map((value, index) => {
+                  if (index !== questionIndex) return value;
+                  if (question.selectionMode !== 'multiple') return event.target.checked ? [optionIndex] : [];
+                  return event.target.checked
+                    ? [...value, optionIndex]
+                    : value.filter((item) => item !== optionIndex);
+                }))}
               />
               <span>{String.fromCharCode(65 + optionIndex)}</span>
               {option}

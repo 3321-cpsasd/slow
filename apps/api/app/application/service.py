@@ -627,7 +627,13 @@ class SlowService:
         remediations = self.db.scalars(select(Remediation).where(Remediation.section_id == section.id).order_by(Remediation.created_at)).all()
         verification = self.db.scalar(select(SourceVerification).where(SourceVerification.content_version_id == content.id)) if content else None
         questions = load(quiz.questions_json, []) if quiz else []
-        public = [{key: value for key, value in question.items() if key != "correct"} for question in questions]
+        public = [
+            {
+                **{key: value for key, value in question.items() if key != "correct"},
+                "selectionMode": "multiple" if len(set(question.get("correct", []))) > 1 else "single",
+            }
+            for question in questions
+        ]
         return {
             **self._section_summary(section),
             "generation": self._generation(run) if run else None,
