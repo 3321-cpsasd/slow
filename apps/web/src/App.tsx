@@ -258,29 +258,53 @@ function ShelfPage({
         <button className="primary-button" onClick={() => setShowPlan(!showPlan)}>＋ 新的台阶</button>
       </div>
       {showPlan && <PlanForm submit={onCreate} />}
-      <div className="series-grid">
-        {shelf.series.map((item) => (
-          <article className="series-card" key={item.id}>
-            <button className="series-card-main" onClick={() => onOpen(item.id)}>
-              <span className="series-kicker">学习系列</span>
-              <h2>{item.title}</h2>
-              <p>{item.rationale}</p>
-              <div className="series-card-footer">
-                <span className="progress-track"><i style={{ width: `${item.progress}%` }} /></span>
-                <b>{item.progress}%</b>
-                <em>进入学习 →</em>
-              </div>
-            </button>
-            <button
-              className="series-delete-button"
-              aria-label={`删除 ${item.title}`}
-              title="删除系列"
-              onClick={() => setDeleteTarget(item)}
+      <div className="series-shelf-heading">
+        <span>技术书架 · 第 1 层</span>
+        <small>{shelf.series.length} 册在架</small>
+      </div>
+      <div className="series-bookshelf">
+        <div className="series-volume-row">
+          <span className="bookend left" aria-hidden="true" />
+          {shelf.series.map((item, index) => (
+            <article
+              className={`series-volume book-tone-${index % 6}`}
+              style={{ height: `${238 + ((index * 17) % 34)}px` }}
+              key={item.id}
             >
-              <TrashIcon />
-            </button>
-          </article>
-        ))}
+              <button
+                className="series-volume-main"
+                aria-label={`进入学习 ${item.title}`}
+                onClick={() => onOpen(item.id)}
+              >
+                <span className="series-volume-number">{String(index + 1).padStart(2, '0')}</span>
+                <span className="series-volume-kicker">slow learning series</span>
+                <h2>{item.title}</h2>
+                <span className="series-volume-rule" />
+                <p>{item.rationale}</p>
+                <span className="series-volume-progress">
+                  <i><b style={{ width: `${item.progress}%` }} /></i>
+                  <small>{item.progress}%</small>
+                </span>
+              </button>
+              <button
+                className="series-delete-button"
+                aria-label={`删除 ${item.title}`}
+                title="删除系列"
+                onClick={() => setDeleteTarget(item)}
+              >
+                <TrashIcon />
+              </button>
+            </article>
+          ))}
+          {shelf.series.length === 0 && (
+            <div className="empty-shelf-message">
+              <span>这里还没有书</span>
+              <small>点击“新的台阶”创建第一册。</small>
+            </div>
+          )}
+          <span className="bookend right" aria-hidden="true" />
+        </div>
+        <span className="series-shelf-board" aria-hidden="true"><i /></span>
       </div>
       {deleteTarget && (
         <div
