@@ -14,7 +14,7 @@ import type {
 } from './model/types';
 
 type View = 'home' | 'shelf' | 'learn';
-type ReaderTab = 'content' | 'quiz' | 'note' | 'askme';
+type ReaderTab = 'content' | 'quiz' | 'note';
 type TextQuote = { text: string; blockId: string };
 type SelectionPopup = TextQuote & { top: number; left: number };
 
@@ -726,7 +726,6 @@ function ReaderPanel({
         <button className={tab === 'content' ? 'active' : ''} onClick={() => switchTab('content')}>正文</button>
         <button className={tab === 'quiz' ? 'active' : ''} disabled={!section.quiz} onClick={() => switchTab('quiz')}>验证</button>
         <button className={tab === 'note' ? 'active' : ''} disabled={!section.note} onClick={() => switchTab('note')}>笔记</button>
-        <button className={tab === 'askme' ? 'active' : ''} disabled={!section.askMeUnlocked} onClick={() => switchTab('askme')}>Ask Me</button>
       </div>
 
       <div
@@ -745,12 +744,11 @@ function ReaderPanel({
           />
         )}
         {tab === 'quiz' && section.quiz && (
-          <Quiz section={section} onSectionChange={onSectionChange} onComplete={() => switchTab('note')} />
+          <Quiz section={section} onSectionChange={onSectionChange} />
         )}
         {tab === 'note' && section.note && (
           <Note sectionId={section.id} note={section.note} onSaved={onSectionChange} />
         )}
-        {tab === 'askme' && <AskMePanel sectionId={section.id} />}
       </div>
       {selectionPopup && (
         <button
@@ -871,11 +869,9 @@ function ContentBlock({
 function Quiz({
   section,
   onSectionChange,
-  onComplete,
 }: {
   section: Section;
   onSectionChange: (section: Section) => void;
-  onComplete: () => void;
 }) {
   const [answers, setAnswers] = useState<number[][]>(section.quiz?.questions.map(() => []) || []);
   const [result, setResult] = useState<{ passed: boolean } | null>(null);
@@ -894,7 +890,6 @@ function Quiz({
       setResult(value);
       const next = await api.section(section.id);
       onSectionChange(next);
-      if (value.passed) onComplete();
     } finally {
       setSubmitting(false);
     }
@@ -941,6 +936,7 @@ function Quiz({
         {submitting ? '正在评分…' : '提交验证'}
       </button>
       {result && <p className={result.passed ? 'result success' : 'result failure'}>{result.passed ? '通过，笔记已经生成。' : '未通过：补充教学已保存，并换成一组新题。'}</p>}
+      {section.askMeUnlocked && <AskMePanel sectionId={section.id} />}
     </div>
   );
 }

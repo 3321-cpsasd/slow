@@ -859,6 +859,12 @@ button:disabled { cursor: not-allowed; }
 .quiz-view, .note-view, .askme-view { width: min(720px, 86%); margin: 0 auto; padding: 46px 0 90px; }
 .quiz-view > h2, .note-view > h2, .askme-view > h2 { margin: 0; font-family: Georgia, "Songti SC", serif; font-size: 34px; font-weight: 500; }
 .quiz-rule, .askme-view > p { color: var(--muted); line-height: 1.65; }
+.quiz-view > .askme-view {
+  width: 100%;
+  margin: 42px 0 0;
+  padding: 36px 0 0;
+  border-top: 1px solid var(--line);
+}
 .question-card { margin: 25px 0; padding: 20px 0 8px; border: 0; border-top: 1px solid var(--line); }
 .question-card legend { width: 100%; display: grid; grid-template-columns: 28px 1fr auto; gap: 10px; align-items: start; line-height: 1.55; }
 .question-card legend > span { color: var(--green); font-family: Georgia, serif; }
