@@ -310,6 +310,38 @@ function findSectionLocation(series: Series, sectionId?: string) {
   return null;
 }
 
+function LockIcon({ size = 14 }: { size?: number }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className="lock-icon"
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+    >
+      <rect x="5" y="10" width="14" height="10" rx="3" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M8.5 10V7.5a3.5 3.5 0 0 1 7 0V10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ChevronIcon() {
+  return (
+    <svg aria-hidden="true" className="chevron-icon" width="13" height="13" viewBox="0 0 20 20" fill="none">
+      <path d="m5 7.5 5 5 5-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function GenerateIcon() {
+  return (
+    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 20 20" fill="none">
+      <path d="M10 3v14M3 10h14" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function DirectoryPanel({
   series,
   currentSectionId,
@@ -368,15 +400,30 @@ function BookTree({
       <summary>
         <span className="book-number">{book.position}</span>
         <span><b>{book.title}</b><small>{book.progress}% · {Math.round(book.estimatedMinutes / 60)} 小时</small></span>
-        <i>{book.status === 'locked' ? '锁' : '⌄'}</i>
+        <i>{book.status === 'locked' ? <LockIcon /> : <ChevronIcon />}</i>
       </summary>
       <div className="chapter-tree">
-        {book.chapters.map((chapter) => (
-          <div className="chapter-node" key={chapter.id}>
-            <div className="chapter-title">
-              <span>{book.position}.{chapter.position}</span>
-              <b>{chapter.title}</b>
-            </div>
+        {book.chapters.map((chapter) => {
+          const chapterLocked = chapter.status === 'locked';
+          return (
+            <div className="chapter-node" key={chapter.id}>
+              {chapter.generated || chapterLocked ? (
+                <div className={`chapter-title ${chapterLocked ? 'locked' : ''}`}>
+                  <span>{book.position}.{chapter.position}</span>
+                  <b>{chapter.title}</b>
+                  {chapterLocked && <LockIcon size={13} />}
+                </div>
+              ) : (
+                <button
+                  className="chapter-title chapter-entry"
+                  aria-label={`生成并进入 ${chapter.title}`}
+                  onClick={() => onGenerateChapter(chapter)}
+                >
+                  <span>{book.position}.{chapter.position}</span>
+                  <b>{chapter.title}</b>
+                  <GenerateIcon />
+                </button>
+              )}
             {chapter.generated ? (
               <div className="section-tree">
                 {chapter.sections.map((item) => (
@@ -388,15 +435,7 @@ function BookTree({
                   />
                 ))}
               </div>
-            ) : (
-              <button
-                className="generate-chapter-button"
-                disabled={chapter.status === 'locked'}
-                onClick={() => onGenerateChapter(chapter)}
-              >
-                {chapter.status === 'locked' ? '尚未解锁' : '生成本章小节'}
-              </button>
-            )}
+            ) : null}
             {chapter.practice && (
               <ArtifactSubmission
                 kind="practice"
@@ -409,8 +448,9 @@ function BookTree({
                 }}
               />
             )}
-          </div>
-        ))}
+            </div>
+          );
+        })}
         {book.capstone && (
           <ArtifactSubmission
             kind="capstone"
@@ -429,7 +469,7 @@ function BookTree({
 }
 
 function SectionTreeButton({ item, active, onClick }: { item: SectionSummary; active: boolean; onClick: () => void }) {
-  const state = item.status === 'completed' ? '✓' : item.status === 'locked' ? '·' : item.position;
+  const state = item.status === 'completed' ? '✓' : item.status === 'locked' ? <LockIcon size={11} /> : item.position;
   return (
     <button
       className={`section-tree-button ${active ? 'active' : ''} ${item.status}`}
@@ -873,8 +913,13 @@ function ArtifactSubmission({
   };
   return (
     <label className={`artifact-submit ${kind} ${enabled ? 'enabled' : ''}`}>
-      <span>{kind === 'practice' ? '◇' : '◆'}</span>
-      {label} · {needsLegacyFile ? '补充附件' : status === 'completed' ? '已完成' : status === 'locked' ? '未解锁' : '提交成果'}
+      <span className="artifact-icon">
+        {status === 'locked' ? <LockIcon size={12} /> : kind === 'practice' ? '◇' : '◆'}
+      </span>
+      <span>{label}</span>
+      {status !== 'locked' && (
+        <small>· {needsLegacyFile ? '补充附件' : status === 'completed' ? '已完成' : '提交成果'}</small>
+      )}
       <input
         type="file"
         hidden

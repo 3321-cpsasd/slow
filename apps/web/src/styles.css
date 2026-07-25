@@ -252,12 +252,37 @@ button:disabled { cursor: not-allowed; }
 }
 .book-node > summary b { display: block; font-size: 13px; line-height: 1.35; }
 .book-node > summary small { display: block; margin-top: 4px; color: #929790; font-size: 10px; }
-.book-node > summary > i { color: #9ba09a; font-style: normal; font-size: 11px; }
+.book-node > summary > i {
+  color: #9ba09a;
+  font-style: normal;
+  display: grid;
+  place-items: center;
+  transition: transform .18s ease;
+}
+.book-node[open] > summary > i .chevron-icon { transform: rotate(180deg); }
+.chevron-icon { transition: transform .18s ease; }
+.lock-icon { display: block; }
 .chapter-tree { padding: 0 4px 12px 19px; }
 .chapter-node { border-left: 1px solid #dfe2dc; padding: 5px 0 10px 12px; }
-.chapter-title { display: grid; grid-template-columns: auto 1fr; gap: 7px; align-items: baseline; padding: 5px 7px 7px; }
+.chapter-title {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 7px;
+  align-items: center;
+  padding: 7px;
+  text-align: left;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+}
 .chapter-title span { color: #9ca19b; font-size: 9px; }
 .chapter-title b { font-size: 11px; line-height: 1.35; color: #575e58; }
+.chapter-title > svg { color: #a4aaa4; }
+.chapter-title.locked { opacity: .52; }
+.chapter-entry { cursor: pointer; }
+.chapter-entry:hover { background: #eef0ec; }
+.chapter-entry:hover b, .chapter-entry:hover > svg { color: var(--green); }
 .section-tree { display: flex; flex-direction: column; gap: 2px; }
 .section-tree-button {
   width: 100%;
@@ -287,24 +312,18 @@ button:disabled { cursor: not-allowed; }
 }
 .section-tree-button b { font-size: 11px; line-height: 1.45; font-weight: 600; }
 .section-tree-button.locked { opacity: .48; }
-.generate-chapter-button {
-  margin: 1px 7px 6px;
-  padding: 6px 9px;
-  border: 1px dashed #cbd2cb;
-  background: transparent;
-  border-radius: 7px;
-  color: var(--green-2);
-  font-size: 10px;
-}
 .artifact-submit {
   margin: 3px 7px;
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 5px;
   padding: 6px 8px;
   color: #999d98;
   font-size: 9px;
 }
 .artifact-submit.enabled { color: var(--green); cursor: pointer; }
-.artifact-submit > span { margin-right: 5px; }
+.artifact-submit .artifact-icon { width: 13px; display: grid; place-items: center; }
+.artifact-submit small { font: inherit; color: inherit; }
 
 .reader-panel { min-width: 0; background: #fff; display: flex; flex-direction: column; overflow: hidden; }
 .reader-toolbar {
