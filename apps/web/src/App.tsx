@@ -436,7 +436,6 @@ function LearningWorkspace({
         section={section}
         location={location}
         selectedBlockId={activeBlockId}
-        onAnchor={selectBlock}
         onQuote={(quote) => {
           setSelectedBlockId(quote.blockId);
           setSelectedQuote(quote);
@@ -643,7 +642,6 @@ function ReaderPanel({
   section,
   location,
   selectedBlockId,
-  onAnchor,
   onQuote,
   onGenerate,
   onSectionChange,
@@ -651,7 +649,6 @@ function ReaderPanel({
   section: Section | null;
   location: ReturnType<typeof findSectionLocation>;
   selectedBlockId: string;
-  onAnchor: (id: string) => void;
   onQuote: (quote: TextQuote) => void;
   onGenerate: () => void;
   onSectionChange: (section: Section) => void;
@@ -734,7 +731,6 @@ function ReaderPanel({
           <LessonContent
             section={section}
             selectedBlockId={selectedBlockId}
-            onAnchor={onAnchor}
             onGenerate={onGenerate}
           />
         )}
@@ -771,12 +767,10 @@ function ReaderPanel({
 function LessonContent({
   section,
   selectedBlockId,
-  onAnchor,
   onGenerate,
 }: {
   section: Section;
   selectedBlockId: string;
-  onAnchor: (id: string) => void;
   onGenerate: () => void;
 }) {
   if (!section.content) {
@@ -812,7 +806,6 @@ function LessonContent({
           block={block}
           index={index}
           selected={block.id === selectedBlockId}
-          onAnchor={() => onAnchor(block.id)}
         />
       ))}
       <details className="source-list">
@@ -833,12 +826,10 @@ function ContentBlock({
   block,
   index,
   selected,
-  onAnchor,
 }: {
   block: Block;
   index: number;
   selected: boolean;
-  onAnchor: () => void;
 }) {
   const labels: Record<string, string> = {
     conclusion: '先说结论',
@@ -855,7 +846,6 @@ function ContentBlock({
       <div className="block-meta"><span>{String(index + 1).padStart(2, '0')}</span><b>{labels[block.role] || block.role}</b></div>
       <h2>{block.heading}</h2>
       <pre className={block.kind === 'code' ? 'code-block' : ''}>{block.content}</pre>
-      <button className="anchor-button" onClick={onAnchor}>{selected ? '答疑已定位到这里' : '就这一段提问'} <span>→</span></button>
     </section>
   );
 }
