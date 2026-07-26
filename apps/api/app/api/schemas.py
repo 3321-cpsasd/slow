@@ -1,5 +1,5 @@
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 
 def camel(value: str):
@@ -26,6 +26,13 @@ class PlanCreate(ApiModel):
     purpose: str = Field(default="", max_length=1000)
     depth: Literal["overview", "deep", "mastery"]
     details: str = Field(default="", max_length=3000)
+
+
+class AiRuntimeUpdate(ApiModel):
+    mode: Literal["provider", "demo"] = "provider"
+    api_key: SecretStr | None = None
+    base_url: str = Field(default="", max_length=1000)
+    model: str = Field(default="gpt-5", min_length=1, max_length=160)
 
 
 class QuizSubmit(ApiModel):

@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import json
+from urllib.parse import urlparse
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,7 +8,7 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from .ai.openai_adapter import OpenAiAdapter
 from .ai.local_adapter import LocalDemoAdapter
-from .api.schemas import AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, NoteUpdate, PlanCreate, QaClassificationUpdate, QuizSubmit, ShelfCreate
+from .api.schemas import AiRuntimeUpdate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, NoteUpdate, PlanCreate, QaClassificationUpdate, QuizSubmit, ShelfCreate
 from .application.service import SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -20,6 +21,12 @@ from .services.attachment_storage import LocalAttachmentStorage
 def create_app(database_url: str | None = None, ai=None, source_verifier=None, attachment_storage=None):
     engine, sessions = build_database(database_url or settings.database_url)
     adapter = ai or (OpenAiAdapter(settings.openai_api_key, settings.openai_model, settings.openai_base_url) if settings.openai_api_key else LocalDemoAdapter())
+    initial_runtime = {
+        "mode": "injected" if ai is not None else ("provider" if settings.openai_api_key else "demo"),
+        "api_key": "" if ai is not None else settings.openai_api_key,
+        "base_url": "" if ai is not None else settings.openai_base_url,
+        "provider_model": adapter.model if adapter.configured else settings.openai_model,
+    }
     verifier = source_verifier or (HttpSourceVerifier() if adapter.configured else AcceptingSourceVerifier())
     storage = attachment_storage or LocalAttachmentStorage(settings.attachment_storage_dir, settings.attachment_max_bytes)
 
@@ -28,8 +35,15 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
         Base.metadata.create_all(engine)
         with sessions() as db: SlowService(db, adapter, verifier, storage).ensure_seed()
         app.state.sessions, app.state.ai, app.state.source_verifier, app.state.attachment_storage = sessions, adapter, verifier, storage
+        app.state.ai_runtime = initial_runtime
+        app.state.retired_ai = []
+        app.state.runtime_verifier_managed = source_verifier is None
         yield
-        if hasattr(adapter, "close"): await adapter.close()
+        seen = set()
+        for candidate in [app.state.ai, *app.state.retired_ai]:
+            if id(candidate) not in seen and hasattr(candidate, "close"):
+                seen.add(id(candidate))
+                await candidate.close()
         engine.dispose()
 
     app = FastAPI(title="Slow API", version="0.1.0", lifespan=lifespan)
@@ -51,6 +65,23 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
 
     def service(request: Request, session: Session = Depends(db)): return SlowService(session, request.app.state.ai, request.app.state.source_verifier, request.app.state.attachment_storage)
 
+    def require_local_runtime_access(request: Request):
+        host = request.client.host if request.client else ""
+        if host not in {"127.0.0.1", "::1", "localhost", "testclient"}:
+            raise AppError("运行时 AI 设置仅允许从本机访问", code="AI_RUNTIME_LOCAL_ONLY", status=403)
+
+    def runtime_status(request: Request):
+        runtime = request.app.state.ai_runtime
+        return {
+            "mode": runtime["mode"],
+            "configured": bool(request.app.state.ai.configured),
+            "model": request.app.state.ai.model,
+            "providerModel": runtime["provider_model"],
+            "baseUrl": runtime["base_url"],
+            "apiKeyStored": bool(runtime["api_key"]),
+            "ephemeral": True,
+        }
+
     async def attachment_body(request: Request):
         declared = request.headers.get("content-length")
         if declared and int(declared) > settings.attachment_max_bytes:
@@ -65,6 +96,48 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
 
     @app.get("/api/health")
     def health(request: Request): return {"ok": True, "aiConfigured": request.app.state.ai.configured, "model": request.app.state.ai.model}
+
+    @app.get("/api/runtime/ai")
+    def get_runtime_ai(request: Request):
+        require_local_runtime_access(request)
+        return runtime_status(request)
+
+    @app.put("/api/runtime/ai")
+    async def update_runtime_ai(body: AiRuntimeUpdate, request: Request):
+        require_local_runtime_access(request)
+        current = request.app.state.ai_runtime
+        if body.mode == "demo":
+            candidate = LocalDemoAdapter()
+            next_runtime = {**current, "mode": "demo"}
+        else:
+            api_key = body.api_key.get_secret_value().strip() if body.api_key else current["api_key"]
+            if not api_key:
+                raise AppError("请填写 API Key", code="AI_RUNTIME_KEY_REQUIRED", status=400)
+            base_url = body.base_url.strip()
+            if base_url:
+                parsed = urlparse(base_url)
+                local_http = parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1", "localhost"}
+                if parsed.scheme != "https" and not local_http:
+                    raise AppError("Base URL 必须使用 HTTPS；本机服务可使用 HTTP", code="AI_RUNTIME_BASE_URL_INVALID", status=400)
+            candidate = OpenAiAdapter(api_key, body.model.strip(), base_url)
+            try:
+                await candidate.check_connection()
+            except Exception:
+                await candidate.close()
+                raise AppError("连接验证失败，请检查 API Key、Base URL 和模型名称", code="AI_RUNTIME_CONNECTION_FAILED", status=400)
+            next_runtime = {
+                "mode": "provider",
+                "api_key": api_key,
+                "base_url": base_url,
+                "provider_model": body.model.strip(),
+            }
+        previous = request.app.state.ai
+        request.app.state.ai = candidate
+        request.app.state.ai_runtime = next_runtime
+        request.app.state.retired_ai.append(previous)
+        if request.app.state.runtime_verifier_managed:
+            request.app.state.source_verifier = HttpSourceVerifier() if candidate.configured else AcceptingSourceVerifier()
+        return runtime_status(request)
 
     @app.get("/api/bootstrap")
     def bootstrap(s: SlowService = Depends(service)): return s.bootstrap()

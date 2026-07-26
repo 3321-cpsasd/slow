@@ -48,6 +48,8 @@ async function streamQa(
 
 export const api = {
   bootstrap:()=>call<import('../model/types').Bootstrap>('/api/bootstrap'),
+  aiRuntime:()=>call<import('../model/types').AiRuntime>('/api/runtime/ai'),
+  updateAiRuntime:(body:object)=>call<import('../model/types').AiRuntime>('/api/runtime/ai',{method:'PUT',body:JSON.stringify(body)}),
   createPlan:(body:object,idempotencyKey:string)=>call<import('../model/types').Series>('/api/plans',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},body:JSON.stringify(body)}),
   series:(id:string)=>call<import('../model/types').Series>(`/api/series/${id}`),
   deleteSeries:(id:string)=>call<void>(`/api/series/${id}`,{method:'DELETE'}),

@@ -26,6 +26,35 @@ class OpenAiAdapter:
         if self.client:
             await self.client.close()
 
+    async def check_connection(self):
+        if not self.client:
+            raise AiError("未配置 API Key")
+        if not self.prefer_chat:
+            response = await self.client.responses.create(
+                model=self.model,
+                input="Reply with OK.",
+                reasoning={"effort": "low"},
+                max_output_tokens=16,
+                store=False,
+            )
+            self._record_usage(response.usage)
+            return
+        options = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": "Reply with OK."}],
+            "max_tokens": 2,
+        }
+        if self.disable_compatible_thinking:
+            options["extra_body"] = {"enable_thinking": False}
+        try:
+            completion = await self.client.chat.completions.create(**options)
+        except BadRequestError as error:
+            if "enable_thinking parameter is restricted to True" not in str(error):
+                raise
+            options["extra_body"] = {"enable_thinking": True, "thinking_budget": 32}
+            completion = await self.client.chat.completions.create(**options)
+        self._record_usage(completion.usage)
+
     async def _parse(self, schema, developer: str, payload: dict, tokens: int):
         if not self.client:
             raise AiError("未配置 OPENAI_API_KEY；Slow v0 只接受真实 AI 生成")

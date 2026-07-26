@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { api } from './api/client';
 import type {
   AskMe,
+  AiRuntime,
   Block,
   Book,
   Bootstrap,
@@ -35,6 +36,7 @@ export default function App() {
   const [section, setSection] = useState<Section | null>(null);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
+  const [showAiSettings, setShowAiSettings] = useState(false);
 
   useEffect(() => {
     api.bootstrap().then(setData).catch((reason) => setError(reason.message));
@@ -128,6 +130,10 @@ export default function App() {
         )}
         <div className="header-actions">
           {busy && <span className="busy-indicator"><i />{busy}</span>}
+          <button className="quiet-button ai-settings-trigger" onClick={() => setShowAiSettings(true)}>
+            <span aria-hidden="true" />
+            AI 设置
+          </button>
           {view === 'learn' && (
             <button className="quiet-button" onClick={() => setView('home')}>返回书架</button>
           )}
@@ -171,6 +177,135 @@ export default function App() {
           />
         )}
       </main>
+      {showAiSettings && <AiSettingsDialog onClose={() => setShowAiSettings(false)} />}
+    </div>
+  );
+}
+
+function AiSettingsDialog({ onClose }: { onClose: () => void }) {
+  const [runtime, setRuntime] = useState<AiRuntime | null>(null);
+  const [mode, setMode] = useState<'provider' | 'demo'>('provider');
+  const [apiKey, setApiKey] = useState('');
+  const [baseUrl, setBaseUrl] = useState('');
+  const [model, setModel] = useState('gpt-5');
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+
+  useEffect(() => {
+    api.aiRuntime()
+      .then((value) => {
+        setRuntime(value);
+        setMode(value.mode === 'demo' ? 'demo' : 'provider');
+        setBaseUrl(value.baseUrl);
+        setModel(value.providerModel);
+      })
+      .catch((reason) => setMessage(reason instanceof Error ? reason.message : '读取 AI 设置失败'));
+  }, []);
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !saving) onClose();
+    };
+    document.addEventListener('keydown', closeOnEscape);
+    return () => document.removeEventListener('keydown', closeOnEscape);
+  }, [onClose, saving]);
+
+  const save = async (event: FormEvent) => {
+    event.preventDefault();
+    setSaving(true);
+    setMessage(mode === 'provider' ? '正在验证新配置…' : '正在切换…');
+    try {
+      const value = await api.updateAiRuntime({
+        mode,
+        apiKey: apiKey.trim() || undefined,
+        baseUrl: mode === 'provider' ? baseUrl.trim() : '',
+        model: mode === 'provider' ? model.trim() : 'local-demo-v1',
+      });
+      setRuntime(value);
+      setApiKey('');
+      setMessage(value.mode === 'demo' ? '已切换到本地演示模式。' : `已切换到 ${value.model}。`);
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : '切换失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div
+      className="confirm-backdrop ai-settings-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !saving) onClose();
+      }}
+    >
+      <section className="ai-settings-dialog" role="dialog" aria-modal="true" aria-labelledby="ai-settings-title">
+        <div className="ai-settings-heading">
+          <div>
+            <p className="eyebrow">仅限本机</p>
+            <h2 id="ai-settings-title">运行时 AI 设置</h2>
+          </div>
+          <button className="dialog-close" aria-label="关闭 AI 设置" disabled={saving} onClick={onClose}>×</button>
+        </div>
+
+        <div className={`runtime-status ${runtime?.configured ? 'online' : 'demo'}`}>
+          <span />
+          <div>
+            <b>{runtime ? (runtime.mode === 'demo' ? '本地演示模式' : runtime.model) : '正在读取当前配置…'}</b>
+            <small>{runtime?.configured ? (runtime.baseUrl || 'OpenAI 官方接口') : '不产生真实 AI 内容'}</small>
+          </div>
+        </div>
+
+        <form className="ai-settings-form" onSubmit={save}>
+          <fieldset disabled={saving}>
+            <legend>运行模式</legend>
+            <label className={mode === 'provider' ? 'selected' : ''}>
+              <input type="radio" checked={mode === 'provider'} onChange={() => setMode('provider')} />
+              <span><b>真实模型</b><small>使用服务端 API Key 调用模型</small></span>
+            </label>
+            <label className={mode === 'demo' ? 'selected' : ''}>
+              <input type="radio" checked={mode === 'demo'} onChange={() => setMode('demo')} />
+              <span><b>本地演示</b><small>明确标记为 Demo，不调用外部模型</small></span>
+            </label>
+          </fieldset>
+
+          {mode === 'provider' && (
+            <div className="provider-fields">
+              <label>
+                API Key
+                <input
+                  type="password"
+                  value={apiKey}
+                  autoComplete="new-password"
+                  placeholder={runtime?.apiKeyStored ? '留空则沿用当前 Key' : '输入新的 API Key'}
+                  onChange={(event) => setApiKey(event.target.value)}
+                />
+                <small>Key 只提交给本机 API，不会由服务端返回。</small>
+              </label>
+              <label>
+                Base URL
+                <input
+                  value={baseUrl}
+                  placeholder="留空使用 OpenAI 官方接口"
+                  onChange={(event) => setBaseUrl(event.target.value)}
+                />
+              </label>
+              <label>
+                模型
+                <input value={model} required onChange={(event) => setModel(event.target.value)} />
+              </label>
+            </div>
+          )}
+
+          <p className="runtime-warning">切换仅对当前 API 进程有效；重启后恢复服务器环境变量中的配置。保存前会先验证连接，失败时继续使用旧配置。</p>
+          {message && <p className="runtime-message" role="status">{message}</p>}
+          <div className="dialog-actions">
+            <button type="button" className="quiet-button" disabled={saving} onClick={onClose}>取消</button>
+            <button className="primary-button" disabled={saving || !runtime}>
+              {saving ? '正在验证…' : '验证并切换'}
+            </button>
+          </div>
+        </form>
+      </section>
     </div>
   );
 }

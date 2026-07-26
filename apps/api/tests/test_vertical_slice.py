@@ -141,6 +141,35 @@ def test_plan_creation_is_idempotent(client):
     assert conflict.json()["code"] == "IDEMPOTENCY_KEY_REUSED"
 
 
+def test_runtime_ai_settings_never_return_the_key_and_can_switch_to_demo(client):
+    before = client.get("/api/runtime/ai")
+    assert before.status_code == 200
+    assert '"apiKey":' not in before.text
+    assert before.json()["ephemeral"] is True
+
+    switched = client.put(
+        "/api/runtime/ai",
+        json={"mode": "demo", "apiKey": "must-not-be-returned", "baseUrl": "", "model": "ignored"},
+    )
+    assert switched.status_code == 200
+    assert switched.json()["mode"] == "demo"
+    assert switched.json()["configured"] is False
+    assert '"apiKey":' not in switched.text
+    assert "must-not-be-returned" not in switched.text
+    assert client.get("/api/health").json()["model"] == "local-demo-v1"
+
+
+def test_runtime_ai_settings_reject_non_local_clients(tmp_path):
+    storage = LocalAttachmentStorage(tmp_path / "remote-runtime-settings")
+    with TestClient(
+        create_app("sqlite+pysqlite:///:memory:", FakeAi(), AcceptingSourceVerifier(), storage),
+        client=("203.0.113.10", 50000),
+    ) as remote:
+        denied = remote.get("/api/runtime/ai")
+        assert denied.status_code == 403
+        assert denied.json()["code"] == "AI_RUNTIME_LOCAL_ONLY"
+
+
 def generate_and_pass(client, section_id):
     section = client.post(f"/api/sections/{section_id}/generate").json()
     answers = [[1] for _ in section["quiz"]["questions"]]

@@ -7,6 +7,7 @@ export type Book = { id:string; position:number; title:string; description:strin
 export type Series = { id:string; title:string; rationale:string; progress:number; progressBasis?:string; books:Book[] };
 export type Shelf = { id:string; name:string; domain:string; specialty:string; tags:string[]; series:Series[] };
 export type Bootstrap = { user:{id:string;name:string}; shelves:Shelf[] };
+export type AiRuntime = { mode:'provider'|'demo'|'injected'; configured:boolean; model:string; providerModel:string; baseUrl:string; apiKeyStored:boolean; ephemeral:boolean };
 export type Source = { title:string; url:string; kind:string; version:string };
 export type Block = { id:string; version:number; kind:string; role:string; heading:string; content:string; source_indexes:number[] };
 export type Question = { prompt:string; options:string[]; core:boolean; objective:string; explanation:string; selectionMode:'single'|'multiple' };
