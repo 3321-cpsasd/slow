@@ -16,6 +16,7 @@ from .contracts import (
     ReplannedChapter,
     Source,
 )
+from .port import ProviderCapabilities
 
 
 class LocalDemoAdapter:
@@ -23,6 +24,13 @@ class LocalDemoAdapter:
 
     configured = False
     model = "local-demo-v1"
+    capabilities = ProviderCapabilities(
+        protocol="openai",
+        api_mode="responses",
+        structured_output=True,
+        streaming=True,
+        reasoning_mode="disabled",
+    )
 
     async def close(self):
         return None

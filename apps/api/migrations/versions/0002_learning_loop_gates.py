@@ -6,7 +6,7 @@ Revises: 0001_slow_v0
 
 from alembic import op
 
-from app.infrastructure.tables import Base
+from migrations.frozen_schema_v0003 import FrozenBase
 
 revision = "0002_learning_loop_gates"
 down_revision = "0001_slow_v0"
@@ -30,7 +30,11 @@ NEW_TABLES = [
 
 
 def upgrade():
-    Base.metadata.create_all(op.get_bind(), checkfirst=True)
+    FrozenBase.metadata.create_all(
+        op.get_bind(),
+        tables=[FrozenBase.metadata.tables[name] for name in NEW_TABLES],
+        checkfirst=True,
+    )
 
 
 def downgrade():

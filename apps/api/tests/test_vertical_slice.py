@@ -1,15 +1,29 @@
 import hashlib
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
+from sqlalchemy import delete, event, select
 from app.ai.contracts import AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedChapter, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedSectionOutline, PlanBook, PlanChapter, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
 from app.main import create_app
 from app.evaluation.runner import run
 from app.services.attachment_storage import LocalAttachmentStorage
 from app.services.source_verifier import AcceptingSourceVerifier
+from app.infrastructure.tables import (
+    Book,
+    ChapterRevision,
+    LearningEvidence,
+    LearningPlan,
+    LearningRun,
+    NoteGenerationTask,
+    QuizAttempt,
+    Section,
+    SectionProgress,
+    Series,
+)
 
 
 class FakeAi:
@@ -102,10 +116,214 @@ def test_quiz_exposes_selection_mode_without_leaking_answers(tmp_path):
         assert result.status_code == 200 and result.json()["perfect"] is True
 
 
+def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    section = client.post(
+        f"/api/sections/{chapter['sections'][0]['id']}/generate"
+    ).json()
+    body = {
+        "quizSetId": section["quiz"]["id"],
+        "answers": [[1] for _ in section["quiz"]["questions"]],
+    }
+    headers = {"Idempotency-Key": "quiz-submit-idempotency-1"}
+
+    first = client.post(
+        f"/api/sections/{section['id']}/quiz",
+        json=body,
+        headers=headers,
+    )
+    replay = client.post(
+        f"/api/sections/{section['id']}/quiz",
+        json=body,
+        headers=headers,
+    )
+
+    assert first.status_code == replay.status_code == 200
+    assert replay.json()["attemptId"] == first.json()["attemptId"]
+    with client.app.state.sessions() as db:
+        attempts = db.scalars(
+            select(QuizAttempt).where(
+                QuizAttempt.idempotency_key == "quiz-submit-idempotency-1"
+            )
+        ).all()
+        evidence = db.scalars(
+            select(LearningEvidence).where(
+                LearningEvidence.section_id == section["id"],
+                LearningEvidence.evidence_type == "quiz",
+            )
+        ).all()
+        assert len(attempts) == 1
+        assert len(evidence) == len(section["quiz"]["questions"])
+
+    conflict = client.post(
+        f"/api/sections/{section['id']}/quiz",
+        json={**body, "answers": [[0] for _ in section["quiz"]["questions"]]},
+        headers=headers,
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "IDEMPOTENCY_KEY_REUSED"
+
+
+def test_concurrent_passing_submissions_trigger_first_completion_once(
+    tmp_path,
+):
+    database = tmp_path / "concurrent.db"
+    storage = LocalAttachmentStorage(tmp_path / "concurrent-attachments")
+    with TestClient(
+        create_app(
+            f"sqlite+pysqlite:///{database}",
+            FakeAi(),
+            AcceptingSourceVerifier(),
+            storage,
+        )
+    ) as concurrent_client:
+        series = create_series(concurrent_client)
+        chapter = concurrent_client.post(
+            f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+        ).json()
+        section = concurrent_client.post(
+            f"/api/sections/{chapter['sections'][0]['id']}/generate"
+        ).json()
+        body = {
+            "quizSetId": section["quiz"]["id"],
+            "answers": [[1] for _ in section["quiz"]["questions"]],
+        }
+
+        def submit(index):
+            return concurrent_client.post(
+                f"/api/sections/{section['id']}/quiz",
+                json=body,
+                headers={
+                    "Idempotency-Key": f"concurrent-pass-request-{index}"
+                },
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            responses = list(executor.map(submit, [1, 2]))
+
+        assert all(response.status_code == 200 for response in responses)
+        with concurrent_client.app.state.sessions() as db:
+            tasks = db.scalars(
+                select(NoteGenerationTask).where(
+                    NoteGenerationTask.section_id == section["id"]
+                )
+            ).all()
+            attempts = db.scalars(
+                select(QuizAttempt).where(
+                    QuizAttempt.learning_run_id == tasks[0].learning_run_id
+                )
+            ).all()
+        assert len(tasks) == 1
+        assert len(attempts) == 2
+
+
+def test_note_failure_does_not_roll_back_pass_or_unlock(tmp_path):
+    class FailingNoteAi(FakeAi):
+        async def note(self, request):
+            raise RuntimeError("simulated note failure")
+
+    storage = LocalAttachmentStorage(tmp_path / "note-failure-attachments")
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            FailingNoteAi(),
+            AcceptingSourceVerifier(),
+            storage,
+        )
+    ) as failing:
+        series = create_series(failing)
+        chapter = failing.post(
+            f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+        ).json()
+        section = failing.post(
+            f"/api/sections/{chapter['sections'][0]['id']}/generate"
+        ).json()
+        response = failing.post(
+            f"/api/sections/{section['id']}/quiz",
+            json={
+                "quizSetId": section["quiz"]["id"],
+                "answers": [[1] for _ in section["quiz"]["questions"]],
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["passed"] is True
+        note_generation = response.json()["noteGeneration"]
+        assert {
+            key: note_generation[key]
+            for key in ["status", "retryable", "errorCode"]
+        } == {
+            "status": "failed",
+            "retryable": True,
+            "errorCode": "RuntimeError",
+        }
+        retried = failing.post(
+            f"/api/note-tasks/{note_generation['taskId']}/retry"
+        )
+        assert retried.status_code == 200
+        assert retried.json()["status"] == "failed"
+        refreshed = failing.get(
+            f"/api/series/{series['id']}"
+        ).json()["books"][0]["chapters"][0]["sections"]
+        assert refreshed[0]["status"] == "completed"
+        assert refreshed[1]["status"] == "available"
+        assert failing.get(f"/api/sections/{section['id']}").json()["note"] is None
+        with failing.app.state.sessions() as db:
+            task = db.scalar(
+                select(NoteGenerationTask).where(
+                    NoteGenerationTask.section_id == section["id"]
+                )
+            )
+            assert task.status == "failed"
+            assert task.attempt_count == 2
+
+
 def test_locked_boundary(client):
     series = client.post("/api/plans", json={"shelfId":"shelf_technology","topic":"Kubernetes","role":"技术人员","experience":"会 Docker","depth":"deep"}).json()
     locked = series["books"][1]["chapters"][0]["id"]
     assert client.post(f"/api/chapters/{locked}/generate").status_code == 403
+
+
+def test_completing_chapter_unlocks_first_pregenerated_section(client):
+    series = create_series(client)
+    first_chapter, next_chapter = series["books"][0]["chapters"]
+    first = client.post(f"/api/chapters/{first_chapter['id']}/generate").json()
+    with client.app.state.sessions() as db:
+        db.add(
+            Section(
+                id="section_pregenerated_next",
+                chapter_id=next_chapter["id"],
+                position=1,
+                title="预生成小节",
+                question="预生成内容如何保持解锁语义？",
+                objectives_json='["验证预生成章节解锁"]',
+                status="locked",
+            )
+        )
+        learning_run = db.scalar(
+            select(LearningRun).where(LearningRun.series_id == series["id"])
+        )
+        db.add(
+            SectionProgress(
+                id="section_progress_pregenerated_next",
+                learning_run_id=learning_run.id,
+                user_id=learning_run.user_id,
+                section_id="section_pregenerated_next",
+                status="locked",
+            )
+        )
+        db.commit()
+
+    for section in first["sections"]:
+        generate_and_pass(client, section["id"])
+
+    refreshed = client.get(f"/api/series/{series['id']}").json()
+    unlocked_chapter = refreshed["books"][0]["chapters"][1]
+    assert unlocked_chapter["status"] == "available"
+    assert unlocked_chapter["sections"][0]["status"] == "available"
 
 
 def test_series_soft_delete_hides_it_without_destroying_history(client):
@@ -122,6 +340,65 @@ def test_series_soft_delete_hides_it_without_destroying_history(client):
     repeated = client.delete(f"/api/series/{series['id']}")
     assert repeated.status_code == 404
     assert repeated.json()["code"] == "SERIES_NOT_FOUND"
+
+
+def test_deleted_ancestor_invalidates_all_descendant_routes(client):
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    section_id = chapter["sections"][0]["id"]
+    assert client.delete(f"/api/series/{series['id']}").status_code == 204
+    assert client.get(f"/api/sections/{section_id}").status_code == 404
+    assert client.post(f"/api/sections/{section_id}/generate").status_code == 404
+    assert client.get(f"/api/chapters/{chapter['id']}/practice").status_code == 404
+
+
+def test_book_soft_delete_hides_book_and_preserves_audit_history(client):
+    series = create_series(client)
+    deleted_book = series["books"][1]
+
+    deleted = client.delete(f"/api/books/{deleted_book['id']}")
+    assert deleted.status_code == 204
+    remaining = client.get(f"/api/series/{series['id']}").json()
+    assert [item["id"] for item in remaining["books"]] == [series["books"][0]["id"]]
+    assert client.get(f"/api/books/{deleted_book['id']}").status_code == 404
+    repeated = client.delete(f"/api/books/{deleted_book['id']}")
+    assert repeated.status_code == 404
+    assert repeated.json()["code"] == "BOOK_NOT_FOUND"
+
+    with client.app.state.sessions() as db:
+        stored = db.get(Book, deleted_book["id"])
+        revision = db.scalar(
+            select(ChapterRevision).where(
+                ChapterRevision.book_id == deleted_book["id"],
+                ChapterRevision.action == "book_soft_delete",
+            )
+        )
+        assert stored.deleted_at is not None
+        assert revision is not None
+
+
+def test_deleting_available_book_unlocks_next_and_last_book_hides_series(client):
+    series = create_series(client)
+    first_book, second_book = series["books"]
+
+    assert client.delete(f"/api/books/{first_book['id']}").status_code == 204
+    remaining = client.get(f"/api/series/{series['id']}").json()["books"]
+    assert len(remaining) == 1
+    assert remaining[0]["id"] == second_book["id"]
+    assert remaining[0]["status"] == "available"
+    assert remaining[0]["chapters"][0]["status"] == "available"
+
+    assert client.delete(f"/api/books/{second_book['id']}").status_code == 204
+    assert client.get(f"/api/series/{series['id']}").status_code == 404
+    bootstrap = client.get("/api/bootstrap").json()
+    assert all(item["id"] != series["id"] for item in bootstrap["shelves"][0]["series"])
+    with client.app.state.sessions() as db:
+        stored_series = db.get(Series, series["id"])
+        plan = db.get(LearningPlan, stored_series.plan_id)
+        assert stored_series.deleted_at is not None
+        assert plan.status == "deleted"
 
 
 def create_series(client):
@@ -146,6 +423,9 @@ def test_runtime_ai_settings_never_return_the_key_and_can_switch_to_demo(client)
     assert before.status_code == 200
     assert '"apiKey":' not in before.text
     assert before.json()["ephemeral"] is True
+    assert before.json()["apiMode"] == "responses"
+    assert before.json()["providerProtocol"] == "openai"
+    assert before.json()["reasoningMode"] == "optional"
 
     switched = client.put(
         "/api/runtime/ai",
@@ -154,9 +434,59 @@ def test_runtime_ai_settings_never_return_the_key_and_can_switch_to_demo(client)
     assert switched.status_code == 200
     assert switched.json()["mode"] == "demo"
     assert switched.json()["configured"] is False
+    assert switched.json()["reasoningMode"] == "disabled"
     assert '"apiKey":' not in switched.text
     assert "must-not-be-returned" not in switched.text
     assert client.get("/api/health").json()["model"] == "local-demo-v1"
+
+
+def test_library_read_model_has_fixed_query_budget_and_no_writes(client):
+    series = create_series(client)
+    first_chapter = series["books"][0]["chapters"][0]
+    client.post(f"/api/chapters/{first_chapter['id']}/generate")
+    engine = client.app.state.sessions.kw["bind"]
+    statements = []
+
+    def record_statement(_conn, _cursor, statement, _params, _context, _many):
+        statements.append(statement.strip().upper())
+
+    event.listen(engine, "before_cursor_execute", record_statement)
+    try:
+        response = client.get(f"/api/series/{series['id']}")
+    finally:
+        event.remove(engine, "before_cursor_execute", record_statement)
+
+    assert response.status_code == 200
+    assert sum(item.startswith("SELECT") for item in statements) <= 7
+    assert not any(
+        item.startswith(("INSERT", "UPDATE", "DELETE"))
+        for item in statements
+    )
+
+
+def test_missing_progress_projection_is_reported_without_read_repair(client):
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    section_id = chapter["sections"][0]["id"]
+    with client.app.state.sessions() as db:
+        db.execute(
+            delete(SectionProgress).where(
+                SectionProgress.section_id == section_id
+            )
+        )
+        db.commit()
+
+    response = client.get(f"/api/series/{series['id']}")
+    assert response.status_code == 500
+    assert response.json()["code"] == "SECTION_PROGRESS_MISSING"
+    with client.app.state.sessions() as db:
+        assert db.scalar(
+            select(SectionProgress).where(
+                SectionProgress.section_id == section_id
+            )
+        ) is None
 
 
 def test_runtime_ai_settings_reject_non_local_clients(tmp_path):
@@ -296,6 +626,8 @@ def test_generation_failure_is_observable_and_retry_safe():
         section_id = chapter["sections"][0]["id"]
         generated = failing.post(f"/api/sections/{section_id}/generate")
         assert generated.status_code == 502
+        assert generated.json()["retryable"] is True
+        assert generated.json()["operationId"].startswith("generation_")
         state = failing.get(f"/api/sections/{section_id}").json()
         assert state["content"] is None
         assert state["generation"]["status"] == "failed"

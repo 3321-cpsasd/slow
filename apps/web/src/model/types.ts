@@ -7,7 +7,20 @@ export type Book = { id:string; position:number; title:string; description:strin
 export type Series = { id:string; title:string; rationale:string; progress:number; progressBasis?:string; books:Book[] };
 export type Shelf = { id:string; name:string; domain:string; specialty:string; tags:string[]; series:Series[] };
 export type Bootstrap = { user:{id:string;name:string}; shelves:Shelf[] };
-export type AiRuntime = { mode:'provider'|'demo'|'injected'; configured:boolean; model:string; providerModel:string; baseUrl:string; apiKeyStored:boolean; ephemeral:boolean };
+export type AiRuntime = {
+  mode:'provider'|'demo'|'injected';
+  configured:boolean;
+  model:string;
+  providerModel:string;
+  baseUrl:string;
+  apiKeyStored:boolean;
+  ephemeral:boolean;
+  providerProtocol:'openai'|'anthropic';
+  apiMode:'responses'|'chat_completions'|'messages';
+  reasoningMode:'optional'|'required'|'disabled';
+  structuredOutput:boolean;
+  streaming:boolean;
+};
 export type Source = { title:string; url:string; kind:string; version:string };
 export type Block = { id:string; version:number; kind:string; role:string; heading:string; content:string; source_indexes:number[] };
 export type Question = { prompt:string; options:string[]; core:boolean; objective:string; explanation:string; selectionMode:'single'|'multiple' };
@@ -16,3 +29,31 @@ export type Remediation = {id:string;attemptId:string;replacementQuizId:string;b
 export type Note = {id:string;aiContent:Record<string,unknown>;userContent:Record<string,unknown>;version:number};
 export type AskMe = {id:string;status:string;round:number;dimension:string;prompt:string|null;entries:{dimension:string;prompt:string;answer:string|null;evaluation:string;rationale:string}[]};
 export type Section = SectionSummary & { generation:null|Generation; content:null|{id:string;version:number;blocks:Block[];sources:Source[];sourceVerification:{url:string;reachable:boolean;statusCode:number;pinned:boolean}[];confidence:string}; quiz:null|{id:string;generation:number;questions:Question[]}; remediations:Remediation[]; note:null|Note };
+export type QuizResult = {
+  attemptId:string;
+  score:number;
+  total:number;
+  passed:boolean;
+  perfect:boolean;
+  results:{correct:boolean;explanation:string;objective:string}[];
+  remediation:Remediation|null;
+  nextQuiz:Section['quiz'];
+  noteGeneration:null|{
+    status:string;
+    retryable:boolean;
+    errorCode:string|null;
+    taskId:string;
+  };
+};
+export type QaAnswer = {
+  sessionId:string;
+  threadId:string;
+  relation:'follow_up'|'new_question';
+  answer:string;
+};
+export type QaCorrection = {
+  threadId:string;
+  targetThreadId:string;
+  classification:'follow_up';
+  corrected:boolean;
+};

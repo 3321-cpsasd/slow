@@ -174,6 +174,36 @@ export default function App() {
             onGenerateChapter={openChapter}
             onSectionChange={setSection}
             onRefreshSeries={refreshSeries}
+            onDeleteBook={async (bookId) => {
+              const deletingLastBook = series.books.length === 1;
+              const deletingCurrentBook = series.books.some(
+                (book) => book.id === bookId && book.chapters.some(
+                  (chapter) => chapter.sections.some((item) => item.id === section?.id),
+                ),
+              );
+              await run('正在从书架移除书籍…', async () => {
+                await api.deleteBook(bookId);
+                const refreshed = await api.bootstrap();
+                const refreshedShelf = shelf
+                  ? refreshed.shelves.find((item) => item.id === shelf.id) || null
+                  : null;
+                setData(refreshed);
+                setShelf(refreshedShelf);
+                if (deletingLastBook) {
+                  setSeries(null);
+                  setSection(null);
+                  setView(refreshedShelf ? 'shelf' : 'home');
+                  return;
+                }
+                const updated = await api.series(series.id);
+                setSeries(updated);
+                if (deletingCurrentBook) {
+                  const initial = firstUsableSection(updated);
+                  if (initial) await loadSection(initial);
+                  else setSection(null);
+                }
+              });
+            }}
           />
         )}
       </main>
@@ -188,6 +218,9 @@ function AiSettingsDialog({ onClose }: { onClose: () => void }) {
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [model, setModel] = useState('gpt-5');
+  const [providerProtocol, setProviderProtocol] = useState<'openai' | 'anthropic'>('openai');
+  const [apiMode, setApiMode] = useState<'responses' | 'chat_completions'>('responses');
+  const [reasoningMode, setReasoningMode] = useState<'optional' | 'required' | 'disabled'>('optional');
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
 
@@ -198,6 +231,9 @@ function AiSettingsDialog({ onClose }: { onClose: () => void }) {
         setMode(value.mode === 'demo' ? 'demo' : 'provider');
         setBaseUrl(value.baseUrl);
         setModel(value.providerModel);
+        setProviderProtocol(value.providerProtocol);
+        if (value.apiMode !== 'messages') setApiMode(value.apiMode);
+        setReasoningMode(value.reasoningMode);
       })
       .catch((reason) => setMessage(reason instanceof Error ? reason.message : '读取 AI 设置失败'));
   }, []);
@@ -220,6 +256,9 @@ function AiSettingsDialog({ onClose }: { onClose: () => void }) {
         apiKey: apiKey.trim() || undefined,
         baseUrl: mode === 'provider' ? baseUrl.trim() : '',
         model: mode === 'provider' ? model.trim() : 'local-demo-v1',
+        providerProtocol,
+        apiMode,
+        reasoningMode,
       });
       setRuntime(value);
       setApiKey('');
@@ -285,13 +324,54 @@ function AiSettingsDialog({ onClose }: { onClose: () => void }) {
                 Base URL
                 <input
                   value={baseUrl}
-                  placeholder="留空使用 OpenAI 官方接口"
+                  placeholder={providerProtocol === 'openai' ? '留空使用 OpenAI 官方接口' : '留空使用 Anthropic 官方接口'}
                   onChange={(event) => setBaseUrl(event.target.value)}
                 />
               </label>
               <label>
                 模型
                 <input value={model} required onChange={(event) => setModel(event.target.value)} />
+              </label>
+              <label>
+                供应商协议
+                <select
+                  value={providerProtocol}
+                  onChange={(event) => {
+                    const next = event.target.value as typeof providerProtocol;
+                    setProviderProtocol(next);
+                    setBaseUrl((current) => {
+                      if (next === 'anthropic' && current.endsWith('/compatible-mode/v1')) {
+                        return current.replace(/\/compatible-mode\/v1$/, '/apps/anthropic');
+                      }
+                      if (next === 'openai' && current.endsWith('/apps/anthropic')) {
+                        return current.replace(/\/apps\/anthropic$/, '/compatible-mode/v1');
+                      }
+                      return current;
+                    });
+                  }}
+                >
+                  <option value="openai">OpenAI 兼容 API</option>
+                  <option value="anthropic">Anthropic 兼容 API</option>
+                </select>
+              </label>
+              {providerProtocol === 'openai' ? (
+                <label>
+                  OpenAI 接口形态
+                  <select value={apiMode} onChange={(event) => setApiMode(event.target.value as typeof apiMode)}>
+                    <option value="responses">Responses API</option>
+                    <option value="chat_completions">Chat Completions</option>
+                  </select>
+                </label>
+              ) : (
+                <p className="runtime-warning">Anthropic 兼容协议固定使用 Messages API；Base URL 不要包含尾部 `/v1`。</p>
+              )}
+              <label>
+                推理模式
+                <select value={reasoningMode} onChange={(event) => setReasoningMode(event.target.value as typeof reasoningMode)}>
+                  <option value="optional">可选</option>
+                  <option value="required">必须启用</option>
+                  <option value="disabled">禁用</option>
+                </select>
               </label>
             </div>
           )}
@@ -554,6 +634,7 @@ function LearningWorkspace({
   onGenerateChapter,
   onSectionChange,
   onRefreshSeries,
+  onDeleteBook,
 }: {
   series: Series;
   section: Section | null;
@@ -562,6 +643,7 @@ function LearningWorkspace({
   onGenerateChapter: (chapter: Chapter) => Promise<void>;
   onSectionChange: (section: Section) => void;
   onRefreshSeries: () => Promise<void>;
+  onDeleteBook: (bookId: string) => Promise<void>;
 }) {
   const [selectedBlockId, setSelectedBlockId] = useState('');
   const [selectedQuote, setSelectedQuote] = useState<TextQuote | null>(null);
@@ -586,6 +668,7 @@ function LearningWorkspace({
         onSelectSection={onSelectSection}
         onGenerateChapter={onGenerateChapter}
         onRefreshSeries={onRefreshSeries}
+        onDeleteBook={onDeleteBook}
       />
       <ReaderPanel
         section={section}
@@ -660,13 +743,27 @@ function DirectoryPanel({
   onSelectSection,
   onGenerateChapter,
   onRefreshSeries,
+  onDeleteBook,
 }: {
   series: Series;
   currentSectionId?: string;
   onSelectSection: (id: string) => Promise<Section>;
   onGenerateChapter: (chapter: Chapter) => Promise<void>;
   onRefreshSeries: () => Promise<void>;
+  onDeleteBook: (bookId: string) => Promise<void>;
 }) {
+  const [deleteTarget, setDeleteTarget] = useState<Book | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  useEffect(() => {
+    if (!deleteTarget) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !deleting) setDeleteTarget(null);
+    };
+    document.addEventListener('keydown', closeOnEscape);
+    return () => document.removeEventListener('keydown', closeOnEscape);
+  }, [deleteTarget, deleting]);
+
   return (
     <aside className="directory-panel" aria-label="课程目录">
       <div className="directory-heading">
@@ -686,9 +783,54 @@ function DirectoryPanel({
             onSelectSection={onSelectSection}
             onGenerateChapter={onGenerateChapter}
             onRefreshSeries={onRefreshSeries}
+            onRequestDelete={setDeleteTarget}
           />
         ))}
       </nav>
+      {deleteTarget && (
+        <div
+          className="confirm-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !deleting) setDeleteTarget(null);
+          }}
+        >
+          <section
+            className="delete-confirm"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="delete-book-title"
+          >
+            <span className="delete-confirm-icon"><TrashIcon size={20} /></span>
+            <p className="eyebrow">删除书籍</p>
+            <h2 id="delete-book-title">{deleteTarget.title}</h2>
+            <p>
+              书籍及其章节会从学习入口中移除，历史学习证据和审计记录仍会保留。
+              {series.books.length === 1 ? '这是系列中的最后一本书，删除后该系列也会从书架隐藏。' : ''}
+              当前界面暂不支持恢复。
+            </p>
+            <div>
+              <button className="quiet-button" disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button>
+              <button
+                className="danger-button"
+                disabled={deleting}
+                onClick={async () => {
+                  setDeleting(true);
+                  try {
+                    await onDeleteBook(deleteTarget.id);
+                    setDeleteTarget(null);
+                  } catch {
+                    // App-level error presentation already explains the failure.
+                  } finally {
+                    setDeleting(false);
+                  }
+                }}
+              >
+                {deleting ? '正在删除…' : '确认删除'}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </aside>
   );
 }
@@ -699,16 +841,26 @@ function BookTree({
   onSelectSection,
   onGenerateChapter,
   onRefreshSeries,
+  onRequestDelete,
 }: {
   book: Book;
   currentSectionId?: string;
   onSelectSection: (id: string) => Promise<Section>;
   onGenerateChapter: (chapter: Chapter) => Promise<void>;
   onRefreshSeries: () => Promise<void>;
+  onRequestDelete: (book: Book) => void;
 }) {
   const containsCurrent = book.chapters.some((chapter) => chapter.sections.some((item) => item.id === currentSectionId));
   return (
     <details className="book-node" open={containsCurrent || book.status !== 'locked'}>
+      <button
+        className="book-delete-button"
+        aria-label={`删除书籍 ${book.title}`}
+        title="删除书籍"
+        onClick={() => onRequestDelete(book)}
+      >
+        <TrashIcon size={14} />
+      </button>
       <summary>
         <span className="book-number">{book.position}</span>
         <span><b>{book.title}</b><small>{book.progress}% · {Math.round(book.estimatedMinutes / 60)} 小时</small></span>
@@ -1039,6 +1191,14 @@ function Quiz({
   onRefreshSeries: () => Promise<void>;
 }) {
   const quizDraftKey = `slow:quiz-draft:${section.id}:${section.quiz?.id || 'none'}`;
+  const quizRequestStorageKey = `slow:quiz-request:${section.id}:${section.quiz?.id || 'none'}`;
+  const quizRequestId = useRef('');
+  if (!quizRequestId.current) {
+    quizRequestId.current = (
+      localStorage.getItem(quizRequestStorageKey) || crypto.randomUUID()
+    );
+    localStorage.setItem(quizRequestStorageKey, quizRequestId.current);
+  }
   const [answers, setAnswers] = useState<number[][]>(() => {
     const empty = section.quiz?.questions.map(() => []) || [];
     try {
@@ -1078,9 +1238,15 @@ function Quiz({
     if (!section.quiz) return;
     setSubmitting(true);
     try {
-      const value = await api.quiz(section.id, section.quiz.id, answers);
+      const value = await api.quiz(
+        section.id,
+        section.quiz.id,
+        answers,
+        quizRequestId.current,
+      );
       setResult(value);
       localStorage.removeItem(quizDraftKey);
+      localStorage.removeItem(quizRequestStorageKey);
       const next = await api.section(section.id);
       onSectionChange(next);
       await onRefreshSeries();

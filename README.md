@@ -88,6 +88,9 @@ cp .env.example .env
 ```dotenv
 OPENAI_API_KEY=your_server_side_key
 OPENAI_MODEL=gpt-5.6-terra
+AI_PROVIDER_PROTOCOL=openai
+OPENAI_API_MODE=responses
+OPENAI_REASONING_MODE=optional
 API_HOST=127.0.0.1
 API_PORT=8000
 WEB_ORIGIN=http://127.0.0.1:5173
@@ -231,6 +234,9 @@ Configure `.env` as needed:
 ```dotenv
 OPENAI_API_KEY=your_server_side_key
 OPENAI_MODEL=gpt-5.6-terra
+AI_PROVIDER_PROTOCOL=openai
+OPENAI_API_MODE=responses
+OPENAI_REASONING_MODE=optional
 API_HOST=127.0.0.1
 API_PORT=8000
 WEB_ORIGIN=http://127.0.0.1:5173

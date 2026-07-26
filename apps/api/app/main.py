@@ -7,9 +7,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from .ai.openai_adapter import OpenAiAdapter
+from .ai.anthropic_adapter import AnthropicAdapter
 from .ai.local_adapter import LocalDemoAdapter
+from .ai.port import ProviderCapabilities
 from .api.schemas import AiRuntimeUpdate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, NoteUpdate, PlanCreate, QaClassificationUpdate, QuizSubmit, ShelfCreate
-from .application.service import SlowService
+from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
 from .infrastructure.database import build_database
@@ -17,15 +19,58 @@ from .infrastructure.tables import Base
 from .services.source_verifier import AcceptingSourceVerifier, HttpSourceVerifier
 from .services.attachment_storage import LocalAttachmentStorage
 
+DEFAULT_PROVIDER_CAPABILITIES = ProviderCapabilities(
+    protocol=settings.ai_provider_protocol,
+    api_mode=(
+        "messages"
+        if settings.ai_provider_protocol == "anthropic"
+        else settings.openai_api_mode
+    ),
+    structured_output=True,
+    streaming=True,
+    reasoning_mode=settings.openai_reasoning_mode,
+)
+
+
+def build_provider_adapter(
+    api_key: str,
+    model: str,
+    base_url: str,
+    capabilities: ProviderCapabilities,
+):
+    if capabilities.protocol == "anthropic":
+        return AnthropicAdapter(
+            api_key,
+            model,
+            base_url,
+            capabilities=capabilities,
+        )
+    return OpenAiAdapter(
+        api_key,
+        model,
+        base_url,
+        capabilities=capabilities,
+    )
+
 
 def create_app(database_url: str | None = None, ai=None, source_verifier=None, attachment_storage=None):
     engine, sessions = build_database(database_url or settings.database_url)
-    adapter = ai or (OpenAiAdapter(settings.openai_api_key, settings.openai_model, settings.openai_base_url) if settings.openai_api_key else LocalDemoAdapter())
+    adapter = ai or (
+        build_provider_adapter(
+            settings.openai_api_key,
+            settings.openai_model,
+            settings.openai_base_url,
+            DEFAULT_PROVIDER_CAPABILITIES,
+        )
+        if settings.openai_api_key
+        else LocalDemoAdapter()
+    )
     initial_runtime = {
         "mode": "injected" if ai is not None else ("provider" if settings.openai_api_key else "demo"),
         "api_key": "" if ai is not None else settings.openai_api_key,
         "base_url": "" if ai is not None else settings.openai_base_url,
         "provider_model": adapter.model if adapter.configured else settings.openai_model,
+        "capabilities": getattr(adapter, "capabilities", DEFAULT_PROVIDER_CAPABILITIES),
     }
     verifier = source_verifier or (HttpSourceVerifier() if adapter.configured else AcceptingSourceVerifier())
     storage = attachment_storage or LocalAttachmentStorage(settings.attachment_storage_dir, settings.attachment_max_bytes)
@@ -33,7 +78,16 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         Base.metadata.create_all(engine)
-        with sessions() as db: SlowService(db, adapter, verifier, storage).ensure_seed()
+        with sessions() as db:
+            startup_service = SlowService(
+                db,
+                adapter,
+                verifier,
+                storage,
+                user_id=DEMO_USER_ID,
+            )
+            startup_service.ensure_seed()
+            await startup_service.recover_note_tasks()
         app.state.sessions, app.state.ai, app.state.source_verifier, app.state.attachment_storage = sessions, adapter, verifier, storage
         app.state.ai_runtime = initial_runtime
         app.state.retired_ai = []
@@ -50,20 +104,68 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
     app.add_middleware(CORSMiddleware, allow_origins=[settings.web_origin], allow_methods=["*"], allow_headers=["*"])
 
     @app.exception_handler(AppError)
-    async def app_error(_request, error): return JSONResponse(status_code=error.status, content={"code": error.code, "error": str(error)})
+    async def app_error(_request, error):
+        return JSONResponse(
+            status_code=error.status,
+            content={
+                "code": error.code,
+                "message": str(error),
+                "error": str(error),
+                "retryable": error.retryable,
+                "operationId": error.operation_id,
+            },
+        )
 
     @app.exception_handler(ValueError)
-    async def value_error(_request, error): return JSONResponse(status_code=400, content={"code": "INVALID_INPUT", "error": str(error)})
+    async def value_error(_request, error):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "code": "INVALID_INPUT",
+                "message": str(error),
+                "error": str(error),
+                "retryable": False,
+                "operationId": None,
+            },
+        )
 
     @app.exception_handler(RequestValidationError)
-    async def validation_error(_request, error): return JSONResponse(status_code=400, content={"code": "INVALID_REQUEST", "error": "请求参数无效", "details": error.errors()})
+    async def validation_error(_request, error):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "code": "INVALID_REQUEST",
+                "message": "请求参数无效",
+                "error": "请求参数无效",
+                "retryable": False,
+                "operationId": None,
+                "details": error.errors(),
+            },
+        )
 
     def db(request: Request):
         session = request.app.state.sessions()
         try: yield session
         finally: session.close()
 
-    def service(request: Request, session: Session = Depends(db)): return SlowService(session, request.app.state.ai, request.app.state.source_verifier, request.app.state.attachment_storage)
+    def current_user_id():
+        # Authentication is not part of this MVP yet. Keeping identity behind a
+        # dependency makes the boundary explicit and prevents domain services
+        # from owning a hidden global user.
+        return DEMO_USER_ID
+
+    def service(
+        request: Request,
+        session: Session = Depends(db),
+        user_id: str = Depends(current_user_id),
+    ):
+        return SlowService(
+            session,
+            request.app.state.ai,
+            request.app.state.source_verifier,
+            request.app.state.attachment_storage,
+            user_id=user_id,
+        )
 
     def require_local_runtime_access(request: Request):
         host = request.client.host if request.client else ""
@@ -72,6 +174,11 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
 
     def runtime_status(request: Request):
         runtime = request.app.state.ai_runtime
+        capabilities = getattr(
+            request.app.state.ai,
+            "capabilities",
+            runtime["capabilities"],
+        )
         return {
             "mode": runtime["mode"],
             "configured": bool(request.app.state.ai.configured),
@@ -80,6 +187,11 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
             "baseUrl": runtime["base_url"],
             "apiKeyStored": bool(runtime["api_key"]),
             "ephemeral": True,
+            "apiMode": capabilities.api_mode,
+            "providerProtocol": capabilities.protocol,
+            "reasoningMode": capabilities.reasoning_mode,
+            "structuredOutput": capabilities.structured_output,
+            "streaming": capabilities.streaming,
         }
 
     async def attachment_body(request: Request):
@@ -108,7 +220,7 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
         current = request.app.state.ai_runtime
         if body.mode == "demo":
             candidate = LocalDemoAdapter()
-            next_runtime = {**current, "mode": "demo"}
+            next_runtime = {**current, "mode": "demo", "capabilities": candidate.capabilities}
         else:
             api_key = body.api_key.get_secret_value().strip() if body.api_key else current["api_key"]
             if not api_key:
@@ -119,7 +231,23 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
                 local_http = parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1", "localhost"}
                 if parsed.scheme != "https" and not local_http:
                     raise AppError("Base URL 必须使用 HTTPS；本机服务可使用 HTTP", code="AI_RUNTIME_BASE_URL_INVALID", status=400)
-            candidate = OpenAiAdapter(api_key, body.model.strip(), base_url)
+            capabilities = ProviderCapabilities(
+                protocol=body.provider_protocol,
+                api_mode=(
+                    "messages"
+                    if body.provider_protocol == "anthropic"
+                    else body.api_mode
+                ),
+                structured_output=True,
+                streaming=True,
+                reasoning_mode=body.reasoning_mode,
+            )
+            candidate = build_provider_adapter(
+                api_key,
+                body.model.strip(),
+                base_url,
+                capabilities,
+            )
             try:
                 await candidate.check_connection()
             except Exception:
@@ -130,6 +258,7 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
                 "api_key": api_key,
                 "base_url": base_url,
                 "provider_model": body.model.strip(),
+                "capabilities": capabilities,
             }
         previous = request.app.state.ai
         request.app.state.ai = candidate
@@ -162,6 +291,9 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
     @app.get("/api/books/{book_id}")
     def book(book_id: str, s: SlowService = Depends(service)): return s.book(book_id)
 
+    @app.delete("/api/books/{book_id}", status_code=204)
+    def delete_book(book_id: str, s: SlowService = Depends(service)): s.delete_book(book_id)
+
     @app.post("/api/books/{book_id}/chapters", status_code=201)
     def add_chapter(book_id: str, body: ChapterCreate, s: SlowService = Depends(service)): return s.add_chapter(book_id, body)
 
@@ -190,7 +322,13 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
     async def generate_section(section_id: str, s: SlowService = Depends(service)): return await s.generate_section(section_id)
 
     @app.post("/api/sections/{section_id}/quiz")
-    async def quiz(section_id: str, body: QuizSubmit, s: SlowService = Depends(service)): return await s.submit_quiz(section_id, body)
+    async def quiz(
+        section_id: str,
+        body: QuizSubmit,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return await s.submit_quiz(section_id, body, idempotency_key)
 
     @app.post("/api/sections/{section_id}/ask")
     async def ask(section_id: str, body: AskRequest, s: SlowService = Depends(service)): return await s.ask(section_id, body)
@@ -208,7 +346,10 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
                     {
                         "type": "error",
                         "code": getattr(error, "code", "QA_STREAM_FAILED"),
+                        "message": str(error) if isinstance(error, AppError) else "答疑生成失败，请稍后重试",
                         "error": str(error) if isinstance(error, AppError) else "答疑生成失败，请稍后重试",
+                        "retryable": getattr(error, "retryable", True),
+                        "operationId": getattr(error, "operation_id", None),
                     },
                     ensure_ascii=False,
                 ) + "\n"
@@ -251,6 +392,10 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
 
     @app.patch("/api/sections/{section_id}/note")
     def note(section_id: str, body: NoteUpdate, s: SlowService = Depends(service)): return s.update_note(section_id, body.content)
+
+    @app.post("/api/note-tasks/{task_id}/retry")
+    async def retry_note_task(task_id: str, s: SlowService = Depends(service)):
+        return await s.retry_note_task(task_id)
 
     return app
 

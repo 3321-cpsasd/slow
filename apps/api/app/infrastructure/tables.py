@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -77,6 +77,7 @@ class Book(Base):
     description: Mapped[str] = mapped_column(Text)
     estimated_minutes: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(24), default="locked")
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 
 class Chapter(Base):
@@ -105,8 +106,71 @@ class Section(Base):
     ask_me_unlocked: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class LearningRun(Base):
+    __tablename__ = "learning_runs"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    series_id: Mapped[str] = mapped_column(ForeignKey("series.id"), index=True)
+    status: Mapped[str] = mapped_column(String(24), index=True, default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    __table_args__ = (
+        Index(
+            "uq_learning_runs_active_user_series",
+            "user_id",
+            "series_id",
+            unique=True,
+            sqlite_where=(status == "active"),
+        ),
+    )
+
+
+class BookProgress(Base):
+    __tablename__ = "book_progress"
+    __table_args__ = (UniqueConstraint("learning_run_id", "book_id"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    learning_run_id: Mapped[str] = mapped_column(ForeignKey("learning_runs.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    book_id: Mapped[str] = mapped_column(ForeignKey("books.id"), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="locked")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ChapterProgress(Base):
+    __tablename__ = "chapter_progress"
+    __table_args__ = (UniqueConstraint("learning_run_id", "chapter_id"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    learning_run_id: Mapped[str] = mapped_column(ForeignKey("learning_runs.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    chapter_id: Mapped[str] = mapped_column(ForeignKey("chapters.id"), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="locked")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class SectionProgress(Base):
+    __tablename__ = "section_progress"
+    __table_args__ = (UniqueConstraint("learning_run_id", "section_id"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    learning_run_id: Mapped[str] = mapped_column(ForeignKey("learning_runs.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="locked")
+    best_score: Mapped[int] = mapped_column(Integer, default=0)
+    total_score: Mapped[int] = mapped_column(Integer, default=0)
+    ask_me_unlocked: Mapped[bool] = mapped_column(Boolean, default=False)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class ContentVersion(Base):
     __tablename__ = "content_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "section_id",
+            "version",
+            name="uq_content_versions_section_version",
+        ),
+    )
     id: Mapped[str] = mapped_column(String, primary_key=True)
     section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
     version: Mapped[int] = mapped_column(Integer)
@@ -143,18 +207,33 @@ class QuizSet(Base):
     __tablename__ = "quiz_sets"
     id: Mapped[str] = mapped_column(String, primary_key=True)
     section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    content_version_id: Mapped[str] = mapped_column(ForeignKey("content_versions.id"), index=True)
     generation: Mapped[int] = mapped_column(Integer)
     questions_json: Mapped[str] = mapped_column(Text)
 
 
 class QuizAttempt(Base):
     __tablename__ = "quiz_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "learning_run_id",
+            "user_id",
+            "idempotency_key",
+            name="uq_quiz_attempts_run_user_idempotency",
+        ),
+    )
     id: Mapped[str] = mapped_column(String, primary_key=True)
     quiz_set_id: Mapped[str] = mapped_column(ForeignKey("quiz_sets.id"))
+    learning_run_id: Mapped[str] = mapped_column(ForeignKey("learning_runs.id"), index=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    request_hash: Mapped[str] = mapped_column(String(64), default="")
     answers_json: Mapped[str] = mapped_column(Text)
     results_json: Mapped[str] = mapped_column(Text)
     passed: Mapped[bool] = mapped_column(Boolean)
+    workflow_status: Mapped[str] = mapped_column(String(24), default="processing")
+    response_json: Mapped[str] = mapped_column(Text, default="")
+    workflow_error_code: Mapped[str] = mapped_column(String(80), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -172,8 +251,17 @@ class Remediation(Base):
 
 class QaSession(Base):
     __tablename__ = "qa_sessions"
+    __table_args__ = (
+        UniqueConstraint(
+            "learning_run_id",
+            "section_id",
+            "user_id",
+            name="uq_qa_sessions_run_section_user",
+        ),
+    )
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), unique=True)
+    learning_run_id: Mapped[str] = mapped_column(ForeignKey("learning_runs.id"), index=True)
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
     memory_json: Mapped[str] = mapped_column(Text, default="{}")
 
@@ -204,8 +292,17 @@ class QaThread(Base):
 
 class LearningNote(Base):
     __tablename__ = "learning_notes"
+    __table_args__ = (
+        UniqueConstraint(
+            "learning_run_id",
+            "section_id",
+            "user_id",
+            name="uq_learning_notes_run_section_user",
+        ),
+    )
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), unique=True)
+    learning_run_id: Mapped[str] = mapped_column(ForeignKey("learning_runs.id"), index=True)
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
     ai_content_json: Mapped[str] = mapped_column(Text)
     user_content_json: Mapped[str] = mapped_column(Text, default="{}")
@@ -213,9 +310,25 @@ class LearningNote(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class NoteGenerationTask(Base):
+    __tablename__ = "note_generation_tasks"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    learning_run_id: Mapped[str] = mapped_column(ForeignKey("learning_runs.id"), index=True)
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    trigger_attempt_id: Mapped[str] = mapped_column(ForeignKey("quiz_attempts.id"), unique=True)
+    status: Mapped[str] = mapped_column(String(24), index=True, default="pending")
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_code: Mapped[str] = mapped_column(String(80), default="")
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class LearningEvidence(Base):
     __tablename__ = "learning_evidence"
     id: Mapped[str] = mapped_column(String, primary_key=True)
+    learning_run_id: Mapped[str] = mapped_column(ForeignKey("learning_runs.id"), index=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     shelf_id: Mapped[str] = mapped_column(ForeignKey("shelves.id"), index=True)
     series_id: Mapped[str] = mapped_column(ForeignKey("series.id"), index=True)
@@ -244,8 +357,16 @@ class LearningMemory(Base):
 
 class AskMeSession(Base):
     __tablename__ = "ask_me_sessions"
-    __table_args__ = (UniqueConstraint("section_id", "user_id"),)
+    __table_args__ = (
+        UniqueConstraint(
+            "learning_run_id",
+            "section_id",
+            "user_id",
+            name="uq_ask_me_sessions_run_section_user",
+        ),
+    )
     id: Mapped[str] = mapped_column(String, primary_key=True)
+    learning_run_id: Mapped[str] = mapped_column(ForeignKey("learning_runs.id"), index=True)
     section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     status: Mapped[str] = mapped_column(String(24), default="active")
@@ -277,9 +398,25 @@ class BookCapstone(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class ArtifactProgress(Base):
+    __tablename__ = "artifact_progress"
+    __table_args__ = (
+        UniqueConstraint("learning_run_id", "target_type", "target_id"),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    learning_run_id: Mapped[str] = mapped_column(ForeignKey("learning_runs.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    target_type: Mapped[str] = mapped_column(String(32), index=True)
+    target_id: Mapped[str] = mapped_column(String, index=True)
+    status: Mapped[str] = mapped_column(String(24), default="locked")
+    submission_json: Mapped[str] = mapped_column(Text, default="{}")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class ArtifactAttachment(Base):
     __tablename__ = "artifact_attachments"
     id: Mapped[str] = mapped_column(String, primary_key=True)
+    learning_run_id: Mapped[str] = mapped_column(ForeignKey("learning_runs.id"), index=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     target_type: Mapped[str] = mapped_column(String(32), index=True)
     target_id: Mapped[str] = mapped_column(String, index=True)

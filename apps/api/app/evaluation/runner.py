@@ -14,9 +14,9 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from ..ai.local_adapter import LocalDemoAdapter
-from ..ai.openai_adapter import OpenAiAdapter
+from ..ai.port import ProviderCapabilities
 from ..core.config import ROOT, settings
-from ..main import create_app
+from ..main import build_provider_adapter, create_app
 from ..infrastructure.database import build_database
 from ..infrastructure.tables import Base, EvaluationRun, now
 from ..services.source_verifier import AcceptingSourceVerifier
@@ -378,7 +378,23 @@ def run(output_dir: Path, real=False, deterministic=None, database_path_override
         app = create_app(f"sqlite+pysqlite:///{database_path}", attachment_storage=evaluation_storage)
         model = settings.openai_model
         agent_loop = asyncio.new_event_loop()
-        learner_agent = OpenAiAdapter(settings.openai_api_key, settings.openai_model, settings.openai_base_url)
+        capabilities = ProviderCapabilities(
+            protocol=settings.ai_provider_protocol,
+            api_mode=(
+                "messages"
+                if settings.ai_provider_protocol == "anthropic"
+                else settings.openai_api_mode
+            ),
+            structured_output=True,
+            streaming=True,
+            reasoning_mode=settings.openai_reasoning_mode,
+        )
+        learner_agent = build_provider_adapter(
+            settings.openai_api_key,
+            settings.openai_model,
+            settings.openai_base_url,
+            capabilities,
+        )
 
         def answerer(section, quiz):
             result = agent_loop.run_until_complete(learner_agent.evaluation_quiz_answers({"section": {"id": section["id"], "title": section["title"], "question": section["question"], "content": section["content"]}, "questions": quiz["questions"]}))
@@ -421,7 +437,12 @@ def run(output_dir: Path, real=False, deterministic=None, database_path_override
             selected_ids.append(second_id)
         samples = [section_samples_by_id[item_id] for item_id in selected_ids if item_id in section_samples_by_id]
         note_samples = list(note_samples_by_id.values())[:5]
-        reviewer_agent = OpenAiAdapter(settings.openai_api_key, settings.openai_model, settings.openai_base_url)
+        reviewer_agent = build_provider_adapter(
+            settings.openai_api_key,
+            settings.openai_model,
+            settings.openai_base_url,
+            capabilities,
+        )
         try:
             assessed = agent_loop.run_until_complete(reviewer_agent.review_evaluation({"fixedInput": {"topic": "Kubernetes", "role": "技术人员"}, "deterministicGates": review["gates"], "featureEvidence": learner["featureEvidence"], "contentSamples": samples, "noteSamples": note_samples, "journey": {"firstBookCompleted": learner["firstBookCompleted"], "secondBookEntered": learner["secondBookEntered"], "progress": learner["progress"]}}))
             semantic_review = {"status": "COMPLETED", **assessed.model_dump()}

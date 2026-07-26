@@ -1,8 +1,19 @@
-from typing import AsyncIterator, Protocol
+from dataclasses import dataclass
+from typing import AsyncIterator, Literal, Protocol
 from .contracts import AskMeTurn, ClassifiedAnswer, GeneratedChapter, GeneratedLesson, GeneratedNote, GeneratedPlan, ReplannedBook
 
 
+@dataclass(frozen=True)
+class ProviderCapabilities:
+    protocol: Literal["openai", "anthropic"]
+    api_mode: Literal["responses", "chat_completions", "messages"]
+    structured_output: bool
+    streaming: bool
+    reasoning_mode: Literal["optional", "required", "disabled"]
+
+
 class AiPort(Protocol):
+    capabilities: ProviderCapabilities
     async def plan(self, request: dict, memory: list[dict]) -> GeneratedPlan: ...
     async def chapter(self, request: dict, memory: list[dict]) -> GeneratedChapter: ...
     async def lesson(self, request: dict, memory: list[dict], prior_questions: list[dict] | None = None) -> GeneratedLesson: ...

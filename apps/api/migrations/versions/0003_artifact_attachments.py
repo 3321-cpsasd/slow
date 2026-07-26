@@ -6,7 +6,7 @@ Revises: 0002_learning_loop_gates
 
 from alembic import op
 
-from app.infrastructure.tables import ArtifactAttachment
+from migrations.frozen_schema_v0003 import ArtifactAttachment
 
 revision = "0003_artifact_attachments"
 down_revision = "0002_learning_loop_gates"

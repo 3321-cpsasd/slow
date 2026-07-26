@@ -30,9 +30,12 @@ class PlanCreate(ApiModel):
 
 class AiRuntimeUpdate(ApiModel):
     mode: Literal["provider", "demo"] = "provider"
+    provider_protocol: Literal["openai", "anthropic"] = "openai"
     api_key: SecretStr | None = None
     base_url: str = Field(default="", max_length=1000)
     model: str = Field(default="gpt-5", min_length=1, max_length=160)
+    api_mode: Literal["responses", "chat_completions"] = "responses"
+    reasoning_mode: Literal["optional", "required", "disabled"] = "optional"
 
 
 class QuizSubmit(ApiModel):

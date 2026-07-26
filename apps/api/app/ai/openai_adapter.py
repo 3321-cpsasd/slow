@@ -1,20 +1,32 @@
 import json
-from openai import AsyncOpenAI, BadRequestError
+from openai import AsyncOpenAI
 from pydantic import ValidationError
 from ..core.errors import AiError
 from .contracts import AskMeTurn, ClassifiedAnswer, EvaluationQuizAnswers, EvaluationReview, GeneratedChapter, GeneratedContent, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedQuiz, GeneratedRemediationContent, GeneratedRemediationLesson, ReplannedBook
+from .port import ProviderCapabilities
 
 
 class OpenAiAdapter:
-    def __init__(self, api_key: str, model: str, base_url: str = ""):
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        base_url: str = "",
+        capabilities: ProviderCapabilities | None = None,
+    ):
         self.model = model
         client_options = {"api_key": api_key, "timeout": 120, "max_retries": 0}
         if base_url:
             client_options["base_url"] = base_url
         self.client = AsyncOpenAI(**client_options) if api_key else None
-        self.prefer_chat = bool(base_url and "api.openai.com" not in base_url)
-        self.disable_compatible_thinking = "aliyuncs.com" in base_url
-        self.compatible_thinking_only = False
+        self.capabilities = capabilities or ProviderCapabilities(
+            protocol="openai",
+            api_mode="responses",
+            structured_output=True,
+            streaming=True,
+            reasoning_mode="optional",
+        )
+        self.prefer_chat = self.capabilities.api_mode == "chat_completions"
         self.input_tokens = 0
         self.output_tokens = 0
 
@@ -30,12 +42,16 @@ class OpenAiAdapter:
         if not self.client:
             raise AiError("未配置 API Key")
         if not self.prefer_chat:
+            options = {
+                "model": self.model,
+                "input": "Reply with OK.",
+                "max_output_tokens": 16,
+                "store": False,
+            }
+            if self.capabilities.reasoning_mode != "disabled":
+                options["reasoning"] = {"effort": "low"}
             response = await self.client.responses.create(
-                model=self.model,
-                input="Reply with OK.",
-                reasoning={"effort": "low"},
-                max_output_tokens=16,
-                store=False,
+                **options,
             )
             self._record_usage(response.usage)
             return
@@ -44,35 +60,49 @@ class OpenAiAdapter:
             "messages": [{"role": "user", "content": "Reply with OK."}],
             "max_tokens": 2,
         }
-        if self.disable_compatible_thinking:
+        if self.capabilities.reasoning_mode == "disabled":
             options["extra_body"] = {"enable_thinking": False}
-        try:
-            completion = await self.client.chat.completions.create(**options)
-        except BadRequestError as error:
-            if "enable_thinking parameter is restricted to True" not in str(error):
-                raise
+        if self.capabilities.reasoning_mode == "required":
             options["extra_body"] = {"enable_thinking": True, "thinking_budget": 32}
+            options["stream"] = True
+            options["stream_options"] = {"include_usage": True}
+            stream = await self.client.chat.completions.create(**options)
+            usage = None
+            async for chunk in stream:
+                if getattr(chunk, "usage", None):
+                    usage = chunk.usage
+            self._record_usage(usage)
+        else:
             completion = await self.client.chat.completions.create(**options)
-        self._record_usage(completion.usage)
+            self._record_usage(completion.usage)
 
     async def _parse(self, schema, developer: str, payload: dict, tokens: int):
         if not self.client:
             raise AiError("未配置 OPENAI_API_KEY；Slow v0 只接受真实 AI 生成")
         if not self.prefer_chat:
             try:
-                response = await self.client.responses.parse(
-                    model=self.model,
-                    input=[{"role": "developer", "content": developer}, {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
-                    text_format=schema,
-                    reasoning={"effort": "low"},
-                    max_output_tokens=tokens,
-                    store=False,
-                )
+                options = {
+                    "model": self.model,
+                    "input": [{"role": "developer", "content": developer}, {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
+                    "text_format": schema,
+                    "max_output_tokens": tokens,
+                    "store": False,
+                }
+                if self.capabilities.reasoning_mode != "disabled":
+                    options["reasoning"] = {"effort": "low"}
+                response = await self.client.responses.parse(**options)
                 if response.output_parsed is not None:
                     self._record_usage(response.usage)
                     return response.output_parsed
-            except Exception:
-                pass
+            except Exception as error:
+                raise AiError(
+                    "AI 结构化生成失败，请稍后重试",
+                    code="AI_STRUCTURED_OUTPUT_FAILED",
+                ) from error
+            raise AiError(
+                "AI 未返回有效的结构化结果，请稍后重试",
+                code="AI_STRUCTURED_OUTPUT_INVALID",
+            )
 
         # 一些 OpenAI 兼容端点尚未实现 Responses API。兼容逻辑只存在于
         # Adapter 内部，返回结果仍必须通过同一个 Pydantic Schema。
@@ -82,11 +112,13 @@ class OpenAiAdapter:
                 return await self._chat_parse_once(schema, developer, payload, tokens)
             except Exception as error:
                 chat_error = error
-                retryable = isinstance(error, ValidationError) or "output became abnormal" in str(error).lower()
+                retryable = isinstance(error, ValidationError)
                 if not retryable or schema_attempt == 2:
                     break
-        detail = str(chat_error).replace(self.client.api_key, "<redacted>") if self.client and self.client.api_key else str(chat_error)
-        raise AiError(f"结构化生成失败：{type(chat_error).__name__}: {detail[:800]}") from chat_error
+        raise AiError(
+            "AI 结构化生成失败，请稍后重试",
+            code="AI_STRUCTURED_OUTPUT_FAILED",
+        ) from chat_error
 
     async def _chat_parse_once(self, schema, developer, payload, tokens):
         schema_text = json.dumps(schema.model_json_schema(), ensure_ascii=False)
@@ -99,19 +131,13 @@ class OpenAiAdapter:
             "response_format": {"type": "json_object"},
             "max_tokens": tokens,
         }
-        if self.disable_compatible_thinking:
+        if self.capabilities.reasoning_mode == "disabled":
             completion_options["extra_body"] = {"enable_thinking": False}
-        if self.compatible_thinking_only:
+        if self.capabilities.reasoning_mode == "required":
             content, usage = await self._thinking_stream(completion_options)
         else:
-            try:
-                completion = await self.client.chat.completions.create(**completion_options)
-                content, usage = completion.choices[0].message.content or "", completion.usage
-            except BadRequestError as error:
-                if "enable_thinking parameter is restricted to True" not in str(error):
-                    raise
-                self.compatible_thinking_only = True
-                content, usage = await self._thinking_stream(completion_options)
+            completion = await self.client.chat.completions.create(**completion_options)
+            content, usage = completion.choices[0].message.content or "", completion.usage
         self._record_usage(usage)
         if content.startswith("```"):
             content = content.split("\n", 1)[-1].rsplit("```", 1)[0]
@@ -168,27 +194,23 @@ class OpenAiAdapter:
         developer = """你是绑定当前小节的答疑助手。当前线程完整历史权重最高，其他线程摘要只在相关时使用。只回答锚定内容块及必要前置，不替用户答测验。输出简洁准确中文，可使用 Markdown 的短标题、列表、表格和代码块。只输出答案正文，不要输出 JSON、线程分类或包裹答案的代码围栏。"""
         emitted = False
         if not self.prefer_chat:
-            try:
-                async with self.client.responses.stream(
-                    model=self.model,
-                    input=[
-                        {"role": "developer", "content": developer},
-                        {"role": "user", "content": json.dumps(request, ensure_ascii=False)},
-                    ],
-                    reasoning={"effort": "low"},
-                    max_output_tokens=2200,
-                    store=False,
-                ) as stream:
-                    async for event in stream:
-                        if event.type == "response.output_text.delta" and event.delta:
-                            emitted = True
-                            yield event.delta
-                    response = await stream.get_final_response()
-                    self._record_usage(response.usage)
-                    return
-            except Exception:
-                if emitted:
-                    raise
+            async with self.client.responses.stream(
+                model=self.model,
+                input=[
+                    {"role": "developer", "content": developer},
+                    {"role": "user", "content": json.dumps(request, ensure_ascii=False)},
+                ],
+                reasoning={"effort": "low"},
+                max_output_tokens=2200,
+                store=False,
+            ) as stream:
+                async for event in stream:
+                    if event.type == "response.output_text.delta" and event.delta:
+                        emitted = True
+                        yield event.delta
+                response = await stream.get_final_response()
+                self._record_usage(response.usage)
+                return
 
         options = {
             "model": self.model,
@@ -200,15 +222,11 @@ class OpenAiAdapter:
             "stream": True,
             "stream_options": {"include_usage": True},
         }
-        if self.disable_compatible_thinking:
+        if self.capabilities.reasoning_mode == "disabled":
             options["extra_body"] = {"enable_thinking": False}
-        try:
-            stream = await self.client.chat.completions.create(**options)
-        except BadRequestError as error:
-            if "enable_thinking parameter is restricted to True" not in str(error):
-                raise
+        if self.capabilities.reasoning_mode == "required":
             options["extra_body"] = {"enable_thinking": True, "thinking_budget": 600}
-            stream = await self.client.chat.completions.create(**options)
+        stream = await self.client.chat.completions.create(**options)
         usage = None
         async for chunk in stream:
             if getattr(chunk, "usage", None):
