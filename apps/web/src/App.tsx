@@ -1249,7 +1249,7 @@ function QaPanel({
   }, [messages]);
 
   const ask = async () => {
-    if (!section || !effectiveBlockId || !question.trim()) return;
+    if (asking || !section || !effectiveBlockId || !question.trim()) return;
     const visibleQuestion = question.trim();
     const submittedQuestion = selectedQuote
       ? `请基于以下选中的正文回答。\n\n选中内容：${selectedQuote.text}\n\n问题：${visibleQuestion}`
@@ -1363,12 +1363,18 @@ function QaPanel({
               value={question}
               onChange={(event) => setQuestion(event.target.value)}
               onKeyDown={(event) => {
-                if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') ask();
+                if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;
+                if (event.metaKey || event.ctrlKey || event.shiftKey) return;
+                event.preventDefault();
+                ask();
               }}
               placeholder={selectedQuote ? '针对选中的内容输入问题…' : '基于当前段落继续追问…'}
             />
             <div>
-              <label><input type="checkbox" checked={newQuestion} onChange={(event) => setNewQuestion(event.target.checked)} /> 新问题</label>
+              <div className="qa-composer-meta">
+                <label><input type="checkbox" checked={newQuestion} onChange={(event) => setNewQuestion(event.target.checked)} /> 新问题</label>
+                <span>Enter 发送 · ⌘/Ctrl + Enter 换行</span>
+              </div>
               <button disabled={asking || !question.trim()} onClick={ask}>{asking ? '回答中…' : '发送 ↑'}</button>
             </div>
           </div>

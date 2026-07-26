@@ -1057,6 +1057,8 @@ button:disabled { cursor: not-allowed; }
 .qa-composer textarea { width: 100%; min-height: 74px; resize: none; border: 1px solid #d8dad5; border-radius: 8px; padding: 10px; background: #fff; font-size: 11px; }
 .qa-composer > div { display: flex; justify-content: space-between; align-items: center; margin-top: 7px; }
 .qa-composer label { color: #818781; font-size: 9px; }
+.qa-composer-meta { min-width: 0; display: grid; gap: 3px; }
+.qa-composer-meta > span { color: #a0a59f; font-size: 8px; white-space: nowrap; }
 .qa-composer button { border: 0; border-radius: 7px; padding: 7px 10px; background: var(--green); color: #fff; font-size: 10px; font-weight: 700; }
 .qa-composer button:disabled { opacity: .4; }
 
