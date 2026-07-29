@@ -1,4 +1,7 @@
 .env
+deploy/.env.production
+deploy/.release
+deploy/.release.env
 config
 .DS_Store
 .venv/
@@ -12,4 +15,5 @@ __pycache__/
 data/*.db
 data/*.db-shm
 data/*.db-wal
+data/runtime-ai.json
 reports/evaluations/evidence/*.db

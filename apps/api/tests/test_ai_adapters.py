@@ -5,11 +5,34 @@ import httpx
 from pydantic import BaseModel
 
 from app.ai.anthropic_adapter import AnthropicAdapter
+from app.ai.openai_adapter import OpenAiAdapter
 from app.ai.port import ProviderCapabilities
 
 
 class StructuredAnswer(BaseModel):
     value: str
+
+
+class FakeProviderError(RuntimeError):
+    def __init__(self, *, status_code=None, code=""):
+        super().__init__("provider failure")
+        self.status_code = status_code
+        self.code = code
+
+
+def test_openai_adapter_maps_invalid_key_to_actionable_error():
+    error = OpenAiAdapter._provider_error(
+        FakeProviderError(status_code=400, code="InvalidApiKey")
+    )
+
+    assert error is not None
+    assert error.code == "AI_PROVIDER_AUTH_FAILED"
+    assert error.retryable is False
+    assert "AI 设置" in str(error)
+
+
+def test_openai_adapter_does_not_misclassify_local_validation_errors():
+    assert OpenAiAdapter._provider_error(ValueError("invalid JSON")) is None
 
 
 def test_anthropic_adapter_uses_messages_path_and_validates_schema():

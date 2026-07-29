@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     database_url: str = f"sqlite+pysqlite:///{ROOT / 'data' / 'slow-v0.db'}"
     attachment_storage_dir: Path = ROOT / "data" / "attachments"
     attachment_max_bytes: int = 10 * 1024 * 1024
+    runtime_ai_config_path: Path = ROOT / "data" / "runtime-ai.json"
     web_origin: str = "http://127.0.0.1:5173"
 
 

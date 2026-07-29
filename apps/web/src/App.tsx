@@ -9,7 +9,9 @@ import type {
   Book,
   Bootstrap,
   Chapter,
+  LearningTask,
   Note as NoteType,
+  QuizResult,
   Section,
   SectionSummary,
   Series,
@@ -262,7 +264,11 @@ function AiSettingsDialog({ onClose }: { onClose: () => void }) {
       });
       setRuntime(value);
       setApiKey('');
-      setMessage(value.mode === 'demo' ? '已切换到本地演示模式。' : `已切换到 ${value.model}。`);
+      setMessage(
+        value.mode === 'demo'
+          ? '已保存并切换到本地演示模式。'
+          : `已保存并切换到 ${value.model}，重启后会自动恢复。`,
+      );
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : '切换失败');
     } finally {
@@ -376,7 +382,12 @@ function AiSettingsDialog({ onClose }: { onClose: () => void }) {
             </div>
           )}
 
-          <p className="runtime-warning">切换仅对当前 API 进程有效；重启后恢复服务器环境变量中的配置。保存前会先验证连接，失败时继续使用旧配置。</p>
+          <p className="runtime-warning">
+            {runtime?.ephemeral
+              ? '当前环境不提供持久化存储；重启后会恢复服务器环境变量中的配置。'
+              : '配置仅保存在本机服务端，浏览器无法读取 API Key；API 重启后会自动恢复。'}
+            保存前会先验证连接，失败时继续使用旧配置。
+          </p>
           {message && <p className="runtime-message" role="status">{message}</p>}
           <div className="dialog-actions">
             <button type="button" className="quiet-button" disabled={saving} onClick={onClose}>取消</button>
@@ -1059,6 +1070,9 @@ function ReaderPanel({
             section={section}
             onSectionChange={onSectionChange}
             onRefreshSeries={onRefreshSeries}
+            onSubmissionComplete={() => {
+              if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
+            }}
           />
         )}
         {tab === 'note' && section.note && (
@@ -1185,20 +1199,15 @@ function Quiz({
   section,
   onSectionChange,
   onRefreshSeries,
+  onSubmissionComplete,
 }: {
   section: Section;
   onSectionChange: (section: Section) => void;
   onRefreshSeries: () => Promise<void>;
+  onSubmissionComplete: () => void;
 }) {
   const quizDraftKey = `slow:quiz-draft:${section.id}:${section.quiz?.id || 'none'}`;
   const quizRequestStorageKey = `slow:quiz-request:${section.id}:${section.quiz?.id || 'none'}`;
-  const quizRequestId = useRef('');
-  if (!quizRequestId.current) {
-    quizRequestId.current = (
-      localStorage.getItem(quizRequestStorageKey) || crypto.randomUUID()
-    );
-    localStorage.setItem(quizRequestStorageKey, quizRequestId.current);
-  }
   const [answers, setAnswers] = useState<number[][]>(() => {
     const empty = section.quiz?.questions.map(() => []) || [];
     try {
@@ -1227,22 +1236,111 @@ function Quiz({
     }
     return empty;
   });
-  const [result, setResult] = useState<{ passed: boolean } | null>(null);
+  const [result, setResult] = useState<QuizResult | null>(null);
+  const [submissionError, setSubmissionError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [workflowRunning, setWorkflowRunning] = useState(false);
+  const [workflowMessage, setWorkflowMessage] = useState('');
+  const [failedTasks, setFailedTasks] = useState<LearningTask[]>([]);
 
   useEffect(() => {
     localStorage.setItem(quizDraftKey, JSON.stringify(answers));
   }, [answers, quizDraftKey]);
 
+  const monitorTasks = async (
+    initialTasks: LearningTask[],
+    passed = result?.passed,
+  ) => {
+    if (!initialTasks.length) return;
+    setWorkflowRunning(true);
+    setFailedTasks([]);
+    setWorkflowMessage(
+      initialTasks.some((task) => task.type === 'remediation_generation')
+        ? '评分已完成，正在准备补充教学和新的等价题…'
+        : '评分已完成，正在准备个人笔记和下一节…',
+    );
+    let current = initialTasks;
+    for (let poll = 0; poll < 120; poll += 1) {
+      current = await Promise.all(
+        current.map((task) => api.learningTask(task.taskId)),
+      );
+      if (current.every((task) => ['succeeded', 'failed'].includes(task.status))) {
+        const failures = current.filter((task) => task.status === 'failed');
+        setFailedTasks(failures);
+        setWorkflowRunning(false);
+        setWorkflowMessage(
+          failures.length
+            ? '评分结果已保存，但部分后续内容生成失败，可以安全重试。'
+            : passed
+              ? '个人笔记和下一节已经准备完成。'
+              : '补充教学和新的等价题已经准备完成。',
+        );
+        onSectionChange(await api.section(section.id));
+        await onRefreshSeries();
+        return;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+    }
+    setWorkflowRunning(false);
+    setWorkflowMessage('评分结果已保存，后续内容仍在后台处理中。');
+  };
+
+  const retryFailedTasks = async () => {
+    setSubmissionError('');
+    try {
+      const retried = await Promise.all(
+        failedTasks.filter((task) => task.retryable).map(
+          (task) => api.retryLearningTask(task.taskId),
+        ),
+      );
+      await monitorTasks(retried, result?.passed);
+    } catch (reason) {
+      setSubmissionError(reason instanceof Error ? reason.message : '任务重试失败。');
+    }
+  };
+
   const submit = async () => {
     if (!section.quiz) return;
+    const firstUnanswered = answers.findIndex((answer) => answer.length === 0);
+    if (firstUnanswered >= 0) {
+      const unansweredCount = answers.filter((answer) => answer.length === 0).length;
+      setResult(null);
+      setSubmissionError(`还有 ${unansweredCount} 道题未作答，请先完成第 ${firstUnanswered + 1} 题。`);
+      return;
+    }
+
+    const answerFingerprint = JSON.stringify(answers);
+    let requestId = crypto.randomUUID();
+    try {
+      const stored = JSON.parse(localStorage.getItem(quizRequestStorageKey) || 'null');
+      if (
+        stored &&
+        typeof stored.id === 'string' &&
+        stored.id.length >= 8 &&
+        stored.id.length <= 128 &&
+        stored.answerFingerprint === answerFingerprint
+      ) {
+        requestId = stored.id;
+      } else {
+        localStorage.setItem(
+          quizRequestStorageKey,
+          JSON.stringify({ id: requestId, answerFingerprint }),
+        );
+      }
+    } catch {
+      // Storage may be unavailable or contain a legacy request key. A fresh
+      // request id keeps the current answer set independent from stale retries.
+    }
+
+    setResult(null);
+    setSubmissionError('');
     setSubmitting(true);
     try {
       const value = await api.quiz(
         section.id,
         section.quiz.id,
         answers,
-        quizRequestId.current,
+        requestId,
       );
       setResult(value);
       localStorage.removeItem(quizDraftKey);
@@ -1250,6 +1348,19 @@ function Quiz({
       const next = await api.section(section.id);
       onSectionChange(next);
       await onRefreshSeries();
+      onSubmissionComplete();
+      void monitorTasks(value.workflowTasks, value.passed).catch((reason) => {
+        setWorkflowRunning(false);
+        setSubmissionError(
+          reason instanceof Error ? reason.message : '无法读取后续任务状态。',
+        );
+      });
+    } catch (reason) {
+      setSubmissionError(
+        reason instanceof Error && reason.name !== 'TypeError'
+          ? reason.message
+          : '提交失败，请检查服务连接后重试。',
+      );
     } finally {
       setSubmitting(false);
     }
@@ -1297,10 +1408,24 @@ function Quiz({
           ))}
         </fieldset>
       ))}
-      <button className="primary-button large" disabled={submitting} onClick={submit}>
-        {submitting ? '正在评分…' : '提交验证'}
+      <button
+        className="primary-button large"
+        disabled={submitting || workflowRunning}
+        aria-describedby="quiz-submission-feedback"
+        onClick={submit}
+      >
+        {submitting ? '正在评分…' : workflowRunning ? '正在准备后续内容…' : '提交验证'}
       </button>
-      {result && <p className={result.passed ? 'result success' : 'result failure'}>{result.passed ? '通过，笔记已经生成。' : '未通过：补充教学已保存，并换成一组新题。'}</p>}
+      <div id="quiz-submission-feedback" aria-live="polite">
+        {submissionError && <p className="result failure" role="alert">{submissionError}</p>}
+        {result && <p className={result.passed ? 'result success' : 'result failure'}>{result.passed ? '验证已通过，下一节已经解锁。' : '本次未通过，评分结果已经保存。'}</p>}
+        {workflowMessage && <p className={failedTasks.length ? 'result failure' : 'result success'}>{workflowMessage}</p>}
+        {failedTasks.some((task) => task.retryable) && (
+          <button type="button" className="secondary-button" onClick={retryFailedTasks}>
+            安全重试后续生成
+          </button>
+        )}
+      </div>
       {section.askMeUnlocked && <AskMePanel sectionId={section.id} />}
     </div>
   );
@@ -1448,7 +1573,11 @@ function QaPanel({
         message.id === exchangeId
           ? {
               ...message,
-              answer: message.answer || (reason instanceof Error ? reason.message : '答疑生成失败'),
+              answer: message.answer || (
+                reason instanceof Error && reason.name !== 'TypeError'
+                  ? reason.message
+                  : '无法连接 API 服务，请确认后端已启动后重试。'
+              ),
               status: 'error',
             }
           : message

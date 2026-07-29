@@ -1,6 +1,5 @@
 import hashlib
 import json
-from collections.abc import Awaitable, Callable
 from uuid import uuid4
 
 from sqlalchemy import select, update
@@ -16,7 +15,7 @@ from ...infrastructure.tables import (
     ChapterPractice,
     LearningEvidence,
     LearningMemory,
-    NoteGenerationTask,
+    LearningTask,
     QuizAttempt,
     QuizSet,
     Section,
@@ -172,9 +171,6 @@ class SubmitQuiz:
         db: Session,
         *,
         user_id: str,
-        note_task_runner: Callable[[str, Section], Awaitable[None]],
-        remediation_generator: Callable[[str, str], Awaitable[None]],
-        section_reader: Callable[[str], dict],
     ):
         self.db = db
         self.user_id = user_id
@@ -184,9 +180,6 @@ class SubmitQuiz:
         self.progression = ProgressionRepository(db, self.progress)
         self.policy = ProgressionPolicy()
         self.uow = SqlAlchemyUnitOfWork(db)
-        self.note_task_runner = note_task_runner
-        self.remediation_generator = remediation_generator
-        self.section_reader = section_reader
 
     async def execute(self, section_id: str, body, idempotency_key: str | None = None) -> dict:
         request_key = idempotency_key.strip() if idempotency_key else None
@@ -282,7 +275,7 @@ class SubmitQuiz:
             section_progress.status = "available"
         self._record_evidence(context, questions, grade.results, attempt.id)
 
-        note_task = None
+        workflow_tasks: list[LearningTask] = []
         if first_completion:
             decision = self.policy.after_quiz_passed(self.progression.snapshot(context))
             self.progression.apply(decision)
@@ -290,15 +283,50 @@ class SubmitQuiz:
                 learning_run_id=learning_run.id,
                 decision=decision,
             )
-            note_task = NoteGenerationTask(
-                id=_uid("note_task"),
+            workflow_tasks.append(LearningTask(
+                id=_uid("task"),
                 learning_run_id=learning_run.id,
                 section_id=section.id,
                 user_id=self.user_id,
-                trigger_attempt_id=attempt.id,
+                task_type="note_generation",
+                idempotency_key=f"note:{section.id}",
+                trigger_id=attempt.id,
+                payload_json=_dump({"triggerAttemptId": attempt.id}),
                 status="pending",
-            )
-            self.db.add(note_task)
+            ))
+            if (
+                decision.unlocked_section_id
+                or decision.unlocked_chapter_id
+                or decision.unlocked_book_id
+            ):
+                workflow_tasks.append(LearningTask(
+                    id=_uid("task"),
+                    learning_run_id=learning_run.id,
+                    section_id=section.id,
+                    user_id=self.user_id,
+                    task_type="next_section_preload",
+                    idempotency_key=f"next-after:{section.id}",
+                    trigger_id=attempt.id,
+                    payload_json=_dump({"sourceSectionId": section.id}),
+                    status="pending",
+                ))
+        if not grade.passed:
+            workflow_tasks.append(LearningTask(
+                id=_uid("task"),
+                learning_run_id=learning_run.id,
+                section_id=section.id,
+                user_id=self.user_id,
+                task_type="remediation_generation",
+                idempotency_key=f"remediation:{attempt.id}",
+                trigger_id=attempt.id,
+                payload_json=_dump({"attemptId": attempt.id}),
+                status="pending",
+            ))
+        self.db.add_all(workflow_tasks)
+        response = self._response(attempt, workflow_tasks)
+        attempt.workflow_status = "completed"
+        attempt.response_json = _dump(response)
+        attempt.workflow_error_code = ""
         try:
             self.uow.commit()
         except IntegrityError:
@@ -308,29 +336,7 @@ class SubmitQuiz:
                 raise
             self._validate_replay(replay, request_hash)
             return self._replay_response(replay)
-
-        try:
-            if note_task:
-                await self.note_task_runner(note_task.id, section)
-            if not grade.passed:
-                await self.remediation_generator(section.id, attempt.id)
-            response = self._response(attempt)
-            attempt.workflow_status = "completed"
-            attempt.response_json = _dump(response)
-            attempt.workflow_error_code = ""
-            self.uow.commit()
-            return response
-        except Exception as error:
-            self.uow.rollback()
-            stored_attempt = self.db.get(QuizAttempt, attempt.id)
-            stored_attempt.workflow_status = "failed"
-            stored_attempt.workflow_error_code = getattr(
-                error,
-                "code",
-                type(error).__name__,
-            )[:80]
-            self.uow.commit()
-            raise
+        return response
 
     def _find_replay(
         self,
@@ -428,20 +434,32 @@ class SubmitQuiz:
             )
             memory.updated_at = now()
 
-    def _response(self, attempt: QuizAttempt) -> dict:
+    def _response(
+        self,
+        attempt: QuizAttempt,
+        workflow_tasks: list[LearningTask],
+    ) -> dict:
         results = _load(attempt.results_json, [])
         score = sum(bool(item.get("correct")) for item in results)
-        section = self.db.scalar(
-            select(Section)
-            .join(QuizSet, QuizSet.section_id == Section.id)
-            .where(QuizSet.id == attempt.quiz_set_id)
+        note_task = next(
+            (
+                task
+                for task in workflow_tasks
+                if task.task_type == "note_generation"
+            ),
+            None,
         )
-        view = self.section_reader(section.id)
-        note_task = self.db.scalar(
-            select(NoteGenerationTask).where(
-                NoteGenerationTask.trigger_attempt_id == attempt.id
-            )
-        )
+        task_views = [
+            {
+                "taskId": task.id,
+                "type": task.task_type,
+                "sectionId": task.section_id,
+                "status": task.status,
+                "retryable": False,
+                "errorCode": None,
+            }
+            for task in workflow_tasks
+        ]
         return {
             "attemptId": attempt.id,
             "score": score,
@@ -449,12 +467,13 @@ class SubmitQuiz:
             "passed": attempt.passed,
             "perfect": bool(results) and score == len(results),
             "results": results,
-            "remediation": view["remediations"][-1] if not attempt.passed and view["remediations"] else None,
-            "nextQuiz": view["quiz"] if not attempt.passed else None,
+            "remediation": None,
+            "nextQuiz": None,
+            "workflowTasks": task_views,
             "noteGeneration": (
                 {
                     "status": note_task.status,
-                    "retryable": note_task.status == "failed",
+                    "retryable": False,
                     "errorCode": note_task.error_code or None,
                     "taskId": note_task.id,
                 }

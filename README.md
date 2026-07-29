@@ -110,12 +110,20 @@ WEB_ORIGIN=http://127.0.0.1:5173
 
 没有配置 `OPENAI_API_KEY` 时，系统使用机器可识别的 `local-demo-v1` 内容演示学习状态机。Demo 数据不能作为真实 AI 内容或正式评测证据。
 
+也可以在页面右上角的「AI 设置」中配置供应商。通过连接验证后，配置会写入仅服务端可读、权限为 `0600` 且被 Git 忽略的 `data/runtime-ai.json`；浏览器只能读取脱敏状态，API Key 不会返回前端，API 重启后会自动恢复该配置。
+
 ### 验证
 
 ```bash
 PYTHONPATH=apps/api .venv/bin/pytest -q apps/api/tests
 cd apps/web && pnpm build
 ```
+
+### 部署
+
+仓库包含 GitHub Actions、Docker 镜像和阿里云 ECS 单机部署配置。部署前请先阅读
+[`docs/DEPLOY_ECS.md`](docs/DEPLOY_ECS.md)，尤其是 SSH 密钥、持久化备份、
+安全组、HTTPS 与当前单用户鉴权边界。
 
 运行黑盒学习者与独立评审：
 
@@ -256,12 +264,21 @@ Start both services:
 
 Without `OPENAI_API_KEY`, Slow uses machine-identifiable `local-demo-v1` content to demonstrate the learning state machine. Demo data is never treated as real AI content or formal evaluation evidence.
 
+You can also configure a provider from **AI Settings** in the web UI. After connection validation, Slow stores the configuration in the Git-ignored, server-only `data/runtime-ai.json` file with `0600` permissions. The browser receives only redacted status, never the API key, and the API restores the configuration after a restart.
+
 ### Verification
 
 ```bash
 PYTHONPATH=apps/api .venv/bin/pytest -q apps/api/tests
 cd apps/web && pnpm build
 ```
+
+### Deployment
+
+The repository includes GitHub Actions, Docker images, and a single-host Alibaba
+Cloud ECS deployment. Read [`docs/DEPLOY_ECS.md`](docs/DEPLOY_ECS.md) before
+deploying, especially the SSH key, persistent backup, security group, HTTPS, and
+current single-user authentication boundaries.
 
 Run the black-box learner and independent reviewer:
 

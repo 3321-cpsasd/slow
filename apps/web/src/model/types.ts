@@ -29,6 +29,19 @@ export type Remediation = {id:string;attemptId:string;replacementQuizId:string;b
 export type Note = {id:string;aiContent:Record<string,unknown>;userContent:Record<string,unknown>;version:number};
 export type AskMe = {id:string;status:string;round:number;dimension:string;prompt:string|null;entries:{dimension:string;prompt:string;answer:string|null;evaluation:string;rationale:string}[]};
 export type Section = SectionSummary & { generation:null|Generation; content:null|{id:string;version:number;blocks:Block[];sources:Source[];sourceVerification:{url:string;reachable:boolean;statusCode:number;pinned:boolean}[];confidence:string}; quiz:null|{id:string;generation:number;questions:Question[]}; remediations:Remediation[]; note:null|Note };
+export type LearningTask = {
+  taskId:string;
+  type:'note_generation'|'remediation_generation'|'next_section_preload';
+  sectionId:string;
+  status:'pending'|'running'|'succeeded'|'failed';
+  attemptCount?:number;
+  maxAttempts?:number;
+  retryable:boolean;
+  errorCode:string|null;
+  result?:Record<string,unknown>;
+  createdAt?:string;
+  updatedAt?:string;
+};
 export type QuizResult = {
   attemptId:string;
   score:number;
@@ -38,6 +51,7 @@ export type QuizResult = {
   results:{correct:boolean;explanation:string;objective:string}[];
   remediation:Remediation|null;
   nextQuiz:Section['quiz'];
+  workflowTasks:LearningTask[];
   noteGeneration:null|{
     status:string;
     retryable:boolean;

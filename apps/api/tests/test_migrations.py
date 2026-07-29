@@ -35,8 +35,13 @@ def test_fresh_database_migrates_to_head_with_run_scoped_idempotency(tmp_path):
             row[1]: row
             for row in connection.execute("PRAGMA table_info(quiz_sets)")
         }
+        learning_task_schema = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'learning_tasks'"
+        ).fetchone()[0]
 
-    assert revision == "0013_learning_run_fks"
+    assert revision == "0014_durable_learning_tasks"
     assert "uq_quiz_attempts_run_user_idempotency" in attempt_schema
     assert "uq_quiz_attempts_user_id_idempotency_key" not in attempt_schema
     assert quiz_columns["content_version_id"][3] == 1
+    assert "uq_learning_tasks_run_type_idempotency" in learning_task_schema

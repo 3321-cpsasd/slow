@@ -310,15 +310,37 @@ class LearningNote(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
-class NoteGenerationTask(Base):
-    __tablename__ = "note_generation_tasks"
+class LearningTask(Base):
+    """Durable AI work created by a committed learning fact.
+
+    The task row is orchestration state, never the authority for quiz results,
+    progression, generated content, or learning evidence.
+    """
+
+    __tablename__ = "learning_tasks"
+    __table_args__ = (
+        UniqueConstraint(
+            "learning_run_id",
+            "task_type",
+            "idempotency_key",
+            name="uq_learning_tasks_run_type_idempotency",
+        ),
+    )
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    learning_run_id: Mapped[str] = mapped_column(ForeignKey("learning_runs.id"), index=True)
-    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    learning_run_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_runs.id"),
+        index=True,
+    )
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
-    trigger_attempt_id: Mapped[str] = mapped_column(ForeignKey("quiz_attempts.id"), unique=True)
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    task_type: Mapped[str] = mapped_column(String(40), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(160))
+    trigger_id: Mapped[str] = mapped_column(String(160), index=True)
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
     status: Mapped[str] = mapped_column(String(24), index=True, default="pending")
     attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
     error_code: Mapped[str] = mapped_column(String(80), default="")
     error_message: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)

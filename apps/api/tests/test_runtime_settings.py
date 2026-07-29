@@ -1,0 +1,73 @@
+import stat
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.ai.port import ProviderCapabilities
+from app.main import create_app
+from app.services.attachment_storage import LocalAttachmentStorage
+from app.services.runtime_settings import RuntimeSettingsStore
+from app.services.source_verifier import AcceptingSourceVerifier
+
+
+def saved_demo_runtime():
+    return {
+        "mode": "demo",
+        "api_key": "server-only-secret",
+        "base_url": "https://provider.example/v1",
+        "provider_model": "provider-model",
+        "capabilities": ProviderCapabilities(
+            protocol="openai",
+            api_mode="responses",
+            structured_output=True,
+            streaming=True,
+            reasoning_mode="optional",
+        ),
+    }
+
+
+def test_runtime_settings_round_trip_with_private_file_permissions(tmp_path):
+    path = tmp_path / "runtime-ai.json"
+    store = RuntimeSettingsStore(path)
+
+    store.save(saved_demo_runtime())
+    restored = store.load()
+
+    assert restored["mode"] == "demo"
+    assert restored["api_key"] == "server-only-secret"
+    assert restored["provider_model"] == "provider-model"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_app_restores_saved_runtime_without_returning_the_key(tmp_path):
+    path = tmp_path / "runtime-ai.json"
+    RuntimeSettingsStore(path).save(saved_demo_runtime())
+    storage = LocalAttachmentStorage(tmp_path / "attachments")
+
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            source_verifier=AcceptingSourceVerifier(),
+            attachment_storage=storage,
+            runtime_settings_path=path,
+        )
+    ) as client:
+        response = client.get("/api/runtime/ai")
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "demo"
+    assert response.json()["providerModel"] == "provider-model"
+    assert response.json()["apiKeyStored"] is True
+    assert response.json()["ephemeral"] is False
+    assert "server-only-secret" not in response.text
+
+
+def test_corrupt_runtime_settings_fail_closed(tmp_path):
+    path = tmp_path / "runtime-ai.json"
+    path.write_text('{"schemaVersion":1,"mode":"provider"}', encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="供应商协议无效"):
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            runtime_settings_path=path,
+        )

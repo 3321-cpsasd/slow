@@ -21,6 +21,49 @@ from ..infrastructure.database import build_database
 from ..infrastructure.tables import Base, EvaluationRun, now
 from ..services.source_verifier import AcceptingSourceVerifier
 from ..services.attachment_storage import LocalAttachmentStorage
+from ..services.runtime_settings import RuntimeSettingsStore
+
+
+def configured_provider():
+    saved = RuntimeSettingsStore(settings.runtime_ai_config_path).load()
+    if saved and saved.get("mode") == "provider":
+        config = saved
+    else:
+        config = {
+            "mode": "provider" if settings.openai_api_key else "demo",
+            "api_key": settings.openai_api_key,
+            "base_url": settings.openai_base_url,
+            "provider_model": settings.openai_model,
+            "provider_protocol": settings.ai_provider_protocol,
+            "api_mode": settings.openai_api_mode,
+            "reasoning_mode": settings.openai_reasoning_mode,
+        }
+    if config.get("mode") != "provider" or not config.get("api_key"):
+        raise RuntimeError(
+            "真实评测需要已保存的服务端 AI 配置或 OPENAI_API_KEY"
+        )
+    capabilities = ProviderCapabilities(
+        protocol=config["provider_protocol"],
+        api_mode=(
+            "messages"
+            if config["provider_protocol"] == "anthropic"
+            else config["api_mode"]
+        ),
+        structured_output=True,
+        streaming=True,
+        reasoning_mode=config["reasoning_mode"],
+    )
+    return config, capabilities
+
+
+def configured_provider_adapter():
+    config, capabilities = configured_provider()
+    return build_provider_adapter(
+        config["api_key"],
+        config["provider_model"],
+        config["base_url"],
+        capabilities,
+    )
 
 
 @dataclass
@@ -49,6 +92,58 @@ class LearnerRunner:
         if response.status_code != expected:
             raise RuntimeError(f"{method} {path}: expected {expected}, got {response.status_code}: {payload}")
         return payload
+
+    def wait_for_workflow(self, result, *, timeout=1500):
+        tasks = result.get("workflowTasks", [])
+        if not tasks:
+            return []
+        deadline = time.monotonic() + timeout
+        completed = []
+        for initial in tasks:
+            while time.monotonic() < deadline:
+                response = self.client.get(
+                    f"/api/learning-tasks/{initial['taskId']}"
+                )
+                payload = response.json() if response.content else {}
+                if response.status_code != 200:
+                    self.steps.append(
+                        Step(
+                            f"GET /api/learning-tasks/{initial['taskId']}",
+                            "FAIL",
+                            {
+                                "statusCode": response.status_code,
+                                "payload": payload,
+                            },
+                        )
+                    )
+                    raise RuntimeError(
+                        f"learning task status failed: {response.status_code}"
+                    )
+                if payload.get("status") in {"succeeded", "failed"}:
+                    self.steps.append(
+                        Step(
+                            f"GET /api/learning-tasks/{initial['taskId']}",
+                            "PASS" if payload["status"] == "succeeded" else "FAIL",
+                            {
+                                "statusCode": response.status_code,
+                                "payload": payload,
+                            },
+                        )
+                    )
+                    if payload["status"] == "failed":
+                        raise RuntimeError(
+                            "post-quiz task failed: "
+                            f"{payload.get('type')} "
+                            f"{payload.get('errorCode')}"
+                        )
+                    completed.append(payload)
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError(
+                    f"post-quiz task timed out: {initial['taskId']}"
+                )
+        return completed
 
     def run(self):
         health = self.request("GET", "/api/health")
@@ -114,14 +209,23 @@ class LearnerRunner:
                 if section["id"] == first_section_id:
                     failed_answers = [[] for _ in quiz["questions"]]
                     failed = self.request("POST", f"/api/sections/{section['id']}/quiz", json_body={"quizSetId": quiz["id"], "answers": failed_answers})
-                    remediation_verified = bool(failed.get("remediation", {}).get("blocks")) and failed["nextQuiz"]["id"] != quiz["id"]
-                    quiz = failed["nextQuiz"]
+                    self.wait_for_workflow(failed)
+                    remediated = self.request(
+                        "GET",
+                        f"/api/sections/{section['id']}",
+                    )
+                    remediation_verified = (
+                        bool(remediated.get("remediations"))
+                        and remediated["quiz"]["id"] != quiz["id"]
+                    )
+                    quiz = remediated["quiz"]
                 answers = self.answerer(section, quiz)
                 if len(answers) != len(quiz["questions"]):
                     raise RuntimeError("independent learner returned the wrong answer count")
                 result = self.request("POST", f"/api/sections/{section['id']}/quiz", json_body={"quizSetId": quiz["id"], "answers": answers})
                 if not result["passed"]:
                     raise RuntimeError("learner answer strategy did not pass current quiz")
+                self.wait_for_workflow(result)
                 completed = self.request("GET", f"/api/sections/{section['id']}")
                 if not completed["note"]:
                     raise RuntimeError("passing quiz did not create note")
@@ -254,7 +358,11 @@ def run_real_smoke(output_dir: Path):
     run_id = datetime.now(timezone.utc).strftime("slow-real-smoke-%Y%m%dT%H%M%SZ")
     database_path = Path(tempfile.gettempdir()) / f"{run_id}.db"
     started = time.monotonic()
-    app = create_app(f"sqlite+pysqlite:///{database_path}")
+    configured_adapter = configured_provider_adapter()
+    app = create_app(
+        f"sqlite+pysqlite:///{database_path}",
+        ai=configured_adapter,
+    )
     steps = []
     health, persisted, adapter, error = {"model": settings.openai_model}, {}, None, None
     try:
@@ -307,7 +415,11 @@ def run_real_smoke(output_dir: Path):
 def resume_real_section_smoke(output_dir: Path, database_path: Path, section_id: str):
     run_id = datetime.now(timezone.utc).strftime("slow-real-section-retry-%Y%m%dT%H%M%SZ")
     started, steps, error = time.monotonic(), [], None
-    app = create_app(f"sqlite+pysqlite:///{database_path}")
+    configured_adapter = configured_provider_adapter()
+    app = create_app(
+        f"sqlite+pysqlite:///{database_path}",
+        ai=configured_adapter,
+    )
     persisted, adapter = {}, None
     try:
         with TestClient(app, raise_server_exceptions=False) as client:
@@ -328,6 +440,244 @@ def resume_real_section_smoke(output_dir: Path, database_path: Path, section_id:
     json_path, markdown_path = output_dir / f"{run_id}.json", output_dir / f"{run_id}.md"
     json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     markdown_path.write_text(f"# Slow real section retry {run_id}\n\n- Verdict: **{report['verdict']}**\n- Duration: {report['durationSeconds']}s\n- Generation: `{report['assertions']['generationStatus']}`\n- Error: `{error or ''}`\n", encoding="utf-8")
+    return json_path, markdown_path, report
+
+
+def run_m1_learning_loop_smoke(
+    output_dir: Path,
+    database_path: Path,
+    section_id: str,
+):
+    """Exercise the real post-quiz queue without regenerating a whole book."""
+    run_id = datetime.now(timezone.utc).strftime(
+        "slow-m1-real-smoke-%Y%m%dT%H%M%SZ"
+    )
+    started = time.monotonic()
+    app_adapter = configured_provider_adapter()
+    learner_agent = configured_provider_adapter()
+    app = create_app(
+        f"sqlite+pysqlite:///{database_path}",
+        ai=app_adapter,
+    )
+    steps = []
+    error = None
+    assertions = {
+        "gradingReturnedBeforeAi": False,
+        "remediationPersisted": False,
+        "replacementQuizGenerated": False,
+        "quizPassed": False,
+        "notePersisted": False,
+        "nextSectionPreloaded": False,
+        "allTasksSucceeded": False,
+    }
+
+    def record(method, path, response):
+        payload = response.json() if response.content else {}
+        steps.append(
+            {
+                "method": method,
+                "path": path,
+                "statusCode": response.status_code,
+                "code": payload.get("code") if isinstance(payload, dict) else None,
+            }
+        )
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"{method} {path} failed: "
+                f"{response.status_code} {payload.get('code')}"
+            )
+        return payload
+
+    def wait_tasks(client, result, timeout=900):
+        task_results = []
+        for task in result.get("workflowTasks", []):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                response = client.get(
+                    f"/api/learning-tasks/{task['taskId']}"
+                )
+                payload = response.json()
+                if payload.get("status") in {"succeeded", "failed"}:
+                    record(
+                        "GET",
+                        f"/api/learning-tasks/{task['taskId']}",
+                        response,
+                    )
+                    if payload["status"] != "succeeded":
+                        raise RuntimeError(
+                            f"{payload.get('type')} failed: "
+                            f"{payload.get('errorCode')}"
+                        )
+                    task_results.append(payload)
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError(f"task timed out: {task['taskId']}")
+        return task_results
+
+    learner_loop = asyncio.new_event_loop()
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            section = record(
+                "GET",
+                f"/api/sections/{section_id}",
+                client.get(f"/api/sections/{section_id}"),
+            )
+            original_quiz_id = section["quiz"]["id"]
+            failed_started = time.monotonic()
+            failed = record(
+                "POST",
+                f"/api/sections/{section_id}/quiz",
+                client.post(
+                    f"/api/sections/{section_id}/quiz",
+                    json={
+                        "quizSetId": original_quiz_id,
+                        "answers": [[] for _ in section["quiz"]["questions"]],
+                    },
+                ),
+            )
+            grading_seconds = time.monotonic() - failed_started
+            assertions["gradingReturnedBeforeAi"] = (
+                grading_seconds < 2
+                and failed["passed"] is False
+                and failed["remediation"] is None
+                and failed["nextQuiz"] is None
+            )
+            wait_tasks(client, failed)
+            section = record(
+                "GET",
+                f"/api/sections/{section_id}",
+                client.get(f"/api/sections/{section_id}"),
+            )
+            assertions["remediationPersisted"] = bool(
+                section["remediations"]
+            )
+            assertions["replacementQuizGenerated"] = (
+                section["quiz"]["id"] != original_quiz_id
+            )
+
+            passed_result = None
+            passed_tasks = []
+            for _attempt in range(3):
+                quiz = section["quiz"]
+                answer = learner_loop.run_until_complete(
+                    learner_agent.evaluation_quiz_answers(
+                        {
+                            "section": {
+                                "id": section["id"],
+                                "title": section["title"],
+                                "question": section["question"],
+                                "content": section["content"],
+                            },
+                            "questions": quiz["questions"],
+                        }
+                    )
+                )
+                passed_result = record(
+                    "POST",
+                    f"/api/sections/{section_id}/quiz",
+                    client.post(
+                        f"/api/sections/{section_id}/quiz",
+                        json={
+                            "quizSetId": quiz["id"],
+                            "answers": answer.answers,
+                        },
+                    ),
+                )
+                passed_tasks = wait_tasks(client, passed_result)
+                if passed_result["passed"]:
+                    break
+                section = record(
+                    "GET",
+                    f"/api/sections/{section_id}",
+                    client.get(f"/api/sections/{section_id}"),
+                )
+            assertions["quizPassed"] = bool(
+                passed_result and passed_result["passed"]
+            )
+            final_section = record(
+                "GET",
+                f"/api/sections/{section_id}",
+                client.get(f"/api/sections/{section_id}"),
+            )
+            assertions["notePersisted"] = bool(final_section["note"])
+            task_types = {item["type"] for item in passed_tasks}
+            assertions["allTasksSucceeded"] = bool(passed_tasks) and all(
+                item["status"] == "succeeded" for item in passed_tasks
+            )
+            preload = next(
+                (
+                    item
+                    for item in passed_tasks
+                    if item["type"] == "next_section_preload"
+                ),
+                None,
+            )
+            target_id = (
+                preload.get("result", {}).get("targetSectionId")
+                if preload
+                else None
+            )
+            if target_id:
+                target = record(
+                    "GET",
+                    f"/api/sections/{target_id}",
+                    client.get(f"/api/sections/{target_id}"),
+                )
+                assertions["nextSectionPreloaded"] = bool(target["content"])
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {str(exc)[:1000]}"
+    finally:
+        learner_loop.run_until_complete(learner_agent.close())
+        learner_loop.close()
+
+    passed = not error and all(assertions.values())
+    report = {
+        "schemaVersion": "1.0",
+        "runId": run_id,
+        "mode": "real-m1-learning-loop",
+        "model": app_adapter.model,
+        "createdAt": datetime.now(timezone.utc).isoformat(),
+        "durationSeconds": round(time.monotonic() - started, 3),
+        "database": str(database_path),
+        "sectionId": section_id,
+        "usage": {
+            "inputTokens": app_adapter.input_tokens + learner_agent.input_tokens,
+            "outputTokens": app_adapter.output_tokens + learner_agent.output_tokens,
+        },
+        "verdict": "PASS" if passed else "FAIL",
+        "error": error,
+        "assertions": assertions,
+        "steps": steps,
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    json_path = output_dir / f"{run_id}.json"
+    markdown_path = output_dir / f"{run_id}.md"
+    json_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    markdown_path.write_text(
+        "\n".join(
+            [
+                f"# Slow M1 real learning-loop smoke {run_id}",
+                "",
+                f"- Model: `{report['model']}`",
+                f"- Verdict: **{report['verdict']}**",
+                f"- Duration: {report['durationSeconds']}s",
+                f"- Error: `{error or ''}`",
+                "",
+                "## Assertions",
+                "",
+                *[
+                    f"- {key}: `{value}`"
+                    for key, value in assertions.items()
+                ],
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
     return json_path, markdown_path, report
 
 
@@ -375,24 +725,19 @@ def run(output_dir: Path, real=False, deterministic=None, database_path_override
     learner_runner = None
     runner_error = None
     if real:
-        app = create_app(f"sqlite+pysqlite:///{database_path}", attachment_storage=evaluation_storage)
-        model = settings.openai_model
-        agent_loop = asyncio.new_event_loop()
-        capabilities = ProviderCapabilities(
-            protocol=settings.ai_provider_protocol,
-            api_mode=(
-                "messages"
-                if settings.ai_provider_protocol == "anthropic"
-                else settings.openai_api_mode
-            ),
-            structured_output=True,
-            streaming=True,
-            reasoning_mode=settings.openai_reasoning_mode,
+        config, capabilities = configured_provider()
+        app_adapter = configured_provider_adapter()
+        app = create_app(
+            f"sqlite+pysqlite:///{database_path}",
+            ai=app_adapter,
+            attachment_storage=evaluation_storage,
         )
+        model = config["provider_model"]
+        agent_loop = asyncio.new_event_loop()
         learner_agent = build_provider_adapter(
-            settings.openai_api_key,
-            settings.openai_model,
-            settings.openai_base_url,
+            config["api_key"],
+            config["provider_model"],
+            config["base_url"],
             capabilities,
         )
 
@@ -438,9 +783,9 @@ def run(output_dir: Path, real=False, deterministic=None, database_path_override
         samples = [section_samples_by_id[item_id] for item_id in selected_ids if item_id in section_samples_by_id]
         note_samples = list(note_samples_by_id.values())[:5]
         reviewer_agent = build_provider_adapter(
-            settings.openai_api_key,
-            settings.openai_model,
-            settings.openai_base_url,
+            config["api_key"],
+            config["provider_model"],
+            config["base_url"],
             capabilities,
         )
         try:
@@ -507,12 +852,35 @@ def main():
     parser = argparse.ArgumentParser(description="Run the Slow black-box learner and independent gate reviewer")
     parser.add_argument("--real", action="store_true", help="use configured external model and real source reachability checks")
     parser.add_argument("--smoke", action="store_true", help="run only the real plan-to-first-section persistence smoke test")
+    parser.add_argument("--m1-smoke", action="store_true", help="run the real non-blocking quiz/remediation/note/preload loop")
     parser.add_argument("--resume-database", type=Path, help="reuse a smoke database and retry only one section")
     parser.add_argument("--resume-section", help="section ID to retry with --resume-database")
     parser.add_argument("--resume-series", help="series ID to continue through the full real learner journey")
     parser.add_argument("--output", type=Path, default=ROOT / "reports" / "evaluations")
     parser.add_argument("--skip-build-checks", action="store_true", help="do not run pytest and the frontend production build")
     args = parser.parse_args()
+    if args.m1_smoke:
+        if not args.real or not args.resume_database or not args.resume_section:
+            parser.error(
+                "--m1-smoke requires --real, --resume-database and "
+                "--resume-section"
+            )
+        json_path, markdown_path, report = run_m1_learning_loop_smoke(
+            args.output,
+            args.resume_database,
+            args.resume_section,
+        )
+        print(
+            json.dumps(
+                {
+                    "verdict": report["verdict"],
+                    "json": str(json_path),
+                    "markdown": str(markdown_path),
+                },
+                ensure_ascii=False,
+            )
+        )
+        return
     if args.resume_section:
         if not args.real or not args.resume_database:
             parser.error("section retry requires --real, --resume-database and --resume-section")

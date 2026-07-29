@@ -1,6 +1,8 @@
+import asyncio
 import hashlib
 import json
 import sqlite3
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -16,9 +18,9 @@ from app.infrastructure.tables import (
     Book,
     ChapterRevision,
     LearningEvidence,
+    LearningTask,
     LearningPlan,
     LearningRun,
-    NoteGenerationTask,
     QuizAttempt,
     Section,
     SectionProgress,
@@ -71,17 +73,32 @@ def test_complete_real_shape_vertical_slice(client):
     assert all("correct" not in question for question in section["quiz"]["questions"])
     quiz_id = section["quiz"]["id"]
     failed = client.post(f"/api/sections/{section_id}/quiz", json={"quizSetId":quiz_id,"answers":[[0],[1],[1],[1],[1]]}).json()
-    assert failed["passed"] is False and failed["nextQuiz"]["generation"] == 2 and failed["remediation"]["blocks"]
+    assert failed["passed"] is False
+    remediation_task = next(
+        task
+        for task in failed["workflowTasks"]
+        if task["type"] == "remediation_generation"
+    )
+    assert wait_for_task(client, remediation_task["taskId"])["status"] == "succeeded"
+    remediated = client.get(f"/api/sections/{section_id}").json()
+    assert remediated["quiz"]["generation"] == 2
+    assert remediated["remediations"][-1]["blocks"]
     stale = client.post(f"/api/sections/{section_id}/quiz", json={"quizSetId":quiz_id,"answers":[[1],[1],[1],[1],[1]]})
     assert stale.status_code == 409 and stale.json()["code"] == "QUIZ_STALE"
-    passed = client.post(f"/api/sections/{section_id}/quiz", json={"quizSetId":failed["nextQuiz"]["id"],"answers":[[1],[1],[1],[1],[1]]}).json()
+    passed = client.post(f"/api/sections/{section_id}/quiz", json={"quizSetId":remediated["quiz"]["id"],"answers":[[1],[1],[1],[1],[1]]}).json()
     assert passed["passed"] is True
+    for task in passed["workflowTasks"]:
+        assert wait_for_task(client, task["taskId"])["status"] == "succeeded"
     completed = client.get(f"/api/sections/{section_id}").json()
     assert completed["note"]
     refreshed_series = client.get(f"/api/series/{series['id']}").json()
     refreshed_sections = refreshed_series["books"][0]["chapters"][0]["sections"]
     assert refreshed_sections[0]["status"] == "completed"
     assert refreshed_sections[1]["status"] == "available"
+    next_section = client.get(
+        f"/api/sections/{refreshed_sections[1]['id']}"
+    ).json()
+    assert next_section["content"] is not None
     assert client.get("/api/learning-memory?shelf_id=shelf_technology").json()
 
 
@@ -207,8 +224,9 @@ def test_concurrent_passing_submissions_trigger_first_completion_once(
         assert all(response.status_code == 200 for response in responses)
         with concurrent_client.app.state.sessions() as db:
             tasks = db.scalars(
-                select(NoteGenerationTask).where(
-                    NoteGenerationTask.section_id == section["id"]
+                select(LearningTask).where(
+                    LearningTask.section_id == section["id"],
+                    LearningTask.task_type == "note_generation",
                 )
             ).all()
             attempts = db.scalars(
@@ -252,8 +270,9 @@ def test_note_failure_does_not_roll_back_pass_or_unlock(tmp_path):
         assert response.status_code == 200
         assert response.json()["passed"] is True
         note_generation = response.json()["noteGeneration"]
+        failed_task = wait_for_task(failing, note_generation["taskId"])
         assert {
-            key: note_generation[key]
+            key: failed_task[key]
             for key in ["status", "retryable", "errorCode"]
         } == {
             "status": "failed",
@@ -264,7 +283,11 @@ def test_note_failure_does_not_roll_back_pass_or_unlock(tmp_path):
             f"/api/note-tasks/{note_generation['taskId']}/retry"
         )
         assert retried.status_code == 200
-        assert retried.json()["status"] == "failed"
+        assert retried.json()["status"] == "pending"
+        assert wait_for_task(
+            failing,
+            note_generation["taskId"],
+        )["status"] == "failed"
         refreshed = failing.get(
             f"/api/series/{series['id']}"
         ).json()["books"][0]["chapters"][0]["sections"]
@@ -273,12 +296,103 @@ def test_note_failure_does_not_roll_back_pass_or_unlock(tmp_path):
         assert failing.get(f"/api/sections/{section['id']}").json()["note"] is None
         with failing.app.state.sessions() as db:
             task = db.scalar(
-                select(NoteGenerationTask).where(
-                    NoteGenerationTask.section_id == section["id"]
+                select(LearningTask).where(
+                    LearningTask.section_id == section["id"],
+                    LearningTask.task_type == "note_generation",
                 )
             )
             assert task.status == "failed"
             assert task.attempt_count == 2
+
+
+def test_quiz_response_does_not_wait_for_post_quiz_ai(tmp_path):
+    class SlowPostQuizAi(FakeAi):
+        async def note(self, request):
+            await asyncio.sleep(0.4)
+            return await super().note(request)
+
+    storage = LocalAttachmentStorage(tmp_path / "slow-task-attachments")
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            SlowPostQuizAi(),
+            AcceptingSourceVerifier(),
+            storage,
+        )
+    ) as non_blocking:
+        series = create_series(non_blocking)
+        chapter = non_blocking.post(
+            f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+        ).json()
+        section = non_blocking.post(
+            f"/api/sections/{chapter['sections'][0]['id']}/generate"
+        ).json()
+        started = time.monotonic()
+        response = non_blocking.post(
+            f"/api/sections/{section['id']}/quiz",
+            json={
+                "quizSetId": section["quiz"]["id"],
+                "answers": [[1] for _ in section["quiz"]["questions"]],
+            },
+        )
+        elapsed = time.monotonic() - started
+
+        assert response.status_code == 200
+        assert response.json()["passed"] is True
+        assert elapsed < 0.25
+        assert {
+            task["type"] for task in response.json()["workflowTasks"]
+        } == {"note_generation", "next_section_preload"}
+        for task in response.json()["workflowTasks"]:
+            assert wait_for_task(
+                non_blocking,
+                task["taskId"],
+            )["status"] == "succeeded"
+
+
+def test_interrupted_learning_task_resumes_after_restart(tmp_path):
+    class InterruptedNoteAi(FakeAi):
+        async def note(self, request):
+            await asyncio.sleep(30)
+            return await super().note(request)
+
+    database = tmp_path / "task-restart.db"
+    database_url = f"sqlite+pysqlite:///{database}"
+    storage = LocalAttachmentStorage(tmp_path / "task-restart-attachments")
+    with TestClient(
+        create_app(
+            database_url,
+            InterruptedNoteAi(),
+            AcceptingSourceVerifier(),
+            storage,
+        )
+    ) as interrupted:
+        series = create_series(interrupted)
+        chapter = interrupted.post(
+            f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+        ).json()
+        section = interrupted.post(
+            f"/api/sections/{chapter['sections'][0]['id']}/generate"
+        ).json()
+        response = interrupted.post(
+            f"/api/sections/{section['id']}/quiz",
+            json={
+                "quizSetId": section["quiz"]["id"],
+                "answers": [[1] for _ in section["quiz"]["questions"]],
+            },
+        ).json()
+        task_id = response["noteGeneration"]["taskId"]
+        wait_for_task_status(interrupted, task_id, "running")
+
+    with TestClient(
+        create_app(
+            database_url,
+            FakeAi(),
+            AcceptingSourceVerifier(),
+            storage,
+        )
+    ) as restarted:
+        assert wait_for_task(restarted, task_id)["status"] == "succeeded"
 
 
 def test_locked_boundary(client):
@@ -405,6 +519,30 @@ def create_series(client):
     return client.post("/api/plans", json={"shelfId":"shelf_technology","topic":"Kubernetes","role":"技术人员","experience":"会 Docker","depth":"deep"}).json()
 
 
+def wait_for_task(client, task_id, timeout=3):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/learning-tasks/{task_id}")
+        assert response.status_code == 200
+        task = response.json()
+        if task["status"] in {"succeeded", "failed"}:
+            return task
+        time.sleep(0.01)
+    raise AssertionError(f"task {task_id} did not finish")
+
+
+def wait_for_task_status(client, task_id, expected, timeout=3):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/learning-tasks/{task_id}")
+        assert response.status_code == 200
+        task = response.json()
+        if task["status"] == expected:
+            return task
+        time.sleep(0.01)
+    raise AssertionError(f"task {task_id} did not reach {expected}")
+
+
 def test_plan_creation_is_idempotent(client):
     body = {"shelfId":"shelf_technology","topic":"并发创建保护","role":"技术人员","experience":"会 Docker","depth":"deep"}
     headers = {"Idempotency-Key": "test-plan-creation-idempotency"}
@@ -505,6 +643,8 @@ def generate_and_pass(client, section_id):
     answers = [[1] for _ in section["quiz"]["questions"]]
     result = client.post(f"/api/sections/{section_id}/quiz", json={"quizSetId":section["quiz"]["id"],"answers":answers})
     assert result.status_code == 200 and result.json()["passed"]
+    for task in result.json()["workflowTasks"]:
+        assert wait_for_task(client, task["taskId"])["status"] == "succeeded"
     return section
 
 
@@ -608,8 +748,12 @@ def test_complete_first_book_attachments_and_enter_second(client):
     assert final["books"][0]["status"] == "completed"
     assert final["books"][1]["status"] == "available"
     assert 0 < final["progress"] < 100
-    second_chapter = client.post(f"/api/chapters/{final['books'][1]['chapters'][0]['id']}/generate").json()
-    second_section = client.post(f"/api/sections/{second_chapter['sections'][0]['id']}/generate").json()
+    second_chapter = final["books"][1]["chapters"][0]
+    assert second_chapter["generated"] is True
+    second_section = client.get(
+        f"/api/sections/{second_chapter['sections'][0]['id']}"
+    ).json()
+    assert second_section["content"] is not None
     assert second_section["generation"]["trace"]["memoryApplied"] is True
     assert second_section["generation"]["trace"]["memoryConceptCount"] > 0
 
@@ -645,7 +789,15 @@ def test_duplicate_retry_questions_are_rejected_and_observable():
         chapter = duplicate.post(f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate").json()
         section = duplicate.post(f"/api/sections/{chapter['sections'][0]['id']}/generate").json()
         failed = duplicate.post(f"/api/sections/{section['id']}/quiz", json={"quizSetId":section["quiz"]["id"],"answers":[[] for _ in section["quiz"]["questions"]]})
-        assert failed.status_code == 502 and failed.json()["code"] == "QUIZ_NOT_NOVEL"
+        assert failed.status_code == 200
+        remediation_task = next(
+            task
+            for task in failed.json()["workflowTasks"]
+            if task["type"] == "remediation_generation"
+        )
+        task = wait_for_task(duplicate, remediation_task["taskId"])
+        assert task["status"] == "failed"
+        assert task["errorCode"] == "QUIZ_NOT_NOVEL"
         state = duplicate.get(f"/api/sections/{section['id']}").json()
         assert state["generation"]["status"] == "failed" and state["generation"]["errorCode"] == "QUIZ_NOT_NOVEL"
 

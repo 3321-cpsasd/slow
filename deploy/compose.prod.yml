@@ -1,0 +1,54 @@
+name: slow
+
+services:
+  api:
+    image: ${REGISTRY}/${IMAGE_NAME}-api:${APP_VERSION}
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: sqlite+pysqlite:////data/slow-v0.db
+      ATTACHMENT_STORAGE_DIR: /data/attachments
+      RUNTIME_AI_CONFIG_PATH: /data/runtime-ai.json
+      WEB_ORIGIN: http://127.0.0.1
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+    mem_limit: 1200m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks:
+      - app
+
+  web:
+    image: ${REGISTRY}/${IMAGE_NAME}-web:${APP_VERSION}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "80:80"
+    mem_limit: 128m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks:
+      - app
+
+networks:
+  app:
+    driver: bridge

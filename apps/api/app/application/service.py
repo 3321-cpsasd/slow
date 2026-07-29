@@ -1,3 +1,4 @@
+from asyncio import CancelledError
 import hashlib
 import json
 import re
@@ -25,7 +26,7 @@ from ..infrastructure.tables import (
     LearningEvidence,
     LearningMemory,
     LearningNote,
-    NoteGenerationTask,
+    LearningTask,
     LearningPlan,
     PlanCreationRequest,
     QaMessage,
@@ -45,8 +46,16 @@ from ..modules.library.context import ActiveLearningContextResolver
 from ..modules.artifacts.progress import ArtifactProgressStore
 from ..modules.learning.commands import SubmitQuiz
 from ..modules.learning.progress import ProgressStore
+from ..modules.learning.tasks import (
+    claim_task,
+    complete_task,
+    fail_task,
+    release_task,
+    recoverable_task_ids,
+    reset_failed_task,
+    task_view,
+)
 from ..modules.tutoring.commands import GenerateLearningNote
-from ..modules.tutoring.tasks import execute_note_task, recoverable_note_tasks
 from ..read_models.library import LibraryReadModel
 
 DEMO_USER_ID = "user_demo"
@@ -766,7 +775,7 @@ class SlowService:
                 if error.operation_id is None:
                     error.operation_id = operation_id
                 raise
-            if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            if isinstance(error, (CancelledError, KeyboardInterrupt, SystemExit)):
                 raise
             raise AiError(
                 "小节生成失败；失败状态已保存，可安全重试",
@@ -871,68 +880,173 @@ class SlowService:
         }
 
     async def submit_quiz(self, section_id, body, idempotency_key=None):
-        async def generate_remediation(target_section_id, attempt_id):
-            await self.generate_section(
-                target_section_id,
-                retry=True,
-                retry_attempt_id=attempt_id,
-            )
-
         return await SubmitQuiz(
             self.db,
             user_id=self.user_id,
-            note_task_runner=self._run_note_task,
-            remediation_generator=generate_remediation,
-            section_reader=self.section,
         ).execute(section_id, body, idempotency_key)
 
-    async def _run_note_task(self, task_id, section):
-        await execute_note_task(
-            self.db,
-            task_id=task_id,
-            section=section,
-            note_generator=self._ensure_note,
-        )
-
-    async def recover_note_tasks(self):
-        tasks = recoverable_note_tasks(self.db)
+    def recoverable_learning_task_ids(self):
+        task_ids = recoverable_task_ids(self.db)
         self.db.commit()
-        for task in tasks:
-            try:
+        return task_ids
+
+    async def execute_learning_task(self, task_id):
+        task = self.db.scalar(
+            select(LearningTask).where(
+                LearningTask.id == task_id,
+                LearningTask.user_id == self.user_id,
+            )
+        )
+        if not task:
+            raise AppError(
+                "学习任务不存在",
+                code="LEARNING_TASK_NOT_FOUND",
+                status=404,
+            )
+        task = claim_task(self.db, task.id)
+        if not task:
+            return self.learning_task(task_id)
+        payload = load(task.payload_json, {})
+        try:
+            if task.task_type == "note_generation":
                 context = self.contexts.resolve_section(
                     user_id=task.user_id,
                     section_id=task.section_id,
                 )
-                await self._run_note_task(task.id, context.section)
-            except AppError as error:
-                self.db.rollback()
-                stored = self.db.get(NoteGenerationTask, task.id)
-                stored.status = "failed"
-                stored.error_code = error.code[:80]
-                stored.error_message = "AppError: note task context unavailable"
-                stored.updated_at = now()
-                self.db.commit()
+                await self._ensure_note(context.section)
+                note = self.db.scalar(
+                    select(LearningNote).where(
+                        LearningNote.learning_run_id == task.learning_run_id,
+                        LearningNote.user_id == task.user_id,
+                        LearningNote.section_id == task.section_id,
+                    )
+                )
+                result = {"noteId": note.id if note else None}
+            elif task.task_type == "remediation_generation":
+                view = await self.generate_section(
+                    task.section_id,
+                    retry=True,
+                    retry_attempt_id=payload.get("attemptId"),
+                )
+                result = {
+                    "quizSetId": view["quiz"]["id"] if view["quiz"] else None,
+                    "remediationId": (
+                        view["remediations"][-1]["id"]
+                        if view["remediations"]
+                        else None
+                    ),
+                }
+            elif task.task_type == "next_section_preload":
+                result = await self._preload_next_section(
+                    payload.get("sourceSectionId") or task.section_id
+                )
+            else:
+                raise AppError(
+                    "不支持的学习任务类型",
+                    code="LEARNING_TASK_TYPE_UNSUPPORTED",
+                    status=500,
+                )
+            return task_view(complete_task(self.db, task.id, result))
+        except CancelledError:
+            release_task(self.db, task.id)
+            raise
+        except Exception as error:
+            return task_view(fail_task(self.db, task.id, error))
 
-    async def retry_note_task(self, task_id):
+    async def _preload_next_section(self, source_section_id):
+        context = self.contexts.resolve_section(
+            user_id=self.user_id,
+            section_id=source_section_id,
+        )
+        target = self.db.scalar(
+            select(Section)
+            .where(
+                Section.chapter_id == context.chapter.id,
+                Section.position > context.section.position,
+            )
+            .order_by(Section.position)
+        )
+        if not target:
+            next_chapter = self.db.scalar(
+                select(Chapter)
+                .where(
+                    Chapter.book_id == context.book.id,
+                    Chapter.position > context.chapter.position,
+                )
+                .order_by(Chapter.position)
+            )
+            if not next_chapter:
+                next_book = self.db.scalar(
+                    select(Book)
+                    .where(
+                        Book.series_id == context.book.series_id,
+                        Book.position > context.book.position,
+                        Book.deleted_at.is_(None),
+                    )
+                    .order_by(Book.position)
+                )
+                next_chapter = (
+                    self.db.scalar(
+                        select(Chapter)
+                        .where(Chapter.book_id == next_book.id)
+                        .order_by(Chapter.position)
+                    )
+                    if next_book
+                    else None
+                )
+            if next_chapter:
+                await self.generate_chapter(next_chapter.id)
+                target = self.db.scalar(
+                    select(Section)
+                    .where(Section.chapter_id == next_chapter.id)
+                    .order_by(Section.position)
+                )
+        if not target:
+            return {"targetSectionId": None, "endOfSeries": True}
+        await self.generate_section(target.id)
+        return {"targetSectionId": target.id, "endOfSeries": False}
+
+    def learning_task(self, task_id):
         task = self.db.scalar(
-            select(NoteGenerationTask).where(
-                NoteGenerationTask.id == task_id,
-                NoteGenerationTask.user_id == self.user_id,
+            select(LearningTask).where(
+                LearningTask.id == task_id,
+                LearningTask.user_id == self.user_id,
+            )
+        )
+        if not task:
+            raise AppError(
+                "学习任务不存在",
+                code="LEARNING_TASK_NOT_FOUND",
+                status=404,
+            )
+        return task_view(task)
+
+    def retry_learning_task(self, task_id):
+        task = self.db.scalar(
+            select(LearningTask).where(
+                LearningTask.id == task_id,
+                LearningTask.user_id == self.user_id,
+            )
+        )
+        if not task:
+            raise AppError(
+                "学习任务不存在",
+                code="LEARNING_TASK_NOT_FOUND",
+                status=404,
+            )
+        return task_view(reset_failed_task(self.db, task))
+
+    def retry_note_task(self, task_id):
+        task = self.db.scalar(
+            select(LearningTask).where(
+                LearningTask.id == task_id,
+                LearningTask.user_id == self.user_id,
+                LearningTask.task_type == "note_generation",
             )
         )
         if not task:
             raise AppError("笔记任务不存在", code="NOTE_TASK_NOT_FOUND", status=404)
-        context = self.contexts.resolve_section(
-            user_id=self.user_id,
-            section_id=task.section_id,
-        )
-        await self._run_note_task(task.id, context.section)
-        return {
-            "taskId": task.id,
-            "status": task.status,
-            "retryable": task.status == "failed" and task.attempt_count < 3,
-            "errorCode": task.error_code or None,
-        }
+        return task_view(reset_failed_task(self.db, task))
 
     def _add_evidence(self, context, concept, evidence_type, result, delta):
         evidence = LearningEvidence(

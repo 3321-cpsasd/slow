@@ -1,4 +1,6 @@
-const BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+const BASE = import.meta.env.VITE_API_URL ?? (
+  import.meta.env.PROD ? '' : 'http://127.0.0.1:8000'
+);
 
 export class ApiError extends Error {
   constructor(
@@ -83,6 +85,8 @@ export const api = {
     headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},
     body:JSON.stringify({quizSetId,answers}),
   }),
+  learningTask:(id:string)=>call<import('../model/types').LearningTask>(`/api/learning-tasks/${id}`),
+  retryLearningTask:(id:string)=>call<import('../model/types').LearningTask>(`/api/learning-tasks/${id}/retry`,{method:'POST'}),
   ask:(id:string,blockId:string,question:string,threadId?:string,forceRelation?:'follow_up'|'new_question')=>call<import('../model/types').QaAnswer>(`/api/sections/${id}/ask`,{method:'POST',body:JSON.stringify({blockId,question,threadId,forceRelation})}),
   askStream:(id:string,blockId:string,question:string,onDelta:(delta:string)=>void,threadId?:string,forceRelation?:'follow_up'|'new_question')=>streamQa(`/api/sections/${id}/ask/stream`,{blockId,question,threadId,forceRelation},onDelta),
   correctQa:(id:string,threadId:string,targetThreadId:string)=>call<import('../model/types').QaCorrection>(`/api/sections/${id}/qa/threads/${threadId}`,{method:'PATCH',body:JSON.stringify({relation:'follow_up',targetThreadId})}),

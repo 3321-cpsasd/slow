@@ -1,5 +1,8 @@
+import asyncio
 from contextlib import asynccontextmanager
+from contextlib import suppress
 import json
+from pathlib import Path
 from urllib.parse import urlparse
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
@@ -15,9 +18,10 @@ from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
 from .infrastructure.database import build_database
-from .infrastructure.tables import Base
+from .infrastructure.tables import Base, LearningTask
 from .services.source_verifier import AcceptingSourceVerifier, HttpSourceVerifier
 from .services.attachment_storage import LocalAttachmentStorage
+from .services.runtime_settings import RuntimeSettingsStore
 
 DEFAULT_PROVIDER_CAPABILITIES = ProviderCapabilities(
     protocol=settings.ai_provider_protocol,
@@ -30,6 +34,20 @@ DEFAULT_PROVIDER_CAPABILITIES = ProviderCapabilities(
     streaming=True,
     reasoning_mode=settings.openai_reasoning_mode,
 )
+
+
+def provider_capabilities(config: dict) -> ProviderCapabilities:
+    return ProviderCapabilities(
+        protocol=config["provider_protocol"],
+        api_mode=(
+            "messages"
+            if config["provider_protocol"] == "anthropic"
+            else config["api_mode"]
+        ),
+        structured_output=True,
+        streaming=True,
+        reasoning_mode=config["reasoning_mode"],
+    )
 
 
 def build_provider_adapter(
@@ -53,27 +71,112 @@ def build_provider_adapter(
     )
 
 
-def create_app(database_url: str | None = None, ai=None, source_verifier=None, attachment_storage=None):
+def create_app(
+    database_url: str | None = None,
+    ai=None,
+    source_verifier=None,
+    attachment_storage=None,
+    runtime_settings_path=None,
+):
     engine, sessions = build_database(database_url or settings.database_url)
-    adapter = ai or (
-        build_provider_adapter(
-            settings.openai_api_key,
-            settings.openai_model,
-            settings.openai_base_url,
-            DEFAULT_PROVIDER_CAPABILITIES,
-        )
-        if settings.openai_api_key
-        else LocalDemoAdapter()
-    )
-    initial_runtime = {
-        "mode": "injected" if ai is not None else ("provider" if settings.openai_api_key else "demo"),
-        "api_key": "" if ai is not None else settings.openai_api_key,
-        "base_url": "" if ai is not None else settings.openai_base_url,
-        "provider_model": adapter.model if adapter.configured else settings.openai_model,
-        "capabilities": getattr(adapter, "capabilities", DEFAULT_PROVIDER_CAPABILITIES),
+    if runtime_settings_path is False:
+        runtime_store = None
+    elif runtime_settings_path is not None:
+        runtime_store = RuntimeSettingsStore(Path(runtime_settings_path))
+    elif ai is None and database_url is None:
+        runtime_store = RuntimeSettingsStore(settings.runtime_ai_config_path)
+    else:
+        runtime_store = None
+
+    saved_runtime = runtime_store.load() if runtime_store else None
+    environment_runtime = {
+        "mode": "provider" if settings.openai_api_key else "demo",
+        "api_key": settings.openai_api_key,
+        "base_url": settings.openai_base_url,
+        "provider_model": settings.openai_model,
+        "provider_protocol": settings.ai_provider_protocol,
+        "api_mode": (
+            "messages"
+            if settings.ai_provider_protocol == "anthropic"
+            else settings.openai_api_mode
+        ),
+        "reasoning_mode": settings.openai_reasoning_mode,
     }
+    configured_runtime = saved_runtime or environment_runtime
+    configured_capabilities = provider_capabilities(configured_runtime)
+    if ai is not None:
+        adapter = ai
+        initial_runtime = {
+            "mode": "injected",
+            "api_key": "",
+            "base_url": "",
+            "provider_model": adapter.model,
+            "capabilities": getattr(
+                adapter,
+                "capabilities",
+                DEFAULT_PROVIDER_CAPABILITIES,
+            ),
+        }
+    else:
+        adapter = (
+            build_provider_adapter(
+                configured_runtime["api_key"],
+                configured_runtime["provider_model"],
+                configured_runtime["base_url"],
+                configured_capabilities,
+            )
+            if configured_runtime["mode"] == "provider"
+            else LocalDemoAdapter()
+        )
+        initial_runtime = {
+            "mode": configured_runtime["mode"],
+            "api_key": configured_runtime["api_key"],
+            "base_url": configured_runtime["base_url"],
+            "provider_model": configured_runtime["provider_model"],
+            "capabilities": configured_capabilities,
+        }
     verifier = source_verifier or (HttpSourceVerifier() if adapter.configured else AcceptingSourceVerifier())
     storage = attachment_storage or LocalAttachmentStorage(settings.attachment_storage_dir, settings.attachment_max_bytes)
+
+    async def learning_task_worker(app: FastAPI):
+        while not app.state.learning_task_stop.is_set():
+            app.state.learning_task_wakeup.clear()
+            while not app.state.learning_task_stop.is_set():
+                with sessions() as db:
+                    worker_service = SlowService(
+                        db,
+                        app.state.ai,
+                        app.state.source_verifier,
+                        app.state.attachment_storage,
+                        user_id=DEMO_USER_ID,
+                    )
+                    task_ids = worker_service.recoverable_learning_task_ids()
+                if not task_ids:
+                    break
+                for task_id in task_ids:
+                    if app.state.learning_task_stop.is_set():
+                        break
+                    with sessions() as db:
+                        task = db.get(LearningTask, task_id)
+                        if not task:
+                            continue
+                        worker_service = SlowService(
+                            db,
+                            app.state.ai,
+                            app.state.source_verifier,
+                            app.state.attachment_storage,
+                            user_id=task.user_id,
+                        )
+                        await worker_service.execute_learning_task(task_id)
+            if app.state.learning_task_stop.is_set():
+                break
+            try:
+                await asyncio.wait_for(
+                    app.state.learning_task_wakeup.wait(),
+                    timeout=1,
+                )
+            except TimeoutError:
+                pass
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -87,12 +190,21 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
                 user_id=DEMO_USER_ID,
             )
             startup_service.ensure_seed()
-            await startup_service.recover_note_tasks()
         app.state.sessions, app.state.ai, app.state.source_verifier, app.state.attachment_storage = sessions, adapter, verifier, storage
         app.state.ai_runtime = initial_runtime
+        app.state.runtime_store = runtime_store
         app.state.retired_ai = []
         app.state.runtime_verifier_managed = source_verifier is None
+        app.state.learning_task_wakeup = asyncio.Event()
+        app.state.learning_task_stop = asyncio.Event()
+        worker = asyncio.create_task(learning_task_worker(app))
+        app.state.learning_task_wakeup.set()
         yield
+        app.state.learning_task_stop.set()
+        app.state.learning_task_wakeup.set()
+        worker.cancel()
+        with suppress(asyncio.CancelledError):
+            await worker
         seen = set()
         for candidate in [app.state.ai, *app.state.retired_ai]:
             if id(candidate) not in seen and hasattr(candidate, "close"):
@@ -186,7 +298,7 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
             "providerModel": runtime["provider_model"],
             "baseUrl": runtime["base_url"],
             "apiKeyStored": bool(runtime["api_key"]),
-            "ephemeral": True,
+            "ephemeral": request.app.state.runtime_store is None,
             "apiMode": capabilities.api_mode,
             "providerProtocol": capabilities.protocol,
             "reasoningMode": capabilities.reasoning_mode,
@@ -260,6 +372,16 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
                 "provider_model": body.model.strip(),
                 "capabilities": capabilities,
             }
+        if request.app.state.runtime_store:
+            try:
+                request.app.state.runtime_store.save(next_runtime)
+            except Exception as error:
+                await candidate.close()
+                raise AppError(
+                    "AI 配置验证成功，但无法保存到本机服务端",
+                    code="AI_RUNTIME_PERSIST_FAILED",
+                    status=500,
+                ) from error
         previous = request.app.state.ai
         request.app.state.ai = candidate
         request.app.state.ai_runtime = next_runtime
@@ -323,12 +445,15 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
 
     @app.post("/api/sections/{section_id}/quiz")
     async def quiz(
+        request: Request,
         section_id: str,
         body: QuizSubmit,
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
         s: SlowService = Depends(service),
     ):
-        return await s.submit_quiz(section_id, body, idempotency_key)
+        result = await s.submit_quiz(section_id, body, idempotency_key)
+        request.app.state.learning_task_wakeup.set()
+        return result
 
     @app.post("/api/sections/{section_id}/ask")
     async def ask(section_id: str, body: AskRequest, s: SlowService = Depends(service)): return await s.ask(section_id, body)
@@ -393,9 +518,29 @@ def create_app(database_url: str | None = None, ai=None, source_verifier=None, a
     @app.patch("/api/sections/{section_id}/note")
     def note(section_id: str, body: NoteUpdate, s: SlowService = Depends(service)): return s.update_note(section_id, body.content)
 
+    @app.get("/api/learning-tasks/{task_id}")
+    def learning_task(task_id: str, s: SlowService = Depends(service)):
+        return s.learning_task(task_id)
+
+    @app.post("/api/learning-tasks/{task_id}/retry")
+    def retry_learning_task(
+        task_id: str,
+        request: Request,
+        s: SlowService = Depends(service),
+    ):
+        result = s.retry_learning_task(task_id)
+        request.app.state.learning_task_wakeup.set()
+        return result
+
     @app.post("/api/note-tasks/{task_id}/retry")
-    async def retry_note_task(task_id: str, s: SlowService = Depends(service)):
-        return await s.retry_note_task(task_id)
+    def retry_note_task(
+        task_id: str,
+        request: Request,
+        s: SlowService = Depends(service),
+    ):
+        result = s.retry_note_task(task_id)
+        request.app.state.learning_task_wakeup.set()
+        return result
 
     return app
 
