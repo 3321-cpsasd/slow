@@ -203,6 +203,74 @@ class GenerationRun(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class AiInvocation(Base):
+    """One physical request sent to an AI provider."""
+
+    __tablename__ = "ai_invocations"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    api_mode: Mapped[str] = mapped_column(String(32))
+    model: Mapped[str] = mapped_column(String(160), index=True)
+    operation: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    usage_status: Mapped[str] = mapped_column(String(24), index=True)
+    attribution_status: Mapped[str] = mapped_column(String(32), index=True)
+    actor_kind: Mapped[str] = mapped_column(String(32), default="")
+    actor_id: Mapped[str] = mapped_column(String(160), default="")
+    subject_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id"),
+        index=True,
+        nullable=True,
+    )
+    provider_response_id: Mapped[str] = mapped_column(String(200), default="")
+    error_code: Mapped[str] = mapped_column(String(80), default="")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    metering_schema_version: Mapped[str] = mapped_column(String(24), default="v1")
+
+
+class AiUsageMeasurement(Base):
+    """Append-only observation of usage for an invocation."""
+
+    __tablename__ = "ai_usage_measurements"
+    __table_args__ = (
+        UniqueConstraint(
+            "invocation_id",
+            "source",
+            "measurement_version",
+            name="uq_ai_usage_measurement_source_version",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    invocation_id: Mapped[str] = mapped_column(
+        ForeignKey("ai_invocations.id"),
+        index=True,
+    )
+    source: Mapped[str] = mapped_column(String(32), index=True)
+    quality: Mapped[str] = mapped_column(String(24), index=True)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cached_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_write_5m_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_write_1h_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reasoning_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    raw_usage_json: Mapped[str] = mapped_column(Text, default="{}")
+    measurement_version: Mapped[str] = mapped_column(String(24), default="v1")
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class GenerationLease(Base):
+    """Database-backed cross-request mutex with crash recovery."""
+
+    __tablename__ = "generation_leases"
+    resource_key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    owner_id: Mapped[str] = mapped_column(String(80), unique=True)
+    acquired_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+
+
 class QuizSet(Base):
     __tablename__ = "quiz_sets"
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -332,7 +400,11 @@ class LearningTask(Base):
         index=True,
     )
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
-    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    section_id: Mapped[str | None] = mapped_column(
+        ForeignKey("sections.id"),
+        index=True,
+        nullable=True,
+    )
     task_type: Mapped[str] = mapped_column(String(40), index=True)
     idempotency_key: Mapped[str] = mapped_column(String(160))
     trigger_id: Mapped[str] = mapped_column(String(160), index=True)

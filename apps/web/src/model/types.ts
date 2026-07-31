@@ -4,7 +4,15 @@ export type Practice = { id:string; title:string; instructions:Record<string,unk
 export type Capstone = { id:string; title:string; brief:Record<string,unknown>; submission:Record<string,unknown>; attachments:Attachment[]; evidenceMode:'file_attachment'|'structured_only_legacy'; status:string };
 export type Chapter = { id:string; position:number; title:string; objective:string; status:string; generated:boolean; sections:SectionSummary[]; practice:null|Practice };
 export type Book = { id:string; position:number; title:string; description:string; estimatedMinutes:number; status:string; progress:number; practiceProgress:number; chapters:Chapter[]; capstone:null|Capstone };
-export type Series = { id:string; title:string; rationale:string; progress:number; progressBasis?:string; books:Book[] };
+export type Series = {
+  id:string;
+  title:string;
+  rationale:string;
+  progress:number;
+  progressBasis?:string;
+  books:Book[];
+  initializationTask?:LearningTask|null;
+};
 export type Shelf = { id:string; name:string; domain:string; specialty:string; tags:string[]; series:Series[] };
 export type Bootstrap = { user:{id:string;name:string}; shelves:Shelf[] };
 export type AiRuntime = {
@@ -31,8 +39,8 @@ export type AskMe = {id:string;status:string;round:number;dimension:string;promp
 export type Section = SectionSummary & { generation:null|Generation; content:null|{id:string;version:number;blocks:Block[];sources:Source[];sourceVerification:{url:string;reachable:boolean;statusCode:number;pinned:boolean}[];confidence:string}; quiz:null|{id:string;generation:number;questions:Question[]}; remediations:Remediation[]; note:null|Note };
 export type LearningTask = {
   taskId:string;
-  type:'note_generation'|'remediation_generation'|'next_section_preload';
-  sectionId:string;
+  type:'initial_book_preload'|'note_generation'|'remediation_generation'|'next_section_preload';
+  sectionId:string|null;
   status:'pending'|'running'|'succeeded'|'failed';
   attemptCount?:number;
   maxAttempts?:number;

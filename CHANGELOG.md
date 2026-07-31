@@ -8,6 +8,12 @@ Slow 的重要变更记录在这里。本项目采用 [Keep a Changelog](https:/
 
 ### Added · 新增
 
+- Added durable first-lesson preloading: a new learning plan now queues its first chapter outline, lesson content, sources, and quiz immediately, while the UI tracks the task and opens the prepared section automatically.
+- 新增持久化首节预生成：学习计划创建后立即排队生成首章小节、第一节正文、来源与测验；前端持续跟踪任务，并在完成后自动打开首节。
+- Added a provider-neutral structured-output repair harness: schema failures now trigger bounded repair-only calls with field-level validation feedback, fail closed after the retry budget, and persist privacy-safe attempt metadata and output digests in generation traces.
+- 新增供应商无关的结构化输出修复 Harness：Schema 失败后执行有上限的纯修复调用，携带字段级校验反馈；耗尽预算后明确失败，并在生成轨迹中持久化不含原文的尝试元数据与输出摘要。
+- Re-ran the previously failed real-model section with the new harness; content, quiz, stable block IDs, and reachable sources all passed without duplicate persisted versions.
+- 使用新 Harness 重新运行此前失败的真实模型小节；正文、题集、稳定内容块 ID 与来源可达性均通过，且未产生重复持久化版本。
 - Added GitHub Actions CI/CD for API tests, Web builds, immutable GHCR images, and health-checked Alibaba Cloud ECS deployment with SQLite backups and image rollback.
 - 新增 GitHub Actions CI/CD：覆盖 API 测试、Web 构建、不可变 GHCR 镜像，以及带 SQLite 备份、健康检查和镜像回滚的阿里云 ECS 部署。
 - Added a durable post-quiz task queue for non-blocking note generation, remediation, equivalent-quiz generation, and automatic next-section preloading, with recovery, idempotency, status polling, and safe retry.
@@ -29,5 +35,11 @@ Slow 的重要变更记录在这里。本项目采用 [Keep a Changelog](https:/
 
 ### Changed · 调整
 
+- Added database-backed generation leases so refreshes, multiple tabs, or
+  multiple workers cannot start duplicate chapter or section model calls; stale
+  leases expire for safe recovery.
+- 新增数据库生成租约：刷新、多标签页或多进程不会重复启动同一章/节的模型调用；中断后的过期租约可安全恢复。
+- Prevented repeated chapter-generation submissions while a request or initial preload is already active, avoiding duplicate concurrent model calls from rapid clicks.
+- 在章节生成请求或首节预生成进行中锁定重复提交，避免连续点击触发并发模型调用。
 - Bound the local project to `https://github.com/3321-cpsasd/slow.git` as the `origin` remote.
 - 将本地项目的 `origin` 远程仓库绑定为 `https://github.com/3321-cpsasd/slow.git`。

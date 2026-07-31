@@ -39,6 +39,9 @@ export default function App() {
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [showAiSettings, setShowAiSettings] = useState(false);
+  const [preparingInitialSection, setPreparingInitialSection] = useState(false);
+  const [generatingChapterId, setGeneratingChapterId] = useState('');
+  const chapterGenerationRequests = useRef(new Set<string>());
 
   useEffect(() => {
     api.bootstrap().then(setData).catch((reason) => setError(reason.message));
@@ -78,10 +81,56 @@ export default function App() {
     return null;
   };
 
+  const monitorInitialSection = async (value: Series) => {
+    const initialTask = value.initializationTask;
+    if (!initialTask || initialTask.status === 'failed') return false;
+    setPreparingInitialSection(true);
+    setBusy('正在准备第一节，完成后自动打开…');
+    setError('');
+    try {
+      let task = initialTask;
+      for (let poll = 0; poll < 360; poll += 1) {
+        if (!['succeeded', 'failed'].includes(task.status)) {
+          task = await api.learningTask(task.taskId);
+        }
+        if (task.status === 'succeeded') {
+          const refreshed = await api.series(value.id);
+          setSeries(refreshed);
+          const targetSectionId = typeof task.result?.targetSectionId === 'string'
+            ? task.result.targetSectionId
+            : firstUsableSection(refreshed);
+          if (targetSectionId) setSection(await api.section(targetSectionId));
+          return true;
+        }
+        if (task.status === 'failed') {
+          const refreshed = await api.series(value.id);
+          setSeries(refreshed);
+          const fallbackSectionId = firstUsableSection(refreshed);
+          if (fallbackSectionId) setSection(await api.section(fallbackSectionId));
+          setError('第一节后台准备失败。目录已经保存，可以从第一章安全重试。');
+          return true;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      }
+      setError('第一节仍在后台准备，可以稍后重新进入本书查看。');
+      return true;
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '无法读取第一节准备状态。');
+      return true;
+    } finally {
+      setPreparingInitialSection(false);
+      setBusy('');
+    }
+  };
+
   const openSeries = async (seriesId: string) => {
     const value = await run('正在进入学习空间…', () => api.series(seriesId));
     setSeries(value);
     setView('learn');
+    if (value.initializationTask && value.initializationTask.status !== 'failed') {
+      void monitorInitialSection(value);
+      return;
+    }
     const initial = firstUsableSection(value);
     if (initial) await loadSection(initial);
     else setSection(null);
@@ -94,10 +143,21 @@ export default function App() {
   };
 
   const openChapter = async (chapter: Chapter) => {
-    const updated = await run('正在规划本章小节…', () => api.chapter(chapter.id));
-    await refreshSeries();
-    const first = updated.sections.find((item) => item.status !== 'locked');
-    if (first) await loadSection(first.id);
+    if (
+      preparingInitialSection ||
+      chapterGenerationRequests.current.has(chapter.id)
+    ) return;
+    chapterGenerationRequests.current.add(chapter.id);
+    setGeneratingChapterId(chapter.id);
+    try {
+      const updated = await run('正在规划本章小节…', () => api.chapter(chapter.id));
+      await refreshSeries();
+      const first = updated.sections.find((item) => item.status !== 'locked');
+      if (first) await loadSection(first.id);
+    } finally {
+      chapterGenerationRequests.current.delete(chapter.id);
+      setGeneratingChapterId('');
+    }
   };
 
   const generateSection = async (sectionId: string) => {
@@ -153,6 +213,7 @@ export default function App() {
               setSeries(value);
               setSection(null);
               setView('learn');
+              void monitorInitialSection(value);
             }}
             onOpen={openSeries}
             onDelete={async (seriesId) => {
@@ -174,6 +235,8 @@ export default function App() {
             onSelectSection={loadSection}
             onGenerateSection={generateSection}
             onGenerateChapter={openChapter}
+            chapterGenerationDisabled={preparingInitialSection}
+            generatingChapterId={generatingChapterId}
             onSectionChange={setSection}
             onRefreshSeries={refreshSeries}
             onDeleteBook={async (bookId) => {
@@ -643,6 +706,8 @@ function LearningWorkspace({
   onSelectSection,
   onGenerateSection,
   onGenerateChapter,
+  chapterGenerationDisabled,
+  generatingChapterId,
   onSectionChange,
   onRefreshSeries,
   onDeleteBook,
@@ -652,6 +717,8 @@ function LearningWorkspace({
   onSelectSection: (id: string) => Promise<Section>;
   onGenerateSection: (id: string) => Promise<void>;
   onGenerateChapter: (chapter: Chapter) => Promise<void>;
+  chapterGenerationDisabled: boolean;
+  generatingChapterId: string;
   onSectionChange: (section: Section) => void;
   onRefreshSeries: () => Promise<void>;
   onDeleteBook: (bookId: string) => Promise<void>;
@@ -678,6 +745,8 @@ function LearningWorkspace({
         currentSectionId={section?.id}
         onSelectSection={onSelectSection}
         onGenerateChapter={onGenerateChapter}
+        chapterGenerationDisabled={chapterGenerationDisabled}
+        generatingChapterId={generatingChapterId}
         onRefreshSeries={onRefreshSeries}
         onDeleteBook={onDeleteBook}
       />
@@ -753,6 +822,8 @@ function DirectoryPanel({
   currentSectionId,
   onSelectSection,
   onGenerateChapter,
+  chapterGenerationDisabled,
+  generatingChapterId,
   onRefreshSeries,
   onDeleteBook,
 }: {
@@ -760,6 +831,8 @@ function DirectoryPanel({
   currentSectionId?: string;
   onSelectSection: (id: string) => Promise<Section>;
   onGenerateChapter: (chapter: Chapter) => Promise<void>;
+  chapterGenerationDisabled: boolean;
+  generatingChapterId: string;
   onRefreshSeries: () => Promise<void>;
   onDeleteBook: (bookId: string) => Promise<void>;
 }) {
@@ -793,6 +866,8 @@ function DirectoryPanel({
             currentSectionId={currentSectionId}
             onSelectSection={onSelectSection}
             onGenerateChapter={onGenerateChapter}
+            chapterGenerationDisabled={chapterGenerationDisabled}
+            generatingChapterId={generatingChapterId}
             onRefreshSeries={onRefreshSeries}
             onRequestDelete={setDeleteTarget}
           />
@@ -851,6 +926,8 @@ function BookTree({
   currentSectionId,
   onSelectSection,
   onGenerateChapter,
+  chapterGenerationDisabled,
+  generatingChapterId,
   onRefreshSeries,
   onRequestDelete,
 }: {
@@ -858,6 +935,8 @@ function BookTree({
   currentSectionId?: string;
   onSelectSection: (id: string) => Promise<Section>;
   onGenerateChapter: (chapter: Chapter) => Promise<void>;
+  chapterGenerationDisabled: boolean;
+  generatingChapterId: string;
   onRefreshSeries: () => Promise<void>;
   onRequestDelete: (book: Book) => void;
 }) {
@@ -892,10 +971,15 @@ function BookTree({
                 <button
                   className="chapter-title chapter-entry"
                   aria-label={`生成并进入 ${chapter.title}`}
+                  disabled={chapterGenerationDisabled || generatingChapterId === chapter.id}
                   onClick={() => onGenerateChapter(chapter)}
                 >
                   <span>{book.position}.{chapter.position}</span>
-                  <b>{chapter.title}</b>
+                  <b>
+                    {generatingChapterId === chapter.id
+                      ? '正在规划本章小节…'
+                      : chapter.title}
+                  </b>
                   <GenerateIcon />
                 </button>
               )}

@@ -102,6 +102,37 @@ def test_complete_real_shape_vertical_slice(client):
     assert client.get("/api/learning-memory?shelf_id=shelf_technology").json()
 
 
+def test_new_plan_preloads_first_lesson_in_durable_background_task(client):
+    response = client.post(
+        "/api/plans",
+        json={
+            "shelfId": "shelf_technology",
+            "topic": "首节体验",
+            "role": "技术人员",
+            "experience": "会 Docker",
+            "purpose": "立即开始学习",
+            "depth": "deep",
+        },
+    )
+    assert response.status_code == 201
+    series = response.json()
+    task = series["initializationTask"]
+    assert task["type"] == "initial_book_preload"
+    assert task["sectionId"] is None
+    completed = wait_for_task(client, task["taskId"])
+    assert completed["status"] == "succeeded"
+
+    refreshed = client.get(f"/api/series/{series['id']}").json()
+    first_chapter = refreshed["books"][0]["chapters"][0]
+    assert first_chapter["generated"] is True
+    first_section = client.get(
+        f"/api/sections/{first_chapter['sections'][0]['id']}"
+    ).json()
+    assert first_section["content"] is not None
+    assert first_section["quiz"] is not None
+    assert completed["result"]["targetSectionId"] == first_section["id"]
+
+
 def test_quiz_exposes_selection_mode_without_leaking_answers(tmp_path):
     class MixedChoiceAi(FakeAi):
         async def lesson(self, request, memory, prior_questions=None):
@@ -595,7 +626,7 @@ def test_library_read_model_has_fixed_query_budget_and_no_writes(client):
         event.remove(engine, "before_cursor_execute", record_statement)
 
     assert response.status_code == 200
-    assert sum(item.startswith("SELECT") for item in statements) <= 7
+    assert sum(item.startswith("SELECT") for item in statements) <= 8
     assert not any(
         item.startswith(("INSERT", "UPDATE", "DELETE"))
         for item in statements
@@ -762,6 +793,60 @@ class FailingLessonAi(FakeAi):
     async def lesson(self, request, memory, prior_questions=None):
         raise RuntimeError("simulated provider failure")
 
+    def structured_trace(self):
+        return [
+            {
+                "schema": "GeneratedContent",
+                "attempts": 2,
+                "repairAttempts": 1,
+                "outcome": "provider_failed",
+                "invalidOutputDigests": ["fedcba9876543210"],
+                "lastValidationIssues": [],
+            }
+        ]
+
+
+class HarnessTraceAi(FakeAi):
+    def structured_trace(self):
+        return [
+            {
+                "schema": "GeneratedContent",
+                "attempts": 2,
+                "repairAttempts": 1,
+                "outcome": "succeeded",
+                "invalidOutputDigests": ["0123456789abcdef"],
+                "lastValidationIssues": [
+                    {
+                        "path": "blocks",
+                        "type": "too_short",
+                        "message": "List should have at least 5 items",
+                    }
+                ],
+            }
+        ]
+
+
+def test_generation_persists_safe_structured_harness_audit():
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            HarnessTraceAi(),
+            AcceptingSourceVerifier(),
+        )
+    ) as harness_client:
+        series = create_series(harness_client)
+        chapter = harness_client.post(
+            f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+        ).json()
+        section = harness_client.post(
+            f"/api/sections/{chapter['sections'][0]['id']}/generate"
+        ).json()
+
+    trace = section["generation"]["trace"]["aiHarness"]
+    assert trace[0]["repairAttempts"] == 1
+    assert trace[0]["invalidOutputDigests"] == ["0123456789abcdef"]
+    assert "invalid_output" not in json.dumps(trace)
+
 
 def test_generation_failure_is_observable_and_retry_safe():
     with TestClient(create_app("sqlite+pysqlite:///:memory:", FailingLessonAi(), AcceptingSourceVerifier()), raise_server_exceptions=False) as failing:
@@ -776,6 +861,10 @@ def test_generation_failure_is_observable_and_retry_safe():
         assert state["content"] is None
         assert state["generation"]["status"] == "failed"
         assert state["generation"]["errorCode"] == "RuntimeError"
+        assert (
+            state["generation"]["trace"]["aiHarness"][0]["outcome"]
+            == "provider_failed"
+        )
 
 
 class DuplicateRetryAi(FakeAi):

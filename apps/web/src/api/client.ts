@@ -1,6 +1,6 @@
-const BASE = import.meta.env.VITE_API_URL ?? (
-  import.meta.env.PROD ? '' : 'http://127.0.0.1:8000'
-);
+const BASE = import.meta.env.VITE_API_URL ?? '';
+
+const API_UNAVAILABLE_MESSAGE = '无法连接 API 服务。请启动后端，然后刷新页面重试。';
 
 export class ApiError extends Error {
   constructor(
@@ -15,17 +15,40 @@ export class ApiError extends Error {
   }
 }
 
+async function request(path:string, init?:RequestInit):Promise<Response>{
+  try {
+    return await fetch(`${BASE}${path}`, init);
+  } catch (reason) {
+    if (reason instanceof TypeError) {
+      throw new ApiError(API_UNAVAILABLE_MESSAGE, 0, 'API_UNREACHABLE', true);
+    }
+    throw reason;
+  }
+}
+
+function parsePayload(text:string):Record<string,unknown>|undefined {
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text) as Record<string,unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
 async function call<T>(path:string, init?:RequestInit):Promise<T>{
-  const response = await fetch(`${BASE}${path}`, {headers:{'Content-Type':'application/json'}, ...init});
+  const response = await request(path, {headers:{'Content-Type':'application/json'}, ...init});
   const text = await response.text();
-  const payload = text ? JSON.parse(text) : undefined;
+  const payload = parsePayload(text);
   if(!response.ok) {
+    const apiUnavailable = !payload && response.status >= 500;
     throw new ApiError(
-      payload?.message || payload?.error || '请求失败',
+      apiUnavailable
+        ? API_UNAVAILABLE_MESSAGE
+        : String(payload?.message || payload?.error || '请求失败'),
       response.status,
-      payload?.code || 'UNKNOWN_ERROR',
+      apiUnavailable ? 'API_UNREACHABLE' : String(payload?.code || 'UNKNOWN_ERROR'),
       Boolean(payload?.retryable),
-      payload?.operationId || undefined,
+      payload?.operationId ? String(payload.operationId) : undefined,
     );
   }
   return payload as T;
@@ -36,15 +59,25 @@ async function streamQa(
   body:object,
   onDelta:(delta:string)=>void,
 ):Promise<{sessionId:string;threadId:string;relation:string}>{
-  const response = await fetch(`${BASE}${path}`, {
+  const response = await request(path, {
     method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify(body),
   });
   if(!response.ok){
     const text = await response.text();
-    const payload = text ? JSON.parse(text) : undefined;
-    throw new Error(payload?.error || '答疑发送失败');
+    const payload = parsePayload(text);
+    throw new ApiError(
+      !payload && response.status >= 500
+        ? API_UNAVAILABLE_MESSAGE
+        : String(payload?.message || payload?.error || '答疑发送失败'),
+      response.status,
+      !payload && response.status >= 500
+        ? 'API_UNREACHABLE'
+        : String(payload?.code || 'UNKNOWN_ERROR'),
+      Boolean(payload?.retryable),
+      payload?.operationId ? String(payload.operationId) : undefined,
+    );
   }
   if(!response.body) throw new Error('浏览器不支持流式答疑');
   const reader = response.body.getReader();

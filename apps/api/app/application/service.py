@@ -26,6 +26,7 @@ from ..infrastructure.tables import (
     LearningEvidence,
     LearningMemory,
     LearningNote,
+    LearningRun,
     LearningTask,
     LearningPlan,
     PlanCreationRequest,
@@ -45,6 +46,10 @@ from ..infrastructure.tables import (
 from ..modules.library.context import ActiveLearningContextResolver
 from ..modules.artifacts.progress import ArtifactProgressStore
 from ..modules.learning.commands import SubmitQuiz
+from ..modules.learning.generation_leases import (
+    acquire_generation_lease,
+    release_generation_lease,
+)
 from ..modules.learning.progress import ProgressStore
 from ..modules.learning.tasks import (
     claim_task,
@@ -218,6 +223,7 @@ class SlowService:
         self.db.flush()
         learning_run = self.progress.create_run(series.id)
         self.db.flush()
+        initial_chapter_id = None
         for book_position, item in enumerate(generated.books, 1):
             book = Book(
                 id=uid("book"),
@@ -274,11 +280,39 @@ class SlowService:
                         else "locked"
                     ),
                 )
+                if book_position == 1 and chapter_position == 1:
+                    initial_chapter_id = chapter_row.id
+        if initial_chapter_id:
+            self.db.add(
+                LearningTask(
+                    id=uid("task"),
+                    learning_run_id=learning_run.id,
+                    section_id=None,
+                    user_id=self.user_id,
+                    task_type="initial_book_preload",
+                    idempotency_key=f"initial-book:{series.id}",
+                    trigger_id=plan.id,
+                    payload_json=dump({"chapterId": initial_chapter_id}),
+                    status="pending",
+                )
+            )
         self.db.commit()
         return self.series(series.id)
 
     def series(self, series_id):
-        return self.library_reads.series(series_id)
+        view = self.library_reads.series(series_id)
+        task = self.db.scalar(
+            select(LearningTask)
+            .join(LearningRun, LearningRun.id == LearningTask.learning_run_id)
+            .where(
+                LearningRun.series_id == series_id,
+                LearningTask.user_id == self.user_id,
+                LearningTask.task_type == "initial_book_preload",
+            )
+            .order_by(LearningTask.created_at.desc())
+        )
+        view["initializationTask"] = task_view(task) if task else None
+        return view
 
     def delete_series(self, series_id):
         series = self.contexts.resolve_series(user_id=self.user_id, series_id=series_id).series
@@ -567,6 +601,30 @@ class SlowService:
         return self.book(book.id)
 
     async def generate_chapter(self, chapter_id):
+        chapter_context = self.contexts.resolve_chapter(
+            user_id=self.user_id,
+            chapter_id=chapter_id,
+        )
+        if self.db.scalar(
+            select(func.count())
+            .select_from(Section)
+            .where(Section.chapter_id == chapter_id)
+        ):
+            return self._chapter(chapter_context.chapter)
+        resource_key = f"chapter:{chapter_id}"
+        owner_id = acquire_generation_lease(self.db, resource_key)
+        if owner_id is None:
+            raise AppError(
+                "本章正在生成，请等待当前任务完成",
+                code="GENERATION_IN_PROGRESS",
+                status=409,
+            )
+        try:
+            return await self._generate_chapter_locked(chapter_id)
+        finally:
+            release_generation_lease(self.db, resource_key, owner_id)
+
+    async def _generate_chapter_locked(self, chapter_id):
         chapter_context = self.contexts.resolve_chapter(user_id=self.user_id, chapter_id=chapter_id)
         chapter = chapter_context.chapter
         if self.progress.for_chapter(chapter, chapter_context.book).status == "locked":
@@ -627,6 +685,35 @@ class SlowService:
         return self._chapter(chapter)
 
     async def generate_section(self, section_id, retry=False, retry_attempt_id=None):
+        resource_key = f"section:{section_id}"
+        owner_id = acquire_generation_lease(self.db, resource_key)
+        if owner_id is None:
+            if not retry and self.db.scalar(
+                select(ContentVersion)
+                .where(ContentVersion.section_id == section_id)
+                .order_by(ContentVersion.version.desc())
+            ):
+                return self.section(section_id)
+            raise AppError(
+                "本节正在生成，请等待当前任务完成",
+                code="GENERATION_IN_PROGRESS",
+                status=409,
+            )
+        try:
+            return await self._generate_section_locked(
+                section_id,
+                retry=retry,
+                retry_attempt_id=retry_attempt_id,
+            )
+        finally:
+            release_generation_lease(self.db, resource_key, owner_id)
+
+    async def _generate_section_locked(
+        self,
+        section_id,
+        retry=False,
+        retry_attempt_id=None,
+    ):
         section_context = self.contexts.resolve_section(
             user_id=self.user_id,
             section_id=section_id,
@@ -669,6 +756,7 @@ class SlowService:
             lesson = None
             verification = []
             rejected_source_urls: list[str] = []
+            ai_harness_trace: list[dict] = []
             max_generation_attempts = 4
             for novelty_attempt in range(1, max_generation_attempts + 1):
                 memory = self._memory(book.shelf_id)
@@ -679,7 +767,8 @@ class SlowService:
                 if retry:
                     lesson_request["remediationStrategy"] = remediation_strategy
                 lesson = await self.ai.lesson(lesson_request, memory, prior)
-                run.trace_json = dump({"stage": "source_verification", "retry": retry, "noveltyAttempt": novelty_attempt, "sourceUrls": [item.url for item in lesson.sources], **memory_trace})
+                ai_harness_trace = self._ai_harness_trace()
+                run.trace_json = dump({"stage": "source_verification", "retry": retry, "noveltyAttempt": novelty_attempt, "sourceUrls": [item.url for item in lesson.sources], "aiHarness": ai_harness_trace, **memory_trace})
                 self.db.commit()
                 try:
                     verification = await self.source_verifier.verify(lesson.sources)
@@ -752,7 +841,7 @@ class SlowService:
                     )
                 )
             run.status, run.finished_at = "succeeded", now()
-            run.trace_json = dump({"stage": "persisted", "contentVersionId": content.id if content else None, "quizSetId": quiz.id, "sourceVerification": verification, **memory_trace})
+            run.trace_json = dump({"stage": "persisted", "contentVersionId": content.id if content else None, "quizSetId": quiz.id, "sourceVerification": verification, "aiHarness": ai_harness_trace, **memory_trace})
             self.db.commit()
             return self.section(section.id)
         except BaseException as error:
@@ -769,7 +858,12 @@ class SlowService:
                 )
                 run.finished_at = now()
                 previous_trace = load(run.trace_json, {})
-                run.trace_json = dump({**previous_trace, "stage": "failed"})
+                harness_trace = self._ai_harness_trace()
+                run.trace_json = dump({
+                    **previous_trace,
+                    "stage": "failed",
+                    **({"aiHarness": harness_trace} if harness_trace else {}),
+                })
                 self.db.commit()
             if isinstance(error, AppError):
                 if error.operation_id is None:
@@ -781,6 +875,13 @@ class SlowService:
                 "小节生成失败；失败状态已保存，可安全重试",
                 operation_id=operation_id,
             ) from error
+
+    def _ai_harness_trace(self) -> list[dict]:
+        trace = getattr(self.ai, "structured_trace", None)
+        if not callable(trace):
+            return []
+        value = trace()
+        return value if isinstance(value, list) else []
 
     def _questions_are_novel(self, prior, current):
         if not prior or len(prior) != len(current):
@@ -908,7 +1009,9 @@ class SlowService:
             return self.learning_task(task_id)
         payload = load(task.payload_json, {})
         try:
-            if task.task_type == "note_generation":
+            if task.task_type == "initial_book_preload":
+                result = await self._preload_initial_book(payload.get("chapterId"))
+            elif task.task_type == "note_generation":
                 context = self.contexts.resolve_section(
                     user_id=task.user_id,
                     section_id=task.section_id,
@@ -952,6 +1055,28 @@ class SlowService:
             raise
         except Exception as error:
             return task_view(fail_task(self.db, task.id, error))
+
+    async def _preload_initial_book(self, chapter_id):
+        if not chapter_id:
+            raise AppError(
+                "首节预生成任务缺少章节",
+                code="INITIAL_CHAPTER_MISSING",
+                status=500,
+            )
+        await self.generate_chapter(chapter_id)
+        target = self.db.scalar(
+            select(Section)
+            .where(Section.chapter_id == chapter_id)
+            .order_by(Section.position)
+        )
+        if not target:
+            raise AppError(
+                "首章没有可生成的小节",
+                code="INITIAL_SECTION_MISSING",
+                status=500,
+            )
+        await self.generate_section(target.id)
+        return {"targetSectionId": target.id}
 
     async def _preload_next_section(self, source_section_id):
         context = self.contexts.resolve_section(

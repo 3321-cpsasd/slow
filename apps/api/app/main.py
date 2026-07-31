@@ -13,6 +13,7 @@ from .ai.openai_adapter import OpenAiAdapter
 from .ai.anthropic_adapter import AnthropicAdapter
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
+from .ai.metering import AiUsageRecorder
 from .api.schemas import AiRuntimeUpdate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, NoteUpdate, PlanCreate, QaClassificationUpdate, QuizSubmit, ShelfCreate
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
@@ -79,6 +80,7 @@ def create_app(
     runtime_settings_path=None,
 ):
     engine, sessions = build_database(database_url or settings.database_url)
+    usage_recorder = AiUsageRecorder(sessions)
     if runtime_settings_path is False:
         runtime_store = None
     elif runtime_settings_path is not None:
@@ -135,6 +137,8 @@ def create_app(
             "provider_model": configured_runtime["provider_model"],
             "capabilities": configured_capabilities,
         }
+    if hasattr(adapter, "set_usage_recorder"):
+        adapter.set_usage_recorder(usage_recorder)
     verifier = source_verifier or (HttpSourceVerifier() if adapter.configured else AcceptingSourceVerifier())
     storage = attachment_storage or LocalAttachmentStorage(settings.attachment_storage_dir, settings.attachment_max_bytes)
 
@@ -191,6 +195,7 @@ def create_app(
             )
             startup_service.ensure_seed()
         app.state.sessions, app.state.ai, app.state.source_verifier, app.state.attachment_storage = sessions, adapter, verifier, storage
+        app.state.ai_usage_recorder = usage_recorder
         app.state.ai_runtime = initial_runtime
         app.state.runtime_store = runtime_store
         app.state.retired_ai = []
@@ -360,6 +365,8 @@ def create_app(
                 base_url,
                 capabilities,
             )
+            if hasattr(candidate, "set_usage_recorder"):
+                candidate.set_usage_recorder(request.app.state.ai_usage_recorder)
             try:
                 await candidate.check_connection()
             except Exception:
@@ -398,11 +405,14 @@ def create_app(
 
     @app.post("/api/plans", status_code=201)
     async def create_plan(
+        request: Request,
         body: PlanCreate,
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
         s: SlowService = Depends(service),
     ):
-        return await s.create_plan(body, idempotency_key)
+        result = await s.create_plan(body, idempotency_key)
+        request.app.state.learning_task_wakeup.set()
+        return result
 
     @app.get("/api/series/{series_id}")
     def series(series_id: str, s: SlowService = Depends(service)): return s.series(series_id)
