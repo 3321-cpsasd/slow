@@ -6,7 +6,23 @@ export type Chapter = { id:string; position:number; title:string; objective:stri
 export type Book = { id:string; position:number; title:string; description:string; estimatedMinutes:number; status:string; progress:number; practiceProgress:number; chapters:Chapter[]; capstone:null|Capstone };
 export type Series = { id:string; title:string; rationale:string; progress:number; progressBasis?:string; books:Book[] };
 export type Shelf = { id:string; name:string; domain:string; specialty:string; tags:string[]; series:Series[] };
-export type Bootstrap = { user:{id:string;name:string}; shelves:Shelf[] };
+export type ResumePosition = {
+  learningRunId:string;
+  sectionId:string;
+  blockId:string;
+  updatedAt:string;
+};
+export type Bootstrap = {
+  user:{id:string;name:string};
+  shelves:Shelf[];
+  resume:ResumePosition|null;
+};
+export type AuthState = {
+  authenticated:boolean;
+  mode:'demo'|'oidc';
+  user:{id:string;name:string};
+  csrfToken:string;
+};
 export type AiRuntime = {
   mode:'provider'|'demo'|'injected';
   configured:boolean;

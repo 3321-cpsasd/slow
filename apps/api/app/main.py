@@ -1,24 +1,30 @@
 import asyncio
 from contextlib import asynccontextmanager
 from contextlib import suppress
+import hmac
 import json
 from pathlib import Path
 from urllib.parse import urlparse
+from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from sqlalchemy.orm import Session
+from .auth.context import Principal, UserScope, demo_user_scope
+from .auth.oidc import OidcClient
+from .auth.service import IdentityService, OidcStateService, SessionService, token_hash
 from .ai.openai_adapter import OpenAiAdapter
 from .ai.anthropic_adapter import AnthropicAdapter
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
-from .api.schemas import AiRuntimeUpdate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, NoteUpdate, PlanCreate, QaClassificationUpdate, QuizSubmit, ShelfCreate
+from .api.schemas import AiRuntimeUpdate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, NoteUpdate, PlanCreate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ShelfCreate
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
 from .infrastructure.database import build_database
-from .infrastructure.tables import Base, LearningTask
+from .infrastructure.tables import Base, LearningTask, User
+from .modules.learning.tasks import claim_task, heartbeat_task, recoverable_task_ids
 from .services.source_verifier import AcceptingSourceVerifier, HttpSourceVerifier
 from .services.attachment_storage import LocalAttachmentStorage
 from .services.runtime_settings import RuntimeSettingsStore
@@ -77,7 +83,15 @@ def create_app(
     source_verifier=None,
     attachment_storage=None,
     runtime_settings_path=None,
+    *,
+    auth_mode: str | None = None,
+    app_mode: str | None = None,
+    oidc_client=None,
 ):
+    effective_auth_mode = auth_mode or settings.auth_mode
+    effective_app_mode = app_mode or settings.app_mode
+    if effective_app_mode == "production" and effective_auth_mode == "demo":
+        raise RuntimeError("Production mode cannot use demo authentication")
     engine, sessions = build_database(database_url or settings.database_url)
     if runtime_settings_path is False:
         runtime_store = None
@@ -137,37 +151,68 @@ def create_app(
         }
     verifier = source_verifier or (HttpSourceVerifier() if adapter.configured else AcceptingSourceVerifier())
     storage = attachment_storage or LocalAttachmentStorage(settings.attachment_storage_dir, settings.attachment_max_bytes)
+    configured_oidc = oidc_client
+    if effective_auth_mode == "oidc" and configured_oidc is None:
+        configured_oidc = OidcClient(
+            issuer=settings.oidc_issuer,
+            client_id=settings.oidc_client_id,
+            client_secret=settings.oidc_client_secret,
+            redirect_uri=settings.oidc_redirect_uri,
+            scopes=settings.oidc_scopes,
+        )
+        configured_oidc.validate_configuration()
+    worker_id = f"worker_{uuid4().hex}"
+
+    async def task_heartbeat_loop(
+        context,
+        stopped: asyncio.Event,
+    ):
+        while not stopped.is_set():
+            try:
+                await asyncio.wait_for(stopped.wait(), timeout=30)
+                break
+            except TimeoutError:
+                with sessions() as heartbeat_db:
+                    if not heartbeat_task(heartbeat_db, context):
+                        break
 
     async def learning_task_worker(app: FastAPI):
         while not app.state.learning_task_stop.is_set():
             app.state.learning_task_wakeup.clear()
             while not app.state.learning_task_stop.is_set():
                 with sessions() as db:
-                    worker_service = SlowService(
-                        db,
-                        app.state.ai,
-                        app.state.source_verifier,
-                        app.state.attachment_storage,
-                        user_id=DEMO_USER_ID,
-                    )
-                    task_ids = worker_service.recoverable_learning_task_ids()
+                    task_ids = recoverable_task_ids(db)
                 if not task_ids:
                     break
                 for task_id in task_ids:
                     if app.state.learning_task_stop.is_set():
                         break
                     with sessions() as db:
-                        task = db.get(LearningTask, task_id)
-                        if not task:
+                        context = claim_task(
+                            db,
+                            task_id,
+                            lease_owner=worker_id,
+                        )
+                        if not context:
                             continue
                         worker_service = SlowService(
                             db,
                             app.state.ai,
                             app.state.source_verifier,
                             app.state.attachment_storage,
-                            user_id=task.user_id,
+                            scope=context,
                         )
-                        await worker_service.execute_learning_task(task_id)
+                        heartbeat_stop = asyncio.Event()
+                        heartbeat = asyncio.create_task(
+                            task_heartbeat_loop(context, heartbeat_stop)
+                        )
+                        try:
+                            await worker_service.execute_learning_task(context)
+                        finally:
+                            heartbeat_stop.set()
+                            heartbeat.cancel()
+                            with suppress(asyncio.CancelledError):
+                                await heartbeat
             if app.state.learning_task_stop.is_set():
                 break
             try:
@@ -181,15 +226,16 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         Base.metadata.create_all(engine)
-        with sessions() as db:
-            startup_service = SlowService(
-                db,
-                adapter,
-                verifier,
-                storage,
-                user_id=DEMO_USER_ID,
-            )
-            startup_service.ensure_seed()
+        if effective_auth_mode == "demo":
+            with sessions() as db:
+                startup_service = SlowService(
+                    db,
+                    adapter,
+                    verifier,
+                    storage,
+                    scope=demo_user_scope(DEMO_USER_ID),
+                )
+                startup_service.ensure_seed()
         app.state.sessions, app.state.ai, app.state.source_verifier, app.state.attachment_storage = sessions, adapter, verifier, storage
         app.state.ai_runtime = initial_runtime
         app.state.runtime_store = runtime_store
@@ -210,10 +256,21 @@ def create_app(
             if id(candidate) not in seen and hasattr(candidate, "close"):
                 seen.add(id(candidate))
                 await candidate.close()
+        if configured_oidc is not None and hasattr(configured_oidc, "close"):
+            await configured_oidc.close()
         engine.dispose()
 
     app = FastAPI(title="Slow API", version="0.1.0", lifespan=lifespan)
-    app.add_middleware(CORSMiddleware, allow_origins=[settings.web_origin], allow_methods=["*"], allow_headers=["*"])
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[settings.web_origin],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["Content-Type", "Idempotency-Key", "X-CSRF-Token", "X-Filename"],
+    )
+    app.state.auth_mode = effective_auth_mode
+    app.state.app_mode = effective_app_mode
+    app.state.oidc = configured_oidc
 
     @app.exception_handler(AppError)
     async def app_error(_request, error):
@@ -260,23 +317,38 @@ def create_app(
         try: yield session
         finally: session.close()
 
-    def current_user_id():
-        # Authentication is not part of this MVP yet. Keeping identity behind a
-        # dependency makes the boundary explicit and prevents domain services
-        # from owning a hidden global user.
-        return DEMO_USER_ID
+    def current_scope(
+        request: Request,
+        session: Session = Depends(db),
+    ) -> UserScope:
+        if request.app.state.auth_mode == "demo":
+            return demo_user_scope(DEMO_USER_ID)
+        auth = SessionService(
+            session,
+            ttl_seconds=settings.session_ttl_seconds,
+        )
+        scope, auth_session = auth.authenticate(
+            request.cookies.get(settings.session_cookie_name)
+        )
+        if request.method not in {"GET", "HEAD", "OPTIONS"}:
+            auth.require_csrf(
+                auth_session,
+                request.headers.get("X-CSRF-Token"),
+            )
+        request.state.auth_session = auth_session
+        return scope
 
     def service(
         request: Request,
         session: Session = Depends(db),
-        user_id: str = Depends(current_user_id),
+        scope: UserScope = Depends(current_scope),
     ):
         return SlowService(
             session,
             request.app.state.ai,
             request.app.state.source_verifier,
             request.app.state.attachment_storage,
-            user_id=user_id,
+            scope=scope,
         )
 
     def require_local_runtime_access(request: Request):
@@ -320,6 +392,178 @@ def create_app(
 
     @app.get("/api/health")
     def health(request: Request): return {"ok": True, "aiConfigured": request.app.state.ai.configured, "model": request.app.state.ai.model}
+
+    def safe_return_to(value: str) -> str:
+        if not value.startswith("/") or value.startswith("//"):
+            return "/"
+        return value
+
+    @app.get("/api/auth/login")
+    async def auth_login(
+        request: Request,
+        return_to: str = "/",
+        session: Session = Depends(db),
+    ):
+        destination = safe_return_to(return_to)
+        if request.app.state.auth_mode == "demo":
+            return RedirectResponse(f"{settings.web_origin}{destination}")
+        state, login = OidcStateService(session).create(
+            return_to=destination,
+        )
+        authorization_url = await request.app.state.oidc.authorization_url(
+            state=state,
+            nonce=login.nonce,
+            code_verifier=login.code_verifier,
+        )
+        response = RedirectResponse(authorization_url)
+        response.set_cookie(
+            "slow_oidc_state",
+            state,
+            max_age=600,
+            httponly=True,
+            secure=(
+                settings.session_cookie_secure
+                or request.app.state.app_mode == "production"
+            ),
+            samesite="lax",
+            path="/api/auth/callback",
+        )
+        return response
+
+    @app.get("/api/auth/callback")
+    async def auth_callback(
+        request: Request,
+        code: str,
+        state: str,
+        session: Session = Depends(db),
+    ):
+        if request.app.state.auth_mode != "oidc":
+            raise AppError(
+                "当前未启用 OIDC 登录",
+                code="OIDC_NOT_ENABLED",
+                status=404,
+            )
+        browser_state = request.cookies.get("slow_oidc_state", "")
+        if not browser_state or not hmac.compare_digest(browser_state, state):
+            raise AppError(
+                "登录请求与当前浏览器不匹配",
+                code="OIDC_STATE_BROWSER_MISMATCH",
+                status=400,
+            )
+        login = OidcStateService(session).consume(state)
+        identity = await request.app.state.oidc.exchange(
+            code=code,
+            nonce=login.nonce,
+            code_verifier=login.code_verifier,
+        )
+        user = IdentityService(session).resolve_or_create(
+            issuer=identity.issuer,
+            subject=identity.subject,
+            display_name=identity.display_name,
+            email=identity.email,
+            email_verified=identity.email_verified,
+        )
+        session_service = SessionService(
+            session,
+            ttl_seconds=settings.session_ttl_seconds,
+        )
+        session_service.revoke(
+            request.cookies.get(settings.session_cookie_name)
+        )
+        auth_session, raw_token, csrf_token = session_service.issue(user)
+        user_scope = UserScope(
+            Principal(
+                actor_kind="user",
+                actor_id=user.id,
+                subject_user_id=user.id,
+                session_id=auth_session.id,
+            )
+        )
+        SlowService(
+            session,
+            request.app.state.ai,
+            request.app.state.source_verifier,
+            request.app.state.attachment_storage,
+            scope=user_scope,
+        ).ensure_seed()
+        response = RedirectResponse(
+            f"{settings.web_origin}{safe_return_to(login.return_to)}"
+        )
+        cookie_secure = (
+            settings.session_cookie_secure
+            or request.app.state.app_mode == "production"
+        )
+        response.set_cookie(
+            settings.session_cookie_name,
+            raw_token,
+            max_age=settings.session_ttl_seconds,
+            httponly=True,
+            secure=cookie_secure,
+            samesite="lax",
+            path="/",
+        )
+        response.set_cookie(
+            "slow_csrf",
+            csrf_token,
+            max_age=settings.session_ttl_seconds,
+            httponly=False,
+            secure=cookie_secure,
+            samesite="lax",
+            path="/",
+        )
+        response.delete_cookie(
+            "slow_oidc_state",
+            path="/api/auth/callback",
+        )
+        return response
+
+    @app.get("/api/auth/me")
+    def auth_me(
+        request: Request,
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        user = session.get(User, scope.user_id)
+        if not user:
+            raise AppError(
+                "当前用户不存在",
+                code="AUTH_USER_MISSING",
+                status=401,
+            )
+        csrf_token = request.cookies.get("slow_csrf", "")
+        if request.app.state.auth_mode == "oidc":
+            auth_session = request.state.auth_session
+            if (
+                not csrf_token
+                or auth_session.csrf_token_hash != token_hash(csrf_token)
+            ):
+                csrf_token = ""
+        return {
+            "authenticated": True,
+            "mode": request.app.state.auth_mode,
+            "user": {"id": user.id, "name": user.name},
+            "csrfToken": csrf_token,
+        }
+
+    @app.post("/api/auth/logout", status_code=204)
+    def auth_logout(
+        request: Request,
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        del scope
+        response = JSONResponse(status_code=204, content=None)
+        if request.app.state.auth_mode == "oidc":
+            SessionService(
+                session,
+                ttl_seconds=settings.session_ttl_seconds,
+            ).revoke(request.cookies.get(settings.session_cookie_name))
+            response.delete_cookie(
+                settings.session_cookie_name,
+                path="/",
+            )
+            response.delete_cookie("slow_csrf", path="/")
+        return response
 
     @app.get("/api/runtime/ai")
     def get_runtime_ai(request: Request):
@@ -392,6 +636,14 @@ def create_app(
 
     @app.get("/api/bootstrap")
     def bootstrap(s: SlowService = Depends(service)): return s.bootstrap()
+
+    @app.put("/api/sections/{section_id}/resume")
+    def update_resume(
+        section_id: str,
+        body: ResumeUpdate,
+        s: SlowService = Depends(service),
+    ):
+        return s.record_resume_position(section_id, body.block_id)
 
     @app.post("/api/shelves", status_code=201)
     def create_shelf(body: ShelfCreate, s: SlowService = Depends(service)): return s.create_shelf(body)

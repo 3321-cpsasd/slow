@@ -7,18 +7,21 @@ from collections import Counter
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, event, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from ..auth.context import UserScope, WorkerExecutionContext
 
 from ..ai.port import AiPort
 from ..core.errors import AiError, AppError
 from ..infrastructure.tables import (
     ArtifactAttachment,
+    ArtifactSubmission,
     AskMeSession,
     Book,
     BookCapstone,
     Chapter,
+    ChapterProgress,
     ChapterPractice,
     ChapterRevision,
     ContentVersion,
@@ -28,6 +31,7 @@ from ..infrastructure.tables import (
     LearningNote,
     LearningTask,
     LearningPlan,
+    LearningResumePosition,
     PlanCreationRequest,
     QaMessage,
     QaSession,
@@ -47,11 +51,9 @@ from ..modules.artifacts.progress import ArtifactProgressStore
 from ..modules.learning.commands import SubmitQuiz
 from ..modules.learning.progress import ProgressStore
 from ..modules.learning.tasks import (
-    claim_task,
     complete_task,
     fail_task,
     release_task,
-    recoverable_task_ids,
     reset_failed_task,
     task_view,
 )
@@ -93,22 +95,57 @@ class SlowService:
         source_verifier,
         attachment_storage=None,
         *,
-        user_id: str = DEMO_USER_ID,
+        scope: UserScope | WorkerExecutionContext,
     ):
         self.db, self.ai, self.source_verifier = db, ai, source_verifier
-        self.user_id = user_id
+        self.scope = scope
+        self.user_id = scope.user_id
         self.attachment_storage = attachment_storage
         self.contexts = ActiveLearningContextResolver(db)
         self.progress = ProgressStore(db, user_id=self.user_id)
         self.artifacts = ArtifactProgressStore(db, user_id=self.user_id)
         self.library_reads = LibraryReadModel(db, user_id=self.user_id)
+        if isinstance(scope, WorkerExecutionContext):
+            self._install_worker_fence(scope)
+
+    def _install_worker_fence(
+        self,
+        context: WorkerExecutionContext,
+    ) -> None:
+        @event.listens_for(self.db, "before_flush")
+        def verify_worker_lease(session, _flush_context, _instances):
+            valid = session.connection().execute(
+                select(LearningTask.id).where(
+                    LearningTask.id == context.task_id,
+                    LearningTask.status == "running",
+                    LearningTask.lease_owner == context.lease_owner,
+                    LearningTask.lease_token == context.lease_token,
+                )
+            ).scalar_one_or_none()
+            if not valid:
+                raise AppError(
+                    "任务租约已失效，拒绝旧 Worker 写入结果",
+                    code="TASK_LEASE_LOST",
+                    status=409,
+                )
 
     def ensure_seed(self):
-        if not self.db.get(User, self.user_id):
-            self.db.add(User(id=self.user_id, name="学习者"))
+        user = self.db.get(User, self.user_id)
+        if not user:
+            user = User(id=self.user_id, name="学习者")
+            self.db.add(user)
+            self.db.flush()
+        shelf = self.db.scalar(
+            select(Shelf).where(Shelf.user_id == self.user_id)
+        )
+        if not shelf:
             self.db.add(
                 Shelf(
-                    id="shelf_technology",
+                    id=(
+                        "shelf_technology"
+                        if self.user_id == DEMO_USER_ID
+                        else uid("shelf")
+                    ),
                     user_id=self.user_id,
                     name="技术",
                     domain="计算机",
@@ -116,7 +153,7 @@ class SlowService:
                     tags_json='["AI","云原生"]',
                 )
             )
-            self.db.commit()
+        self.db.commit()
 
     def shelf(self, shelf_id):
         row = self.db.scalar(select(Shelf).where(Shelf.id == shelf_id, Shelf.user_id == self.user_id))
@@ -125,7 +162,57 @@ class SlowService:
         return row
 
     def bootstrap(self):
-        return self.library_reads.bootstrap()
+        view = self.library_reads.bootstrap()
+        view["resume"] = self.resume_position()
+        return view
+
+    def resume_position(self):
+        row = self.db.scalar(
+            select(LearningResumePosition)
+            .where(LearningResumePosition.user_id == self.user_id)
+            .order_by(LearningResumePosition.updated_at.desc())
+        )
+        if not row:
+            return None
+        return {
+            "learningRunId": row.learning_run_id,
+            "sectionId": row.section_id,
+            "blockId": row.block_id,
+            "updatedAt": timestamp(row.updated_at),
+        }
+
+    def record_resume_position(self, section_id: str, block_id: str):
+        context = self.contexts.resolve_section(
+            user_id=self.user_id,
+            section_id=section_id,
+        )
+        learning_run = self.progress.active_run(context.series.id)
+        row = self.db.scalar(
+            select(LearningResumePosition).where(
+                LearningResumePosition.user_id == self.user_id,
+                LearningResumePosition.learning_run_id == learning_run.id,
+            )
+        )
+        if not row:
+            row = LearningResumePosition(
+                id=uid("resume"),
+                user_id=self.user_id,
+                learning_run_id=learning_run.id,
+                section_id=section_id,
+                block_id=block_id,
+            )
+            self.db.add(row)
+        else:
+            row.section_id = section_id
+            row.block_id = block_id
+            row.updated_at = now()
+        self.db.commit()
+        return {
+            "learningRunId": row.learning_run_id,
+            "sectionId": row.section_id,
+            "blockId": row.block_id,
+            "updatedAt": timestamp(row.updated_at),
+        }
 
     def _shelf(self, shelf):
         return next(
@@ -156,7 +243,8 @@ class SlowService:
         request_hash = hashlib.sha256(
             json.dumps(request, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
-        reservation = self.db.get(PlanCreationRequest, request_key)
+        reservation_key = (request_key, self.user_id)
+        reservation = self.db.get(PlanCreationRequest, reservation_key)
         owns_reservation = False
         if not reservation:
             reservation = PlanCreationRequest(
@@ -171,7 +259,7 @@ class SlowService:
                 owns_reservation = True
             except IntegrityError:
                 self.db.rollback()
-                reservation = self.db.get(PlanCreationRequest, request_key)
+                reservation = self.db.get(PlanCreationRequest, reservation_key)
         if not reservation or reservation.user_id != self.user_id or reservation.request_hash != request_hash:
             raise AppError("创建请求标识已用于其他学习计划", code="IDEMPOTENCY_KEY_REUSED", status=409)
         if reservation.status == "completed" and reservation.series_id:
@@ -190,7 +278,7 @@ class SlowService:
             generated = await self.ai.plan(request, memory)
         except Exception as error:
             self.db.rollback()
-            failed = self.db.get(PlanCreationRequest, request_key)
+            failed = self.db.get(PlanCreationRequest, reservation_key)
             if failed:
                 failed.status = "failed"
                 failed.error_code = getattr(error, "code", error.__class__.__name__)[:80]
@@ -211,11 +299,13 @@ class SlowService:
             title=generated.series_title,
             rationale=generated.rationale,
         )
-        self.db.add_all([plan, series])
+        self.db.add(plan)
+        self.db.flush()
+        self.db.add(series)
+        self.db.flush()
         reservation.status = "completed"
         reservation.series_id = series.id
         reservation.updated_at = now()
-        self.db.flush()
         learning_run = self.progress.create_run(series.id)
         self.db.flush()
         for book_position, item in enumerate(generated.books, 1):
@@ -228,7 +318,6 @@ class SlowService:
                 topic=item.topic,
                 description=item.description,
                 estimated_minutes=item.estimated_minutes,
-                status="available" if book_position == 1 else "locked",
             )
             self.db.add(book)
             self.db.flush()
@@ -247,7 +336,6 @@ class SlowService:
                         "deliverables": ["方案或实现", "验证记录", "边界与复盘"],
                     }
                 ),
-                status="locked",
             )
             self.db.add(capstone)
             self.artifacts.add(
@@ -262,7 +350,6 @@ class SlowService:
                     position=chapter_position,
                     title=chapter.title,
                     objective=chapter.objective,
-                    status="locked",
                 )
                 self.db.add(chapter_row)
                 self.progress.add_chapter(
@@ -448,7 +535,7 @@ class SlowService:
         for item in chapters:
             if item.position >= 1000:
                 item.position -= 999
-        row = Chapter(id=uid("chapter"), book_id=book.id, position=position, title=body.title, objective=body.objective, status="locked")
+        row = Chapter(id=uid("chapter"), book_id=book.id, position=position, title=body.title, objective=body.objective)
         self.db.add(row)
         self.progress.add_chapter(
             self.progress.active_run(book.series_id),
@@ -479,6 +566,15 @@ class SlowService:
         if count <= 1:
             raise AppError("一本书至少保留一章", code="LAST_CHAPTER", status=409)
         self.db.add(ChapterRevision(id=uid("revision"), book_id=book_id, action="delete", before_json=dump({"id": chapter.id, "position": old_position, "title": chapter.title})))
+        chapter_progress = self.db.scalar(
+            select(ChapterProgress).where(
+                ChapterProgress.user_id == self.user_id,
+                ChapterProgress.chapter_id == chapter.id,
+            )
+        )
+        if chapter_progress:
+            self.db.delete(chapter_progress)
+            self.db.flush()
         self.db.delete(chapter)
         self.db.flush()
         later = self.db.scalars(select(Chapter).where(Chapter.book_id == book_id, Chapter.position > old_position).order_by(Chapter.position)).all()
@@ -551,11 +647,19 @@ class SlowService:
         if current != load(proposal.before_json, []):
             raise AppError("未来章节已变化，请重新生成提案", code="REPLAN_PROPOSAL_STALE", status=409)
         proposed = load(proposal.after_json, {})
+        future_ids = [item.id for item in future]
+        if future_ids:
+            self.db.execute(
+                delete(ChapterProgress).where(
+                    ChapterProgress.user_id == self.user_id,
+                    ChapterProgress.chapter_id.in_(future_ids),
+                )
+            )
         for item in future:
             self.db.delete(item)
         self.db.flush()
         for offset, item in enumerate(proposed["chapters"], len(started) + 1):
-            chapter = Chapter(id=uid("chapter"), book_id=book.id, position=offset, title=item["title"], objective=item["objective"], status="locked")
+            chapter = Chapter(id=uid("chapter"), book_id=book.id, position=offset, title=item["title"], objective=item["objective"])
             self.db.add(chapter)
             self.progress.add_chapter(
                 self.progress.active_run(book.series_id),
@@ -597,7 +701,6 @@ class SlowService:
                     title=item.title,
                     question=item.question,
                     objectives_json=dump(item.objectives),
-                    status="locked",
                 )
                 self.db.add(section)
                 self.progress.add_section(
@@ -615,7 +718,6 @@ class SlowService:
                         "steps": ["完成一个最小实践", "保存输入、输出或截图证据", "记录失败边界与复盘"],
                     }
                 ),
-                status="locked",
             )
             self.db.add(practice)
             self.artifacts.add(
@@ -885,16 +987,29 @@ class SlowService:
             user_id=self.user_id,
         ).execute(section_id, body, idempotency_key)
 
-    def recoverable_learning_task_ids(self):
-        task_ids = recoverable_task_ids(self.db)
-        self.db.commit()
-        return task_ids
-
-    async def execute_learning_task(self, task_id):
+    async def execute_learning_task(
+        self,
+        execution: WorkerExecutionContext,
+    ):
+        if not isinstance(self.scope, WorkerExecutionContext):
+            raise AppError(
+                "后台任务不能通过用户请求上下文执行",
+                code="WORKER_SCOPE_REQUIRED",
+                status=403,
+            )
+        if self.scope != execution:
+            raise AppError(
+                "Worker 执行上下文不匹配",
+                code="WORKER_SCOPE_MISMATCH",
+                status=403,
+            )
         task = self.db.scalar(
             select(LearningTask).where(
-                LearningTask.id == task_id,
+                LearningTask.id == execution.task_id,
                 LearningTask.user_id == self.user_id,
+                LearningTask.status == "running",
+                LearningTask.lease_owner == execution.lease_owner,
+                LearningTask.lease_token == execution.lease_token,
             )
         )
         if not task:
@@ -903,11 +1018,13 @@ class SlowService:
                 code="LEARNING_TASK_NOT_FOUND",
                 status=404,
             )
-        task = claim_task(self.db, task.id)
-        if not task:
-            return self.learning_task(task_id)
-        payload = load(task.payload_json, {})
         try:
+            aggregate = self.contexts.resolve_learning_task(
+                user_id=self.user_id,
+                task_id=task.id,
+            )
+            task = aggregate.task
+            payload = load(task.payload_json, {})
             if task.task_type == "note_generation":
                 context = self.contexts.resolve_section(
                     user_id=task.user_id,
@@ -946,12 +1063,12 @@ class SlowService:
                     code="LEARNING_TASK_TYPE_UNSUPPORTED",
                     status=500,
                 )
-            return task_view(complete_task(self.db, task.id, result))
+            return task_view(complete_task(self.db, execution, result))
         except CancelledError:
-            release_task(self.db, task.id)
+            release_task(self.db, execution)
             raise
         except Exception as error:
-            return task_view(fail_task(self.db, task.id, error))
+            return task_view(fail_task(self.db, execution, error))
 
     async def _preload_next_section(self, source_section_id):
         context = self.contexts.resolve_section(
@@ -1398,7 +1515,19 @@ class SlowService:
             practice.id,
             attachment_ids,
         )
-        progress.submission_json = dump({"content": content, "attachmentIds": [item.id for item in attachments]})
+        attachment_ids = [item.id for item in attachments]
+        self.db.add(
+            ArtifactSubmission(
+                id=uid("artifact_submission"),
+                learning_run_id=learning_run.id,
+                user_id=self.user_id,
+                target_type="chapter_practice",
+                target_id=practice.id,
+                content_json=dump(content),
+                attachment_ids_json=dump(attachment_ids),
+            )
+        )
+        progress.submission_json = dump({"content": content, "attachmentIds": attachment_ids})
         progress.status, progress.updated_at = "completed", now()
         self.db.commit()
         return self._practice(practice)
@@ -1463,7 +1592,19 @@ class SlowService:
             capstone.id,
             attachment_ids,
         )
-        progress.submission_json = dump({"content": content, "attachmentIds": [item.id for item in attachments]})
+        attachment_ids = [item.id for item in attachments]
+        self.db.add(
+            ArtifactSubmission(
+                id=uid("artifact_submission"),
+                learning_run_id=learning_run.id,
+                user_id=self.user_id,
+                target_type="book_capstone",
+                target_id=capstone.id,
+                content_json=dump(content),
+                attachment_ids_json=dump(attachment_ids),
+            )
+        )
+        progress.submission_json = dump({"content": content, "attachmentIds": attachment_ids})
         progress.status, progress.updated_at = "completed", now()
         self.db.commit()
         return self._capstone(capstone)

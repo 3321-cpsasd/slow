@@ -4,7 +4,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...core.errors import AppError
-from ...infrastructure.tables import Book, Chapter, Section, Series, Shelf
+from ...infrastructure.tables import (
+    Book,
+    Chapter,
+    LearningRun,
+    LearningTask,
+    Section,
+    Series,
+    Shelf,
+)
 
 
 @dataclass(frozen=True)
@@ -26,6 +34,12 @@ class ChapterContext(BookContext):
 @dataclass(frozen=True)
 class SectionContext(ChapterContext):
     section: Section
+
+
+@dataclass(frozen=True)
+class LearningTaskContext(SectionContext):
+    learning_run: LearningRun
+    task: LearningTask
 
 
 class ActiveLearningContextResolver:
@@ -110,4 +124,57 @@ class ActiveLearningContextResolver:
             book=book,
             chapter=chapter,
             section=section,
+        )
+
+    def resolve_learning_task(
+        self,
+        *,
+        user_id: str,
+        task_id: str,
+    ) -> LearningTaskContext:
+        row = self.db.execute(
+            select(
+                LearningTask,
+                LearningRun,
+                Section,
+                Chapter,
+                Book,
+                Series,
+                Shelf,
+            )
+            .join(
+                LearningRun,
+                LearningRun.id == LearningTask.learning_run_id,
+            )
+            .join(Section, Section.id == LearningTask.section_id)
+            .join(Chapter, Chapter.id == Section.chapter_id)
+            .join(Book, Book.id == Chapter.book_id)
+            .join(Series, Series.id == Book.series_id)
+            .join(Shelf, Shelf.id == Series.shelf_id)
+            .where(
+                LearningTask.id == task_id,
+                LearningTask.user_id == user_id,
+                LearningRun.user_id == user_id,
+                LearningRun.series_id == Series.id,
+                Book.shelf_id == Series.shelf_id,
+                Shelf.user_id == user_id,
+                Book.deleted_at.is_(None),
+                Series.deleted_at.is_(None),
+            )
+        ).one_or_none()
+        if not row:
+            raise AppError(
+                "任务、学习运行与小节不属于同一授权聚合",
+                code="TASK_AGGREGATE_MISMATCH",
+                status=409,
+            )
+        task, run, section, chapter, book, series, shelf = row
+        return LearningTaskContext(
+            shelf=shelf,
+            series=series,
+            book=book,
+            chapter=chapter,
+            section=section,
+            learning_run=run,
+            task=task,
         )

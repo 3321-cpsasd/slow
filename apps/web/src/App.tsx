@@ -5,6 +5,7 @@ import { api } from './api/client';
 import type {
   AskMe,
   AiRuntime,
+  AuthState,
   Block,
   Book,
   Bootstrap,
@@ -31,6 +32,8 @@ type QaExchange = {
 };
 
 export default function App() {
+  const [auth, setAuth] = useState<AuthState | null>(null);
+  const [authChecked, setAuthChecked] = useState(false);
   const [data, setData] = useState<Bootstrap | null>(null);
   const [view, setView] = useState<View>('home');
   const [shelf, setShelf] = useState<Shelf | null>(null);
@@ -41,7 +44,26 @@ export default function App() {
   const [showAiSettings, setShowAiSettings] = useState(false);
 
   useEffect(() => {
-    api.bootstrap().then(setData).catch((reason) => setError(reason.message));
+    const clearUserState = () => {
+      setAuth(null);
+      setData(null);
+      setShelf(null);
+      setSeries(null);
+      setSection(null);
+      setView('home');
+      setAuthChecked(true);
+    };
+    api.setUnauthorizedHandler(clearUserState);
+    api.authMe()
+      .then(async (value) => {
+        setAuth(value);
+        setData(await api.bootstrap());
+      })
+      .catch((reason) => {
+        if(reason?.status !== 401) setError(reason.message);
+        setAuth(null);
+      })
+      .finally(() => setAuthChecked(true));
   }, []);
 
   const run = async <T,>(label: string, action: () => Promise<T>) => {
@@ -65,6 +87,7 @@ export default function App() {
   const loadSection = async (sectionId: string) => {
     const value = await run('正在读取小节…', () => api.section(sectionId));
     setSection(value);
+    void api.updateResume(sectionId).catch(() => undefined);
     return value;
   };
 
@@ -82,7 +105,15 @@ export default function App() {
     const value = await run('正在进入学习空间…', () => api.series(seriesId));
     setSeries(value);
     setView('learn');
-    const initial = firstUsableSection(value);
+    const resumeSection = data?.resume?.sectionId;
+    const resumeBelongsToSeries = resumeSection
+      ? value.books.some((book) => book.chapters.some(
+        (chapter) => chapter.sections.some(
+          (item) => item.id === resumeSection && item.status !== 'locked',
+        ),
+      ))
+      : false;
+    const initial = resumeBelongsToSeries ? resumeSection! : firstUsableSection(value);
     if (initial) await loadSection(initial);
     else setSection(null);
   };
@@ -105,6 +136,29 @@ export default function App() {
     setSection(value);
     await refreshSeries();
   };
+
+  if(!authChecked) {
+    return <div className="app-shell"><main className="marketing-main"><div className="global-error">正在确认登录状态…</div></main></div>;
+  }
+
+  if(!auth) {
+    return (
+      <div className="app-shell">
+        <header className="app-header">
+          <span className="brand"><span className="brand-mark"><i /></span><b>slow</b></span>
+        </header>
+        <main className="marketing-main">
+          <section className="hero-card">
+            <small>个人学习空间</small>
+            <h1>登录后继续你的书架</h1>
+            <p>学习记录、测验证据和掌握画像只保存在你的账户下。</p>
+            <button className="primary-button" onClick={() => api.login('/')}>登录</button>
+            {error && <div className="global-error">{error}</div>}
+          </section>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="app-shell">
@@ -132,6 +186,7 @@ export default function App() {
         )}
         <div className="header-actions">
           {busy && <span className="busy-indicator"><i />{busy}</span>}
+          <span className="user-name">{auth.user.name}</span>
           <button className="quiet-button ai-settings-trigger" onClick={() => setShowAiSettings(true)}>
             <span aria-hidden="true" />
             AI 设置
@@ -139,6 +194,23 @@ export default function App() {
           {view === 'learn' && (
             <button className="quiet-button" onClick={() => setView('home')}>返回书架</button>
           )}
+          <button
+            className="quiet-button"
+            onClick={async () => {
+              try {
+                await api.logout();
+              } finally {
+                setAuth(null);
+                setData(null);
+                setShelf(null);
+                setSeries(null);
+                setSection(null);
+                setView('home');
+              }
+            }}
+          >
+            退出
+          </button>
         </div>
       </header>
 

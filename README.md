@@ -36,6 +36,8 @@ Slow 不交付一份静态学习计划，而是构建完整的学习闭环：
 - 段落级 Ask AI、多轮 Ask Me 和可编辑个人笔记
 - 章末实践、书末综合项目及附件提交
 - 不可变学习证据与可重建掌握度投影
+- OIDC 登录、可撤销服务端 Session、CSRF 防护和逐用户数据隔离
+- 带 fencing token 的持久化 Worker，以及跨设备阅读位置恢复
 - 本地 Demo Adapter、真实 OpenAI Responses API 和独立评测 Runner
 
 ### 技术架构
@@ -94,6 +96,8 @@ OPENAI_REASONING_MODE=optional
 API_HOST=127.0.0.1
 API_PORT=8000
 WEB_ORIGIN=http://127.0.0.1:5173
+APP_MODE=development
+AUTH_MODE=demo
 ```
 
 启动前后端：
@@ -110,6 +114,12 @@ WEB_ORIGIN=http://127.0.0.1:5173
 
 没有配置 `OPENAI_API_KEY` 时，系统使用机器可识别的 `local-demo-v1` 内容演示学习状态机。Demo 数据不能作为真实 AI 内容或正式评测证据。
 
+本地默认使用显式 `AUTH_MODE=demo`。正式部署必须设置
+`APP_MODE=production`、`AUTH_MODE=oidc`、`OIDC_ISSUER`、
+`OIDC_CLIENT_ID`、`OIDC_REDIRECT_URI` 和真实 `WEB_ORIGIN`；正式模式会拒绝
+Demo 身份。浏览器只保存 `HttpOnly` Session Cookie 和 CSRF 凭证，不接收
+`user_id` 或长期身份令牌。
+
 也可以在页面右上角的「AI 设置」中配置供应商。通过连接验证后，配置会写入仅服务端可读、权限为 `0600` 且被 Git 忽略的 `data/runtime-ai.json`；浏览器只能读取脱敏状态，API Key 不会返回前端，API 重启后会自动恢复该配置。
 
 ### 验证
@@ -117,6 +127,12 @@ WEB_ORIGIN=http://127.0.0.1:5173
 ```bash
 PYTHONPATH=apps/api .venv/bin/pytest -q apps/api/tests
 cd apps/web && pnpm build
+```
+
+从不可变测验、提交和学习证据重建某个用户的进度与掌握投影：
+
+```bash
+PYTHONPATH=apps/api .venv/bin/python scripts/rebuild_learning_projections.py USER_ID
 ```
 
 ### 部署
@@ -190,6 +206,8 @@ User → Shelf → Book → Chapter → Section
 - Block-level Ask AI, multi-round Ask Me, and editable personal notes
 - Chapter practices, book capstones, and attachment submission
 - Immutable learning evidence and rebuildable mastery projections
+- OIDC login, revocable server-side sessions, CSRF protection, and per-user isolation
+- Fenced durable workers and cross-device reading-position recovery
 - Local Demo Adapter, real OpenAI Responses API integration, and an independent evaluation runner
 
 ### Architecture
@@ -248,6 +266,8 @@ OPENAI_REASONING_MODE=optional
 API_HOST=127.0.0.1
 API_PORT=8000
 WEB_ORIGIN=http://127.0.0.1:5173
+APP_MODE=development
+AUTH_MODE=demo
 ```
 
 Start both services:
@@ -264,6 +284,11 @@ Start both services:
 
 Without `OPENAI_API_KEY`, Slow uses machine-identifiable `local-demo-v1` content to demonstrate the learning state machine. Demo data is never treated as real AI content or formal evaluation evidence.
 
+Local development uses explicit `AUTH_MODE=demo`. Production must configure
+`APP_MODE=production`, `AUTH_MODE=oidc`, the OIDC issuer/client/redirect URI,
+and the real `WEB_ORIGIN`; production refuses demo identity. The browser never
+supplies a trusted `user_id` or stores a long-lived identity token.
+
 You can also configure a provider from **AI Settings** in the web UI. After connection validation, Slow stores the configuration in the Git-ignored, server-only `data/runtime-ai.json` file with `0600` permissions. The browser receives only redacted status, never the API key, and the API restores the configuration after a restart.
 
 ### Verification
@@ -273,12 +298,18 @@ PYTHONPATH=apps/api .venv/bin/pytest -q apps/api/tests
 cd apps/web && pnpm build
 ```
 
+Rebuild one user's progress and mastery projections from immutable facts:
+
+```bash
+PYTHONPATH=apps/api .venv/bin/python scripts/rebuild_learning_projections.py USER_ID
+```
+
 ### Deployment
 
 The repository includes GitHub Actions, Docker images, and a single-host Alibaba
 Cloud ECS deployment. Read [`docs/DEPLOY_ECS.md`](docs/DEPLOY_ECS.md) before
 deploying, especially the SSH key, persistent backup, security group, HTTPS, and
-current single-user authentication boundaries.
+OIDC configuration.
 
 Run the black-box learner and independent reviewer:
 

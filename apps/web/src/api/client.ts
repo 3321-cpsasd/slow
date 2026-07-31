@@ -1,6 +1,8 @@
 const BASE = import.meta.env.VITE_API_URL ?? (
   import.meta.env.PROD ? '' : 'http://127.0.0.1:8000'
 );
+let csrfToken = '';
+let unauthorizedHandler:(()=>void)|undefined;
 
 export class ApiError extends Error {
   constructor(
@@ -16,10 +18,23 @@ export class ApiError extends Error {
 }
 
 async function call<T>(path:string, init?:RequestInit):Promise<T>{
-  const response = await fetch(`${BASE}${path}`, {headers:{'Content-Type':'application/json'}, ...init});
+  const headers = new Headers(init?.headers);
+  if(init?.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type','application/json');
+  }
+  const method = (init?.method || 'GET').toUpperCase();
+  if(csrfToken && !['GET','HEAD','OPTIONS'].includes(method)) {
+    headers.set('X-CSRF-Token',csrfToken);
+  }
+  const response = await fetch(`${BASE}${path}`, {
+    ...init,
+    headers,
+    credentials:'include',
+  });
   const text = await response.text();
   const payload = text ? JSON.parse(text) : undefined;
   if(!response.ok) {
+    if(response.status === 401) unauthorizedHandler?.();
     throw new ApiError(
       payload?.message || payload?.error || '请求失败',
       response.status,
@@ -38,10 +53,15 @@ async function streamQa(
 ):Promise<{sessionId:string;threadId:string;relation:string}>{
   const response = await fetch(`${BASE}${path}`, {
     method:'POST',
-    headers:{'Content-Type':'application/json'},
+    headers:{
+      'Content-Type':'application/json',
+      ...(csrfToken ? {'X-CSRF-Token':csrfToken} : {}),
+    },
+    credentials:'include',
     body:JSON.stringify(body),
   });
   if(!response.ok){
+    if(response.status === 401) unauthorizedHandler?.();
     const text = await response.text();
     const payload = text ? JSON.parse(text) : undefined;
     throw new Error(payload?.error || '答疑发送失败');
@@ -70,7 +90,21 @@ async function streamQa(
 }
 
 export const api = {
+  setUnauthorizedHandler:(handler:()=>void)=>{ unauthorizedHandler = handler; },
+  authMe:async()=>{
+    const state = await call<import('../model/types').AuthState>('/api/auth/me');
+    csrfToken = state.csrfToken;
+    return state;
+  },
+  login:(returnTo='/')=>{
+    window.location.assign(`${BASE}/api/auth/login?return_to=${encodeURIComponent(returnTo)}`);
+  },
+  logout:async()=>{
+    await call<void>('/api/auth/logout',{method:'POST'});
+    csrfToken = '';
+  },
   bootstrap:()=>call<import('../model/types').Bootstrap>('/api/bootstrap'),
+  updateResume:(sectionId:string,blockId='')=>call<import('../model/types').ResumePosition>(`/api/sections/${sectionId}/resume`,{method:'PUT',body:JSON.stringify({blockId})}),
   aiRuntime:()=>call<import('../model/types').AiRuntime>('/api/runtime/ai'),
   updateAiRuntime:(body:object)=>call<import('../model/types').AiRuntime>('/api/runtime/ai',{method:'PUT',body:JSON.stringify(body)}),
   createPlan:(body:object,idempotencyKey:string)=>call<import('../model/types').Series>('/api/plans',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},body:JSON.stringify(body)}),

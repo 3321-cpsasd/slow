@@ -414,7 +414,6 @@ def test_completing_chapter_unlocks_first_pregenerated_section(client):
                 title="预生成小节",
                 question="预生成内容如何保持解锁语义？",
                 objectives_json='["验证预生成章节解锁"]',
-                status="locked",
             )
         )
         learning_run = db.scalar(
