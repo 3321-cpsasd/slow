@@ -30,9 +30,25 @@ def run_migrations_online() -> None:
 
     engine = create_engine(config.get_main_option("sqlalchemy.url"))
     with engine.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
+        # SQLite cannot batch-recreate a referenced table while foreign-key
+        # enforcement is active. Its default is OFF for this migration-only
+        # connection; application connections still enable enforcement.
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=True,
+        )
         with context.begin_transaction():
             context.run_migrations()
+        if engine.dialect.name == "sqlite":
+            violations = connection.exec_driver_sql(
+                "PRAGMA foreign_key_check"
+            ).fetchall()
+            if violations:
+                raise RuntimeError(
+                    "SQLite foreign-key violations after migration: "
+                    f"{violations[:10]}"
+                )
     engine.dispose()
 
 

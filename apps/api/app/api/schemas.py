@@ -59,6 +59,10 @@ class NoteUpdate(ApiModel):
     content: dict
 
 
+class ResumeUpdate(ApiModel):
+    block_id: str = Field(default="", max_length=200)
+
+
 class AskMeReply(ApiModel):
     answer: str = Field(default="", max_length=3000)
 

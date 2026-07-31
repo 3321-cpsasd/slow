@@ -14,6 +14,7 @@ from sqlalchemy import select
 from app.ai.contracts import Source
 from app.ai.local_adapter import LocalDemoAdapter
 from app.application.service import SlowService
+from app.auth.context import demo_user_scope
 from app.core.config import settings
 from app.infrastructure.database import build_database
 from app.infrastructure.tables import (
@@ -293,7 +294,12 @@ def import_book():
     engine, sessions = build_database(settings.database_url)
     Base.metadata.create_all(engine)
     with sessions() as db:
-        SlowService(db, LocalDemoAdapter(), AcceptingSourceVerifier()).ensure_seed()
+        SlowService(
+            db,
+            LocalDemoAdapter(),
+            AcceptingSourceVerifier(),
+            scope=demo_user_scope("user_demo"),
+        ).ensure_seed()
         existing = db.scalar(select(Series).where(Series.id == SERIES_ID))
         if existing:
             book = db.get(Book, BOOK_ID)
@@ -344,7 +350,6 @@ def import_book():
             topic="大模型预训练与后训练的稳定性、可靠性和效率工程",
             description="2 章 6 节的岗位速读教材。每节约 15–20 分钟，读完能用统一指标描述问题、按证据分诊，并设计 checkpoint/restart 与效率优化闭环。",
             estimated_minutes=120,
-            status="available",
         )
         db.add_all([plan, series, book])
         db.add(
@@ -365,7 +370,6 @@ def import_book():
                     "goal": "为一个 1024 GPU 训练任务的 hang + 低 MFU 场景产出可复核作战图",
                     "deliverables": ["跨层时间线与最强假设", "最小证据集和排除实验", "checkpoint/restart 契约", "稳定性与效率联合指标"],
                 }),
-                status="locked",
             )
         )
 
@@ -378,7 +382,6 @@ def import_book():
                 position=position,
                 title=item["title"],
                 objective=item["objective"],
-                status="available" if position == 1 else "locked",
             )
             chapter_rows[position] = chapter
             db.add(chapter)
@@ -391,7 +394,6 @@ def import_book():
                         "objective": item["objective"],
                         "steps": ["画出一张跨层证据图", "写出一个可证伪假设", "给出一个自动化动作及其失败边界"],
                     }),
-                    status="locked",
                 )
             )
 
@@ -421,7 +423,6 @@ def import_book():
                 title=lesson["title"],
                 question=lesson["question"],
                 objectives_json=dumps(lesson["objectives"]),
-                status="available" if lesson["chapter"] == 1 and lesson["position"] == 1 else "locked",
             )
             db.add_all([
                 section,

@@ -14,6 +14,12 @@ Slow 的重要变更记录在这里。本项目采用 [Keep a Changelog](https:/
 - 新增供应商无关的结构化输出修复 Harness：Schema 失败后执行有上限的纯修复调用，携带字段级校验反馈；耗尽预算后明确失败，并在生成轨迹中持久化不含原文的尝试元数据与输出摘要。
 - Re-ran the previously failed real-model section with the new harness; content, quiz, stable block IDs, and reachable sources all passed without duplicate persisted versions.
 - 使用新 Harness 重新运行此前失败的真实模型小节；正文、题集、稳定内容块 ID 与来源可达性均通过，且未产生重复持久化版本。
+- Added OIDC authorization-code login with PKCE, state/nonce and signed ID-token validation, revocable server-side sessions, CSRF protection, and fail-closed production authentication.
+- 新增带 PKCE、state/nonce 与签名 ID Token 校验的 OIDC 授权码登录、可撤销服务端 Session、CSRF 防护，以及正式环境身份失败关闭。
+- Added actor/subject principals, user-scoped aggregate authorization, composite learning-run/user integrity constraints, and two-user isolation tests.
+- 新增执行者/受益用户 Principal、用户级聚合授权、学习运行/用户复合一致性约束与双用户隔离测试。
+- Added fenced worker leases with owner/token/expiry/heartbeat checks, immutable artifact submission facts, cross-device resume positions, and a projection rebuild tool.
+- 新增带 owner/token/过期/心跳校验的 Worker fencing、不可变成果提交事实、跨设备恢复位置与投影重建工具。
 - Added GitHub Actions CI/CD for API tests, Web builds, immutable GHCR images, and health-checked Alibaba Cloud ECS deployment with SQLite backups and image rollback.
 - 新增 GitHub Actions CI/CD：覆盖 API 测试、Web 构建、不可变 GHCR 镜像，以及带 SQLite 备份、健康检查和镜像回滚的阿里云 ECS 部署。
 - Added a durable post-quiz task queue for non-blocking note generation, remediation, equivalent-quiz generation, and automatic next-section preloading, with recovery, idempotency, status polling, and safe retry.

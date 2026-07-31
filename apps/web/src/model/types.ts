@@ -14,7 +14,23 @@ export type Series = {
   initializationTask?:LearningTask|null;
 };
 export type Shelf = { id:string; name:string; domain:string; specialty:string; tags:string[]; series:Series[] };
-export type Bootstrap = { user:{id:string;name:string}; shelves:Shelf[] };
+export type ResumePosition = {
+  learningRunId:string;
+  sectionId:string;
+  blockId:string;
+  updatedAt:string;
+};
+export type Bootstrap = {
+  user:{id:string;name:string};
+  shelves:Shelf[];
+  resume:ResumePosition|null;
+};
+export type AuthState = {
+  authenticated:boolean;
+  mode:'demo'|'oidc';
+  user:{id:string;name:string};
+  csrfToken:string;
+};
 export type AiRuntime = {
   mode:'provider'|'demo'|'injected';
   configured:boolean;

@@ -11,9 +11,15 @@ from app.ai.anthropic_adapter import AnthropicAdapter
 from app.ai.metering import AiUsageRecorder
 from app.ai.openai_adapter import OpenAiAdapter
 from app.ai.port import ProviderCapabilities
+from app.auth.context import Principal
 from app.core.errors import AiError
 from app.infrastructure.database import build_database
-from app.infrastructure.tables import AiInvocation, AiUsageMeasurement, Base
+from app.infrastructure.tables import (
+    AiInvocation,
+    AiUsageMeasurement,
+    Base,
+    User,
+)
 
 
 class StructuredAnswer(BaseModel):
@@ -198,6 +204,38 @@ def test_missing_usage_is_explicit_instead_of_becoming_zero():
     assert invocation.attribution_status == "system"
     assert invocation.subject_user_id is None
     assert measurement_count == 0
+
+
+def test_usage_recorder_attributes_invocation_to_verified_principal():
+    engine, sessions = build_database("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    recorder = AiUsageRecorder(sessions)
+    with sessions() as db:
+        db.add(User(id="user_a", name="A"))
+        db.commit()
+
+    principal = Principal(
+        actor_kind="user",
+        actor_id="user_a",
+        subject_user_id="user_a",
+        session_id="session_a",
+    )
+    with recorder.attributed(principal):
+        invocation_id = recorder.start(
+            provider="openai",
+            api_mode="responses",
+            model="test-model",
+            operation="section_generation",
+        )
+        recorder.succeed(invocation_id, None)
+
+    with sessions() as db:
+        invocation = db.get(AiInvocation, invocation_id)
+        assert invocation.attribution_status == "verified"
+        assert invocation.actor_kind == "user"
+        assert invocation.actor_id == "user_a"
+        assert invocation.subject_user_id == "user_a"
+    engine.dispose()
 
 
 def test_anthropic_adapter_uses_messages_path_and_validates_schema():

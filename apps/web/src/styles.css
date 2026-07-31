@@ -76,6 +76,7 @@ button:disabled { cursor: not-allowed; }
 .header-context span:first-child { overflow: hidden; text-overflow: ellipsis; }
 .header-context i { color: #b3b7b1; }
 .header-actions { justify-self: end; display: flex; align-items: center; gap: 14px; }
+.user-name { color: var(--muted); font-size: 12px; }
 .quiet-button {
   border: 1px solid #d7dad4;
   background: #fff;
@@ -104,6 +105,19 @@ button:disabled { cursor: not-allowed; }
 @keyframes pulse { 50% { opacity: .45; } }
 
 .marketing-main { width: min(1180px, 92vw); margin: 56px auto; }
+.hero-card {
+  width: min(520px, 100%);
+  margin: 12vh auto 0;
+  padding: 42px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--paper);
+  box-shadow: 0 20px 60px rgba(34, 48, 39, .08);
+}
+.hero-card small { color: var(--green-2); }
+.hero-card h1 { margin: 12px 0; font-size: clamp(30px, 5vw, 46px); }
+.hero-card p { color: var(--muted); line-height: 1.7; }
+.hero-card .primary-button { margin-top: 16px; }
 .learn-main { height: calc(100vh - 64px); overflow: hidden; position: relative; }
 .global-error {
   position: fixed;

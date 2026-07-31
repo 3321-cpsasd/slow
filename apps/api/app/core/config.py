@@ -24,6 +24,16 @@ class Settings(BaseSettings):
     attachment_max_bytes: int = 10 * 1024 * 1024
     runtime_ai_config_path: Path = ROOT / "data" / "runtime-ai.json"
     web_origin: str = "http://127.0.0.1:5173"
+    app_mode: Literal["development", "demo", "production", "test"] = "development"
+    auth_mode: Literal["demo", "oidc"] = "demo"
+    session_cookie_name: str = "slow_session"
+    session_ttl_seconds: int = 60 * 60 * 24 * 14
+    session_cookie_secure: bool = False
+    oidc_issuer: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
+    oidc_redirect_uri: str = "http://127.0.0.1:8000/api/auth/callback"
+    oidc_scopes: str = "openid email profile"
 
 
 settings = Settings()

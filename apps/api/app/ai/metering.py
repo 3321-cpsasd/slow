@@ -1,12 +1,21 @@
 import asyncio
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy.orm import sessionmaker
 
+from ..auth.context import Principal
 from ..infrastructure.tables import AiInvocation, AiUsageMeasurement, now
+
+
+_current_principal: ContextVar[Principal | None] = ContextVar(
+    "ai_usage_principal",
+    default=None,
+)
 
 
 def _uid(prefix: str) -> str:
@@ -113,6 +122,14 @@ class AiUsageRecorder:
     def __init__(self, sessions: sessionmaker):
         self.sessions = sessions
 
+    @contextmanager
+    def attributed(self, principal: Principal):
+        token = _current_principal.set(principal)
+        try:
+            yield
+        finally:
+            _current_principal.reset(token)
+
     def start(
         self,
         *,
@@ -123,6 +140,9 @@ class AiUsageRecorder:
         attribution_status: str = "legacy_unverified",
     ) -> str:
         invocation_id = _uid("aiinv")
+        principal = _current_principal.get()
+        if principal:
+            attribution_status = "verified"
         with self.sessions() as db:
             db.add(
                 AiInvocation(
@@ -134,7 +154,17 @@ class AiUsageRecorder:
                     status="started",
                     usage_status="pending",
                     attribution_status=attribution_status,
-                    actor_kind="system" if attribution_status == "system" else "",
+                    actor_kind=(
+                        principal.actor_kind
+                        if principal
+                        else "system"
+                        if attribution_status == "system"
+                        else ""
+                    ),
+                    actor_id=principal.actor_id if principal else "",
+                    subject_user_id=(
+                        principal.subject_user_id if principal else None
+                    ),
                 )
             )
             db.commit()
