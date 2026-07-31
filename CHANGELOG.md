@@ -8,6 +8,10 @@ Slow 的重要变更记录在这里。本项目采用 [Keep a Changelog](https:/
 
 ### Added · 新增
 
+- Added a competition-review guide and a canonical evaluation index that distinguishes current evidence, historical failures, and open gates.
+- 新增参赛评审指南与权威评测索引，明确区分当前证据、历史失败与尚未关闭的门禁。
+- Added repository-hosted product screenshots for the bookshelf and personalized learning-goal flow.
+- 新增仓库内产品截图，展示个人书架与个性化学习目标流程。
 - Added durable first-lesson preloading: a new learning plan now queues its first chapter outline, lesson content, sources, and quiz immediately, while the UI tracks the task and opens the prepared section automatically.
 - 新增持久化首节预生成：学习计划创建后立即排队生成首章小节、第一节正文、来源与测验；前端持续跟踪任务，并在完成后自动打开首节。
 - Added a provider-neutral structured-output repair harness: schema failures now trigger bounded repair-only calls with field-level validation feedback, fail closed after the retry budget, and persist privacy-safe attempt metadata and output digests in generation traces.
@@ -41,6 +45,12 @@ Slow 的重要变更记录在这里。本项目采用 [Keep a Changelog](https:/
 
 ### Changed · 调整
 
+- Made the Web launcher portable, removed workstation paths from project context and historical/future evaluation reports, aligned the example model with the server default, and made production deployment explicitly opt-in.
+- 提升 Web 启动脚本可移植性，移除项目上下文及历史/后续评测报告中的本机路径，统一示例模型与服务端默认值，并将生产部署改为显式开启。
+- Declared the supported Node.js and pnpm versions so local and CI builds use the same runtime contract.
+- 声明受支持的 Node.js 与 pnpm 版本，使本地和 CI 构建遵循同一运行时约定。
+- Made identity, worker-fencing, resume-position, and artifact-submission migrations recover safely when a prior ORM startup pre-created future tables.
+- 让身份、Worker fencing、跨设备阅读位置与成果提交迁移可从 ORM 提前建表的中间状态安全恢复。
 - Added database-backed generation leases so refreshes, multiple tabs, or
   multiple workers cannot start duplicate chapter or section model calls; stale
   leases expire for safe recovery.

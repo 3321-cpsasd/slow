@@ -1,10 +1,14 @@
 # Slow · 知行书架
 
-[中文](#中文) · [English](#english)
+[中文](#中文) · [English](#english) · [系统全景](docs/SYSTEM_OVERVIEW.md) · [参赛说明](docs/COMPETITION_SUBMISSION.md) · [评测索引](reports/evaluations/README.md)
 
 Slow is an AI-native personal learning bookshelf that turns a learning goal into structured books users can study, verify, and retain one section at a time.
 
 Slow 是一个 AI 原生个人学习书架：把学习目标转化为可以逐节学习、验证并持续沉淀记忆的个性化教材。
+
+| 个人学习书架 | 个性化学习目标 |
+|---|---|
+| ![Slow 个人学习书架](docs/assets/slow-bookshelf.jpg) | ![Slow 个性化学习目标](docs/assets/slow-learning-goal.jpg) |
 
 ---
 
@@ -38,7 +42,7 @@ Slow 不交付一份静态学习计划，而是构建完整的学习闭环：
 - 不可变学习证据与可重建掌握度投影
 - OIDC 登录、可撤销服务端 Session、CSRF 防护和逐用户数据隔离
 - 带 fencing token 的持久化 Worker，以及跨设备阅读位置恢复
-- 本地 Demo Adapter、真实 OpenAI Responses API 和独立评测 Runner
+- 本地 Demo Adapter、OpenAI/Anthropic 兼容协议和独立评测 Runner
 
 ### 技术架构
 
@@ -49,7 +53,7 @@ Slow 采用前后端分离的模块化单体架构。浏览器负责展示和交
 | Web | React、TypeScript、Vite |
 | API | Python 3.12+、FastAPI、Pydantic 2 |
 | 数据 | SQLAlchemy 2、Alembic、SQLite |
-| AI | OpenAI Python SDK、Responses API |
+| AI | OpenAI Python SDK、Responses API、Anthropic 兼容协议 |
 | 验证 | pytest、TypeScript 编译、Vite 构建、黑盒 Agent 评测 |
 
 ```text
@@ -67,7 +71,7 @@ reports/evaluations/     评测历史与证据
 环境要求：
 
 - Python 3.12+
-- Node.js 与 pnpm
+- Node.js 22+ 与 pnpm 11+
 - macOS/Linux shell
 - 可选：OpenAI API Key（仅保存在服务端）
 
@@ -89,7 +93,7 @@ cp .env.example .env
 
 ```dotenv
 OPENAI_API_KEY=your_server_side_key
-OPENAI_MODEL=gpt-5.6-terra
+OPENAI_MODEL=gpt-5
 AI_PROVIDER_PROTOCOL=openai
 OPENAI_API_MODE=responses
 OPENAI_REASONING_MODE=optional
@@ -150,6 +154,11 @@ PYTHONPATH=apps/api .venv/bin/python -m app.evaluation.runner --real
 
 本地模式只验证评测框架；`--real` 会调用已配置模型、核验来源并产生实际 API 费用。报告写入 `reports/evaluations/`。
 
+评审或参赛提交请从 [`docs/COMPETITION_SUBMISSION.md`](docs/COMPETITION_SUBMISSION.md)
+开始；历史评测、当前权威证据与尚未关闭的门禁见
+[`reports/evaluations/README.md`](reports/evaluations/README.md)。历史失败报告作为审计记录保留，
+不代表当前代码版本的最终结论。
+
 ### README 与变更日志检查
 
 仓库提供版本化 Git hooks。首次 clone 后执行：
@@ -208,7 +217,7 @@ User → Shelf → Book → Chapter → Section
 - Immutable learning evidence and rebuildable mastery projections
 - OIDC login, revocable server-side sessions, CSRF protection, and per-user isolation
 - Fenced durable workers and cross-device reading-position recovery
-- Local Demo Adapter, real OpenAI Responses API integration, and an independent evaluation runner
+- Local Demo Adapter, OpenAI/Anthropic-compatible protocols, and an independent evaluation runner
 
 ### Architecture
 
@@ -219,7 +228,7 @@ Slow is a front-end/back-end separated modular monolith. The browser owns presen
 | Web | React, TypeScript, Vite |
 | API | Python 3.12+, FastAPI, Pydantic 2 |
 | Data | SQLAlchemy 2, Alembic, SQLite |
-| AI | OpenAI Python SDK, Responses API |
+| AI | OpenAI Python SDK, Responses API, Anthropic-compatible protocol |
 | Verification | pytest, TypeScript checks, Vite builds, black-box agent evaluation |
 
 ```text
@@ -237,7 +246,7 @@ reports/evaluations/     Evaluation history and evidence
 Prerequisites:
 
 - Python 3.12+
-- Node.js and pnpm
+- Node.js 22+ and pnpm 11+
 - A macOS/Linux shell
 - Optional: an OpenAI API key, stored only on the server
 
@@ -259,7 +268,7 @@ Configure `.env` as needed:
 
 ```dotenv
 OPENAI_API_KEY=your_server_side_key
-OPENAI_MODEL=gpt-5.6-terra
+OPENAI_MODEL=gpt-5
 AI_PROVIDER_PROTOCOL=openai
 OPENAI_API_MODE=responses
 OPENAI_REASONING_MODE=optional
@@ -319,6 +328,10 @@ PYTHONPATH=apps/api .venv/bin/python -m app.evaluation.runner --real
 ```
 
 Local mode validates the evaluation framework only. `--real` calls the configured model, verifies source reachability, and incurs actual API cost. Reports are written to `reports/evaluations/`.
+
+Reviewers should start with [`docs/COMPETITION_SUBMISSION.md`](docs/COMPETITION_SUBMISSION.md).
+The evidence index at [`reports/evaluations/README.md`](reports/evaluations/README.md)
+distinguishes current authoritative evidence from retained historical failures.
 
 ### README and changelog checks
 

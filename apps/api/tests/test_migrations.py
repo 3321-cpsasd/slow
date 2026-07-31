@@ -5,6 +5,10 @@ import sqlite3
 import subprocess
 import sys
 
+from sqlalchemy import create_engine
+
+from app.infrastructure.tables import Base
+
 
 API_ROOT = Path(__file__).resolve().parents[1]
 HEAD_REVISION = "0021_artifact_submission_facts"
@@ -131,6 +135,38 @@ def test_generation_lease_migration_accepts_orm_precreated_table(tmp_path):
             "SELECT version_num FROM alembic_version"
         ).fetchone()[0]
     assert revision == HEAD_REVISION
+
+
+def test_migrations_recover_when_orm_precreated_future_tables(tmp_path):
+    database = tmp_path / "orm-precreated.db"
+    run_alembic(database, "upgrade", "0018_multi_user_state_authority")
+
+    engine = create_engine(f"sqlite+pysqlite:///{database}")
+    Base.metadata.create_all(engine)
+    engine.dispose()
+
+    run_alembic(database, "upgrade", "head")
+
+    with sqlite3.connect(database) as connection:
+        revision = connection.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone()[0]
+        task_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(learning_tasks)")
+        }
+        foreign_key_errors = connection.execute(
+            "PRAGMA foreign_key_check"
+        ).fetchall()
+
+    assert revision == HEAD_REVISION
+    assert {
+        "lease_owner",
+        "lease_token",
+        "lease_expires_at",
+        "heartbeat_at",
+    }.issubset(task_columns)
+    assert foreign_key_errors == []
 
 
 def test_populated_0014_database_upgrades_without_losing_user_facts(tmp_path):

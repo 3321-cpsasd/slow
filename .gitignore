@@ -16,4 +16,5 @@ data/*.db
 data/*.db-shm
 data/*.db-wal
 data/runtime-ai.json
+data/backups/
 reports/evaluations/evidence/*.db

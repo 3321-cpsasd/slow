@@ -81,7 +81,9 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.component }}
 
   deploy-production:
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    # Publishing an image is safe on main; changing the live service requires an
+    # explicit repository/environment variable to avoid accidental deployments.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.ENABLE_PRODUCTION_DEPLOY == 'true'
     needs:
       - publish-images
     runs-on: ubuntu-latest

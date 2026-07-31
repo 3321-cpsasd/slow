@@ -1,12 +1,16 @@
 #!/bin/sh
 set -eu
 project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-pnpm_bin=/Users/pix/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback/pnpm
-node_dir=/Users/pix/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin
 
-if [ ! -x "$pnpm_bin" ]; then
-  pnpm_bin=pnpm
+if ! command -v node >/dev/null 2>&1; then
+  echo "缺少 Node.js，请先安装 Node.js 22+。" >&2
+  exit 1
+fi
+
+if ! command -v pnpm >/dev/null 2>&1; then
+  echo "缺少 pnpm，请先安装 pnpm 11+。" >&2
+  exit 1
 fi
 
 cd "$project_dir/apps/web"
-exec env PATH="$node_dir:/usr/local/bin:/usr/bin:/bin" CI=true "$pnpm_bin" dev
+exec pnpm dev

@@ -913,6 +913,12 @@ def test_runner_persists_failure_report_and_evidence_snapshot(tmp_path, monkeypa
     assert report["runnerError"]["message"] == "forced runner interruption"
     assert report["deterministic"]["runnerPersistence"] is True
     assert report["evidenceSnapshot"]["database"]["sha256"]
+    assert str(tmp_path) not in json_path.read_text(encoding="utf-8")
+    assert report["databaseSource"].startswith(("<temporary>/", "<external>/"))
+    assert report["databaseSource"].endswith("/evaluation.db")
+    assert report["evidenceSnapshot"]["database"]["path"].startswith(
+        ("<temporary>/", "<external>/")
+    )
     with sqlite3.connect(database) as connection:
         saved = connection.execute("select status, result_json from evaluation_runs where id = ?", (report["runId"],)).fetchone()
     assert saved and saved[0] == "fail" and "forced runner interruption" in saved[1]

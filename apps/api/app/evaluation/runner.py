@@ -639,7 +639,7 @@ def run_m1_learning_loop_smoke(
         "model": app_adapter.model,
         "createdAt": datetime.now(timezone.utc).isoformat(),
         "durationSeconds": round(time.monotonic() - started, 3),
-        "database": str(database_path),
+        "database": _portable_report_path(database_path),
         "sectionId": section_id,
         "usage": {
             "inputTokens": app_adapter.input_tokens + learner_agent.input_tokens,
@@ -698,12 +698,28 @@ def _file_sha256(path: Path):
     return digest.hexdigest()
 
 
+def _portable_report_path(path: Path) -> str:
+    """Keep report lineage useful without publishing workstation paths."""
+    resolved = path.resolve()
+    roots = (
+        (ROOT.resolve(), None),
+        (Path(tempfile.gettempdir()).resolve(), "<temporary>"),
+    )
+    for base, label in roots:
+        try:
+            relative = resolved.relative_to(base).as_posix()
+        except ValueError:
+            continue
+        return relative if label is None else f"{label}/{relative}"
+    return f"<external>/{resolved.name}"
+
+
 def _persist_evaluation(database_path: Path, report, json_path: Path, markdown_path: Path):
     engine, sessions = build_database(f"sqlite+pysqlite:///{database_path}")
     Base.metadata.create_all(engine)
     with sessions() as history:
         record = history.get(EvaluationRun, report["runId"])
-        payload = json.dumps({"jsonReport": str(json_path), "markdownReport": str(markdown_path), "runnerError": report.get("runnerError"), "review": report["review"], "semanticReview": report["semanticReview"], "evidenceSnapshot": report.get("evidenceSnapshot")}, ensure_ascii=False)
+        payload = json.dumps({"jsonReport": _portable_report_path(json_path), "markdownReport": _portable_report_path(markdown_path), "runnerError": report.get("runnerError"), "review": report["review"], "semanticReview": report["semanticReview"], "evidenceSnapshot": report.get("evidenceSnapshot")}, ensure_ascii=False)
         if record:
             record.status, record.result_json, record.finished_at = report["review"]["verdict"].lower(), payload, now()
         else:
@@ -803,7 +819,7 @@ def run(output_dir: Path, real=False, deterministic=None, database_path_override
         "model": model,
         "promptVersion": "slow-v0.3",
         "codeVersion": _code_version(),
-        "databaseSource": str(database_path),
+        "databaseSource": _portable_report_path(database_path),
         "usage": {"inputTokens": sum(getattr(item, "input_tokens", 0) for item in [adapter, learner_agent, reviewer_agent] if item), "outputTokens": sum(getattr(item, "output_tokens", 0) for item in [adapter, learner_agent, reviewer_agent] if item)},
         "cost": {"currency": "USD", "amount": None, "reason": "provider price is not configured; token usage is preserved"},
         "fixedInput": {"topic": "Kubernetes", "role": "技术人员", "experience": "Linux, Docker, basic networking; no Kubernetes practice", "purpose": "deployment and troubleshooting", "depth": "deep"},
@@ -824,8 +840,8 @@ def run(output_dir: Path, real=False, deterministic=None, database_path_override
         shutil.copy2(database_path, snapshot)
         attachment_files = sorted(path for path in evaluation_attachment_dir.rglob("*") if path.is_file())
         report["evidenceSnapshot"] = {
-            "database": {"path": str(snapshot), "sha256": _file_sha256(snapshot), "byteSize": snapshot.stat().st_size},
-            "attachments": {"path": str(evaluation_attachment_dir), "count": len(attachment_files), "objects": [{"key": path.relative_to(evaluation_attachment_dir).as_posix(), "sha256": _file_sha256(path), "byteSize": path.stat().st_size} for path in attachment_files]},
+            "database": {"path": _portable_report_path(snapshot), "sha256": _file_sha256(snapshot), "byteSize": snapshot.stat().st_size},
+            "attachments": {"path": _portable_report_path(evaluation_attachment_dir), "count": len(attachment_files), "objects": [{"key": path.relative_to(evaluation_attachment_dir).as_posix(), "sha256": _file_sha256(path), "byteSize": path.stat().st_size} for path in attachment_files]},
         }
         deterministic_result["runnerPersistence"] = True
         report["review"] = GateReviewer().review(learner, deterministic_result)
