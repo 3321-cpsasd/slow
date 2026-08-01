@@ -1,143 +1,55 @@
-# Slow · 知行书架
+<p align="center">
+  <img src="apps/web/public/slow-mark.svg" width="96" height="96" alt="Slow logo">
+</p>
 
-[中文](#中文) · [English](#english) · [系统全景](docs/SYSTEM_OVERVIEW.md) · [参赛说明](docs/COMPETITION_SUBMISSION.md) · [评测索引](reports/evaluations/README.md)
+<h1 align="center">Slow · 知行书架</h1>
 
-Slow is an AI-native personal learning bookshelf that turns a learning goal into structured books users can study, verify, and retain one section at a time.
+<p align="center">
+  An AI-native personal learning bookshelf.<br>
+  把学习目标变成可以真正学完的书。
+</p>
 
-Slow 是一个 AI 原生个人学习书架：把学习目标转化为可以逐节学习、验证并持续沉淀记忆的个性化教材。
-
-| 个人学习书架 | 个性化学习目标 |
-|---|---|
-| ![Slow 个人学习书架](docs/assets/slow-bookshelf.jpg) | ![Slow 个性化学习目标](docs/assets/slow-learning-goal.jpg) |
+<p align="center">
+  <a href="#中文">中文</a> · <a href="#english">English</a>
+</p>
 
 ---
 
 ## 中文
 
-### 项目简介
-
-Slow 不交付一份静态学习计划，而是构建完整的学习闭环：
-
-```text
-用户 → 书架 → 书 → 章 → 节
-                    ↓
-             阅读 → 答疑 → 测验 → 解锁 → 记忆
-```
-
-- 每本书预计 3–15 天完成，每章约对应一天。
-- 每章包含 3–5 节，每节约 20 分钟，只解决一个清晰问题。
-- 每节结束必须通过服务端评分的选择题，及格后才解锁下一节。
-- 满分后可进入可选的 Ask Me 口试，依次验证机制、边界和迁移能力。
-- Ask AI 绑定具体小节和内容块，不打断或污染主阅读流程。
-- 测验和口试证据会沉淀为可追溯的学习记忆，用于后续内容个性化。
+Slow 是一个 AI 原生个人学习应用。它把学习目标组织为可阅读、可验证、可持续推进的个性化教材，而不是只生成一份静态计划。
 
 ### 当前能力
 
-- 书架、系列、书、章、节的完整内容层级
-- 基于角色、经验、目标和深度生成个性化学习路径
-- 章节与小节按需生成，支持来源和内容版本记录
-- 服务端测验评分、失败补救、新题重试和渐进解锁
-- 段落级 Ask AI、多轮 Ask Me 和可编辑个人笔记
-- 章末实践、书末综合项目及附件提交
-- 不可变学习证据与可重建掌握度投影
-- OIDC 登录、可撤销服务端 Session、CSRF 防护和逐用户数据隔离
-- 带 fencing token 的持久化 Worker，以及跨设备阅读位置恢复
-- 本地 Demo Adapter、OpenAI/Anthropic 兼容协议和独立评测 Runner
-
-### 技术架构
-
-Slow 采用前后端分离的模块化单体架构。浏览器负责展示和交互，FastAPI 是 AI 调用、业务规则、内容版本、评分、解锁和学习证据的唯一可信边界。
-
-| 层 | 技术 |
-|---|---|
-| Web | React、TypeScript、Vite |
-| API | Python 3.12+、FastAPI、Pydantic 2 |
-| 数据 | SQLAlchemy 2、Alembic、SQLite |
-| AI | OpenAI Python SDK、Responses API、Anthropic 兼容协议 |
-| 验证 | pytest、TypeScript 编译、Vite 构建、黑盒 Agent 评测 |
-
-```text
-apps/
-├── api/                 FastAPI 应用、领域规则、AI Adapter、迁移与测试
-└── web/                 React 学习界面
-docs/
-├── PRODUCT_BOUNDARY.md  产品边界
-└── ARCHITECTURE.md      架构与数据规则
-reports/evaluations/     评测历史与证据
-```
+- React + TypeScript 学习界面
+- FastAPI + SQLAlchemy 服务端
+- 个性化课程、正文与测验生成
+- 服务端评分、渐进解锁与失败补救
+- 与具体学习内容绑定的 Ask AI
+- 可选的多轮 Ask Me 检查
+- 持久化后台任务、恢复与幂等处理
+- 本地开发身份和 OIDC 生产身份边界
+- OpenAI 与 Anthropic 兼容供应商接口
 
 ### 快速开始
 
-环境要求：
-
-- Python 3.12+
-- Node.js 22+ 与 pnpm 11+
-- macOS/Linux shell
-- 可选：OpenAI API Key（仅保存在服务端）
-
-安装依赖：
+环境要求：Python 3.12+、Node.js 22+、pnpm 11+。
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r apps/api/requirements.txt
 cd apps/web && pnpm install && cd ../..
-```
-
-创建本地配置：
-
-```bash
 cp .env.example .env
-```
-
-在 `.env` 中按需填写：
-
-```dotenv
-OPENAI_API_KEY=your_server_side_key
-OPENAI_MODEL=gpt-5
-AI_PROVIDER_PROTOCOL=openai
-OPENAI_API_MODE=responses
-OPENAI_REASONING_MODE=optional
-API_HOST=127.0.0.1
-API_PORT=8000
-WEB_ORIGIN=http://127.0.0.1:5173
-APP_MODE=development
-AUTH_MODE=local
-```
-
-启动前后端：
-
-```bash
 ./start.sh
 ```
 
-| 服务 | 地址 |
-|---|---|
-| Web | `http://127.0.0.1:5173` |
-| API | `http://127.0.0.1:8000` |
-| OpenAPI | `http://127.0.0.1:8000/docs` |
+默认地址：
 
-没有配置 `OPENAI_API_KEY` 时，系统使用机器可识别的 `local-demo-v1` 内容演示学习状态机。Demo 数据不能作为真实 AI 内容或正式评测证据。
+- Web：`http://127.0.0.1:5173`
+- API：`http://127.0.0.1:8000`
+- OpenAPI：`http://127.0.0.1:8000/docs`
 
-本地默认使用 `AUTH_MODE=local`，登录页内置四个相互隔离的开发验证账号：
-
-| 场景 | 用户名 |
-|---|---|
-| 计算机专业新生 | `cs-freshman` |
-| 金融考研 | `finance-postgrad` |
-| 数学系泛函分析期末 | `math-functional` |
-| 舞蹈系跨专业考公 | `dance-civil` |
-
-四个账号的临时开发密码均为 `SlowDemo2026!`。密码只以 Argon2id 哈希写入
-`local_credentials`；登录成功后仍使用可撤销服务端 Session 和 CSRF 防护。
-这个入口只用于本机产品验证，也可显式设置 `AUTH_MODE=demo` 跳过登录页。
-
-正式部署必须设置
-`APP_MODE=production`、`AUTH_MODE=oidc`、`OIDC_ISSUER`、
-`OIDC_CLIENT_ID`、`OIDC_REDIRECT_URI` 和真实 `WEB_ORIGIN`；正式模式会拒绝
-Local/Demo 身份。浏览器只保存 `HttpOnly` Session Cookie 和 CSRF 凭证，不接收
-`user_id` 或长期身份令牌。
-
-也可以在页面右上角的「AI 设置」中配置供应商。通过连接验证后，配置会写入仅服务端可读、权限为 `0600` 且被 Git 忽略的 `data/runtime-ai.json`；浏览器只能读取脱敏状态，API Key 不会返回前端，API 重启后会自动恢复该配置。
+未配置外部模型时，开发环境使用明确标记的本地 Demo 数据。Demo 数据不能被当作真实 AI 内容或正式学习证据。
 
 ### 验证
 
@@ -146,179 +58,41 @@ PYTHONPATH=apps/api .venv/bin/pytest -q apps/api/tests
 cd apps/web && pnpm build
 ```
 
-从不可变测验、提交和学习证据重建某个用户的进度与掌握投影：
+### 安全说明
 
-```bash
-PYTHONPATH=apps/api .venv/bin/python scripts/rebuild_learning_projections.py USER_ID
-```
-
-### 部署
-
-仓库包含 GitHub Actions、Docker 镜像和阿里云 ECS 单机部署配置。部署前请先阅读
-[`docs/DEPLOY_ECS.md`](docs/DEPLOY_ECS.md)，尤其是 SSH 密钥、持久化备份、
-安全组、HTTPS 与当前单用户鉴权边界。
-
-运行黑盒学习者与独立评审：
-
-```bash
-PYTHONPATH=apps/api .venv/bin/python -m app.evaluation.runner
-PYTHONPATH=apps/api .venv/bin/python -m app.evaluation.runner --real
-```
-
-本地模式只验证评测框架；`--real` 会调用已配置模型、核验来源并产生实际 API 费用。报告写入 `reports/evaluations/`。
-
-评审或参赛提交请从 [`docs/COMPETITION_SUBMISSION.md`](docs/COMPETITION_SUBMISSION.md)
-开始；历史评测、当前权威证据与尚未关闭的门禁见
-[`reports/evaluations/README.md`](reports/evaluations/README.md)。历史失败报告作为审计记录保留，
-不代表当前代码版本的最终结论。
-
-### README 与变更日志检查
-
-仓库提供版本化 Git hooks。首次 clone 后执行：
-
-```bash
-./scripts/install-git-hooks.sh
-```
-
-之后每次 `git pull` 完成 merge 或 rebase 时，hook 都会检查本次更新是否涉及产品代码、配置、迁移或脚本，并提示是否需要同步维护 `README.md` 和 `CHANGELOG.md`。检查只提醒、不阻止 pull；是否需要修改仍由开发者根据实际语义判断。
-
-手动检查两个 Git 引用之间的变化：
-
-```bash
-./scripts/check-doc-updates.sh <旧引用> <新引用>
-```
-
-### 数据可信原则
-
-- API Key 仅存在服务端，不返回浏览器或写入日志。
-- AI 结构化结果必须通过 JSON Schema 与服务端校验。
-- Mock、Demo、测试和降级数据必须显式标记并与真实证据隔离。
-- 解锁和掌握度只由服务端计算，前端状态不作为权威来源。
-- 内容、来源、生成、测验和重要状态变化需要版本化且可追溯。
-
-更完整的产品与技术约束见 [`docs/PRODUCT_BOUNDARY.md`](docs/PRODUCT_BOUNDARY.md) 和 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
+- API Key 只存在服务端，不应进入浏览器、日志或 Git。
+- 正式环境应使用 OIDC，并关闭本地开发身份与 Demo 模式。
+- 解锁、评分和学习状态由服务端负责，不能信任前端状态。
+- `.env`、运行时配置、数据库、附件与内部评测证据均被 Git 忽略。
 
 ---
 
 ## English
 
-### Overview
+Slow is an AI-native personal learning application. It turns a learning goal into structured material that learners can study, verify, and continue over time instead of stopping at a static plan.
 
-Slow does not produce a static study plan. It provides an end-to-end learning loop:
+### Highlights
 
-```text
-User → Shelf → Book → Chapter → Section
-                          ↓
-             Read → Ask → Quiz → Unlock → Remember
-```
-
-- A book is designed for roughly 3–15 days, with each chapter representing about one day.
-- A chapter contains 3–5 focused sections; each section takes about 20 minutes.
-- Learners must pass a server-graded multiple-choice quiz before the next section unlocks.
-- A perfect score reveals the optional Ask Me oral checkpoint for mechanism, boundary, and transfer.
-- Ask AI is anchored to a specific section and content block, keeping Q&A outside the reading flow.
-- Quiz and oral-checkpoint evidence feeds a traceable learning-memory profile for future personalization.
-
-### Current capabilities
-
-- Complete shelf, series, book, chapter, and section hierarchy
-- Personalized learning paths based on role, experience, purpose, and target depth
-- On-demand chapter and section generation with sources and content versions
-- Server-side grading, remediation, fresh quiz retries, and progressive unlocking
-- Block-level Ask AI, multi-round Ask Me, and editable personal notes
-- Chapter practices, book capstones, and attachment submission
-- Immutable learning evidence and rebuildable mastery projections
-- OIDC login, revocable server-side sessions, CSRF protection, and per-user isolation
-- Fenced durable workers and cross-device reading-position recovery
-- Local Demo Adapter, OpenAI/Anthropic-compatible protocols, and an independent evaluation runner
-
-### Architecture
-
-Slow is a front-end/back-end separated modular monolith. The browser owns presentation and interaction; FastAPI is the sole trusted boundary for AI calls, domain rules, content versions, grading, unlocking, and learning evidence.
-
-| Layer | Stack |
-|---|---|
-| Web | React, TypeScript, Vite |
-| API | Python 3.12+, FastAPI, Pydantic 2 |
-| Data | SQLAlchemy 2, Alembic, SQLite |
-| AI | OpenAI Python SDK, Responses API, Anthropic-compatible protocol |
-| Verification | pytest, TypeScript checks, Vite builds, black-box agent evaluation |
-
-```text
-apps/
-├── api/                 FastAPI app, domain rules, AI adapters, migrations, tests
-└── web/                 React learning interface
-docs/
-├── PRODUCT_BOUNDARY.md  Product boundaries
-└── ARCHITECTURE.md      Architecture and data rules
-reports/evaluations/     Evaluation history and evidence
-```
+- React and TypeScript learning interface
+- FastAPI and SQLAlchemy backend
+- Personalized curriculum, lesson, and quiz generation
+- Server-side grading, progressive unlocking, and remediation
+- Context-bound Ask AI and optional multi-round Ask Me checks
+- Durable background tasks with recovery and idempotency
+- Local development identity and an OIDC production boundary
+- OpenAI- and Anthropic-compatible provider interfaces
 
 ### Quick start
 
-Prerequisites:
-
-- Python 3.12+
-- Node.js 22+ and pnpm 11+
-- A macOS/Linux shell
-- Optional: an OpenAI API key, stored only on the server
-
-Install dependencies:
+Requires Python 3.12+, Node.js 22+, and pnpm 11+.
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r apps/api/requirements.txt
 cd apps/web && pnpm install && cd ../..
-```
-
-Create local configuration:
-
-```bash
 cp .env.example .env
-```
-
-Configure `.env` as needed:
-
-```dotenv
-OPENAI_API_KEY=your_server_side_key
-OPENAI_MODEL=gpt-5
-AI_PROVIDER_PROTOCOL=openai
-OPENAI_API_MODE=responses
-OPENAI_REASONING_MODE=optional
-API_HOST=127.0.0.1
-API_PORT=8000
-WEB_ORIGIN=http://127.0.0.1:5173
-APP_MODE=development
-AUTH_MODE=local
-```
-
-Start both services:
-
-```bash
 ./start.sh
 ```
-
-| Service | URL |
-|---|---|
-| Web | `http://127.0.0.1:5173` |
-| API | `http://127.0.0.1:8000` |
-| OpenAPI | `http://127.0.0.1:8000/docs` |
-
-Without `OPENAI_API_KEY`, Slow uses machine-identifiable `local-demo-v1` content to demonstrate the learning state machine. Demo data is never treated as real AI content or formal evaluation evidence.
-
-Local development defaults to `AUTH_MODE=local` with four isolated validation
-accounts: `cs-freshman`, `finance-postgrad`, `math-functional`, and
-`dance-civil`. Their temporary development password is `SlowDemo2026!`.
-Passwords are stored only as Argon2id hashes; successful login reuses the
-revocable server-side Session and CSRF boundary. Set `AUTH_MODE=demo` explicitly
-to skip the login page.
-
-Production must configure
-`APP_MODE=production`, `AUTH_MODE=oidc`, the OIDC issuer/client/redirect URI,
-and the real `WEB_ORIGIN`; production refuses local and demo identity. The browser never
-supplies a trusted `user_id` or stores a long-lived identity token.
-
-You can also configure a provider from **AI Settings** in the web UI. After connection validation, Slow stores the configuration in the Git-ignored, server-only `data/runtime-ai.json` file with `0600` permissions. The browser receives only redacted status, never the API key, and the API restores the configuration after a restart.
 
 ### Verification
 
@@ -327,54 +101,4 @@ PYTHONPATH=apps/api .venv/bin/pytest -q apps/api/tests
 cd apps/web && pnpm build
 ```
 
-Rebuild one user's progress and mastery projections from immutable facts:
-
-```bash
-PYTHONPATH=apps/api .venv/bin/python scripts/rebuild_learning_projections.py USER_ID
-```
-
-### Deployment
-
-The repository includes GitHub Actions, Docker images, and a single-host Alibaba
-Cloud ECS deployment. Read [`docs/DEPLOY_ECS.md`](docs/DEPLOY_ECS.md) before
-deploying, especially the SSH key, persistent backup, security group, HTTPS, and
-OIDC configuration.
-
-Run the black-box learner and independent reviewer:
-
-```bash
-PYTHONPATH=apps/api .venv/bin/python -m app.evaluation.runner
-PYTHONPATH=apps/api .venv/bin/python -m app.evaluation.runner --real
-```
-
-Local mode validates the evaluation framework only. `--real` calls the configured model, verifies source reachability, and incurs actual API cost. Reports are written to `reports/evaluations/`.
-
-Reviewers should start with [`docs/COMPETITION_SUBMISSION.md`](docs/COMPETITION_SUBMISSION.md).
-The evidence index at [`reports/evaluations/README.md`](reports/evaluations/README.md)
-distinguishes current authoritative evidence from retained historical failures.
-
-### README and changelog checks
-
-The repository includes versioned Git hooks. After the first clone, run:
-
-```bash
-./scripts/install-git-hooks.sh
-```
-
-After every `git pull` merge or rebase, the hook checks whether product code, configuration, migrations, or scripts changed and reminds the developer to review `README.md` and `CHANGELOG.md`. The check is advisory and never blocks a pull; maintainers decide whether a documentation change is semantically required.
-
-To inspect a range manually:
-
-```bash
-./scripts/check-doc-updates.sh <old-ref> <new-ref>
-```
-
-### Data trust principles
-
-- API keys remain server-side and are never returned to the browser or written to logs.
-- Structured AI output must pass JSON Schema and server-side validation.
-- Mock, demo, test, and fallback data is explicitly labeled and isolated from real evidence.
-- Unlocking and mastery are calculated only on the server; client state is never authoritative.
-- Content, sources, generations, quizzes, and important state changes are versioned and traceable.
-
-See [`docs/PRODUCT_BOUNDARY.md`](docs/PRODUCT_BOUNDARY.md) and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full product and technical constraints.
+External model credentials are optional in development and must remain server-side. Production deployments should use OIDC and disable local/demo identity modes.

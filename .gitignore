@@ -17,5 +17,12 @@ data/*.db-shm
 data/*.db-wal
 data/runtime-ai.json
 data/backups/
-reports/evaluations/evidence/*.db
-reports/evaluations/evidence/*-attachments/
+
+# Private product strategy, internal evidence, and local agent context.
+/docs/
+/reports/evaluations/
+/AGENTS.md
+/PROJECT_CONTEXT.md
+/.githooks/
+/scripts/check-doc-updates.sh
+/scripts/install-git-hooks.sh
