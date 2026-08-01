@@ -865,6 +865,41 @@ button:disabled { cursor: not-allowed; }
   grid-template-columns: minmax(250px, 17.5vw) minmax(520px, 1fr) minmax(300px, 21vw);
   background: var(--paper);
 }
+.initial-task-alert {
+  position: fixed;
+  z-index: 20;
+  top: 70px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(760px, calc(100vw - 32px));
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid #efc7bd;
+  border-radius: 10px;
+  background: #fff7f4;
+  color: var(--danger);
+  box-shadow: 0 8px 28px rgba(70, 45, 34, .12);
+}
+.initial-task-alert.pending, .initial-task-alert.running {
+  border-color: #d9d2b9;
+  background: #fffdf3;
+  color: #75683f;
+}
+.next-book-callout {
+  margin: 12px;
+  padding: 13px;
+  display: grid;
+  gap: 7px;
+  border: 1px solid #cfded3;
+  border-radius: 10px;
+  background: var(--green-soft);
+}
+.next-book-callout b { color: var(--green); font-size: 12px; }
+.next-book-callout span { color: var(--muted); font-size: 10px; line-height: 1.5; }
+.next-book-callout button { justify-self: start; }
 .directory-panel, .qa-panel { min-width: 0; background: #f8f8f5; }
 .directory-panel { border-right: 1px solid var(--line); overflow-y: auto; }
 .qa-panel { border-left: 1px solid var(--line); display: flex; flex-direction: column; overflow: hidden; }
@@ -1188,6 +1223,23 @@ button:disabled { cursor: not-allowed; }
 .result { margin-top: 16px; padding: 13px; border-radius: 8px; }
 .result.success { color: var(--green); background: var(--green-soft); }
 .result.failure { color: var(--danger); background: #fff0ed; }
+.workflow-task-list { margin-top: 12px; display: grid; gap: 7px; }
+.workflow-task {
+  padding: 10px 12px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 3px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fafaf7;
+}
+.workflow-task > span { font-size: 11px; font-weight: 700; }
+.workflow-task > b { font-size: 10px; color: var(--muted); }
+.workflow-task > small { grid-column: 1 / -1; color: var(--muted); font-size: 9px; }
+.workflow-task.running > b, .workflow-task.pending > b { color: #8a7048; }
+.workflow-task.succeeded > b { color: var(--green); }
+.workflow-task.failed { border-color: #efc7bd; background: #fff7f4; }
+.workflow-task.failed > b, .workflow-task.failed > small { color: var(--danger); }
 .note-paper { margin: 22px 0; padding: 24px; border: 1px solid var(--line); background: #fbfbf8; border-radius: 10px; }
 .note-paper pre { margin: 0; white-space: pre-wrap; font: inherit; line-height: 1.75; color: #495049; }
 .note-view textarea, .askme-view textarea { width: 100%; min-height: 150px; margin: 8px 0 12px; }

@@ -11,7 +11,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import delete, event, select
 from app.ai.contracts import AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedChapter, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedSectionOutline, PlanBook, PlanChapter, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
 from app.main import create_app
-from app.evaluation.runner import run
+from app.core.errors import AiError
+from app.evaluation.runner import _semantic_evidence, run
 from app.services.attachment_storage import LocalAttachmentStorage
 from app.services.source_verifier import AcceptingSourceVerifier
 from app.infrastructure.tables import (
@@ -83,6 +84,18 @@ def test_complete_real_shape_vertical_slice(client):
     remediated = client.get(f"/api/sections/{section_id}").json()
     assert remediated["quiz"]["generation"] == 2
     assert remediated["remediations"][-1]["blocks"]
+    assert remediated["remediations"][-1]["sourceLineage"] == {
+        "mode": "generation_trace",
+        "generationRunId": remediated["generation"]["id"],
+    }
+    assert remediated["remediations"][-1]["sourceVerification"] == [
+        {
+            "url": "https://kubernetes.io/docs/",
+            "reachable": True,
+            "statusCode": 200,
+            "pinned": True,
+        }
+    ]
     stale = client.post(f"/api/sections/{section_id}/quiz", json={"quizSetId":quiz_id,"answers":[[1],[1],[1],[1],[1]]})
     assert stale.status_code == 409 and stale.json()["code"] == "QUIZ_STALE"
     passed = client.post(f"/api/sections/{section_id}/quiz", json={"quizSetId":remediated["quiz"]["id"],"answers":[[1],[1],[1],[1],[1]]}).json()
@@ -100,6 +113,44 @@ def test_complete_real_shape_vertical_slice(client):
     ).json()
     assert next_section["content"] is not None
     assert client.get("/api/learning-memory?shelf_id=shelf_technology").json()
+
+
+def test_semantic_evidence_scopes_remediation_generation_to_remediation():
+    generation = {
+        "id": "generation_1",
+        "operation": "remediation",
+        "trace": {
+            "quizSetId": "quiz_2",
+            "sourceVerification": [{"url": "https://example.test/source"}],
+        },
+    }
+    learner = {
+        "featureEvidence": {"secondBookGeneratedSectionId": None},
+        "steps": [
+            {
+                "name": "GET /api/sections/section_1",
+                "status": "PASS",
+                "evidence": {
+                    "payload": {
+                        "id": "section_1",
+                        "content": {"id": "content_1"},
+                        "generation": generation,
+                        "remediations": [
+                            {"replacementQuizId": "quiz_2", "blocks": []}
+                        ],
+                    }
+                },
+            }
+        ],
+    }
+
+    samples, _ = _semantic_evidence(learner)
+
+    assert samples[0]["generation"] is None
+    assert samples[0]["latestWorkflowGeneration"] == generation
+    remediation = samples[0]["remediations"][0]
+    assert remediation["generation"] == generation
+    assert remediation["sourceLineage"]["generationRunId"] == "generation_1"
 
 
 def test_new_plan_preloads_first_lesson_in_durable_background_task(client):
@@ -310,6 +361,7 @@ def test_note_failure_does_not_roll_back_pass_or_unlock(tmp_path):
             "retryable": True,
             "errorCode": "RuntimeError",
         }
+        assert failed_task["errorMessage"] == "后台任务执行失败，请安全重试"
         retried = failing.post(
             f"/api/note-tasks/{note_generation['taskId']}/retry"
         )
@@ -334,6 +386,56 @@ def test_note_failure_does_not_roll_back_pass_or_unlock(tmp_path):
             )
             assert task.status == "failed"
             assert task.attempt_count == 2
+
+
+def test_retryable_post_quiz_ai_failure_recovers_without_user_retry(tmp_path):
+    class TransientNoteAi(FakeAi):
+        def __init__(self):
+            self.note_attempts = 0
+
+        async def note(self, request):
+            self.note_attempts += 1
+            if self.note_attempts == 1:
+                raise AiError("temporary provider failure")
+            return await super().note(request)
+
+    ai = TransientNoteAi()
+    storage = LocalAttachmentStorage(tmp_path / "automatic-retry-attachments")
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            ai,
+            AcceptingSourceVerifier(),
+            storage,
+        )
+    ) as recovering:
+        series = create_series(recovering)
+        chapter = recovering.post(
+            f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+        ).json()
+        section = recovering.post(
+            f"/api/sections/{chapter['sections'][0]['id']}/generate"
+        ).json()
+        result = recovering.post(
+            f"/api/sections/{section['id']}/quiz",
+            json={
+                "quizSetId": section["quiz"]["id"],
+                "answers": [[1] for _ in section["quiz"]["questions"]],
+            },
+        ).json()
+
+        note_task = next(
+            task
+            for task in result["workflowTasks"]
+            if task["type"] == "note_generation"
+        )
+        completed = wait_for_task(recovering, note_task["taskId"])
+        assert completed["status"] == "succeeded"
+        assert completed["attemptCount"] == 2
+        assert ai.note_attempts == 2
+        assert recovering.get(
+            f"/api/sections/{section['id']}"
+        ).json()["note"]
 
 
 def test_quiz_response_does_not_wait_for_post_quiz_ai(tmp_path):
@@ -379,6 +481,16 @@ def test_quiz_response_does_not_wait_for_post_quiz_ai(tmp_path):
                 non_blocking,
                 task["taskId"],
             )["status"] == "succeeded"
+        refreshed = non_blocking.get(
+            f"/api/sections/{section['id']}"
+        ).json()
+        assert {
+            task["type"] for task in refreshed["workflowTasks"]
+        } == {"note_generation", "next_section_preload"}
+        assert all(
+            task["status"] == "succeeded"
+            for task in refreshed["workflowTasks"]
+        )
 
 
 def test_interrupted_learning_task_resumes_after_restart(tmp_path):

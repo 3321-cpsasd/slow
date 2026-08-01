@@ -18,3 +18,4 @@ data/*.db-wal
 data/runtime-ai.json
 data/backups/
 reports/evaluations/evidence/*.db
+reports/evaluations/evidence/*-attachments/

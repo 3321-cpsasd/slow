@@ -1,7 +1,7 @@
 from datetime import timedelta
 from uuid import uuid4
 
-from sqlalchemy import delete
+from sqlalchemy import delete, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -57,3 +57,28 @@ def release_generation_lease(
         )
     )
     db.commit()
+
+
+def renew_generation_lease(
+    db: Session,
+    resource_key: str,
+    owner_id: str,
+) -> bool:
+    """Extend a live lease only while the caller still owns it.
+
+    This is also the write fence used after slow provider calls. If another
+    request has taken over an expired lease, the stale generator cannot renew
+    and must not persist its result.
+    """
+
+    current = now()
+    renewed = db.execute(
+        update(GenerationLease)
+        .where(
+            GenerationLease.resource_key == resource_key,
+            GenerationLease.owner_id == owner_id,
+        )
+        .values(expires_at=current + GENERATION_LEASE_TTL)
+    )
+    db.commit()
+    return renewed.rowcount == 1

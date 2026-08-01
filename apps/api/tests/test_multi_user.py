@@ -14,6 +14,7 @@ from joserfc import jwt
 from joserfc.jwk import RSAKey
 
 from app.auth.oidc import OidcClient, OidcIdentity
+from app.application.service import SlowService
 from app.core.errors import AppError
 from app.demo_personas import LOCAL_DEMO_PASSWORD, LOCAL_DEMO_PERSONAS
 from app.infrastructure.database import build_database
@@ -27,6 +28,7 @@ from app.infrastructure.tables import (
     ContentVersion,
     LearningEvidence,
     LearningMemory,
+    LearningNote,
     LearningPlan,
     LearningRun,
     LearningTask,
@@ -42,7 +44,11 @@ from app.infrastructure.tables import (
     now,
 )
 from app.main import create_app
-from app.modules.learning.tasks import claim_task, complete_task
+from app.modules.learning.tasks import (
+    claim_task,
+    complete_task,
+    recoverable_task_ids,
+)
 from app.modules.learning.rebuild import rebuild_user_projections
 from app.modules.library.context import ActiveLearningContextResolver
 from app.services.attachment_storage import LocalAttachmentStorage
@@ -406,6 +412,218 @@ def test_local_accounts_login_reuses_session_boundary_and_isolates_users(
         assert all(row.password_hash != LOCAL_DEMO_PASSWORD for row in credentials)
 
 
+def test_two_local_users_interleave_learning_tasks_without_cross_access(
+    tmp_path,
+):
+    class FailFirstRemediationAi(LocalDemoAdapter):
+        def __init__(self):
+            self.failed_remediation = False
+
+        async def lesson(self, request, memory, prior_questions=None):
+            if prior_questions and not self.failed_remediation:
+                self.failed_remediation = True
+                raise AppError(
+                    "simulated non-retryable remediation failure",
+                    code="SIMULATED_REMEDIATION_FAILURE",
+                    retryable=False,
+                )
+            return await super().lesson(request, memory, prior_questions)
+
+    app = create_app(
+        f"sqlite+pysqlite:///{tmp_path / 'two-user-tasks.db'}",
+        ai=FailFirstRemediationAi(),
+        source_verifier=AcceptingSourceVerifier(),
+        attachment_storage=LocalAttachmentStorage(
+            tmp_path / "two-user-task-attachments"
+        ),
+        auth_mode="local",
+        app_mode="development",
+        runtime_settings_path=False,
+    )
+
+    def login_as(client, persona):
+        client.cookies.clear()
+        response = client.post(
+            "/api/auth/local/login",
+            json={
+                "username": persona.username,
+                "password": LOCAL_DEMO_PASSWORD,
+            },
+        )
+        assert response.status_code == 200
+        session = response.cookies.get("slow_session")
+        assert session
+        client.cookies.clear()
+        return {
+            "Cookie": f"slow_session={session}",
+            "X-CSRF-Token": response.json()["csrfToken"],
+        }
+
+    def wait_for_owned_task(client, task_id, headers):
+        for _ in range(400):
+            response = client.get(
+                f"/api/learning-tasks/{task_id}",
+                headers=headers,
+            )
+            assert response.status_code == 200
+            payload = response.json()
+            if payload["status"] in {"succeeded", "failed"}:
+                return payload
+            time.sleep(0.01)
+        raise AssertionError(f"task did not finish: {task_id}")
+
+    with TestClient(app) as client:
+        persona_a, persona_b = LOCAL_DEMO_PERSONAS[:2]
+        headers_a = login_as(client, persona_a)
+        headers_b = login_as(client, persona_b)
+
+        bootstrap_a = client.get("/api/bootstrap", headers=headers_a).json()
+        bootstrap_b = client.get("/api/bootstrap", headers=headers_b).json()
+
+        def create_started_section(headers, bootstrap, key):
+            created = client.post(
+                "/api/plans",
+                headers={**headers, "Idempotency-Key": key},
+                json={
+                    "shelfId": bootstrap["shelves"][0]["id"],
+                    "topic": key,
+                    "role": "学习者",
+                    "experience": "测试",
+                    "depth": "deep",
+                },
+            )
+            assert created.status_code == 201
+            task = wait_for_owned_task(
+                client,
+                created.json()["initializationTask"]["taskId"],
+                headers,
+            )
+            assert task["status"] == "succeeded"
+            section_id = task["result"]["targetSectionId"]
+            return client.get(
+                f"/api/sections/{section_id}",
+                headers=headers,
+            ).json()
+
+        section_a = create_started_section(
+            headers_a,
+            bootstrap_a,
+            "two-user-a",
+        )
+        section_b = create_started_section(
+            headers_b,
+            bootstrap_b,
+            "two-user-b",
+        )
+
+        failed_quiz = client.post(
+            f"/api/sections/{section_a['id']}/quiz",
+            headers={**headers_a, "Idempotency-Key": "quiz-user-a"},
+            json={
+                "quizSetId": section_a["quiz"]["id"],
+                "answers": [[] for _ in section_a["quiz"]["questions"]],
+            },
+        )
+        passed_quiz = client.post(
+            f"/api/sections/{section_b['id']}/quiz",
+            headers={**headers_b, "Idempotency-Key": "quiz-user-b"},
+            json={
+                "quizSetId": section_b["quiz"]["id"],
+                "answers": [[1] for _ in section_b["quiz"]["questions"]],
+            },
+        )
+        assert failed_quiz.status_code == passed_quiz.status_code == 200
+
+        task_a = failed_quiz.json()["workflowTasks"][0]
+        tasks_b = passed_quiz.json()["workflowTasks"]
+        terminal_a = wait_for_owned_task(
+            client,
+            task_a["taskId"],
+            headers_a,
+        )
+        terminal_b = [
+            wait_for_owned_task(client, task["taskId"], headers_b)
+            for task in tasks_b
+        ]
+        assert terminal_a["status"] == "failed"
+        assert all(task["status"] == "succeeded" for task in terminal_b)
+
+        assert client.get(
+            f"/api/learning-tasks/{task_a['taskId']}",
+            headers=headers_b,
+        ).status_code == 404
+        assert client.post(
+            f"/api/learning-tasks/{task_a['taskId']}/retry",
+            headers=headers_b,
+        ).status_code == 404
+        for task in tasks_b:
+            assert client.get(
+                f"/api/learning-tasks/{task['taskId']}",
+                headers=headers_a,
+            ).status_code == 404
+            assert client.post(
+                f"/api/learning-tasks/{task['taskId']}/retry",
+                headers=headers_a,
+            ).status_code == 404
+
+        retried = client.post(
+            f"/api/learning-tasks/{task_a['taskId']}/retry",
+            headers=headers_a,
+        )
+        assert retried.status_code == 200
+        assert retried.json()["status"] == "pending"
+        assert wait_for_owned_task(
+            client,
+            task_a["taskId"],
+            headers_a,
+        )["status"] == "succeeded"
+
+        refreshed_a = client.get(
+            f"/api/sections/{section_a['id']}",
+            headers=headers_a,
+        ).json()
+        refreshed_b = client.get(
+            f"/api/sections/{section_b['id']}",
+            headers=headers_b,
+        ).json()
+        assert refreshed_a["remediations"]
+        assert refreshed_a["workflowTasks"][0]["status"] == "succeeded"
+        assert refreshed_b["note"]
+        assert all(
+            task["status"] == "succeeded"
+            for task in refreshed_b["workflowTasks"]
+        )
+
+        with client.app.state.sessions() as db:
+            tasks = db.scalars(
+                select(LearningTask).where(
+                    LearningTask.id.in_(
+                        [task_a["taskId"], *[task["taskId"] for task in tasks_b]]
+                    )
+                )
+            ).all()
+            assert {task.user_id for task in tasks} == {
+                persona_a.user_id,
+                persona_b.user_id,
+            }
+            assert db.scalar(
+                select(LearningNote).where(
+                    LearningNote.user_id == persona_b.user_id,
+                    LearningNote.section_id == section_b["id"],
+                )
+            )
+            evidence_users = set(
+                db.scalars(
+                    select(LearningEvidence.user_id).where(
+                        LearningEvidence.section_id.in_(
+                            [section_a["id"], section_b["id"]]
+                        )
+                    )
+                ).all()
+            )
+            assert evidence_users == {persona_a.user_id, persona_b.user_id}
+
+
 def test_local_login_rejects_wrong_password_and_locks_repeated_failures(
     local_auth_client,
 ):
@@ -646,6 +864,86 @@ def test_expired_worker_cannot_commit_after_new_lease():
         completed = complete_task(db, second, {"writer": "new"})
         assert completed.status == "succeeded"
         assert '"new"' in completed.result_json
+    engine.dispose()
+
+
+def test_expired_worker_cannot_persist_domain_rows_after_takeover():
+    engine, sessions = build_database("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with sessions() as db:
+        run, sections = build_task_graph(db)
+        task = LearningTask(
+            id="task_domain_fence",
+            learning_run_id=run.id,
+            user_id="user_a",
+            section_id=sections["user_a"].id,
+            task_type="note_generation",
+            idempotency_key="domain-fence",
+            trigger_id="trigger",
+            status="pending",
+        )
+        db.add(task)
+        db.commit()
+
+        stale_context = claim_task(db, task.id, lease_owner="worker_one")
+        claimed = db.get(LearningTask, task.id)
+        claimed.lease_expires_at = now() - timedelta(seconds=1)
+        db.commit()
+        assert claim_task(db, task.id, lease_owner="worker_two")
+
+        SlowService(
+            db,
+            LocalDemoAdapter(),
+            AcceptingSourceVerifier(),
+            scope=stale_context,
+        )
+        db.add(
+            LearningNote(
+                id="note_from_stale_worker",
+                learning_run_id=run.id,
+                section_id=sections["user_a"].id,
+                user_id="user_a",
+                ai_content_json="{}",
+                user_content_json="{}",
+            )
+        )
+        with pytest.raises(AppError) as raised:
+            db.commit()
+        assert raised.value.code == "TASK_LEASE_LOST"
+        db.rollback()
+        assert db.get(LearningNote, "note_from_stale_worker") is None
+    engine.dispose()
+
+
+def test_expired_exhausted_task_becomes_observable_failure():
+    engine, sessions = build_database("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with sessions() as db:
+        run, sections = build_task_graph(db)
+        task = LearningTask(
+            id="task_exhausted",
+            learning_run_id=run.id,
+            user_id="user_a",
+            section_id=sections["user_a"].id,
+            task_type="note_generation",
+            idempotency_key="exhausted",
+            trigger_id="trigger",
+            status="running",
+            attempt_count=3,
+            max_attempts=3,
+            lease_owner="dead-worker",
+            lease_token="dead-token",
+            lease_expires_at=now() - timedelta(seconds=1),
+        )
+        db.add(task)
+        db.commit()
+
+        assert recoverable_task_ids(db) == []
+        db.refresh(task)
+        assert task.status == "failed"
+        assert task.error_code == "LEARNING_TASK_RETRY_EXHAUSTED"
+        assert task.lease_owner is None
+        assert task.lease_token is None
     engine.dispose()
 
 

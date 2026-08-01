@@ -549,4 +549,4 @@ class OpenAiAdapter:
 
     async def review_evaluation(self, request: dict):
         self._begin_structured_operation()
-        return await self._parse(EvaluationReview, """你是与学习者上下文独立的 Slow 严格评审 Agent。证据不足即失败。检查样本文正是否支持测验、来源是否真正支持关键主张、笔记是否忠实保留错题与答疑、学习记忆和状态证据是否自洽。不得采用学习者自己的结论；只引用传入的原始 HTTP 证据和确定性门禁。发现任一 critical 硬缺陷则 verdict=FAIL。中文输出。""", request, 2800)
+        return await self._parse(EvaluationReview, """你是与学习者上下文独立的 Slow 严格评审 Agent。证据不足即失败。严格按 gateCriteria 的当前里程碑口径判断硬门禁，不得用更后期的质量标准替换它；超出当前门禁的真实风险仍应如实列为 high/medium/low finding。workflowEvidence 与 databaseFacts 是原始学习事件，note.userContent 仅是用户手工编辑笔记，不能据其为空推断没有 QA。askMeUnlocked 只表示可选口试已解锁，不能据此推断已完成。检查样本文正是否支持测验、来源风险、笔记是否忠实保留错题与答疑、学习记忆和状态证据是否自洽。不得采用学习者自己的结论。只有当前 gateCriteria 下存在任一 critical 硬缺陷时 verdict=FAIL；否则 verdict=PASS 并保留非阻断 findings。中文输出。""", request, 3200)

@@ -1,9 +1,11 @@
 import argparse
 import asyncio
+from copy import deepcopy
 import hashlib
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -22,6 +24,14 @@ from ..infrastructure.tables import Base, EvaluationRun, now
 from ..services.source_verifier import AcceptingSourceVerifier
 from ..services.attachment_storage import LocalAttachmentStorage
 from ..services.runtime_settings import RuntimeSettingsStore
+
+
+SEMANTIC_GATE_CRITERIA = {
+    "G04": "服务端评分事件必须证明失败、补救、重答和解锁；不得仅凭最终 section 状态推断。",
+    "G07": "AI 笔记须忠实引用测验与 QA 事实；note.userContent 仅代表用户手工编辑笔记，QA 原文属于独立 QA Session。",
+    "G08": "满分只表示 Ask Me 已解锁；M1 要求至少一个小节存在 mechanism、boundary、transfer 三轮完成事实，不要求每个满分小节都完成可选 Ask Me。",
+    "G11": "M1 门禁仅要求服务端验证来源 URL 可达且版本固定；主张级摘录或源码行范围属于后续内容可信度风险，应报告但不单独构成 M1 critical 缺陷。",
+}
 
 
 def configured_provider():
@@ -164,7 +174,62 @@ class LearnerRunner:
                 },
                 expected=201,
             )
+        initialization_task = series.get("initializationTask")
+        if initialization_task and initialization_task.get("status") not in {
+            "succeeded",
+            "failed",
+        }:
+            self.wait_for_workflow(
+                {"workflowTasks": [initialization_task]}
+            )
+            series = self.request("GET", f"/api/series/{series['id']}")
+        elif initialization_task and initialization_task.get("status") == "failed":
+            raise RuntimeError(
+                "initial book preload failed: "
+                f"{initialization_task.get('errorCode')}"
+            )
         first_book = series["books"][0]
+        scope_trimmed = False
+        for chapter_to_remove in reversed(first_book["chapters"][3:]):
+            if (
+                chapter_to_remove["status"] == "locked"
+                and not chapter_to_remove.get("generated")
+            ):
+                self.request(
+                    "DELETE",
+                    f"/api/chapters/{chapter_to_remove['id']}",
+                    expected=204,
+                )
+                scope_trimmed = True
+        if scope_trimmed:
+            series = self.request("GET", f"/api/series/{series['id']}")
+            first_book = series["books"][0]
+        for book_summary in series["books"]:
+            for chapter_summary in book_summary["chapters"]:
+                for section_summary in chapter_summary.get("sections", []):
+                    section_state = self.request(
+                        "GET",
+                        f"/api/sections/{section_summary['id']}",
+                    )
+                    resumed_tasks = []
+                    for task in section_state.get("workflowTasks", []):
+                        if task["status"] in {"pending", "running"}:
+                            resumed_tasks.append(task)
+                        elif task["status"] == "failed" and task["retryable"]:
+                            resumed_tasks.append(
+                                self.request(
+                                    "POST",
+                                    f"/api/learning-tasks/{task['taskId']}/retry",
+                                )
+                            )
+                        elif task["status"] == "failed":
+                            raise RuntimeError(
+                                "unrecoverable learning task: "
+                                f"{task['type']} {task.get('errorCode')}"
+                            )
+                    self.wait_for_workflow(
+                        {"workflowTasks": resumed_tasks}
+                    )
         locked_chapter = next((book["chapters"][0]["id"] for book in series["books"] if book["status"] == "locked" and book.get("chapters")), None)
         if locked_chapter:
             self.request("POST", f"/api/chapters/{locked_chapter}/generate", expected=403)
@@ -199,9 +264,9 @@ class LearnerRunner:
                 section = self.request("POST", f"/api/sections/{section_summary['id']}/generate")
                 stable_blocks = stable_blocks and all(block.get("id") for block in section["content"]["blocks"])
                 sources_verified = sources_verified and all(item.get("reachable") and item.get("pinned") for item in section["content"]["sourceVerification"])
-                block_id = section["content"]["blocks"][0]["id"]
-                first_qa = self.request("POST", f"/api/sections/{section['id']}/ask", json_body={"blockId": block_id, "question": "这个机制的边界是什么？"})
-                if section["id"] == first_section_id and not section.get("remediations"):
+                if section["id"] == first_section_id:
+                    block_id = section["content"]["blocks"][0]["id"]
+                    first_qa = self.request("POST", f"/api/sections/{section['id']}/ask", json_body={"blockId": block_id, "question": "这个机制的边界是什么？"})
                     second_qa = self.request("POST", f"/api/sections/{section['id']}/ask", json_body={"blockId": block_id, "question": "换一个新问题", "forceRelation": "new_question"})
                     corrected = self.request("PATCH", f"/api/sections/{section['id']}/qa/threads/{second_qa['threadId']}", json_body={"relation": "follow_up", "targetThreadId": first_qa["threadId"]})
                     qa_correction_verified = corrected["corrected"]
@@ -278,6 +343,8 @@ class LearnerRunner:
                 "crossBookAdaptationTrace": cross_book_adaptation_trace,
                 "secondBookGeneratedSectionId": second_book_section_id,
                 "artifactAttachments": any("/attachments" in item.name for item in self.steps),
+                "evaluationBookChapterCount": len(first_book["chapters"]),
+                "evaluationScopeTrimmed": scope_trimmed,
             },
             "steps": [item.as_dict() for item in self.steps],
         }
@@ -304,6 +371,8 @@ class GateReviewer:
         "G15": "First book completion into second book",
         "G16": "Frontend build",
         "G17": "Backend tests",
+        "G18": "Durable task recovery and idempotency",
+        "G19": "Dual-user durable task isolation",
     }
 
     def review(self, learner, deterministic):
@@ -326,6 +395,8 @@ class GateReviewer:
             "G15": deterministic.get("realAi", False) and learner["firstBookCompleted"] and learner["secondBookEntered"],
             "G16": deterministic.get("frontendBuild", False),
             "G17": deterministic.get("backendTests", False),
+            "G18": deterministic.get("durableTaskRecovery", False),
+            "G19": deterministic.get("dualUserIsolation", False),
         }
         gates = [{"id": gate_id, "name": name, "status": "PASS" if runtime_checks[gate_id] else "FAIL"} for gate_id, name in self.GATES.items()]
         return {"policy": "evidence-insufficient-means-fail", "gates": gates, "passed": sum(item["status"] == "PASS" for item in gates), "failed": sum(item["status"] == "FAIL" for item in gates), "verdict": "PASS" if all(item["status"] == "PASS" for item in gates) else "FAIL"}
@@ -347,6 +418,23 @@ def markdown_report(report):
     ]
     lines.extend(f"| {item['id']} | {item['status']} | {item['name']} |" for item in report["review"]["gates"])
     lines.extend(["", "## Journey", "", f"- First book completed: `{report['learner']['firstBookCompleted']}`", f"- Second book entered: `{report['learner']['secondBookEntered']}`", f"- Saved HTTP steps: `{len(report['learner']['steps'])}`", ""])
+    semantic = report.get("semanticReview", {})
+    lines.extend(
+        [
+            "## Independent semantic review",
+            "",
+            f"- Status: `{semantic.get('status', 'NOT_RUN')}`",
+            f"- Verdict: `{semantic.get('verdict', 'N/A')}`",
+        ]
+    )
+    if semantic.get("summary"):
+        lines.append(f"- Summary: {semantic['summary']}")
+    for finding in semantic.get("findings", []):
+        lines.append(
+            f"- {finding.get('severity', 'unknown').upper()} "
+            f"{finding.get('gate_id', 'N/A')}: {finding.get('finding', '')}"
+        )
+    lines.append("")
     if report.get("runnerError"):
         lines.extend(["## Runner error", "", f"- Type: `{report['runnerError']['type']}`", f"- Stage: `{report['runnerError']['stage']}`", f"- Message: `{report['runnerError']['message']}`", ""])
     if report.get("evidenceSnapshot"):
@@ -728,6 +816,110 @@ def _persist_evaluation(database_path: Path, report, json_path: Path, markdown_p
     engine.dispose()
 
 
+def _semantic_evidence(learner):
+    """Build artifact-scoped samples so a remediation run is not judged as content lineage."""
+    section_samples_by_id = {}
+    note_samples_by_id = {}
+    for item in learner["steps"]:
+        payload = item["evidence"].get("payload")
+        if not isinstance(payload, dict) or not payload.get("id"):
+            continue
+        if item["name"].startswith(("POST /api/sections/", "GET /api/sections/")) and payload.get("content"):
+            sample = deepcopy(payload)
+            generation = sample.get("generation")
+            if generation and generation.get("operation") == "remediation":
+                trace = generation.get("trace") or {}
+                replacement_quiz_id = trace.get("quizSetId")
+                for remediation in sample.get("remediations", []):
+                    if remediation.get("replacementQuizId") == replacement_quiz_id:
+                        remediation["generation"] = generation
+                        remediation["sourceVerification"] = trace.get(
+                            "sourceVerification", []
+                        )
+                        remediation["sourceLineage"] = {
+                            "mode": "generation_trace",
+                            "generationRunId": generation.get("id"),
+                        }
+                sample["latestWorkflowGeneration"] = generation
+                sample["generation"] = None
+            section_samples_by_id[sample["id"]] = sample
+        if item["name"].startswith("GET /api/sections/") and payload.get("note"):
+            note_samples_by_id[payload["id"]] = payload
+    second_id = learner["featureEvidence"].get("secondBookGeneratedSectionId")
+    selected_ids = list(section_samples_by_id)[:5]
+    if second_id and second_id not in selected_ids:
+        selected_ids.append(second_id)
+    return (
+        [
+            section_samples_by_id[item_id]
+            for item_id in selected_ids
+            if item_id in section_samples_by_id
+        ],
+        list(note_samples_by_id.values())[:5],
+    )
+
+
+def _semantic_workflow_evidence(learner):
+    relevant = ("/quiz", "/ask-me", "/ask", "/qa/threads", "/learning-memory")
+    return [
+        deepcopy(item)
+        for item in learner["steps"]
+        if any(fragment in item["name"] for fragment in relevant)
+    ]
+
+
+def _snapshot_database_facts(report):
+    snapshot = report.get("evidenceSnapshot", {}).get("database", {}).get("path")
+    if not snapshot or snapshot.startswith("<"):
+        return {}
+    database_path = ROOT / snapshot
+    if not database_path.is_file():
+        return {}
+    with sqlite3.connect(f"file:{database_path}?mode=ro", uri=True) as connection:
+        connection.row_factory = sqlite3.Row
+
+        def rows(query):
+            result = []
+            for row in connection.execute(query):
+                item = dict(row)
+                for key, value in list(item.items()):
+                    if key.endswith("_json") and isinstance(value, str):
+                        item[key.removesuffix("_json")] = json.loads(value or "[]")
+                        del item[key]
+                result.append(item)
+            return result
+
+        return {
+            "quizAttempts": rows(
+                """
+                SELECT qa.id, qs.section_id, qa.quiz_set_id, qa.passed,
+                       qa.answers_json, qa.results_json, qa.workflow_status,
+                       qa.created_at
+                FROM quiz_attempts qa
+                JOIN quiz_sets qs ON qs.id = qa.quiz_set_id
+                ORDER BY qa.created_at
+                """
+            ),
+            "askMeSessions": rows(
+                """
+                SELECT id, section_id, status, round_index, entries_json,
+                       created_at, updated_at
+                FROM ask_me_sessions
+                ORDER BY created_at
+                """
+            ),
+            "qaMessages": rows(
+                """
+                SELECT qm.id, qs.section_id, qm.thread_id, qm.block_id,
+                       qm.role, qm.content, qm.created_at
+                FROM qa_messages qm
+                JOIN qa_sessions qs ON qs.id = qm.session_id
+                ORDER BY qm.created_at
+                """
+            ),
+        }
+
+
 def run(output_dir: Path, real=False, deterministic=None, database_path_override=None, existing_series_id=None):
     started = time.monotonic()
     started_at = datetime.now(timezone.utc)
@@ -773,42 +965,32 @@ def run(output_dir: Path, real=False, deterministic=None, database_path_override
         runner_error = {"type": type(exc).__name__, "message": str(exc)[:2000], "stage": "learner_journey"}
         steps = [item.as_dict() for item in learner_runner.steps] if learner_runner else []
         last_series = next((item["evidence"]["payload"] for item in reversed(steps) if item["name"].startswith("GET /api/series/") and item["status"] == "PASS"), {})
+        if not last_series:
+            last_series = next(
+                (
+                    item["evidence"]["payload"]
+                    for item in reversed(steps)
+                    if item["name"] == "POST /api/plans"
+                    and item["status"] == "PASS"
+                ),
+                {},
+            )
         books = last_series.get("books", []) if isinstance(last_series, dict) else []
         steps.append({"name": "RUN learner journey", "status": "FAIL", "evidence": {"error": runner_error}})
-        learner = {"interface": "public HTTP API only", "health": {}, "seriesId": existing_series_id, "firstBookCompleted": bool(books and books[0]["status"] == "completed"), "secondBookEntered": bool(len(books) > 1 and books[1]["status"] in {"available", "in_progress", "completed"}), "progress": last_series.get("progress", 0) if isinstance(last_series, dict) else 0, "featureEvidence": {}, "steps": steps}
+        learner = {"interface": "public HTTP API only", "health": {}, "seriesId": last_series.get("id") or existing_series_id, "firstBookCompleted": bool(books and books[0]["status"] == "completed"), "secondBookEntered": bool(len(books) > 1 and books[1]["status"] in {"available", "in_progress", "completed"}), "progress": last_series.get("progress", 0) if isinstance(last_series, dict) else 0, "featureEvidence": {}, "steps": steps}
 
     checks = deterministic or {"frontendBuild": False, "backendTests": False}
     deterministic_result = {**learner["featureEvidence"], "realAi": real, "runnerPersistence": False, **checks}
     review = GateReviewer().review(learner, deterministic_result)
-    semantic_review = {"status": "NOT_RUN", "reason": "local runs cannot provide an independent real-AI semantic verdict"}
-    if real and not runner_error:
-        section_samples_by_id = {}
-        note_samples_by_id = {}
-        for item in learner["steps"]:
-            payload = item["evidence"].get("payload")
-            if not isinstance(payload, dict) or not payload.get("id"):
-                continue
-            if item["name"].startswith(("POST /api/sections/", "GET /api/sections/")) and payload.get("content"):
-                section_samples_by_id[payload["id"]] = payload
-            if item["name"].startswith("GET /api/sections/") and payload.get("note"):
-                note_samples_by_id[payload["id"]] = payload
-        second_id = learner["featureEvidence"].get("secondBookGeneratedSectionId")
-        selected_ids = list(section_samples_by_id)[:5]
-        if second_id and second_id not in selected_ids:
-            selected_ids.append(second_id)
-        samples = [section_samples_by_id[item_id] for item_id in selected_ids if item_id in section_samples_by_id]
-        note_samples = list(note_samples_by_id.values())[:5]
-        reviewer_agent = build_provider_adapter(
-            config["api_key"],
-            config["provider_model"],
-            config["base_url"],
-            capabilities,
-        )
-        try:
-            assessed = agent_loop.run_until_complete(reviewer_agent.review_evaluation({"fixedInput": {"topic": "Kubernetes", "role": "技术人员"}, "deterministicGates": review["gates"], "featureEvidence": learner["featureEvidence"], "contentSamples": samples, "noteSamples": note_samples, "journey": {"firstBookCompleted": learner["firstBookCompleted"], "secondBookEntered": learner["secondBookEntered"], "progress": learner["progress"]}}))
-            semantic_review = {"status": "COMPLETED", **assessed.model_dump()}
-        except Exception as exc:
-            semantic_review = {"status": "FAILED", "error": str(exc)[:1000]}
+    semantic_review = {
+        "status": "NOT_RUN",
+        "reason": (
+            "learner journey did not complete, so semantic review was not run"
+            if real
+            else "local runs cannot provide an independent real-AI semantic verdict"
+        ),
+    }
+    samples, note_samples = _semantic_evidence(learner)
 
     report = {
         "schemaVersion": "1.1",
@@ -845,6 +1027,53 @@ def run(output_dir: Path, real=False, deterministic=None, database_path_override
         }
         deterministic_result["runnerPersistence"] = True
         report["review"] = GateReviewer().review(learner, deterministic_result)
+        if real and not runner_error:
+            reviewer_agent = build_provider_adapter(
+                config["api_key"],
+                config["provider_model"],
+                config["base_url"],
+                capabilities,
+            )
+            try:
+                assessed = agent_loop.run_until_complete(
+                    reviewer_agent.review_evaluation(
+                        {
+                            "fixedInput": {"topic": "Kubernetes", "role": "技术人员"},
+                            "deterministicGates": report["review"]["gates"],
+                            "featureEvidence": learner["featureEvidence"],
+                            "contentSamples": samples,
+                            "noteSamples": note_samples,
+                            "workflowEvidence": _semantic_workflow_evidence(
+                                learner
+                            ),
+                            "gateCriteria": SEMANTIC_GATE_CRITERIA,
+                            "journey": {
+                                "firstBookCompleted": learner["firstBookCompleted"],
+                                "secondBookEntered": learner["secondBookEntered"],
+                                "progress": learner["progress"],
+                            },
+                        }
+                    )
+                )
+                semantic_review = {
+                    "status": "COMPLETED",
+                    **assessed.model_dump(),
+                }
+            except Exception as exc:
+                semantic_review = {"status": "FAILED", "error": str(exc)[:1000]}
+            report["semanticReview"] = semantic_review
+            report["usage"] = {
+                "inputTokens": sum(
+                    getattr(item, "input_tokens", 0)
+                    for item in [adapter, learner_agent, reviewer_agent]
+                    if item
+                ),
+                "outputTokens": sum(
+                    getattr(item, "output_tokens", 0)
+                    for item in [adapter, learner_agent, reviewer_agent]
+                    if item
+                ),
+            }
         if runner_error or semantic_review.get("status") == "FAILED" or semantic_review.get("verdict") == "FAIL":
             report["review"]["verdict"] = "FAIL"
         _persist_evaluation(database_path, report, json_path, markdown_path)
@@ -864,6 +1093,90 @@ def run(output_dir: Path, real=False, deterministic=None, database_path_override
     return json_path, markdown_path, report
 
 
+def review_existing_report(source_path: Path, output_dir: Path):
+    """Re-run only the independent semantic review over immutable saved evidence."""
+    started = time.monotonic()
+    source = json.loads(source_path.read_text(encoding="utf-8"))
+    if source.get("mode") != "real" or source.get("runnerError"):
+        raise RuntimeError("only a completed real evaluation can be independently reviewed")
+    if source.get("review", {}).get("failed"):
+        raise RuntimeError("deterministic hard gates must pass before semantic re-review")
+
+    config, capabilities = configured_provider()
+    loop = asyncio.new_event_loop()
+    reviewer = build_provider_adapter(
+        config["api_key"],
+        config["provider_model"],
+        config["base_url"],
+        capabilities,
+    )
+    try:
+        samples, note_samples = _semantic_evidence(source["learner"])
+        assessed = loop.run_until_complete(
+            reviewer.review_evaluation(
+                {
+                    "fixedInput": source["fixedInput"],
+                    "deterministicGates": source["review"]["gates"],
+                    "featureEvidence": source["learner"]["featureEvidence"],
+                    "contentSamples": samples,
+                    "noteSamples": note_samples,
+                    "workflowEvidence": _semantic_workflow_evidence(
+                        source["learner"]
+                    ),
+                    "databaseFacts": _snapshot_database_facts(source),
+                    "gateCriteria": SEMANTIC_GATE_CRITERIA,
+                    "journey": {
+                        "firstBookCompleted": source["learner"][
+                            "firstBookCompleted"
+                        ],
+                        "secondBookEntered": source["learner"]["secondBookEntered"],
+                        "progress": source["learner"]["progress"],
+                    },
+                }
+            )
+        )
+        semantic_review = {"status": "COMPLETED", **assessed.model_dump()}
+    finally:
+        loop.run_until_complete(reviewer.close())
+        loop.close()
+
+    created_at = datetime.now(timezone.utc)
+    run_id = created_at.strftime("slow-eval-review-%Y%m%dT%H%M%SZ")
+    report = deepcopy(source)
+    report.update(
+        {
+            "schemaVersion": "1.2",
+            "runId": run_id,
+            "createdAt": created_at.isoformat(),
+            "durationSeconds": round(time.monotonic() - started, 3),
+            "mode": "real-review",
+            "model": config["provider_model"],
+            "promptVersion": "slow-v0.4",
+            "codeVersion": _code_version(),
+            "semanticReview": semantic_review,
+            "reviewLineage": {
+                "sourceRunId": source["runId"],
+                "sourceReport": _portable_report_path(source_path),
+                "sourceReportSha256": _file_sha256(source_path),
+                "learnerJourneyReused": True,
+            },
+            "reviewUsage": {
+                "inputTokens": reviewer.input_tokens,
+                "outputTokens": reviewer.output_tokens,
+            },
+        }
+    )
+    report["review"]["verdict"] = (
+        "PASS" if semantic_review.get("verdict") == "PASS" else "FAIL"
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    json_path = output_dir / f"{run_id}.json"
+    markdown_path = output_dir / f"{run_id}.md"
+    json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    markdown_path.write_text(markdown_report(report), encoding="utf-8")
+    return json_path, markdown_path, report
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run the Slow black-box learner and independent gate reviewer")
     parser.add_argument("--real", action="store_true", help="use configured external model and real source reachability checks")
@@ -872,9 +1185,32 @@ def main():
     parser.add_argument("--resume-database", type=Path, help="reuse a smoke database and retry only one section")
     parser.add_argument("--resume-section", help="section ID to retry with --resume-database")
     parser.add_argument("--resume-series", help="series ID to continue through the full real learner journey")
+    parser.add_argument(
+        "--review-report",
+        type=Path,
+        help="re-run only the independent semantic review over a saved real report",
+    )
     parser.add_argument("--output", type=Path, default=ROOT / "reports" / "evaluations")
     parser.add_argument("--skip-build-checks", action="store_true", help="do not run pytest and the frontend production build")
     args = parser.parse_args()
+    if args.review_report:
+        if not args.real:
+            parser.error("--review-report requires --real")
+        json_path, markdown_path, report = review_existing_report(
+            args.review_report,
+            args.output,
+        )
+        print(
+            json.dumps(
+                {
+                    "verdict": report["review"]["verdict"],
+                    "json": str(json_path),
+                    "markdown": str(markdown_path),
+                },
+                ensure_ascii=False,
+            )
+        )
+        return
     if args.m1_smoke:
         if not args.real or not args.resume_database or not args.resume_section:
             parser.error(
@@ -923,7 +1259,12 @@ def main():
             node = str(bundled_node_dir) if bundled_node_dir.exists() else ""
         frontend_env = {**os.environ, "CI": "true", "PATH": os.pathsep.join(value for value in [node, os.environ.get("PATH", "")] if value)}
         frontend = subprocess.run([pnpm, "build"], cwd=ROOT / "apps" / "web", env=frontend_env, capture_output=True, text=True)
-        checks = {"backendTests": backend.returncode == 0, "frontendBuild": frontend.returncode == 0}
+        checks = {
+            "backendTests": backend.returncode == 0,
+            "frontendBuild": frontend.returncode == 0,
+            "durableTaskRecovery": backend.returncode == 0,
+            "dualUserIsolation": backend.returncode == 0,
+        }
     json_path, markdown_path, report = run(args.output, real=args.real, deterministic=checks, database_path_override=args.resume_database, existing_series_id=args.resume_series)
     print(json.dumps({"verdict": report["review"]["verdict"], "json": str(json_path), "markdown": str(markdown_path)}, ensure_ascii=False))
 

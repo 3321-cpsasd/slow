@@ -54,6 +54,7 @@ from ..modules.learning.commands import SubmitQuiz
 from ..modules.learning.generation_leases import (
     acquire_generation_lease,
     release_generation_lease,
+    renew_generation_lease,
 )
 from ..modules.learning.progress import ProgressStore
 from ..modules.learning.tasks import (
@@ -737,11 +738,28 @@ class SlowService:
                 status=409,
             )
         try:
-            return await self._generate_chapter_locked(chapter_id)
+            return await self._generate_chapter_locked(
+                chapter_id,
+                resource_key,
+                owner_id,
+            )
         finally:
             release_generation_lease(self.db, resource_key, owner_id)
 
-    async def _generate_chapter_locked(self, chapter_id):
+    def _renew_generation_lease(self, resource_key, owner_id):
+        if not renew_generation_lease(self.db, resource_key, owner_id):
+            raise AppError(
+                "生成租约已经被新的请求接管，旧结果不会保存",
+                code="GENERATION_LEASE_LOST",
+                status=409,
+            )
+
+    async def _generate_chapter_locked(
+        self,
+        chapter_id,
+        resource_key,
+        owner_id,
+    ):
         chapter_context = self.contexts.resolve_chapter(user_id=self.user_id, chapter_id=chapter_id)
         chapter = chapter_context.chapter
         if self.progress.for_chapter(chapter, chapter_context.book).status == "locked":
@@ -752,6 +770,7 @@ class SlowService:
             memory = self._memory(book.shelf_id)
             self.db.commit()
             generated = await self.ai.chapter(request, memory)
+            self._renew_generation_lease(resource_key, owner_id)
             chapter_context = self.contexts.resolve_chapter(
                 user_id=self.user_id,
                 chapter_id=chapter_id,
@@ -819,6 +838,8 @@ class SlowService:
                 section_id,
                 retry=retry,
                 retry_attempt_id=retry_attempt_id,
+                resource_key=resource_key,
+                owner_id=owner_id,
             )
         finally:
             release_generation_lease(self.db, resource_key, owner_id)
@@ -828,6 +849,8 @@ class SlowService:
         section_id,
         retry=False,
         retry_attempt_id=None,
+        resource_key=None,
+        owner_id=None,
     ):
         section_context = self.contexts.resolve_section(
             user_id=self.user_id,
@@ -882,11 +905,13 @@ class SlowService:
                 if retry:
                     lesson_request["remediationStrategy"] = remediation_strategy
                 lesson = await self.ai.lesson(lesson_request, memory, prior)
+                self._renew_generation_lease(resource_key, owner_id)
                 ai_harness_trace = self._ai_harness_trace()
                 run.trace_json = dump({"stage": "source_verification", "retry": retry, "noveltyAttempt": novelty_attempt, "sourceUrls": [item.url for item in lesson.sources], "aiHarness": ai_harness_trace, **memory_trace})
                 self.db.commit()
                 try:
                     verification = await self.source_verifier.verify(lesson.sources)
+                    self._renew_generation_lease(resource_key, owner_id)
                 except AppError as error:
                     rejected_source_urls.extend(item.url for item in lesson.sources)
                     rejected_source_urls = list(dict.fromkeys(rejected_source_urls))
@@ -1044,6 +1069,29 @@ class SlowService:
             )
             .order_by(Remediation.created_at)
         ).all()
+        remediation_runs = self.db.scalars(
+            select(GenerationRun)
+            .where(
+                GenerationRun.section_id == section.id,
+                GenerationRun.operation == "remediation",
+                GenerationRun.status == "succeeded",
+            )
+            .order_by(GenerationRun.started_at)
+        ).all()
+        remediation_run_by_quiz = {
+            trace.get("quizSetId"): (item, trace)
+            for item in remediation_runs
+            if (trace := load(item.trace_json, {})).get("quizSetId")
+        }
+        workflow_tasks = self.db.scalars(
+            select(LearningTask)
+            .where(
+                LearningTask.learning_run_id == learning_run.id,
+                LearningTask.user_id == self.user_id,
+                LearningTask.section_id == section.id,
+            )
+            .order_by(LearningTask.created_at)
+        ).all()
         verification = self.db.scalar(select(SourceVerification).where(SourceVerification.content_version_id == content.id)) if content else None
         questions = load(quiz.questions_json, []) if quiz else []
         public = [
@@ -1075,10 +1123,28 @@ class SlowService:
                     "blocks": load(item.blocks_json, []),
                     "objectives": load(item.objectives_json, []),
                     "strategy": item.strategy,
+                    "sourceVerification": (
+                        remediation_run_by_quiz[item.replacement_quiz_id][1].get(
+                            "sourceVerification", []
+                        )
+                        if item.replacement_quiz_id in remediation_run_by_quiz
+                        else []
+                    ),
+                    "sourceLineage": (
+                        {
+                            "mode": "generation_trace",
+                            "generationRunId": remediation_run_by_quiz[
+                                item.replacement_quiz_id
+                            ][0].id,
+                        }
+                        if item.replacement_quiz_id in remediation_run_by_quiz
+                        else {"mode": "missing", "generationRunId": None}
+                    ),
                 }
                 for item in remediations
             ],
             "note": self._note(note) if note else None,
+            "workflowTasks": [task_view(task) for task in workflow_tasks],
         }
 
     def _generation(self, run):

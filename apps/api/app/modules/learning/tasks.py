@@ -10,7 +10,7 @@ from ...core.errors import AppError, safe_error_code
 from ...infrastructure.tables import LearningTask, now
 
 
-RUNNING_LEASE = timedelta(minutes=5)
+RUNNING_LEASE = timedelta(seconds=90)
 TASK_TYPES = {
     "initial_book_preload",
     "note_generation",
@@ -28,6 +28,29 @@ def _load(value: str, default=None):
 
 def recoverable_task_ids(db: Session, *, limit: int = 20) -> list[str]:
     current = datetime.now(timezone.utc)
+    exhausted = db.execute(
+        update(LearningTask)
+        .where(
+            LearningTask.status == "running",
+            LearningTask.attempt_count >= LearningTask.max_attempts,
+            or_(
+                LearningTask.lease_expires_at.is_(None),
+                LearningTask.lease_expires_at < current,
+            ),
+        )
+        .values(
+            status="failed",
+            error_code="LEARNING_TASK_RETRY_EXHAUSTED",
+            error_message="后台任务在执行中断后已达到最大尝试次数",
+            lease_owner=None,
+            lease_token=None,
+            lease_expires_at=None,
+            heartbeat_at=None,
+            updated_at=now(),
+        )
+    )
+    if exhausted.rowcount:
+        db.commit()
     return list(
         db.scalars(
             select(LearningTask.id)
@@ -184,6 +207,17 @@ def fail_task(
     error: Exception,
 ) -> LearningTask:
     db.rollback()
+    task = db.get(LearningTask, context.task_id)
+    retry_automatically = bool(
+        task
+        and getattr(error, "retryable", False)
+        and task.attempt_count < task.max_attempts
+    )
+    safe_message = (
+        str(error)[:500]
+        if isinstance(error, AppError)
+        else "后台任务执行失败，请安全重试"
+    )
     failed = db.execute(
         update(LearningTask)
         .where(
@@ -193,9 +227,13 @@ def fail_task(
             LearningTask.lease_token == context.lease_token,
         )
         .values(
-            status="failed",
+            status="pending" if retry_automatically else "failed",
             error_code=safe_error_code(error),
-            error_message=f"{type(error).__name__}: learning task failed",
+            error_message=safe_message,
+            lease_owner=None if retry_automatically else context.lease_owner,
+            lease_token=None if retry_automatically else context.lease_token,
+            lease_expires_at=None if retry_automatically else task.lease_expires_at,
+            heartbeat_at=None if retry_automatically else task.heartbeat_at,
             updated_at=now(),
         )
     )
@@ -275,6 +313,7 @@ def task_view(task: LearningTask) -> dict:
             task.status == "failed" and task.attempt_count < task.max_attempts
         ),
         "errorCode": task.error_code or None,
+        "errorMessage": task.error_message or None,
         "result": _load(task.result_json, {}),
         "createdAt": task.created_at.isoformat(),
         "updatedAt": task.updated_at.isoformat(),

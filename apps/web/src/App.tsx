@@ -137,13 +137,19 @@ export default function App() {
   };
 
   const firstUsableSection = (value: Series) => {
+    let completedFallback: string | null = null;
     for (const book of value.books) {
       for (const chapter of book.chapters) {
-        const match = chapter.sections.find((item) => item.status !== 'locked');
+        const match = chapter.sections.find(
+          (item) => item.status !== 'locked' && item.status !== 'completed',
+        );
         if (match) return match.id;
+        completedFallback ||= chapter.sections.find(
+          (item) => item.status === 'completed',
+        )?.id || null;
       }
     }
-    return null;
+    return completedFallback;
   };
 
   const monitorInitialSection = async (value: Series) => {
@@ -218,6 +224,21 @@ export default function App() {
     setSeries(value);
   };
 
+  const retryInitialSection = async () => {
+    const task = series?.initializationTask;
+    if (!series || !task?.retryable) return;
+    setPreparingInitialSection(true);
+    try {
+      const retried = await api.retryLearningTask(task.taskId);
+      const updated = { ...series, initializationTask: retried };
+      setSeries(updated);
+      void monitorInitialSection(updated);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '第一节重试失败。');
+      setPreparingInitialSection(false);
+    }
+  };
+
   const openChapter = async (chapter: Chapter) => {
     if (
       preparingInitialSection ||
@@ -234,6 +255,20 @@ export default function App() {
       chapterGenerationRequests.current.delete(chapter.id);
       setGeneratingChapterId('');
     }
+  };
+
+  const startNextBook = async () => {
+    if (!series) return;
+    const nextBook = series.books.find(
+      (book, index) => index > 0 && book.status !== 'locked' && book.status !== 'completed',
+    );
+    const firstChapter = nextBook?.chapters[0];
+    if (!firstChapter) return;
+    const availableSection = firstChapter.sections.find(
+      (item) => item.status !== 'locked' && item.status !== 'completed',
+    );
+    if (availableSection) await loadSection(availableSection.id);
+    else await openChapter(firstChapter);
   };
 
   const generateSection = async (sectionId: string) => {
@@ -449,17 +484,48 @@ export default function App() {
           />
         )}
         {view === 'learn' && series && (
-          <LearningWorkspace
-            series={series}
-            section={section}
-            onSelectSection={loadSection}
-            onGenerateSection={generateSection}
-            onGenerateChapter={openChapter}
-            chapterGenerationDisabled={preparingInitialSection}
-            generatingChapterId={generatingChapterId}
-            onSectionChange={setSection}
-            onRefreshSeries={refreshSeries}
-            onDeleteBook={async (bookId) => {
+          <>
+            {series.initializationTask
+              && series.initializationTask.status !== 'succeeded' && (
+              <div
+                className={`initial-task-alert ${series.initializationTask.status}`}
+                role={series.initializationTask.status === 'failed' ? 'alert' : 'status'}
+              >
+                <span>
+                  第一节准备{{
+                    pending: '等待中',
+                    running: '进行中',
+                    failed: '失败',
+                    succeeded: '已完成',
+                  }[series.initializationTask.status]}：
+                  {series.initializationTask.status === 'failed'
+                    ? series.initializationTask.errorMessage || series.initializationTask.errorCode || '未知错误'
+                    : '完成后会自动打开，不需要重复点击生成。'}
+                  {' '}（尝试 {series.initializationTask.attemptCount || 0}/{series.initializationTask.maxAttempts || 0}）
+                </span>
+                {series.initializationTask.retryable && (
+                  <button
+                    className="secondary-button"
+                    disabled={preparingInitialSection}
+                    onClick={retryInitialSection}
+                  >
+                    {preparingInitialSection ? '正在重试…' : '安全重试第一节'}
+                  </button>
+                )}
+              </div>
+            )}
+            <LearningWorkspace
+              series={series}
+              section={section}
+              onSelectSection={loadSection}
+              onGenerateSection={generateSection}
+              onGenerateChapter={openChapter}
+              onStartNextBook={startNextBook}
+              chapterGenerationDisabled={preparingInitialSection}
+              generatingChapterId={generatingChapterId}
+              onSectionChange={setSection}
+              onRefreshSeries={refreshSeries}
+              onDeleteBook={async (bookId) => {
               const deletingLastBook = series.books.length === 1;
               const deletingCurrentBook = series.books.some(
                 (book) => book.id === bookId && book.chapters.some(
@@ -488,8 +554,9 @@ export default function App() {
                   else setSection(null);
                 }
               });
-            }}
-          />
+              }}
+            />
+          </>
         )}
       </main>
       {showAiSettings && <AiSettingsDialog onClose={() => setShowAiSettings(false)} />}
@@ -926,6 +993,7 @@ function LearningWorkspace({
   onSelectSection,
   onGenerateSection,
   onGenerateChapter,
+  onStartNextBook,
   chapterGenerationDisabled,
   generatingChapterId,
   onSectionChange,
@@ -937,6 +1005,7 @@ function LearningWorkspace({
   onSelectSection: (id: string) => Promise<Section>;
   onGenerateSection: (id: string) => Promise<void>;
   onGenerateChapter: (chapter: Chapter) => Promise<void>;
+  onStartNextBook: () => Promise<void>;
   chapterGenerationDisabled: boolean;
   generatingChapterId: string;
   onSectionChange: (section: Section) => void;
@@ -965,6 +1034,7 @@ function LearningWorkspace({
         currentSectionId={section?.id}
         onSelectSection={onSelectSection}
         onGenerateChapter={onGenerateChapter}
+        onStartNextBook={onStartNextBook}
         chapterGenerationDisabled={chapterGenerationDisabled}
         generatingChapterId={generatingChapterId}
         onRefreshSeries={onRefreshSeries}
@@ -1042,6 +1112,7 @@ function DirectoryPanel({
   currentSectionId,
   onSelectSection,
   onGenerateChapter,
+  onStartNextBook,
   chapterGenerationDisabled,
   generatingChapterId,
   onRefreshSeries,
@@ -1051,6 +1122,7 @@ function DirectoryPanel({
   currentSectionId?: string;
   onSelectSection: (id: string) => Promise<Section>;
   onGenerateChapter: (chapter: Chapter) => Promise<void>;
+  onStartNextBook: () => Promise<void>;
   chapterGenerationDisabled: boolean;
   generatingChapterId: string;
   onRefreshSeries: () => Promise<void>;
@@ -1078,6 +1150,15 @@ function DirectoryPanel({
           <b>{series.progress}%</b>
         </div>
       </div>
+      {series.books[0]?.status === 'completed'
+        && series.books[1]
+        && series.books[1].status !== 'locked' && (
+          <div className="next-book-callout" role="status">
+            <b>第一册已完成</b>
+            <span>第二册《{series.books[1].title}》已经解锁。</span>
+            <button className="secondary-button" onClick={onStartNextBook}>开始第二册</button>
+          </div>
+      )}
       <nav className="book-tree">
         {series.books.map((book) => (
           <BookTree
@@ -1173,7 +1254,13 @@ function BookTree({
       </button>
       <summary>
         <span className="book-number">{book.position}</span>
-        <span><b>{book.title}</b><small>{book.progress}% · {Math.round(book.estimatedMinutes / 60)} 小时</small></span>
+        <span>
+          <b>{book.title}</b>
+          <small>
+            {book.status === 'completed' ? '已完成' : book.status === 'locked' ? '未解锁' : '已解锁'}
+            {' · '}{book.progress}% · {Math.round(book.estimatedMinutes / 60)} 小时
+          </small>
+        </span>
         <i>{book.status === 'locked' ? <LockIcon /> : <ChevronIcon />}</i>
       </summary>
       <div className="chapter-tree">
@@ -1546,6 +1633,10 @@ function Quiz({
   const [workflowRunning, setWorkflowRunning] = useState(false);
   const [workflowMessage, setWorkflowMessage] = useState('');
   const [failedTasks, setFailedTasks] = useState<LearningTask[]>([]);
+  const [workflowTasks, setWorkflowTasks] = useState<LearningTask[]>(
+    section.workflowTasks || [],
+  );
+  const [retryingTasks, setRetryingTasks] = useState(false);
 
   useEffect(() => {
     localStorage.setItem(quizDraftKey, JSON.stringify(answers));
@@ -1554,22 +1645,28 @@ function Quiz({
   const monitorTasks = async (
     initialTasks: LearningTask[],
     passed = result?.passed,
+    preservedFailures: LearningTask[] = [],
   ) => {
     if (!initialTasks.length) return;
     setWorkflowRunning(true);
-    setFailedTasks([]);
+    setWorkflowTasks([...preservedFailures, ...initialTasks]);
+    setFailedTasks(preservedFailures);
     setWorkflowMessage(
       initialTasks.some((task) => task.type === 'remediation_generation')
         ? '评分已完成，正在准备补充教学和新的等价题…'
         : '评分已完成，正在准备个人笔记和下一节…',
     );
     let current = initialTasks;
-    for (let poll = 0; poll < 120; poll += 1) {
+    for (let poll = 0; poll < 900; poll += 1) {
       current = await Promise.all(
         current.map((task) => api.learningTask(task.taskId)),
       );
+      setWorkflowTasks([...preservedFailures, ...current]);
       if (current.every((task) => ['succeeded', 'failed'].includes(task.status))) {
-        const failures = current.filter((task) => task.status === 'failed');
+        const failures = [
+          ...preservedFailures,
+          ...current.filter((task) => task.status === 'failed'),
+        ];
         setFailedTasks(failures);
         setWorkflowRunning(false);
         setWorkflowMessage(
@@ -1583,23 +1680,40 @@ function Quiz({
         await onRefreshSeries();
         return;
       }
-      await new Promise((resolve) => window.setTimeout(resolve, 250));
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
     }
     setWorkflowRunning(false);
     setWorkflowMessage('评分结果已保存，后续内容仍在后台处理中。');
   };
 
+  useEffect(() => {
+    const unfinished = (section.workflowTasks || []).filter(
+      (task) => task.status !== 'succeeded',
+    );
+    if (!unfinished.length) return;
+    void monitorTasks(unfinished).catch((reason) => {
+      setWorkflowRunning(false);
+      setSubmissionError(
+        reason instanceof Error ? reason.message : '无法恢复后台任务状态。',
+      );
+    });
+  }, [section.id]);
+
   const retryFailedTasks = async () => {
     setSubmissionError('');
+    setRetryingTasks(true);
     try {
+      const preservedFailures = failedTasks.filter((task) => !task.retryable);
       const retried = await Promise.all(
         failedTasks.filter((task) => task.retryable).map(
           (task) => api.retryLearningTask(task.taskId),
         ),
       );
-      await monitorTasks(retried, result?.passed);
+      await monitorTasks(retried, result?.passed, preservedFailures);
     } catch (reason) {
       setSubmissionError(reason instanceof Error ? reason.message : '任务重试失败。');
+    } finally {
+      setRetryingTasks(false);
     }
   };
 
@@ -1724,9 +1838,40 @@ function Quiz({
         {submissionError && <p className="result failure" role="alert">{submissionError}</p>}
         {result && <p className={result.passed ? 'result success' : 'result failure'}>{result.passed ? '验证已通过，下一节已经解锁。' : '本次未通过，评分结果已经保存。'}</p>}
         {workflowMessage && <p className={failedTasks.length ? 'result failure' : 'result success'}>{workflowMessage}</p>}
+        {workflowTasks.length > 0 && (
+          <div className="workflow-task-list" aria-label="后台任务状态">
+            {workflowTasks.map((task) => (
+              <div className={`workflow-task ${task.status}`} key={task.taskId}>
+                <span>{{
+                  initial_book_preload: '第一节准备',
+                  note_generation: '个人笔记',
+                  remediation_generation: '补充教学与新题',
+                  next_section_preload: '下一节预加载',
+                }[task.type]}</span>
+                <b>{{
+                  pending: '等待中',
+                  running: '进行中',
+                  succeeded: '已完成',
+                  failed: '失败',
+                }[task.status]}</b>
+                <small>
+                  尝试 {task.attemptCount || 0}/{task.maxAttempts || 0}
+                  {task.status === 'failed'
+                    ? ` · ${task.errorMessage || task.errorCode || '未知错误'}`
+                    : ''}
+                </small>
+              </div>
+            ))}
+          </div>
+        )}
         {failedTasks.some((task) => task.retryable) && (
-          <button type="button" className="secondary-button" onClick={retryFailedTasks}>
-            安全重试后续生成
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={retryingTasks || workflowRunning}
+            onClick={retryFailedTasks}
+          >
+            {retryingTasks ? '正在重试…' : '安全重试后续生成'}
           </button>
         )}
       </div>

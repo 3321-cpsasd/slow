@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from contextlib import suppress
 import hmac
 import json
+import logging
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -43,6 +44,8 @@ DEFAULT_PROVIDER_CAPABILITIES = ProviderCapabilities(
     streaming=True,
     reasoning_mode=settings.openai_reasoning_mode,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def provider_capabilities(config: dict) -> ProviderCapabilities:
@@ -219,6 +222,11 @@ def create_app(
                                 await worker_service.execute_learning_task(
                                     context
                                 )
+                        except Exception:
+                            logger.exception(
+                                "Learning task worker recovered after task %s failed",
+                                task_id,
+                            )
                         finally:
                             heartbeat_stop.set()
                             heartbeat.cancel()
