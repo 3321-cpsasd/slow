@@ -31,6 +31,10 @@ export type AuthState = {
   user:{id:string;name:string};
   csrfToken:string;
 };
+export type AuthConfig = {
+  mode:'demo'|'oidc';
+  providerName:string;
+};
 export type AiRuntime = {
   mode:'provider'|'demo'|'injected';
   configured:boolean;

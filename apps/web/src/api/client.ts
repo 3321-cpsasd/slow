@@ -126,6 +126,7 @@ async function streamQa(
 
 export const api = {
   setUnauthorizedHandler:(handler:()=>void)=>{ unauthorizedHandler = handler; },
+  authConfig:()=>call<import('../model/types').AuthConfig>('/api/auth/config'),
   authMe:async()=>{
     const state = await call<import('../model/types').AuthState>('/api/auth/me');
     csrfToken = state.csrfToken;

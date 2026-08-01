@@ -9,7 +9,7 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from sqlalchemy.orm import Session
 from .auth.context import Principal, UserScope, demo_user_scope
 from .auth.oidc import OidcClient
@@ -410,6 +410,17 @@ def create_app(
             return "/"
         return value
 
+    @app.get("/api/auth/config")
+    def auth_config(request: Request):
+        return {
+            "mode": request.app.state.auth_mode,
+            "providerName": (
+                settings.oidc_provider_name
+                if request.app.state.auth_mode == "oidc"
+                else ""
+            ),
+        }
+
     @app.get("/api/auth/login")
     async def auth_login(
         request: Request,
@@ -564,7 +575,7 @@ def create_app(
         session: Session = Depends(db),
     ):
         del scope
-        response = JSONResponse(status_code=204, content=None)
+        response = Response(status_code=204)
         if request.app.state.auth_mode == "oidc":
             SessionService(
                 session,

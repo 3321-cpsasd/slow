@@ -223,6 +223,13 @@ def add_foreign_series(db, *, user_id: str) -> Series:
 
 def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
     client, fake_oidc = oidc_client
+    public_config = client.get("/api/auth/config")
+    assert public_config.status_code == 200
+    assert public_config.json() == {
+        "mode": "oidc",
+        "providerName": "统一身份账户",
+    }
+
     me = login(client, fake_oidc)
     assert me["user"]["name"] == "用户 A"
     assert me["mode"] == "oidc"
@@ -263,6 +270,7 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
         headers={"X-CSRF-Token": me["csrfToken"]},
     )
     assert logout.status_code == 204
+    assert logout.content == b""
     assert client.get("/api/auth/me").status_code == 401
 
 
@@ -311,6 +319,21 @@ def test_production_refuses_demo_authentication():
             auth_mode="demo",
             app_mode="production",
         )
+
+
+def test_demo_auth_config_is_public_and_explicit():
+    app = create_app(
+        "sqlite+pysqlite:///:memory:",
+        ai=LocalDemoAdapter(),
+        auth_mode="demo",
+        app_mode="development",
+        runtime_settings_path=False,
+    )
+    with TestClient(app) as client:
+        response = client.get("/api/auth/config")
+
+    assert response.status_code == 200
+    assert response.json() == {"mode": "demo", "providerName": ""}
 
 
 def test_plan_idempotency_key_is_scoped_by_user():

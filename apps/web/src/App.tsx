@@ -5,6 +5,7 @@ import { api } from './api/client';
 import type {
   AskMe,
   AiRuntime,
+  AuthConfig,
   AuthState,
   Block,
   Book,
@@ -33,6 +34,7 @@ type QaExchange = {
 
 export default function App() {
   const [auth, setAuth] = useState<AuthState | null>(null);
+  const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [data, setData] = useState<Bootstrap | null>(null);
   const [view, setView] = useState<View>('home');
@@ -46,6 +48,36 @@ export default function App() {
   const [generatingChapterId, setGeneratingChapterId] = useState('');
   const chapterGenerationRequests = useRef(new Set<string>());
 
+  const loadAuthenticatedState = async () => {
+    const value = await api.authMe();
+    const bootstrap = await api.bootstrap();
+    setAuth(value);
+    setData(bootstrap);
+  };
+
+  const initializeAuth = async () => {
+    setAuthChecked(false);
+    setError('');
+    try {
+      const config = await api.authConfig();
+      setAuthConfig(config);
+      const demoEntered = sessionStorage.getItem('slow_demo_entered') === 'true';
+      if (config.mode === 'oidc' || demoEntered) {
+        await loadAuthenticatedState();
+      } else {
+        setAuth(null);
+        setData(null);
+      }
+    } catch (reason) {
+      if ((reason as { status?: number })?.status !== 401) {
+        setError(reason instanceof Error ? reason.message : '无法连接登录服务');
+      }
+      setAuth(null);
+    } finally {
+      setAuthChecked(true);
+    }
+  };
+
   useEffect(() => {
     const clearUserState = () => {
       setAuth(null);
@@ -57,16 +89,7 @@ export default function App() {
       setAuthChecked(true);
     };
     api.setUnauthorizedHandler(clearUserState);
-    api.authMe()
-      .then(async (value) => {
-        setAuth(value);
-        setData(await api.bootstrap());
-      })
-      .catch((reason) => {
-        if(reason?.status !== 401) setError(reason.message);
-        setAuth(null);
-      })
-      .finally(() => setAuthChecked(true));
+    void initializeAuth();
   }, []);
 
   const run = async <T,>(label: string, action: () => Promise<T>) => {
@@ -200,23 +223,79 @@ export default function App() {
     await refreshSeries();
   };
 
-  if(!authChecked) {
-    return <div className="app-shell"><main className="marketing-main"><div className="global-error">正在确认登录状态…</div></main></div>;
-  }
-
   if(!auth) {
+    const isDemo = authConfig?.mode === 'demo';
+    const providerName = authConfig?.providerName || '统一身份账户';
     return (
-      <div className="app-shell">
-        <header className="app-header">
+      <div className="app-shell auth-shell">
+        <header className="auth-header">
           <span className="brand"><span className="brand-mark"><i /></span><b>slow</b></span>
+          <span>AI 原生个人学习系统</span>
         </header>
-        <main className="marketing-main">
-          <section className="hero-card">
-            <small>个人学习空间</small>
-            <h1>登录后继续你的书架</h1>
-            <p>学习记录、测验证据和掌握画像只保存在你的账户下。</p>
-            <button className="primary-button" onClick={() => api.login('/')}>登录</button>
-            {error && <div className="global-error">{error}</div>}
+        <main className="auth-main">
+          <section className="auth-story">
+            <p className="eyebrow">YOUR PERSONAL LEARNING LIBRARY</p>
+            <h1>把想学的，<br />变成真正学会的。</h1>
+            <p className="auth-lead">
+              Slow 把学习目标写成一套可以逐节阅读、验证和持续积累记忆的个人教材。
+            </p>
+            <div className="auth-journey" aria-label="Slow 学习闭环">
+              <article><span>01</span><div><b>生成你的书</b><small>从目标到章节与小节</small></div></article>
+              <article><span>02</span><div><b>逐节学习验证</b><small>通过测验才继续前进</small></div></article>
+              <article><span>03</span><div><b>积累长期记忆</b><small>让下一本书真正了解你</small></div></article>
+            </div>
+          </section>
+
+          <section className="auth-card" aria-busy={!authChecked}>
+            <div className={`auth-mode-badge ${isDemo ? 'demo' : ''}`}>
+              <i />{isDemo ? '本地体验环境' : '个人学习空间'}
+            </div>
+            <h2>{isDemo ? '进入体验书架' : '欢迎回来'}</h2>
+            <p>
+              {isDemo
+                ? '无需配置第三方账号，使用本机固定体验身份查看完整学习闭环。'
+                : '登录后继续你的书架、学习记录与掌握画像。'}
+            </p>
+
+            {!authConfig && error ? (
+              <button className="auth-submit" onClick={() => void initializeAuth()}>
+                重新连接服务 <span>→</span>
+              </button>
+            ) : isDemo ? (
+              <button
+                className="auth-submit"
+                disabled={!authChecked}
+                onClick={async () => {
+                  sessionStorage.setItem('slow_demo_entered', 'true');
+                  await initializeAuth();
+                }}
+              >
+                进入本地体验 <span>→</span>
+              </button>
+            ) : (
+              <button
+                className="auth-submit"
+                disabled={!authChecked}
+                onClick={() => api.login(`${window.location.pathname}${window.location.search}`)}
+              >
+                使用{providerName}继续 <span>→</span>
+              </button>
+            )}
+
+            {!authChecked && <div className="auth-inline-status">正在确认登录状态…</div>}
+            {error && <div className="auth-inline-error">{error}</div>}
+
+            <div className="auth-trust-list">
+              <div><i>✓</i><span><b>服务端安全会话</b><small>浏览器不保存身份提供商密码</small></span></div>
+              <div><i>✓</i><span><b>学习数据按用户隔离</b><small>书架、证据和画像仅属于你的账户</small></span></div>
+              <div><i>✓</i><span><b>随时安全退出</b><small>退出后服务端会话立即撤销</small></span></div>
+            </div>
+
+            <small className="auth-disclaimer">
+              {isDemo
+                ? '体验模式会被明确标记，不作为真实账号或真实认证证据。'
+                : `登录将在${providerName}页面完成，Slow 不接收你的密码。`}
+            </small>
           </section>
         </main>
       </div>
@@ -263,6 +342,7 @@ export default function App() {
               try {
                 await api.logout();
               } finally {
+                sessionStorage.removeItem('slow_demo_entered');
                 setAuth(null);
                 setData(null);
                 setShelf(null);

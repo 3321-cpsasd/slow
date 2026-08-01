@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     oidc_issuer: str = ""
     oidc_client_id: str = ""
     oidc_client_secret: str = ""
+    oidc_provider_name: str = "统一身份账户"
     oidc_redirect_uri: str = "http://127.0.0.1:8000/api/auth/callback"
     oidc_scopes: str = "openid email profile"
 

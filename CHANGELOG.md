@@ -8,6 +8,8 @@ Slow 的重要变更记录在这里。本项目采用 [Keep a Changelog](https:/
 
 ### Added · 新增
 
+- Added a production-facing OIDC sign-in screen, an explicit local-experience entry, and a public non-secret auth-mode endpoint so Demo state can never masquerade as real authentication.
+- 新增面向正式 OIDC 的登录页面、明确标记的本地体验入口，以及不泄密的公开鉴权模式接口，避免 Demo 状态伪装成真实登录。
 - Added a competition-review guide and a canonical evaluation index that distinguishes current evidence, historical failures, and open gates.
 - 新增参赛评审指南与权威评测索引，明确区分当前证据、历史失败与尚未关闭的门禁。
 - Added repository-hosted product screenshots for the bookshelf and personalized learning-goal flow.
@@ -45,6 +47,8 @@ Slow 的重要变更记录在这里。本项目采用 [Keep a Changelog](https:/
 
 ### Changed · 调整
 
+- Fixed the login startup race and the invalid response body previously emitted by the `204 No Content` logout endpoint.
+- 修复登录页启动竞态，以及退出接口在 `204 No Content` 响应中错误发送正文的问题。
 - Made the Web launcher portable, removed workstation paths from project context and historical/future evaluation reports, aligned the example model with the server default, and made production deployment explicitly opt-in.
 - 提升 Web 启动脚本可移植性，移除项目上下文及历史/后续评测报告中的本机路径，统一示例模型与服务端默认值，并将生产部署改为显式开启。
 - Declared the supported Node.js and pnpm versions so local and CI builds use the same runtime contract.
