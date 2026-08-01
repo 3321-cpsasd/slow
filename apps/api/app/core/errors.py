@@ -31,3 +31,10 @@ class AiError(AppError):
             retryable=retryable,
             operation_id=operation_id,
         )
+
+
+def safe_error_code(error: BaseException, *, limit: int = 80) -> str:
+    """Return an auditable error code even when SDKs expose ``code=None``."""
+
+    value = getattr(error, "code", None) or type(error).__name__
+    return str(value)[:limit]

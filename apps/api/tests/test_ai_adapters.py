@@ -41,6 +41,8 @@ class FakeChatCompletions:
     async def create(self, **options):
         self.calls.append(options)
         content = next(self.outputs)
+        if isinstance(content, BaseException):
+            raise content
         return SimpleNamespace(
             choices=[
                 SimpleNamespace(
@@ -176,6 +178,36 @@ def test_structured_repair_records_each_physical_provider_request():
     assert all(item.subject_user_id is None for item in invocations)
     assert [item.input_tokens for item in measurements] == [3, 3]
     assert [item.output_tokens for item in measurements] == [2, 2]
+
+
+def test_provider_connection_error_with_none_code_is_not_masked_by_metering():
+    class FakeConnectionError(RuntimeError):
+        code = None
+
+    async def run():
+        engine, sessions = build_database("sqlite+pysqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        recorder = AiUsageRecorder(sessions)
+        adapter, _completions = await chat_adapter([FakeConnectionError("offline")])
+        adapter.set_usage_recorder(recorder)
+        with pytest.raises(AiError) as raised:
+            await adapter._parse(
+                StructuredAnswer,
+                "Return JSON.",
+                {"question": "test"},
+                100,
+            )
+        with sessions() as db:
+            invocation = db.scalar(select(AiInvocation))
+        engine.dispose()
+        return raised.value, invocation, adapter.structured_trace()
+
+    error, invocation, trace = asyncio.run(run())
+
+    assert error.code == "AI_PROVIDER_UNAVAILABLE"
+    assert invocation.status == "failed"
+    assert invocation.error_code == "FakeConnectionError"
+    assert trace[0]["outcome"] == "provider_failed"
 
 
 def test_missing_usage_is_explicit_instead_of_becoming_zero():

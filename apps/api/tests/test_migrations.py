@@ -11,7 +11,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0021_artifact_submission_facts"
+HEAD_REVISION = "0022_local_credentials"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -82,6 +82,10 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
             "SELECT sql FROM sqlite_master "
             "WHERE type = 'table' AND name = 'artifact_submissions'"
         ).fetchone()[0]
+        local_credential_columns = {
+            row[1]: row
+            for row in connection.execute("PRAGMA table_info(local_credentials)")
+        }
 
     assert revision == HEAD_REVISION
     assert "uq_quiz_attempts_run_user_idempotency" in attempt_schema
@@ -108,6 +112,12 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
     assert "token_hash" in auth_session_schema
     assert "fk_learning_resume_run_user" in resume_schema
     assert "fk_artifact_submissions_run_user" in artifact_submission_schema
+    assert {
+        "username",
+        "password_hash",
+        "failed_attempts",
+        "locked_until",
+    }.issubset(local_credential_columns)
 
 
 def test_generation_lease_migration_accepts_orm_precreated_table(tmp_path):

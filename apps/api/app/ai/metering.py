@@ -9,6 +9,7 @@ from uuid import uuid4
 from sqlalchemy.orm import sessionmaker
 
 from ..auth.context import Principal
+from ..core.errors import safe_error_code
 from ..infrastructure.tables import AiInvocation, AiUsageMeasurement, now
 
 
@@ -189,7 +190,7 @@ class AiUsageRecorder:
             invocation_id,
             status="interrupted" if isinstance(error, asyncio.CancelledError) else "failed",
             usage=None,
-            error_code=getattr(error, "code", type(error).__name__)[:80],
+            error_code=safe_error_code(error),
         )
 
     def _finish(

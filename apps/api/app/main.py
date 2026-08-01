@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from sqlalchemy.orm import Session
 from .auth.context import Principal, UserScope, demo_user_scope
+from .auth.local import LocalCredentialService
 from .auth.oidc import OidcClient
 from .auth.service import IdentityService, OidcStateService, SessionService, token_hash
 from .ai.openai_adapter import OpenAiAdapter
@@ -19,10 +20,11 @@ from .ai.anthropic_adapter import AnthropicAdapter
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AiRuntimeUpdate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, NoteUpdate, PlanCreate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ShelfCreate
+from .api.schemas import AiRuntimeUpdate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, LocalLogin, NoteUpdate, PlanCreate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ShelfCreate
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
+from .demo_personas import LOCAL_DEMO_PERSONAS
 from .infrastructure.database import build_database
 from .infrastructure.tables import Base, LearningTask, User
 from .modules.learning.tasks import claim_task, heartbeat_task, recoverable_task_ids
@@ -93,6 +95,8 @@ def create_app(
     effective_app_mode = app_mode or settings.app_mode
     if effective_app_mode == "production" and effective_auth_mode == "demo":
         raise RuntimeError("Production mode cannot use demo authentication")
+    if effective_app_mode == "production" and effective_auth_mode == "local":
+        raise RuntimeError("Production mode cannot use local authentication")
     engine, sessions = build_database(database_url or settings.database_url)
     usage_recorder = AiUsageRecorder(sessions)
     if runtime_settings_path is False:
@@ -243,6 +247,17 @@ def create_app(
                     scope=demo_user_scope(DEMO_USER_ID),
                 )
                 startup_service.ensure_seed()
+        elif effective_auth_mode == "local":
+            with sessions() as db:
+                LocalCredentialService(db).ensure_seed_accounts()
+                for persona in LOCAL_DEMO_PERSONAS:
+                    SlowService(
+                        db,
+                        adapter,
+                        verifier,
+                        storage,
+                        scope=demo_user_scope(persona.user_id),
+                    ).ensure_seed()
         app.state.sessions, app.state.ai, app.state.source_verifier, app.state.attachment_storage = sessions, adapter, verifier, storage
         app.state.ai_usage_recorder = usage_recorder
         app.state.ai_runtime = initial_runtime
@@ -410,9 +425,39 @@ def create_app(
             return "/"
         return value
 
+    def set_session_cookies(
+        response: Response,
+        request: Request,
+        *,
+        raw_token: str,
+        csrf_token: str,
+    ) -> None:
+        cookie_secure = (
+            settings.session_cookie_secure
+            or request.app.state.app_mode == "production"
+        )
+        response.set_cookie(
+            settings.session_cookie_name,
+            raw_token,
+            max_age=settings.session_ttl_seconds,
+            httponly=True,
+            secure=cookie_secure,
+            samesite="lax",
+            path="/",
+        )
+        response.set_cookie(
+            "slow_csrf",
+            csrf_token,
+            max_age=settings.session_ttl_seconds,
+            httponly=False,
+            secure=cookie_secure,
+            samesite="lax",
+            path="/",
+        )
+
     @app.get("/api/auth/config")
     def auth_config(request: Request):
-        return {
+        response = {
             "mode": request.app.state.auth_mode,
             "providerName": (
                 settings.oidc_provider_name
@@ -420,6 +465,16 @@ def create_app(
                 else ""
             ),
         }
+        if request.app.state.auth_mode == "local":
+            response["localAccounts"] = [
+                {
+                    "username": persona.username,
+                    "displayName": persona.display_name,
+                    "scenario": persona.scenario,
+                }
+                for persona in LOCAL_DEMO_PERSONAS
+            ]
+        return response
 
     @app.get("/api/auth/login")
     async def auth_login(
@@ -430,6 +485,12 @@ def create_app(
         destination = safe_return_to(return_to)
         if request.app.state.auth_mode == "demo":
             return RedirectResponse(f"{settings.web_origin}{destination}")
+        if request.app.state.auth_mode == "local":
+            raise AppError(
+                "本地账号请在登录页输入账号和密码",
+                code="LOCAL_LOGIN_FORM_REQUIRED",
+                status=400,
+            )
         state, login = OidcStateService(session).create(
             return_to=destination,
         )
@@ -450,6 +511,60 @@ def create_app(
             ),
             samesite="lax",
             path="/api/auth/callback",
+        )
+        return response
+
+    @app.post("/api/auth/local/login")
+    def local_auth_login(
+        request: Request,
+        body: LocalLogin,
+        session: Session = Depends(db),
+    ):
+        if request.app.state.auth_mode != "local":
+            raise AppError(
+                "当前未启用本地账号登录",
+                code="LOCAL_AUTH_NOT_ENABLED",
+                status=404,
+            )
+        user = LocalCredentialService(session).authenticate(
+            username=body.username,
+            password=body.password.get_secret_value(),
+        )
+        session_service = SessionService(
+            session,
+            ttl_seconds=settings.session_ttl_seconds,
+        )
+        session_service.revoke(
+            request.cookies.get(settings.session_cookie_name)
+        )
+        auth_session, raw_token, csrf_token = session_service.issue(user)
+        SlowService(
+            session,
+            request.app.state.ai,
+            request.app.state.source_verifier,
+            request.app.state.attachment_storage,
+            scope=UserScope(
+                Principal(
+                    actor_kind="user",
+                    actor_id=user.id,
+                    subject_user_id=user.id,
+                    session_id=auth_session.id,
+                )
+            ),
+        ).ensure_seed()
+        response = JSONResponse(
+            {
+                "authenticated": True,
+                "mode": "local",
+                "user": {"id": user.id, "name": user.name},
+                "csrfToken": csrf_token,
+            }
+        )
+        set_session_cookies(
+            response,
+            request,
+            raw_token=raw_token,
+            csrf_token=csrf_token,
         )
         return response
 
@@ -512,27 +627,11 @@ def create_app(
         response = RedirectResponse(
             f"{settings.web_origin}{safe_return_to(login.return_to)}"
         )
-        cookie_secure = (
-            settings.session_cookie_secure
-            or request.app.state.app_mode == "production"
-        )
-        response.set_cookie(
-            settings.session_cookie_name,
-            raw_token,
-            max_age=settings.session_ttl_seconds,
-            httponly=True,
-            secure=cookie_secure,
-            samesite="lax",
-            path="/",
-        )
-        response.set_cookie(
-            "slow_csrf",
-            csrf_token,
-            max_age=settings.session_ttl_seconds,
-            httponly=False,
-            secure=cookie_secure,
-            samesite="lax",
-            path="/",
+        set_session_cookies(
+            response,
+            request,
+            raw_token=raw_token,
+            csrf_token=csrf_token,
         )
         response.delete_cookie(
             "slow_oidc_state",
@@ -554,7 +653,7 @@ def create_app(
                 status=401,
             )
         csrf_token = request.cookies.get("slow_csrf", "")
-        if request.app.state.auth_mode == "oidc":
+        if request.app.state.auth_mode != "demo":
             auth_session = request.state.auth_session
             if (
                 not csrf_token
@@ -576,7 +675,7 @@ def create_app(
     ):
         del scope
         response = Response(status_code=204)
-        if request.app.state.auth_mode == "oidc":
+        if request.app.state.auth_mode != "demo":
             SessionService(
                 session,
                 ttl_seconds=settings.session_ttl_seconds,

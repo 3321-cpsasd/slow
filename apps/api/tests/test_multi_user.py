@@ -15,6 +15,7 @@ from joserfc.jwk import RSAKey
 
 from app.auth.oidc import OidcClient, OidcIdentity
 from app.core.errors import AppError
+from app.demo_personas import LOCAL_DEMO_PASSWORD, LOCAL_DEMO_PERSONAS
 from app.infrastructure.database import build_database
 from app.infrastructure.tables import (
     Base,
@@ -29,6 +30,7 @@ from app.infrastructure.tables import (
     LearningPlan,
     LearningRun,
     LearningTask,
+    LocalCredential,
     PlanCreationRequest,
     QuizAttempt,
     QuizSet,
@@ -334,6 +336,114 @@ def test_demo_auth_config_is_public_and_explicit():
 
     assert response.status_code == 200
     assert response.json() == {"mode": "demo", "providerName": ""}
+
+
+@pytest.fixture
+def local_auth_client(tmp_path):
+    app = create_app(
+        "sqlite+pysqlite:///:memory:",
+        ai=LocalDemoAdapter(),
+        source_verifier=AcceptingSourceVerifier(),
+        attachment_storage=LocalAttachmentStorage(tmp_path / "attachments"),
+        auth_mode="local",
+        app_mode="development",
+        runtime_settings_path=False,
+    )
+    with TestClient(app) as client:
+        yield client
+
+
+def test_local_accounts_login_reuses_session_boundary_and_isolates_users(
+    local_auth_client,
+):
+    config = local_auth_client.get("/api/auth/config")
+    assert config.status_code == 200
+    assert config.json()["mode"] == "local"
+    assert {
+        account["username"] for account in config.json()["localAccounts"]
+    } == {persona.username for persona in LOCAL_DEMO_PERSONAS}
+    assert LOCAL_DEMO_PASSWORD not in config.text
+
+    first = LOCAL_DEMO_PERSONAS[0]
+    logged_in = local_auth_client.post(
+        "/api/auth/local/login",
+        json={"username": first.username, "password": LOCAL_DEMO_PASSWORD},
+    )
+    assert logged_in.status_code == 200
+    assert logged_in.json()["user"] == {
+        "id": first.user_id,
+        "name": first.display_name,
+    }
+    assert logged_in.json()["csrfToken"]
+    assert "slow_session" in logged_in.cookies
+
+    bootstrap = local_auth_client.get("/api/bootstrap")
+    assert bootstrap.status_code == 200
+    assert bootstrap.json()["user"]["id"] == first.user_id
+    assert bootstrap.json()["shelves"][0]["name"] == first.shelf_name
+
+    logout = local_auth_client.post(
+        "/api/auth/logout",
+        headers={"X-CSRF-Token": logged_in.json()["csrfToken"]},
+    )
+    assert logout.status_code == 204
+
+    second = LOCAL_DEMO_PERSONAS[1]
+    second_login = local_auth_client.post(
+        "/api/auth/local/login",
+        json={"username": second.username, "password": LOCAL_DEMO_PASSWORD},
+    )
+    assert second_login.status_code == 200
+    second_bootstrap = local_auth_client.get("/api/bootstrap")
+    assert second_bootstrap.json()["user"]["id"] == second.user_id
+    assert second_bootstrap.json()["shelves"][0]["name"] == second.shelf_name
+    assert second_bootstrap.json()["shelves"][0]["id"] != bootstrap.json()["shelves"][0]["id"]
+
+    with local_auth_client.app.state.sessions() as db:
+        credentials = db.scalars(select(LocalCredential)).all()
+        assert len(credentials) == 4
+        assert all(row.password_hash.startswith("$argon2id$") for row in credentials)
+        assert all(row.password_hash != LOCAL_DEMO_PASSWORD for row in credentials)
+
+
+def test_local_login_rejects_wrong_password_and_locks_repeated_failures(
+    local_auth_client,
+):
+    persona = LOCAL_DEMO_PERSONAS[2]
+    for _ in range(5):
+        denied = local_auth_client.post(
+            "/api/auth/local/login",
+            json={"username": persona.username, "password": "wrong-password"},
+        )
+        assert denied.status_code == 401
+        assert denied.json()["code"] == "LOCAL_LOGIN_INVALID"
+        assert "slow_session" not in denied.cookies
+
+    still_locked = local_auth_client.post(
+        "/api/auth/local/login",
+        json={"username": persona.username, "password": LOCAL_DEMO_PASSWORD},
+    )
+    assert still_locked.status_code == 401
+    assert still_locked.json()["code"] == "LOCAL_LOGIN_INVALID"
+    with local_auth_client.app.state.sessions() as db:
+        credential = db.scalar(
+            select(LocalCredential).where(
+                LocalCredential.username == persona.username,
+            )
+        )
+        assert credential.locked_until is not None
+
+
+def test_production_refuses_local_authentication():
+    with pytest.raises(
+        RuntimeError,
+        match="Production mode cannot use local authentication",
+    ):
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            auth_mode="local",
+            app_mode="production",
+        )
 
 
 def test_plan_idempotency_key_is_scoped_by_user():

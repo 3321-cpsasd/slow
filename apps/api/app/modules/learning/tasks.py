@@ -6,7 +6,7 @@ from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from ...auth.context import Principal, WorkerExecutionContext
-from ...core.errors import AppError
+from ...core.errors import AppError, safe_error_code
 from ...infrastructure.tables import LearningTask, now
 
 
@@ -194,7 +194,7 @@ def fail_task(
         )
         .values(
             status="failed",
-            error_code=getattr(error, "code", type(error).__name__)[:80],
+            error_code=safe_error_code(error),
             error_message=f"{type(error).__name__}: learning task failed",
             updated_at=now(),
         )

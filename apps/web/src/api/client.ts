@@ -135,6 +135,14 @@ export const api = {
   login:(returnTo='/')=>{
     window.location.assign(`${BASE}/api/auth/login?return_to=${encodeURIComponent(returnTo)}`);
   },
+  localLogin:async(username:string,password:string)=>{
+    const state = await call<import('../model/types').AuthState>('/api/auth/local/login',{
+      method:'POST',
+      body:JSON.stringify({username,password}),
+    });
+    csrfToken = state.csrfToken;
+    return state;
+  },
   logout:async()=>{
     await call<void>('/api/auth/logout',{method:'POST'});
     csrfToken = '';

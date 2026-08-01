@@ -101,7 +101,7 @@ API_HOST=127.0.0.1
 API_PORT=8000
 WEB_ORIGIN=http://127.0.0.1:5173
 APP_MODE=development
-AUTH_MODE=demo
+AUTH_MODE=local
 ```
 
 启动前后端：
@@ -118,10 +118,23 @@ AUTH_MODE=demo
 
 没有配置 `OPENAI_API_KEY` 时，系统使用机器可识别的 `local-demo-v1` 内容演示学习状态机。Demo 数据不能作为真实 AI 内容或正式评测证据。
 
-本地默认使用显式 `AUTH_MODE=demo`。正式部署必须设置
+本地默认使用 `AUTH_MODE=local`，登录页内置四个相互隔离的开发验证账号：
+
+| 场景 | 用户名 |
+|---|---|
+| 计算机专业新生 | `cs-freshman` |
+| 金融考研 | `finance-postgrad` |
+| 数学系泛函分析期末 | `math-functional` |
+| 舞蹈系跨专业考公 | `dance-civil` |
+
+四个账号的临时开发密码均为 `SlowDemo2026!`。密码只以 Argon2id 哈希写入
+`local_credentials`；登录成功后仍使用可撤销服务端 Session 和 CSRF 防护。
+这个入口只用于本机产品验证，也可显式设置 `AUTH_MODE=demo` 跳过登录页。
+
+正式部署必须设置
 `APP_MODE=production`、`AUTH_MODE=oidc`、`OIDC_ISSUER`、
 `OIDC_CLIENT_ID`、`OIDC_REDIRECT_URI` 和真实 `WEB_ORIGIN`；正式模式会拒绝
-Demo 身份。浏览器只保存 `HttpOnly` Session Cookie 和 CSRF 凭证，不接收
+Local/Demo 身份。浏览器只保存 `HttpOnly` Session Cookie 和 CSRF 凭证，不接收
 `user_id` 或长期身份令牌。
 
 也可以在页面右上角的「AI 设置」中配置供应商。通过连接验证后，配置会写入仅服务端可读、权限为 `0600` 且被 Git 忽略的 `data/runtime-ai.json`；浏览器只能读取脱敏状态，API Key 不会返回前端，API 重启后会自动恢复该配置。
@@ -276,7 +289,7 @@ API_HOST=127.0.0.1
 API_PORT=8000
 WEB_ORIGIN=http://127.0.0.1:5173
 APP_MODE=development
-AUTH_MODE=demo
+AUTH_MODE=local
 ```
 
 Start both services:
@@ -293,9 +306,16 @@ Start both services:
 
 Without `OPENAI_API_KEY`, Slow uses machine-identifiable `local-demo-v1` content to demonstrate the learning state machine. Demo data is never treated as real AI content or formal evaluation evidence.
 
-Local development uses explicit `AUTH_MODE=demo`. Production must configure
+Local development defaults to `AUTH_MODE=local` with four isolated validation
+accounts: `cs-freshman`, `finance-postgrad`, `math-functional`, and
+`dance-civil`. Their temporary development password is `SlowDemo2026!`.
+Passwords are stored only as Argon2id hashes; successful login reuses the
+revocable server-side Session and CSRF boundary. Set `AUTH_MODE=demo` explicitly
+to skip the login page.
+
+Production must configure
 `APP_MODE=production`, `AUTH_MODE=oidc`, the OIDC issuer/client/redirect URI,
-and the real `WEB_ORIGIN`; production refuses demo identity. The browser never
+and the real `WEB_ORIGIN`; production refuses local and demo identity. The browser never
 supplies a trusted `user_id` or stores a long-lived identity token.
 
 You can also configure a provider from **AI Settings** in the web UI. After connection validation, Slow stores the configuration in the Git-ignored, server-only `data/runtime-ai.json` file with `0600` permissions. The browser receives only redacted status, never the API key, and the API restores the configuration after a restart.

@@ -12,4 +12,4 @@ fi
 
 cd "$project_dir/apps/api"
 PYTHONPATH=. "$alembic_bin" -c alembic.ini upgrade head
-exec env PYTHONPATH=. "$uvicorn_bin" app.main:app --host "${API_HOST:-127.0.0.1}" --port "${API_PORT:-8000}" --reload
+exec env PYTHONPATH=. AUTH_MODE="${AUTH_MODE:-local}" "$uvicorn_bin" app.main:app --host "${API_HOST:-127.0.0.1}" --port "${API_PORT:-8000}" --reload

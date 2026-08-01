@@ -13,7 +13,8 @@ from sqlalchemy.orm import Session
 from ..auth.context import UserScope, WorkerExecutionContext
 
 from ..ai.port import AiPort
-from ..core.errors import AiError, AppError
+from ..core.errors import AiError, AppError, safe_error_code
+from ..demo_personas import LOCAL_DEMO_PERSONAS_BY_USER_ID
 from ..infrastructure.tables import (
     ArtifactAttachment,
     ArtifactSubmission,
@@ -135,9 +136,13 @@ class SlowService:
                 )
 
     def ensure_seed(self):
+        persona = LOCAL_DEMO_PERSONAS_BY_USER_ID.get(self.user_id)
         user = self.db.get(User, self.user_id)
         if not user:
-            user = User(id=self.user_id, name="学习者")
+            user = User(
+                id=self.user_id,
+                name=persona.display_name if persona else "学习者",
+            )
             self.db.add(user)
             self.db.flush()
         shelf = self.db.scalar(
@@ -149,13 +154,21 @@ class SlowService:
                     id=(
                         "shelf_technology"
                         if self.user_id == DEMO_USER_ID
-                        else uid("shelf")
+                        else (
+                            f"shelf_{persona.username.replace('-', '_')}"
+                            if persona
+                            else uid("shelf")
+                        )
                     ),
                     user_id=self.user_id,
-                    name="技术",
-                    domain="计算机",
-                    specialty="软件工程",
-                    tags_json='["AI","云原生"]',
+                    name=persona.shelf_name if persona else "技术",
+                    domain=persona.domain if persona else "计算机",
+                    specialty=persona.specialty if persona else "软件工程",
+                    tags_json=(
+                        dump(list(persona.tags))
+                        if persona
+                        else '["AI","云原生"]'
+                    ),
                 )
             )
         self.db.commit()
@@ -286,7 +299,7 @@ class SlowService:
             failed = self.db.get(PlanCreationRequest, reservation_key)
             if failed:
                 failed.status = "failed"
-                failed.error_code = getattr(error, "code", error.__class__.__name__)[:80]
+                failed.error_code = safe_error_code(error)
                 failed.updated_at = now()
                 self.db.commit()
             raise
