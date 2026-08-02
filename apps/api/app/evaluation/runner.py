@@ -33,6 +33,55 @@ SEMANTIC_GATE_CRITERIA = {
     "G11": "M1 门禁仅要求服务端验证来源 URL 可达且版本固定；主张级摘录或源码行范围属于后续内容可信度风险，应报告但不单独构成 M1 critical 缺陷。",
 }
 
+DURABLE_TASK_TEST_TARGETS = (
+    "apps/api/tests/test_vertical_slice.py::test_interrupted_learning_task_resumes_after_restart",
+    "apps/api/tests/test_vertical_slice.py::test_retryable_post_quiz_ai_failure_recovers_without_user_retry",
+    "apps/api/tests/test_vertical_slice.py::test_remediation_task_recovery_reuses_already_persisted_result",
+    "apps/api/tests/test_multi_user.py::test_expired_worker_cannot_persist_domain_rows_after_takeover",
+)
+DUAL_USER_TEST_TARGETS = (
+    "apps/api/tests/test_multi_user.py::test_two_local_users_interleave_learning_tasks_without_cross_access",
+)
+
+
+def _process_check_evidence(result, targets):
+    def safe_tail(value):
+        return (
+            value[-4000:]
+            .replace(str(ROOT.resolve()), "<repo>")
+            .replace(str(Path.home()), "<home>")
+        )
+
+    return {
+        "targets": list(targets),
+        "returnCode": result.returncode,
+        "stdoutTail": safe_tail(result.stdout),
+        "stderrTail": safe_tail(result.stderr),
+    }
+
+
+def _evaluation_checks(backend, frontend, durable, dual_user):
+    backend_targets = ("apps/api/tests",)
+    frontend_targets = ("apps/web: pnpm build",)
+    return {
+        "backendTests": backend.returncode == 0,
+        "frontendBuild": frontend.returncode == 0,
+        "durableTaskRecovery": durable.returncode == 0,
+        "dualUserIsolation": dual_user.returncode == 0,
+        "checkEvidence": {
+            "backendTests": _process_check_evidence(backend, backend_targets),
+            "frontendBuild": _process_check_evidence(frontend, frontend_targets),
+            "durableTaskRecovery": _process_check_evidence(
+                durable,
+                DURABLE_TASK_TEST_TARGETS,
+            ),
+            "dualUserIsolation": _process_check_evidence(
+                dual_user,
+                DUAL_USER_TEST_TARGETS,
+            ),
+        },
+    }
+
 
 def configured_provider():
     saved = RuntimeSettingsStore(settings.runtime_ai_config_path).load()
@@ -869,12 +918,27 @@ def _semantic_workflow_evidence(learner):
 
 
 def _snapshot_database_facts(report):
-    snapshot = report.get("evidenceSnapshot", {}).get("database", {}).get("path")
+    snapshot_record = report.get("evidenceSnapshot", {}).get("database", {})
+    snapshot = snapshot_record.get("path")
     if not snapshot or snapshot.startswith("<"):
         return {}
-    database_path = ROOT / snapshot
+    database_path = (ROOT / snapshot).resolve()
+    try:
+        database_path.relative_to(ROOT.resolve())
+    except ValueError as error:
+        raise RuntimeError(
+            "evaluation database snapshot must stay inside the repository"
+        ) from error
     if not database_path.is_file():
         return {}
+    expected_sha256 = snapshot_record.get("sha256")
+    if not expected_sha256:
+        raise RuntimeError("evaluation database snapshot hash is missing")
+    actual_sha256 = _file_sha256(database_path)
+    if actual_sha256 != expected_sha256:
+        raise RuntimeError(
+            "evaluation database snapshot hash mismatch; refusing semantic review"
+        )
     with sqlite3.connect(f"file:{database_path}?mode=ro", uri=True) as connection:
         connection.row_factory = sqlite3.Row
 
@@ -1251,7 +1315,29 @@ def main():
         return
     checks = None
     if not args.skip_build_checks:
-        backend = subprocess.run([str(ROOT / ".venv" / "bin" / "pytest"), "-q", "apps/api/tests"], cwd=ROOT, env={**os.environ, "PYTHONPATH": "apps/api"}, capture_output=True, text=True)
+        pytest = str(ROOT / ".venv" / "bin" / "pytest")
+        backend_env = {**os.environ, "PYTHONPATH": "apps/api"}
+        backend = subprocess.run(
+            [pytest, "-q", "apps/api/tests"],
+            cwd=ROOT,
+            env=backend_env,
+            capture_output=True,
+            text=True,
+        )
+        durable = subprocess.run(
+            [pytest, "-q", *DURABLE_TASK_TEST_TARGETS],
+            cwd=ROOT,
+            env=backend_env,
+            capture_output=True,
+            text=True,
+        )
+        dual_user = subprocess.run(
+            [pytest, "-q", *DUAL_USER_TEST_TARGETS],
+            cwd=ROOT,
+            env=backend_env,
+            capture_output=True,
+            text=True,
+        )
         pnpm = shutil.which("pnpm") or "pnpm"
         node = shutil.which("node")
         if not node:
@@ -1259,12 +1345,7 @@ def main():
             node = str(bundled_node_dir) if bundled_node_dir.exists() else ""
         frontend_env = {**os.environ, "CI": "true", "PATH": os.pathsep.join(value for value in [node, os.environ.get("PATH", "")] if value)}
         frontend = subprocess.run([pnpm, "build"], cwd=ROOT / "apps" / "web", env=frontend_env, capture_output=True, text=True)
-        checks = {
-            "backendTests": backend.returncode == 0,
-            "frontendBuild": frontend.returncode == 0,
-            "durableTaskRecovery": backend.returncode == 0,
-            "dualUserIsolation": backend.returncode == 0,
-        }
+        checks = _evaluation_checks(backend, frontend, durable, dual_user)
     json_path, markdown_path, report = run(args.output, real=args.real, deterministic=checks, database_path_override=args.resume_database, existing_series_id=args.resume_series)
     print(json.dumps({"verdict": report["review"]["verdict"], "json": str(json_path), "markdown": str(markdown_path)}, ensure_ascii=False))
 

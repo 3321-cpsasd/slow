@@ -1231,19 +1231,46 @@ class SlowService:
                 )
                 result = {"noteId": note.id if note else None}
             elif task.task_type == "remediation_generation":
-                view = await self.generate_section(
-                    task.section_id,
-                    retry=True,
-                    retry_attempt_id=payload.get("attemptId"),
+                attempt_id = payload.get("attemptId")
+                existing_remediation = self.db.scalar(
+                    select(Remediation)
+                    .join(QuizAttempt, QuizAttempt.id == Remediation.attempt_id)
+                    .where(
+                        Remediation.attempt_id == attempt_id,
+                        Remediation.section_id == task.section_id,
+                        QuizAttempt.learning_run_id == task.learning_run_id,
+                        QuizAttempt.user_id == task.user_id,
+                    )
                 )
-                result = {
-                    "quizSetId": view["quiz"]["id"] if view["quiz"] else None,
-                    "remediationId": (
-                        view["remediations"][-1]["id"]
-                        if view["remediations"]
-                        else None
-                    ),
-                }
+                if existing_remediation:
+                    result = {
+                        "quizSetId": existing_remediation.replacement_quiz_id,
+                        "remediationId": existing_remediation.id,
+                    }
+                else:
+                    view = await self.generate_section(
+                        task.section_id,
+                        retry=True,
+                        retry_attempt_id=attempt_id,
+                    )
+                    generated_remediation = next(
+                        (
+                            item
+                            for item in reversed(view["remediations"])
+                            if item["attemptId"] == attempt_id
+                        ),
+                        None,
+                    )
+                    if not generated_remediation:
+                        raise AppError(
+                            "补救教学生成完成但未找到对应结果",
+                            code="REMEDIATION_RESULT_MISSING",
+                            status=500,
+                        )
+                    result = {
+                        "quizSetId": generated_remediation["replacementQuizId"],
+                        "remediationId": generated_remediation["id"],
+                    }
             elif task.task_type == "next_section_preload":
                 result = await self._preload_next_section(
                     payload.get("sourceSectionId") or task.section_id

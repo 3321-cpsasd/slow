@@ -4,6 +4,7 @@ import json
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -12,7 +13,12 @@ from sqlalchemy import delete, event, select
 from app.ai.contracts import AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedChapter, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedSectionOutline, PlanBook, PlanChapter, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
 from app.main import create_app
 from app.core.errors import AiError
-from app.evaluation.runner import _semantic_evidence, run
+from app.evaluation.runner import (
+    _evaluation_checks,
+    _semantic_evidence,
+    _snapshot_database_facts,
+    run,
+)
 from app.services.attachment_storage import LocalAttachmentStorage
 from app.services.source_verifier import AcceptingSourceVerifier
 from app.infrastructure.tables import (
@@ -151,6 +157,49 @@ def test_semantic_evidence_scopes_remediation_generation_to_remediation():
     remediation = samples[0]["remediations"][0]
     assert remediation["generation"] == generation
     assert remediation["sourceLineage"]["generationRunId"] == "generation_1"
+
+
+def test_durable_and_dual_user_gates_use_independent_test_results():
+    success = SimpleNamespace(returncode=0, stdout="passed", stderr="")
+    durable_failure = SimpleNamespace(
+        returncode=1,
+        stdout="durable failure",
+        stderr="",
+    )
+
+    checks = _evaluation_checks(
+        success,
+        success,
+        durable_failure,
+        success,
+    )
+
+    assert checks["backendTests"] is True
+    assert checks["durableTaskRecovery"] is False
+    assert checks["dualUserIsolation"] is True
+    assert checks["checkEvidence"]["durableTaskRecovery"]["returnCode"] == 1
+    assert checks["checkEvidence"]["durableTaskRecovery"]["targets"]
+    assert checks["checkEvidence"]["dualUserIsolation"]["targets"]
+
+
+def test_semantic_review_rejects_modified_database_snapshot(
+    tmp_path,
+    monkeypatch,
+):
+    snapshot = tmp_path / "evaluation.db"
+    snapshot.write_bytes(b"modified snapshot")
+    monkeypatch.setattr("app.evaluation.runner.ROOT", tmp_path)
+    report = {
+        "evidenceSnapshot": {
+            "database": {
+                "path": snapshot.name,
+                "sha256": hashlib.sha256(b"original snapshot").hexdigest(),
+            }
+        }
+    }
+
+    with pytest.raises(RuntimeError, match="snapshot hash mismatch"):
+        _snapshot_database_facts(report)
 
 
 def test_new_plan_preloads_first_lesson_in_durable_background_task(client):
@@ -436,6 +485,58 @@ def test_retryable_post_quiz_ai_failure_recovers_without_user_retry(tmp_path):
         assert recovering.get(
             f"/api/sections/{section['id']}"
         ).json()["note"]
+
+
+def test_remediation_task_recovery_reuses_already_persisted_result(client):
+    series = create_series(client)
+    initialization = wait_for_task(
+        client,
+        series["initializationTask"]["taskId"],
+    )
+    section_id = initialization["result"]["targetSectionId"]
+    section = client.get(f"/api/sections/{section_id}").json()
+    failed = client.post(
+        f"/api/sections/{section_id}/quiz",
+        json={
+            "quizSetId": section["quiz"]["id"],
+            "answers": [[0] for _ in section["quiz"]["questions"]],
+        },
+    ).json()
+    remediation_task = next(
+        task
+        for task in failed["workflowTasks"]
+        if task["type"] == "remediation_generation"
+    )
+    first_completion = wait_for_task(client, remediation_task["taskId"])
+    assert first_completion["status"] == "succeeded"
+    persisted = client.get(f"/api/sections/{section_id}").json()
+    assert len(persisted["remediations"]) == 1
+    persisted_result = first_completion["result"]
+
+    # Recreate the durable crash window: domain rows committed, task completion
+    # missing. Recovery must reuse the existing remediation instead of calling
+    # the model and inserting a second row for the same quiz attempt.
+    with client.app.state.sessions() as db:
+        task = db.get(LearningTask, remediation_task["taskId"])
+        task.status = "pending"
+        task.result_json = "{}"
+        task.lease_owner = None
+        task.lease_token = None
+        task.lease_expires_at = None
+        task.heartbeat_at = None
+        db.commit()
+
+    recovered = wait_for_task(
+        client,
+        remediation_task["taskId"],
+        timeout=5,
+    )
+    assert recovered["status"] == "succeeded"
+    assert recovered["attemptCount"] == 2
+    assert recovered["result"] == persisted_result
+    refreshed = client.get(f"/api/sections/{section_id}").json()
+    assert len(refreshed["remediations"]) == 1
+    assert refreshed["quiz"]["generation"] == 2
 
 
 def test_quiz_response_does_not_wait_for_post_quiz_ai(tmp_path):
