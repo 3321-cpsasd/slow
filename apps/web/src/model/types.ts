@@ -34,11 +34,6 @@ export type AuthState = {
 export type AuthConfig = {
   mode:'demo'|'local'|'oidc';
   providerName:string;
-  localAccounts?:{
-    username:string;
-    displayName:string;
-    scenario:string;
-  }[];
 };
 export type AiRuntime = {
   mode:'provider'|'demo'|'injected';

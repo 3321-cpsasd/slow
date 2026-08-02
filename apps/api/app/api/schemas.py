@@ -21,7 +21,11 @@ class ShelfCreate(ApiModel):
 class PlanCreate(ApiModel):
     shelf_id: str
     topic: str = Field(min_length=1, max_length=160)
-    role: str = Field(min_length=1, max_length=80)
+    role: str = Field(
+        min_length=1,
+        max_length=80,
+        description="学习者的专业、身份或当前背景",
+    )
     experience: str = Field(min_length=1, max_length=500)
     purpose: str = Field(default="", max_length=1000)
     depth: Literal["overview", "deep", "mastery"]

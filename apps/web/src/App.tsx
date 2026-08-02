@@ -38,6 +38,7 @@ export default function App() {
   const [authChecked, setAuthChecked] = useState(false);
   const [localUsername, setLocalUsername] = useState('');
   const [localPassword, setLocalPassword] = useState('');
+  const [showLocalPassword, setShowLocalPassword] = useState(false);
   const [data, setData] = useState<Bootstrap | null>(null);
   const [view, setView] = useState<View>('home');
   const [shelf, setShelf] = useState<Shelf | null>(null);
@@ -117,6 +118,7 @@ export default function App() {
       setAuth(state);
       setData(bootstrap);
       setLocalPassword('');
+      setShowLocalPassword(false);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '登录失败');
     } finally {
@@ -305,12 +307,12 @@ export default function App() {
             <div className={`auth-mode-badge ${isDemo || isLocal ? 'demo' : ''}`}>
               <i />{isDemo ? '固定体验环境' : isLocal ? '本地多账号环境' : '个人学习空间'}
             </div>
-            <h2>{isDemo ? '进入体验书架' : isLocal ? '选择学生账号' : '欢迎回来'}</h2>
+            <h2>{isDemo ? '进入体验书架' : isLocal ? '登录学习账号' : '欢迎回来'}</h2>
             <p>
               {isDemo
                 ? '无需配置第三方账号，使用本机固定体验身份查看完整学习闭环。'
                 : isLocal
-                  ? '四个账号的数据完全隔离，分别验证四种大学学习场景。'
+                  ? '输入分配给你的账号和密码，进入独立的个人学习书架。'
                   : '登录后继续你的书架、学习记录与掌握画像。'}
             </p>
 
@@ -331,40 +333,46 @@ export default function App() {
               </button>
             ) : isLocal ? (
               <form className="local-auth-form" onSubmit={(event) => void loginWithLocalAccount(event)}>
-                <div className="local-account-list" aria-label="大学学习场景账号">
-                  {authConfig.localAccounts?.map((account) => (
-                    <button
-                      key={account.username}
-                      type="button"
-                      className={localUsername === account.username ? 'selected' : ''}
-                      onClick={() => setLocalUsername(account.username)}
-                    >
-                      <b>{account.displayName}</b>
-                      <small>{account.scenario}</small>
-                    </button>
-                  ))}
-                </div>
                 <label>
                   账号
                   <input
                     autoComplete="username"
                     value={localUsername}
                     onChange={(event) => setLocalUsername(event.target.value)}
-                    placeholder="选择上方账号或手动输入"
+                    placeholder="输入分配给你的账号"
                     required
                   />
                 </label>
                 <label>
                   密码
-                  <input
-                    type="password"
-                    autoComplete="current-password"
-                    value={localPassword}
-                    onChange={(event) => setLocalPassword(event.target.value)}
-                    placeholder="输入本地体验密码"
-                    minLength={8}
-                    required
-                  />
+                  <span className="password-input">
+                    <input
+                      type={showLocalPassword ? 'text' : 'password'}
+                      autoComplete="current-password"
+                      value={localPassword}
+                      onChange={(event) => setLocalPassword(event.target.value)}
+                      placeholder="输入本地体验密码"
+                      minLength={8}
+                      required
+                    />
+                    <button
+                      type="button"
+                      aria-label={showLocalPassword ? '隐藏密码' : '显示密码'}
+                      aria-pressed={showLocalPassword}
+                      onClick={() => setShowLocalPassword((visible) => !visible)}
+                    >
+                      {showLocalPassword ? (
+                        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
+                          <path d="m3 3 18 18M10.6 10.7a2 2 0 0 0 2.7 2.7M9.9 4.3A10.7 10.7 0 0 1 12 4c5.5 0 9 5.5 9 5.5a16 16 0 0 1-2.2 2.7M6.6 6.6C4.3 8.1 3 9.5 3 9.5S6.5 15 12 15c1 0 1.9-.2 2.7-.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      ) : (
+                        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
+                          <path d="M3 9.5S6.5 4 12 4s9 5.5 9 5.5S17.5 15 12 15 3 9.5 3 9.5Z" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
+                          <circle cx="12" cy="9.5" r="2.5" stroke="currentColor" strokeWidth="1.7" />
+                        </svg>
+                      )}
+                    </button>
+                  </span>
                 </label>
                 <button className="auth-submit" type="submit" disabled={Boolean(busy)}>
                   登录独立书架 <span>→</span>
@@ -945,20 +953,26 @@ function TrashIcon({ size = 16 }: { size?: number }) {
 }
 
 function PlanForm({ submit }: { submit: (body: object, idempotencyKey: string) => Promise<void> }) {
-  const [topic, setTopic] = useState('Kubernetes');
-  const [role, setRole] = useState('技术人员');
-  const [experience, setExperience] = useState('熟悉 Linux、Docker 和基础网络，但没有实际使用过 K8s');
-  const [purpose, setPurpose] = useState('即将参与基于 K8s 的应用部署与日常排障项目');
-  const [depth, setDepth] = useState('deep');
+  const [topic, setTopic] = useState('');
+  const [background, setBackground] = useState('');
+  const [experience, setExperience] = useState('');
+  const [purpose, setPurpose] = useState('');
+  const [depth, setDepth] = useState('');
+  const [formError, setFormError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const idempotencyKey = useRef(crypto.randomUUID());
   const send = async (event: FormEvent) => {
     event.preventDefault();
     if (submitting) return;
+    if (!depth) {
+      setFormError('请选择目标深度');
+      return;
+    }
+    setFormError('');
     setSubmitting(true);
     try {
       await submit(
-        { topic, role, experience, purpose, depth, details: '希望理解核心机制，而不只是记命令' },
+        { topic, role: background, experience, purpose, depth, details: '' },
         idempotencyKey.current,
       );
     } catch {
@@ -967,20 +981,39 @@ function PlanForm({ submit }: { submit: (body: object, idempotencyKey: string) =
   };
   return (
     <form className="plan-form" onSubmit={send}>
-      <label>学习内容<input disabled={submitting} value={topic} onChange={(event) => setTopic(event.target.value)} /></label>
-      <fieldset disabled={submitting}>
-        <legend>你的角色</legend>
-        {['技术人员', '产品或运营', '管理人员', '猎头或人力'].map((item) => (
-          <button type="button" className={role === item ? 'selected' : ''} onClick={() => setRole(item)} key={item}>{item}</button>
-        ))}
-      </fieldset>
-      <label>相关经验<textarea disabled={submitting} value={experience} onChange={(event) => setExperience(event.target.value)} /></label>
-      <label>学习目的<textarea disabled={submitting} value={purpose} onChange={(event) => setPurpose(event.target.value)} /></label>
-      <fieldset disabled={submitting}>
+      <label>
+        学习内容
+        <input required disabled={submitting} value={topic} onChange={(event) => setTopic(event.target.value)} placeholder="输入你想学习的内容" />
+      </label>
+      <label>
+        你的学习背景
+        <input required disabled={submitting} value={background} onChange={(event) => setBackground(event.target.value)} placeholder="输入你的专业、身份或当前背景" />
+      </label>
+      <label>
+        相关经验
+        <textarea required disabled={submitting} value={experience} onChange={(event) => setExperience(event.target.value)} placeholder="描述你已经了解或实践过的内容" />
+      </label>
+      <label>
+        学习目的（可选）
+        <textarea disabled={submitting} value={purpose} onChange={(event) => setPurpose(event.target.value)} placeholder="描述你希望解决的问题或达到的目标" />
+      </label>
+      <fieldset disabled={submitting} aria-describedby={formError ? 'plan-depth-error' : undefined}>
         <legend>目标深度</legend>
         {[['overview', '简单了解'], ['deep', '深度学习'], ['mastery', '掌握路径']].map(([value, label]) => (
-          <button type="button" className={depth === value ? 'selected' : ''} onClick={() => setDepth(value)} key={value}>{label}</button>
+          <button
+            type="button"
+            className={depth === value ? 'selected' : ''}
+            aria-pressed={depth === value}
+            onClick={() => {
+              setDepth(value);
+              setFormError('');
+            }}
+            key={value}
+          >
+            {label}
+          </button>
         ))}
+        {formError && <p className="plan-form-error" id="plan-depth-error" role="alert">{formError}</p>}
       </fieldset>
       <button className="primary-button" disabled={submitting}>{submitting ? '正在生成，请稍候…' : '生成目录方案'}</button>
     </form>

@@ -473,15 +473,6 @@ def create_app(
                 else ""
             ),
         }
-        if request.app.state.auth_mode == "local":
-            response["localAccounts"] = [
-                {
-                    "username": persona.username,
-                    "displayName": persona.display_name,
-                    "scenario": persona.scenario,
-                }
-                for persona in LOCAL_DEMO_PERSONAS
-            ]
         return response
 
     @app.get("/api/auth/login")

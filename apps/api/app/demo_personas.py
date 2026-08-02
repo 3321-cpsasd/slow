@@ -57,6 +57,16 @@ LOCAL_DEMO_PERSONAS = (
         specialty="跨专业考公",
         tags=("行测", "申论", "跨专业"),
     ),
+    LocalDemoPersona(
+        user_id="user_fashion_to_ux",
+        username="fashion-to-ux",
+        display_name="服装设计转交互设计",
+        scenario="服装设计专业学生跨专业转向交互设计",
+        shelf_name="交互设计",
+        domain="设计学",
+        specialty="交互设计转型",
+        tags=("交互设计", "用户体验", "跨专业"),
+    ),
 )
 
 

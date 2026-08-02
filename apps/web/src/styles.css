@@ -250,21 +250,6 @@ button:disabled { cursor: not-allowed; }
 .auth-submit:disabled { opacity: .58; transform: none; }
 .auth-submit span { font-size: 18px; font-weight: 400; }
 .local-auth-form { margin-top: 22px; display: grid; gap: 12px; }
-.local-account-list { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.local-account-list button {
-  min-width: 0;
-  padding: 10px;
-  border: 1px solid #dde0da;
-  border-radius: 9px;
-  background: #fff;
-  color: var(--ink);
-  text-align: left;
-}
-.local-account-list button:hover { border-color: #a8b9ad; background: #f6f9f6; }
-.local-account-list button.selected { border-color: #6f9a7e; background: #edf4ef; box-shadow: 0 0 0 2px rgba(31, 91, 67, .08); }
-.local-account-list b, .local-account-list small { display: block; }
-.local-account-list b { font-size: 11px; }
-.local-account-list small { margin-top: 4px; color: #858b85; font-size: 8px; line-height: 1.35; }
 .local-auth-form > label { display: grid; gap: 6px; color: #535b54; font-size: 10px; font-weight: 750; }
 .local-auth-form input {
   width: 100%;
@@ -275,6 +260,26 @@ button:disabled { cursor: not-allowed; }
   color: var(--ink);
 }
 .local-auth-form input:focus { border-color: #7da08a; outline: 3px solid rgba(31, 91, 67, .1); }
+.password-input { position: relative; display: block; }
+.password-input input { padding-right: 42px; }
+.password-input button {
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  width: 30px;
+  height: 30px;
+  padding: 6px;
+  display: grid;
+  place-items: center;
+  transform: translateY(-50%);
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #707870;
+}
+.password-input button:hover { background: #f0f4f1; color: var(--green); }
+.password-input button:focus-visible { outline: 2px solid #7da08a; outline-offset: 1px; }
+.password-input svg { width: 18px; height: 18px; }
 .local-auth-form .auth-submit { margin-top: 4px; }
 .auth-inline-status, .auth-inline-error { margin-top: 12px; font-size: 11px; line-height: 1.5; }
 .auth-inline-status { color: #788078; }
@@ -858,6 +863,7 @@ button:disabled { cursor: not-allowed; }
 .plan-form legend { width: 100%; margin-bottom: 7px; font-weight: 650; }
 .plan-form fieldset button { border: 1px solid #d7d9d3; background: #f8f8f5; padding: 8px 11px; border-radius: 8px; }
 .plan-form fieldset button.selected { border-color: #6f987f; background: var(--green-soft); color: var(--green); }
+.plan-form-error { flex-basis: 100%; margin: 2px 0 0; color: var(--danger); font-size: 11px; font-weight: 500; }
 
 .learning-workspace {
   height: 100%;

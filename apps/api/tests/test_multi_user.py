@@ -364,11 +364,9 @@ def test_local_accounts_login_reuses_session_boundary_and_isolates_users(
 ):
     config = local_auth_client.get("/api/auth/config")
     assert config.status_code == 200
-    assert config.json()["mode"] == "local"
-    assert {
-        account["username"] for account in config.json()["localAccounts"]
-    } == {persona.username for persona in LOCAL_DEMO_PERSONAS}
+    assert config.json() == {"mode": "local", "providerName": ""}
     assert LOCAL_DEMO_PASSWORD not in config.text
+    assert all(persona.username not in config.text for persona in LOCAL_DEMO_PERSONAS)
 
     first = LOCAL_DEMO_PERSONAS[0]
     logged_in = local_auth_client.post(
@@ -407,9 +405,44 @@ def test_local_accounts_login_reuses_session_boundary_and_isolates_users(
 
     with local_auth_client.app.state.sessions() as db:
         credentials = db.scalars(select(LocalCredential)).all()
-        assert len(credentials) == 4
+        assert len(credentials) == len(LOCAL_DEMO_PERSONAS)
         assert all(row.password_hash.startswith("$argon2id$") for row in credentials)
         assert all(row.password_hash != LOCAL_DEMO_PASSWORD for row in credentials)
+
+
+def test_fashion_to_ux_account_has_its_own_profile_and_rejects_wrong_password(
+    local_auth_client,
+):
+    persona = next(
+        item for item in LOCAL_DEMO_PERSONAS if item.username == "fashion-to-ux"
+    )
+
+    denied = local_auth_client.post(
+        "/api/auth/local/login",
+        json={"username": persona.username, "password": "wrong-password"},
+    )
+    assert denied.status_code == 401
+    assert denied.json()["code"] == "LOCAL_LOGIN_INVALID"
+    assert "slow_session" not in denied.cookies
+
+    logged_in = local_auth_client.post(
+        "/api/auth/local/login",
+        json={"username": persona.username, "password": LOCAL_DEMO_PASSWORD},
+    )
+    assert logged_in.status_code == 200
+    assert logged_in.json()["user"] == {
+        "id": persona.user_id,
+        "name": persona.display_name,
+    }
+
+    bootstrap = local_auth_client.get("/api/bootstrap")
+    assert bootstrap.status_code == 200
+    assert len(bootstrap.json()["shelves"]) == 1
+    shelf = bootstrap.json()["shelves"][0]
+    assert shelf["name"] == persona.shelf_name
+    assert shelf["domain"] == persona.domain
+    assert shelf["specialty"] == persona.specialty
+    assert shelf["tags"] == list(persona.tags)
 
 
 def test_two_local_users_interleave_learning_tasks_without_cross_access(

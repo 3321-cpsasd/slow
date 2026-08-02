@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 
 from ..ai.local_adapter import LocalDemoAdapter
 from ..ai.port import ProviderCapabilities
+from ..api.schemas import PlanCreate, ShelfCreate
 from ..core.config import ROOT, settings
 from ..main import build_provider_adapter, create_app
 from ..infrastructure.database import build_database
@@ -42,6 +43,31 @@ DURABLE_TASK_TEST_TARGETS = (
 DUAL_USER_TEST_TARGETS = (
     "apps/api/tests/test_multi_user.py::test_two_local_users_interleave_learning_tasks_without_cross_access",
 )
+DEFAULT_EVALUATION_INPUT = {
+    "shelfId": "shelf_technology",
+    "topic": "Kubernetes",
+    "role": "技术人员",
+    "experience": "熟悉 Linux、容器与基础网络",
+    "purpose": "完成部署和日常排障",
+    "depth": "deep",
+    "details": "理解机制、边界与迁移",
+}
+
+
+def validated_evaluation_input(value: dict | None = None) -> dict:
+    candidate = deepcopy(DEFAULT_EVALUATION_INPUT if value is None else value)
+    shelf_candidate = candidate.pop("shelf", None)
+    if "background" in candidate and "role" not in candidate:
+        candidate["role"] = candidate.pop("background")
+    if shelf_candidate and "shelfId" not in candidate:
+        candidate["shelfId"] = "<created-for-evaluation>"
+    body = PlanCreate.model_validate(candidate)
+    result = body.model_dump(by_alias=True)
+    if shelf_candidate:
+        result["shelf"] = ShelfCreate.model_validate(shelf_candidate).model_dump(
+            by_alias=True
+        )
+    return result
 
 
 def _process_check_evidence(result, targets):
@@ -138,10 +164,19 @@ class Step:
 class LearnerRunner:
     """Black-box learner: all product interaction goes through public HTTP routes."""
 
-    def __init__(self, client: TestClient, answerer=None, existing_series_id=None):
+    def __init__(
+        self,
+        client: TestClient,
+        answerer=None,
+        existing_series_id=None,
+        plan_input: dict | None = None,
+    ):
         self.client = client
         self.answerer = answerer or (lambda _section, quiz: [[1] for _ in quiz["questions"]])
         self.existing_series_id = existing_series_id
+        validated_input = validated_evaluation_input(plan_input)
+        self.shelf_input = validated_input.pop("shelf", None)
+        self.plan_input = validated_input
         self.steps: list[Step] = []
 
     def request(self, method, path, *, json_body=None, content=None, headers=None, expected=200):
@@ -209,18 +244,18 @@ class LearnerRunner:
         if self.existing_series_id:
             series = self.request("GET", f"/api/series/{self.existing_series_id}")
         else:
+            if self.shelf_input:
+                shelf = self.request(
+                    "POST",
+                    "/api/shelves",
+                    json_body=self.shelf_input,
+                    expected=201,
+                )
+                self.plan_input["shelfId"] = shelf["id"]
             series = self.request(
                 "POST",
                 "/api/plans",
-                json_body={
-                    "shelfId": "shelf_technology",
-                    "topic": "Kubernetes",
-                    "role": "技术人员",
-                    "experience": "熟悉 Linux、容器与基础网络",
-                    "purpose": "完成部署和日常排障",
-                    "depth": "deep",
-                    "details": "理解机制、边界与迁移",
-                },
+                json_body=self.plan_input,
                 expected=201,
             )
         initialization_task = series.get("initializationTask")
@@ -366,7 +401,10 @@ class LearnerRunner:
             for answer in ["机制回答", "边界回答", "迁移回答"]:
                 self.request("POST", f"/api/sections/{first_section_id}/ask-me", json_body={"answer": answer})
         final_series = self.request("GET", f"/api/series/{series['id']}")
-        memory = self.request("GET", "/api/learning-memory?shelf_id=shelf_technology")
+        memory = self.request(
+            "GET",
+            f"/api/learning-memory?shelf_id={self.plan_input['shelfId']}",
+        )
         second_book_entered = len(final_series["books"]) == 1 or final_series["books"][1]["status"] == "available"
         cross_book_adaptation_trace = False
         second_book_section_id = None
@@ -984,7 +1022,14 @@ def _snapshot_database_facts(report):
         }
 
 
-def run(output_dir: Path, real=False, deterministic=None, database_path_override=None, existing_series_id=None):
+def run(
+    output_dir: Path,
+    real=False,
+    deterministic=None,
+    database_path_override=None,
+    existing_series_id=None,
+    plan_input: dict | None = None,
+):
     started = time.monotonic()
     started_at = datetime.now(timezone.utc)
     run_id = started_at.strftime("slow-eval-%Y%m%dT%H%M%SZ")
@@ -1023,7 +1068,12 @@ def run(output_dir: Path, real=False, deterministic=None, database_path_override
     try:
         with TestClient(app) as client:
             adapter = client.app.state.ai
-            learner_runner = LearnerRunner(client, answerer, existing_series_id)
+            learner_runner = LearnerRunner(
+                client,
+                answerer,
+                existing_series_id,
+                plan_input,
+            )
             learner = learner_runner.run()
     except Exception as exc:
         runner_error = {"type": type(exc).__name__, "message": str(exc)[:2000], "stage": "learner_journey"}
@@ -1068,7 +1118,7 @@ def run(output_dir: Path, real=False, deterministic=None, database_path_override
         "databaseSource": _portable_report_path(database_path),
         "usage": {"inputTokens": sum(getattr(item, "input_tokens", 0) for item in [adapter, learner_agent, reviewer_agent] if item), "outputTokens": sum(getattr(item, "output_tokens", 0) for item in [adapter, learner_agent, reviewer_agent] if item)},
         "cost": {"currency": "USD", "amount": None, "reason": "provider price is not configured; token usage is preserved"},
-        "fixedInput": {"topic": "Kubernetes", "role": "技术人员", "experience": "Linux, Docker, basic networking; no Kubernetes practice", "purpose": "deployment and troubleshooting", "depth": "deep"},
+        "fixedInput": validated_evaluation_input(plan_input),
         "runnerError": runner_error,
         "learner": learner,
         "deterministic": deterministic_result,
@@ -1102,7 +1152,7 @@ def run(output_dir: Path, real=False, deterministic=None, database_path_override
                 assessed = agent_loop.run_until_complete(
                     reviewer_agent.review_evaluation(
                         {
-                            "fixedInput": {"topic": "Kubernetes", "role": "技术人员"},
+                            "fixedInput": report["fixedInput"],
                             "deterministicGates": report["review"]["gates"],
                             "featureEvidence": learner["featureEvidence"],
                             "contentSamples": samples,
@@ -1255,6 +1305,11 @@ def main():
         help="re-run only the independent semantic review over a saved real report",
     )
     parser.add_argument("--output", type=Path, default=ROOT / "reports" / "evaluations")
+    parser.add_argument(
+        "--input-json",
+        type=Path,
+        help="custom plan input JSON for a new full evaluation journey",
+    )
     parser.add_argument("--skip-build-checks", action="store_true", help="do not run pytest and the frontend production build")
     args = parser.parse_args()
     if args.review_report:
@@ -1307,6 +1362,15 @@ def main():
         parser.error("full-run resume requires --resume-series")
     if args.resume_series and (not args.real or not args.resume_database):
         parser.error("full-run resume requires --real, --resume-database and --resume-series")
+    if args.input_json and (
+        args.review_report
+        or args.smoke
+        or args.m1_smoke
+        or args.resume_database
+        or args.resume_section
+        or args.resume_series
+    ):
+        parser.error("--input-json is only supported for a new full evaluation journey")
     if args.smoke:
         if not args.real:
             parser.error("--smoke requires --real")
@@ -1346,7 +1410,19 @@ def main():
         frontend_env = {**os.environ, "CI": "true", "PATH": os.pathsep.join(value for value in [node, os.environ.get("PATH", "")] if value)}
         frontend = subprocess.run([pnpm, "build"], cwd=ROOT / "apps" / "web", env=frontend_env, capture_output=True, text=True)
         checks = _evaluation_checks(backend, frontend, durable, dual_user)
-    json_path, markdown_path, report = run(args.output, real=args.real, deterministic=checks, database_path_override=args.resume_database, existing_series_id=args.resume_series)
+    plan_input = (
+        json.loads(args.input_json.read_text(encoding="utf-8"))
+        if args.input_json
+        else None
+    )
+    json_path, markdown_path, report = run(
+        args.output,
+        real=args.real,
+        deterministic=checks,
+        database_path_override=args.resume_database,
+        existing_series_id=args.resume_series,
+        plan_input=plan_input,
+    )
     print(json.dumps({"verdict": report["review"]["verdict"], "json": str(json_path), "markdown": str(markdown_path)}, ensure_ascii=False))
 
 
