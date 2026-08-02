@@ -2732,7 +2732,7 @@ function QuizReview({
           )
         ) : eligibleUnderCurrentPolicy ? (
           <>
-            <span>按当前规则，答对 3/5 已达到继续学习标准</span>
+            <span>按当前规则，答对 {result.score}/{result.total} 已达到继续学习标准</span>
             <button
               className="primary-button"
               disabled={reassessing}
