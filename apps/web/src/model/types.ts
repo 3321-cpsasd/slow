@@ -52,7 +52,7 @@ export type AiRuntime = {
 };
 export type Source = { title:string; url:string; kind:string; version:string };
 export type Block = { id:string; version:number; kind:string; role:string; heading:string; content:string; source_indexes:number[] };
-export type Question = { prompt:string; options:string[]; core:boolean; objective:string; explanation:string; selectionMode:'single'|'multiple' };
+export type Question = { prompt:string; options:string[]; core:boolean; objective:string; selectionMode:'single'|'multiple' };
 export type Generation = {id:string;operation:string;attempt:number;status:string;model:string;trace:Record<string,unknown>;errorCode?:string;error?:string;startedAt:string;finishedAt?:string;durationMs:number};
 export type SourceVerification = {url:string;reachable:boolean;statusCode:number;pinned:boolean;verificationStatus?:'verified'|'server_unverifiable'|'failed'};
 export type Remediation = {id:string;attemptId:string;replacementQuizId:string;blocks:Block[];objectives:string[];strategy:string;sourceVerification:SourceVerification[];sourceLineage:{mode:"generation_trace"|"missing";generationRunId:string|null}};
@@ -79,7 +79,15 @@ export type QuizResult = {
   total:number;
   passed:boolean;
   perfect:boolean;
-  results:{correct:boolean;explanation:string;objective:string}[];
+  results:{
+    correct:boolean;
+    explanation:string;
+    objective:string;
+    selectedOptions?:number[];
+    correctOptions?:number[];
+    missedOptions?:number[];
+    incorrectOptions?:number[];
+  }[];
   remediation:Remediation|null;
   nextQuiz:Section['quiz'];
   workflowTasks:LearningTask[];

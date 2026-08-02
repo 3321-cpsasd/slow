@@ -1855,6 +1855,7 @@ function ReaderPanel({
             section={section}
             onSectionChange={onSectionChange}
             onRefreshSeries={onRefreshSeries}
+            onReviewContent={() => switchTab('content')}
             onSubmissionComplete={() => {
               if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
             }}
@@ -2112,15 +2113,18 @@ function Quiz({
   section,
   onSectionChange,
   onRefreshSeries,
+  onReviewContent,
   onSubmissionComplete,
 }: {
   section: Section;
   onSectionChange: (section: Section) => void;
   onRefreshSeries: () => Promise<void>;
+  onReviewContent: () => void;
   onSubmissionComplete: () => void;
 }) {
   const quizDraftKey = `slow:quiz-draft:${section.id}:${section.quiz?.id || 'none'}`;
   const quizRequestStorageKey = `slow:quiz-request:${section.id}:${section.quiz?.id || 'none'}`;
+  const quizResultStorageKey = `slow:quiz-result:${section.id}:${section.quiz?.id || 'none'}`;
   const [answers, setAnswers] = useState<number[][]>(() => {
     const empty = section.quiz?.questions.map(() => []) || [];
     try {
@@ -2149,7 +2153,27 @@ function Quiz({
     }
     return empty;
   });
-  const [result, setResult] = useState<QuizResult | null>(null);
+  const [result, setResult] = useState<QuizResult | null>(() => {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(quizResultStorageKey) || 'null');
+      if (
+        saved &&
+        typeof saved.attemptId === 'string' &&
+        typeof saved.passed === 'boolean' &&
+        Array.isArray(saved.results) &&
+        saved.results.length === (section.quiz?.questions.length || 0)
+      ) {
+        return saved;
+      }
+    } catch {
+      try {
+        sessionStorage.removeItem(quizResultStorageKey);
+      } catch {
+        // The new quiz can still open when browser session storage is unavailable.
+      }
+    }
+    return null;
+  });
   const [submissionError, setSubmissionError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [workflowRunning, setWorkflowRunning] = useState(false);
@@ -2159,6 +2183,8 @@ function Quiz({
     section.workflowTasks || [],
   );
   const [retryingTasks, setRetryingTasks] = useState(false);
+  const [remediationReady, setRemediationReady] = useState(false);
+  const [openingRemediation, setOpeningRemediation] = useState(false);
 
   useEffect(() => {
     localStorage.setItem(quizDraftKey, JSON.stringify(answers));
@@ -2198,7 +2224,11 @@ function Quiz({
               ? '个人笔记和下一节已经准备完成。'
               : '补充教学和新的等价题已经准备完成。',
         );
-        onSectionChange(await api.section(section.id));
+        if (!failures.length && passed === false) {
+          setRemediationReady(true);
+        } else if (passed !== false) {
+          onSectionChange(await api.section(section.id));
+        }
         await onRefreshSeries();
         return;
       }
@@ -2239,6 +2269,29 @@ function Quiz({
     }
   };
 
+  const openRemediation = async () => {
+    setSubmissionError('');
+    setOpeningRemediation(true);
+    try {
+      const next = await api.section(section.id);
+      const remediation = result
+        ? next.remediations.find((item) => item.attemptId === result.attemptId)
+        : null;
+      if (!remediation || next.quiz?.id !== remediation.replacementQuizId) {
+        throw new Error('补充教学尚未准备完成，请稍后再试。');
+      }
+      sessionStorage.removeItem(quizResultStorageKey);
+      onSectionChange(next);
+      onSubmissionComplete();
+    } catch (reason) {
+      setSubmissionError(
+        reason instanceof Error ? reason.message : '无法打开补充教学。',
+      );
+    } finally {
+      setOpeningRemediation(false);
+    }
+  };
+
   const submit = async () => {
     if (!section.quiz) return;
     const firstUnanswered = answers.findIndex((answer) => answer.length === 0);
@@ -2273,6 +2326,11 @@ function Quiz({
     }
 
     setResult(null);
+    try {
+      sessionStorage.removeItem(quizResultStorageKey);
+    } catch {
+      // Submission does not depend on browser session storage.
+    }
     setSubmissionError('');
     setSubmitting(true);
     try {
@@ -2283,10 +2341,18 @@ function Quiz({
         requestId,
       );
       setResult(value);
+      try {
+        sessionStorage.setItem(quizResultStorageKey, JSON.stringify(value));
+      } catch {
+        // The current in-memory review remains available for this render.
+      }
+      setRemediationReady(false);
       localStorage.removeItem(quizDraftKey);
       localStorage.removeItem(quizRequestStorageKey);
-      const next = await api.section(section.id);
-      onSectionChange(next);
+      if (value.passed) {
+        const next = await api.section(section.id);
+        onSectionChange(next);
+      }
       await onRefreshSeries();
       onSubmissionComplete();
       void monitorTasks(value.workflowTasks, value.passed).catch((reason) => {
@@ -2312,57 +2378,70 @@ function Quiz({
       <h2>小节验证</h2>
       <p className="quiz-rule">核心题必须答对，且总正确率至少达到 80%。</p>
       <p className="quiz-draft-note">单选题只能选择一个答案，多选题可选择多个；切回正文查阅时，当前作答会自动保留。</p>
-      {section.remediations.map((item) => (
-        <section className="remediation-card" key={item.id}>
-          <span>错题补充教学 · {item.strategy}</span>
-          {item.blocks.map((block) => (
-            <div key={block.id}>
-              <h3>{block.heading}</h3>
-              <BlockBody block={block} />
-            </div>
+      {result ? (
+        <QuizReview
+          section={section}
+          result={result}
+          remediationReady={remediationReady}
+          openingRemediation={openingRemediation}
+          onReviewContent={onReviewContent}
+          onOpenRemediation={openRemediation}
+        />
+      ) : (
+        <>
+          {section.remediations.map((item) => (
+            <section className="remediation-card" key={item.id}>
+              <span>错题补充教学 · {item.strategy}</span>
+              {item.blocks.map((block) => (
+                <div key={block.id}>
+                  <h3>{block.heading}</h3>
+                  <BlockBody block={block} />
+                </div>
+              ))}
+            </section>
           ))}
-        </section>
-      ))}
-      {section.quiz?.questions.map((question, questionIndex) => (
-        <fieldset className="question-card" key={`${section.quiz?.id}-${questionIndex}`}>
-          <legend>
-            <span className="question-number">{questionIndex + 1}</span>
-            <b>{question.prompt}</b>
-            <span className="question-badges">
-              <em className={`question-kind ${question.selectionMode}`}>{question.selectionMode === 'multiple' ? '多选' : '单选'}</em>
-              {question.core && <em className="core-question">核心题</em>}
-            </span>
-          </legend>
-          {question.options.map((option, optionIndex) => (
-            <label key={optionIndex}>
-              <input
-                type={question.selectionMode === 'multiple' ? 'checkbox' : 'radio'}
-                name={`question-${section.quiz?.id}-${questionIndex}`}
-                checked={answers[questionIndex]?.includes(optionIndex)}
-                onChange={(event) => setAnswers((current) => current.map((value, index) => {
-                  if (index !== questionIndex) return value;
-                  if (question.selectionMode !== 'multiple') return event.target.checked ? [optionIndex] : [];
-                  return event.target.checked
-                    ? [...value, optionIndex]
-                    : value.filter((item) => item !== optionIndex);
-                }))}
-              />
-              <span className="question-option-letter">
-                {String.fromCharCode(65 + optionIndex)}
-              </span>
-              <span className="question-option-text">{option}</span>
-            </label>
+          {section.quiz?.questions.map((question, questionIndex) => (
+            <fieldset className="question-card" key={`${section.quiz?.id}-${questionIndex}`}>
+              <legend>
+                <span className="question-number">{questionIndex + 1}</span>
+                <b>{question.prompt}</b>
+                <span className="question-badges">
+                  <em className={`question-kind ${question.selectionMode}`}>{question.selectionMode === 'multiple' ? '多选' : '单选'}</em>
+                  {question.core && <em className="core-question">核心题</em>}
+                </span>
+              </legend>
+              {question.options.map((option, optionIndex) => (
+                <label key={optionIndex}>
+                  <input
+                    type={question.selectionMode === 'multiple' ? 'checkbox' : 'radio'}
+                    name={`question-${section.quiz?.id}-${questionIndex}`}
+                    checked={answers[questionIndex]?.includes(optionIndex)}
+                    onChange={(event) => setAnswers((current) => current.map((value, index) => {
+                      if (index !== questionIndex) return value;
+                      if (question.selectionMode !== 'multiple') return event.target.checked ? [optionIndex] : [];
+                      return event.target.checked
+                        ? [...value, optionIndex]
+                        : value.filter((item) => item !== optionIndex);
+                    }))}
+                  />
+                  <span className="question-option-letter">
+                    {String.fromCharCode(65 + optionIndex)}
+                  </span>
+                  <span className="question-option-text">{option}</span>
+                </label>
+              ))}
+            </fieldset>
           ))}
-        </fieldset>
-      ))}
-      <button
-        className="primary-button large"
-        disabled={submitting || workflowRunning}
-        aria-describedby="quiz-submission-feedback"
-        onClick={submit}
-      >
-        {submitting ? '正在评分…' : workflowRunning ? '正在准备后续内容…' : '提交验证'}
-      </button>
+          <button
+            className="primary-button large"
+            disabled={submitting}
+            aria-describedby="quiz-submission-feedback"
+            onClick={submit}
+          >
+            {submitting ? '正在评分…' : '提交验证'}
+          </button>
+        </>
+      )}
       <div id="quiz-submission-feedback" aria-live="polite">
         {submissionError && <p className="result failure" role="alert">{submissionError}</p>}
         {result && <p className={result.passed ? 'result success' : 'result failure'}>{result.passed ? '验证已通过，下一节已经解锁。' : '本次未通过，评分结果已经保存。'}</p>}
@@ -2406,6 +2485,153 @@ function Quiz({
       </div>
       {section.askMeUnlocked && <AskMePanel sectionId={section.id} />}
     </div>
+  );
+}
+
+function QuizReview({
+  section,
+  result,
+  remediationReady,
+  openingRemediation,
+  onReviewContent,
+  onOpenRemediation,
+}: {
+  section: Section;
+  result: QuizResult;
+  remediationReady: boolean;
+  openingRemediation: boolean;
+  onReviewContent: () => void;
+  onOpenRemediation: () => Promise<void>;
+}) {
+  const questions = section.quiz?.questions || [];
+  const wrongIndexes = result.results
+    .map((item, index) => (item.correct ? -1 : index))
+    .filter((index) => index >= 0);
+  const correctIndexes = result.results
+    .map((item, index) => (item.correct ? index : -1))
+    .filter((index) => index >= 0);
+  const optionSummary = (questionIndex: number, indexes: number[]) => {
+    const question = questions[questionIndex];
+    if (!question || !indexes.length) return '未选择';
+    return indexes.map((index) => (
+      `${String.fromCharCode(65 + index)}. ${question.options[index] || '未知选项'}`
+    )).join('；');
+  };
+  const jumpToWrong = (questionIndex: number) => {
+    document.getElementById(`quiz-review-${result.attemptId}-${questionIndex}`)
+      ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  return (
+    <section className="quiz-review" aria-labelledby="quiz-review-title">
+      <header className={result.passed ? 'passed' : 'failed'}>
+        <p className="eyebrow">评分已完成，无需等待 AI</p>
+        <h3 id="quiz-review-title">
+          {result.passed ? '本次验证已通过' : `有 ${wrongIndexes.length} 道题需要回看`}
+        </h3>
+        <strong>{result.score}<small> / {result.total}</small></strong>
+        <p>
+          {result.passed
+            ? '答题事实已经保存，可以查看解析或回到正文。'
+            : '先查看下面的即时错题解析；个性化补充教学会在后台继续准备。'}
+        </p>
+      </header>
+
+      {wrongIndexes.length > 0 && (
+        <nav className="wrong-question-nav" aria-label="错题导航">
+          <span>跳转错题</span>
+          {wrongIndexes.map((questionIndex) => (
+            <button key={questionIndex} onClick={() => jumpToWrong(questionIndex)}>
+              第 {questionIndex + 1} 题
+            </button>
+          ))}
+        </nav>
+      )}
+
+      <div className="wrong-question-list">
+        {wrongIndexes.map((questionIndex) => {
+          const question = questions[questionIndex];
+          const review = result.results[questionIndex];
+          if (!question || !review) return null;
+          return (
+            <article
+              className="wrong-question-card"
+              id={`quiz-review-${result.attemptId}-${questionIndex}`}
+              key={questionIndex}
+            >
+              <div className="wrong-question-heading">
+                <span>第 {questionIndex + 1} 题</span>
+                <em>{question.core ? '核心题 · ' : ''}答错</em>
+              </div>
+              <h4>{question.prompt}</h4>
+              <p className="review-objective">考查目标：{review.objective}</p>
+              <div className="answer-comparison">
+                <div className="selected-answer">
+                  <span>你的答案</span>
+                  <p>{optionSummary(questionIndex, review.selectedOptions || [])}</p>
+                  {(review.incorrectOptions || []).length > 0 && <small>包含错选项</small>}
+                </div>
+                <div className="correct-answer">
+                  <span>正确答案</span>
+                  <p>{optionSummary(questionIndex, review.correctOptions || [])}</p>
+                  {(review.missedOptions || []).length > 0 && <small>有 {(review.missedOptions || []).length} 项漏选</small>}
+                </div>
+              </div>
+              <div className="question-explanation">
+                <b>基础解析</b>
+                <div className="content-markdown">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{review.explanation}</ReactMarkdown>
+                </div>
+              </div>
+              <button className="quiet-button" onClick={onReviewContent}>回看本节正文</button>
+            </article>
+          );
+        })}
+      </div>
+
+      {correctIndexes.length > 0 && (
+        <details className="correct-question-review">
+          <summary>查看答对的 {correctIndexes.length} 道题</summary>
+          {correctIndexes.map((questionIndex) => {
+            const question = questions[questionIndex];
+            const review = result.results[questionIndex];
+            if (!question || !review) return null;
+            return (
+              <div key={questionIndex}>
+                <b>第 {questionIndex + 1} 题 · {question.prompt}</b>
+                <p>{optionSummary(questionIndex, review.correctOptions || [])}</p>
+                <small>{review.explanation}</small>
+              </div>
+            );
+          })}
+        </details>
+      )}
+
+      <div className={`remediation-readiness ${remediationReady ? 'ready' : ''}`}>
+        {result.passed ? (
+          <>
+            <span>本节验证已经完成</span>
+            <button className="secondary-button" onClick={onReviewContent}>返回正文</button>
+          </>
+        ) : remediationReady ? (
+          <>
+            <span>个性化补充教学和变式题已准备完成</span>
+            <button
+              className="primary-button"
+              disabled={openingRemediation}
+              onClick={onOpenRemediation}
+            >
+              {openingRemediation ? '正在打开…' : '开始补充教学与变式题'}
+            </button>
+          </>
+        ) : (
+          <>
+            <span><i />个性化补充教学正在后台准备</span>
+            <small>你可以继续阅读上面的错题解析，生成不会阻塞当前页面。</small>
+          </>
+        )}
+      </div>
+    </section>
   );
 }
 

@@ -1438,7 +1438,11 @@ class SlowService:
         questions = load(quiz.questions_json, []) if quiz else []
         public = [
             {
-                **{key: value for key, value in question.items() if key != "correct"},
+                **{
+                    key: value
+                    for key, value in question.items()
+                    if key not in {"correct", "explanation"}
+                },
                 "selectionMode": "multiple" if len(set(question.get("correct", []))) > 1 else "single",
             }
             for question in questions

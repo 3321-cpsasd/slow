@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import delete, event, select
 from app.ai.contracts import AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedChapter, GeneratedContent, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedQuiz, GeneratedSectionOutline, PlanBook, PlanChapter, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
 from app.application.service import apply_source_repair_scope
+from app.domain.learning import grade_choice_quiz
 from app.main import create_app
 from app.core.errors import AiError
 from app.evaluation.runner import (
@@ -60,6 +61,33 @@ class FakeAi:
         return AskMeTurn(dimension=dimension, prompt=f"请说明 {dimension}", evaluation="not_evaluated" if not request.get("previousAnswer") else "strong", rationale="回答覆盖关键点")
     async def replan_book(self, request, memory):
         return ReplannedBook(rationale="根据学习记忆减少重复", chapters=[ReplannedChapter(title="重规划章节", objective="验证迁移")])
+
+
+def test_quiz_grade_explains_missed_and_incorrect_multiselect_options():
+    grade = grade_choice_quiz(
+        [
+            {
+                "correct": [0, 2],
+                "core": True,
+                "objective": "识别必要条件",
+                "explanation": "A 和 C 都是必要条件。",
+            }
+        ],
+        [[0, 1]],
+    )
+
+    assert grade.passed is False
+    assert grade.results == [
+        {
+            "correct": False,
+            "explanation": "A 和 C 都是必要条件。",
+            "objective": "识别必要条件",
+            "selectedOptions": [0, 1],
+            "correctOptions": [0, 2],
+            "missedOptions": [2],
+            "incorrectOptions": [1],
+        }
+    ]
 
 
 class StagedFakeAi(FakeAi):
@@ -116,9 +144,21 @@ def test_complete_real_shape_vertical_slice(client):
     assert all(item["reachable"] for item in section["content"]["sourceVerification"])
     assert all(question["selectionMode"] == "single" for question in section["quiz"]["questions"])
     assert all("correct" not in question for question in section["quiz"]["questions"])
+    assert all("explanation" not in question for question in section["quiz"]["questions"])
     quiz_id = section["quiz"]["id"]
     failed = client.post(f"/api/sections/{section_id}/quiz", json={"quizSetId":quiz_id,"answers":[[0],[1],[1],[1],[1]]}).json()
     assert failed["passed"] is False
+    assert failed["results"][0] == {
+        "correct": False,
+        "explanation": "因为 B1",
+        "objective": "目标0",
+        "selectedOptions": [0],
+        "correctOptions": [1],
+        "missedOptions": [1],
+        "incorrectOptions": [0],
+    }
+    assert failed["workflowTasks"][0]["type"] == "remediation_generation"
+    assert failed["workflowTasks"][0]["status"] == "pending"
     remediation_task = next(
         task
         for task in failed["workflowTasks"]
@@ -347,6 +387,7 @@ def test_quiz_exposes_selection_mode_without_leaking_answers(tmp_path):
         questions = section["quiz"]["questions"]
         assert [question["selectionMode"] for question in questions] == ["multiple", "single", "single", "single", "single"]
         assert all("correct" not in question for question in questions)
+        assert all("explanation" not in question for question in questions)
         answers = [[0, 1], [1], [1], [1], [1]]
         result = mixed.post(
             f"/api/sections/{section['id']}/quiz",

@@ -23,7 +23,17 @@ def grade_choice_quiz(questions: list[dict], answers: list[list[int]]) -> Grade:
         score += int(correct)
         if question.get("core", False) and not correct:
             core_ok = False
-        results.append({"correct": correct, "explanation": question["explanation"], "objective": question["objective"]})
+        results.append(
+            {
+                "correct": correct,
+                "explanation": question["explanation"],
+                "objective": question["objective"],
+                "selectedOptions": actual,
+                "correctOptions": expected,
+                "missedOptions": [index for index in expected if index not in actual],
+                "incorrectOptions": [index for index in actual if index not in expected],
+            }
+        )
     passed = core_ok and score / len(questions) >= PASS_RATE
     return Grade(score, len(questions), passed, score == len(questions), results)
 
