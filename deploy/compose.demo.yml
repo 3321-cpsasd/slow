@@ -1,0 +1,10 @@
+name: slow
+
+# Explicit override for the public MVP demo. This file must not be used for a
+# production deployment because it enables the local persona login flow.
+services:
+  api:
+    environment:
+      APP_MODE: development
+      AUTH_MODE: local
+      SESSION_COOKIE_SECURE: "false"

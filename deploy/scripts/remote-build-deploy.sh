@@ -1,0 +1,120 @@
+#!/bin/sh
+set -eu
+
+deploy_root=${DEPLOY_ROOT:-/opt/slow}
+compose_file="$deploy_root/compose.prod.yml"
+compose_override="$deploy_root/compose.demo.yml"
+release_file="$deploy_root/.release"
+release_env="$deploy_root/.release.env"
+builds_root="$deploy_root/builds"
+
+: "${APP_VERSION:?APP_VERSION is required}"
+: "${IMAGE_NAME:?IMAGE_NAME is required}"
+: "${WEB_ORIGIN:?WEB_ORIGIN is required}"
+source_archive=${SOURCE_ARCHIVE:-"$deploy_root/slow-$APP_VERSION.tar.gz"}
+REGISTRY=${REGISTRY:-ghcr.io}
+PIP_INDEX_URL=${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
+PNPM_REGISTRY=${PNPM_REGISTRY:-https://registry.npmmirror.com}
+
+cd "$deploy_root"
+
+if [ ! -f .env ]; then
+  echo "Missing $deploy_root/.env" >&2
+  exit 1
+fi
+if [ ! -f "$source_archive" ]; then
+  echo "Missing release source archive: $source_archive" >&2
+  exit 1
+fi
+
+mkdir -p "$builds_root" "$deploy_root/data/backups"
+build_root=$(mktemp -d "$builds_root/${APP_VERSION}.XXXXXX")
+tar -xzf "$source_archive" -C "$build_root"
+
+source_root="$build_root"
+if [ ! -f "$source_root/deploy/docker/api.Dockerfile" ]; then
+  source_root=$(find "$build_root" -mindepth 1 -maxdepth 1 -type d -print -quit)
+fi
+if [ -z "$source_root" ] || [ ! -f "$source_root/deploy/docker/api.Dockerfile" ]; then
+  echo "Release archive does not contain the expected project layout." >&2
+  exit 1
+fi
+
+docker build \
+  --build-arg "PIP_INDEX_URL=$PIP_INDEX_URL" \
+  -f "$source_root/deploy/docker/api.Dockerfile" \
+  -t "$REGISTRY/$IMAGE_NAME-api:$APP_VERSION" \
+  "$source_root"
+docker build \
+  --build-arg "PNPM_REGISTRY=$PNPM_REGISTRY" \
+  -f "$source_root/deploy/docker/web.Dockerfile" \
+  -t "$REGISTRY/$IMAGE_NAME-web:$APP_VERSION" \
+  "$source_root"
+
+previous_release_env=""
+if [ -f "$release_env" ]; then
+  previous_release_env=$(mktemp "$deploy_root/.release.env.previous.XXXXXX")
+  cp "$release_env" "$previous_release_env"
+fi
+
+compose() {
+  docker compose --env-file "$release_env" \
+    -f "$compose_file" -f "$compose_override" "$@"
+}
+
+if [ -f "$release_env" ] && compose ps -q api 2>/dev/null | grep -q .; then
+  compose exec -T api \
+    python -c "import datetime, pathlib, sqlite3; root=pathlib.Path('/data/backups'); root.mkdir(exist_ok=True); source=sqlite3.connect('/data/slow-v0.db'); target=sqlite3.connect(root / ('slow-' + datetime.datetime.now(datetime.UTC).strftime('%Y%m%dT%H%M%SZ') + '.db')); source.backup(target); target.close(); source.close()"
+fi
+
+release_env_next=$(mktemp "$deploy_root/.release.env.next.XXXXXX")
+cat > "$release_env_next" <<EOF
+REGISTRY=$REGISTRY
+IMAGE_NAME=$IMAGE_NAME
+APP_VERSION=$APP_VERSION
+WEB_ORIGIN=$WEB_ORIGIN
+EOF
+mv "$release_env_next" "$release_env"
+
+if ! compose up -d --remove-orphans; then
+  if [ -n "$previous_release_env" ]; then
+    cp "$previous_release_env" "$release_env"
+    compose up -d --remove-orphans
+  fi
+  echo "Deployment failed while starting containers." >&2
+  exit 1
+fi
+
+healthy=false
+attempt=1
+while [ "$attempt" -le 45 ]; do
+  if curl --fail --silent --show-error http://127.0.0.1/api/health >/dev/null 2>&1; then
+    healthy=true
+    break
+  fi
+  sleep 2
+  attempt=$((attempt + 1))
+done
+
+if [ "$healthy" != true ]; then
+  compose logs --tail=120
+  if [ -n "$previous_release_env" ]; then
+    cp "$previous_release_env" "$release_env"
+    compose up -d --remove-orphans
+    echo "Deployment failed health checks; restored the previous release." >&2
+  else
+    echo "Initial deployment failed health checks; no previous release exists." >&2
+  fi
+  exit 1
+fi
+
+printf '%s\n' "$APP_VERSION-demo" > "$release_file"
+find "$deploy_root/data/backups" -type f -name 'slow-*.db' -mtime +14 -delete
+docker image prune -f >/dev/null
+
+if [ -n "$previous_release_env" ]; then
+  rm -f "$previous_release_env"
+fi
+rm -f "$source_archive"
+
+echo "Demo deployment $APP_VERSION is healthy."

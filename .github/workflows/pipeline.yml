@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: production-${{ github.ref }}
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -98,6 +98,7 @@ jobs:
       ECS_SSH_KEY: ${{ secrets.ECS_SSH_KEY }}
       ECS_KNOWN_HOSTS: ${{ secrets.ECS_KNOWN_HOSTS }}
       GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      WEB_ORIGIN: ${{ vars.WEB_ORIGIN }}
     steps:
       - uses: actions/checkout@v6
       - name: Configure SSH
@@ -125,4 +126,37 @@ jobs:
             "docker login ghcr.io -u '$GITHUB_ACTOR' --password-stdin"
           ssh -p "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
             "$ECS_USER@$ECS_HOST" \
-            "chmod 700 /opt/slow/remote-deploy.sh && APP_VERSION='$GITHUB_SHA' REGISTRY='ghcr.io' IMAGE_NAME='$GITHUB_REPOSITORY' /opt/slow/remote-deploy.sh"
+            "chmod 700 /opt/slow/remote-deploy.sh && APP_VERSION='$GITHUB_SHA' REGISTRY='ghcr.io' IMAGE_NAME='$GITHUB_REPOSITORY' WEB_ORIGIN='$WEB_ORIGIN' /opt/slow/remote-deploy.sh"
+
+  deploy-ecs-demo:
+    # The mainland ECS currently runs the explicit local-login demo. Build on
+    # the host with domestic package mirrors because GHCR pulls are unreliable.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && vars.ENABLE_ECS_DEMO_DEPLOY == 'true' && vars.ENABLE_PRODUCTION_DEPLOY != 'true'
+    needs:
+      - api-tests
+      - web-build
+    runs-on: ubuntu-latest
+    environment: demo
+    permissions:
+      contents: read
+    env:
+      ECS_HOST: ${{ secrets.ECS_HOST }}
+      ECS_PORT: ${{ secrets.ECS_PORT }}
+      ECS_USER: ${{ secrets.ECS_USER }}
+      ECS_SSH_KEY: ${{ secrets.ECS_SSH_KEY }}
+      ECS_KNOWN_HOSTS: ${{ secrets.ECS_KNOWN_HOSTS }}
+    steps:
+      - name: Configure SSH
+        shell: bash
+        run: |
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$ECS_SSH_KEY" > "$HOME/.ssh/ecs_key"
+          chmod 600 "$HOME/.ssh/ecs_key"
+          printf '%s\n' "$ECS_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+      - name: Deploy verified main commit on ECS
+        shell: bash
+        run: |
+          ssh -p "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
+            "$ECS_USER@$ECS_HOST" \
+            "deploy $GITHUB_SHA"

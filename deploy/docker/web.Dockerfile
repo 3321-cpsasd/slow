@@ -2,7 +2,11 @@
 
 FROM node:22-alpine AS build
 
-RUN corepack enable && corepack prepare pnpm@11.9.0 --activate
+ARG PNPM_REGISTRY=https://registry.npmjs.org
+
+RUN corepack enable \
+    && corepack prepare pnpm@11.9.0 --activate \
+    && pnpm config set registry "$PNPM_REGISTRY"
 WORKDIR /build
 
 COPY apps/web/package.json apps/web/pnpm-lock.yaml ./

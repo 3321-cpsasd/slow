@@ -2,6 +2,8 @@
 
 FROM python:3.12-slim
 
+ARG PIP_INDEX_URL=https://pypi.org/simple
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -13,7 +15,7 @@ RUN groupadd --gid 10001 slow \
 WORKDIR /srv/slow
 
 COPY apps/api/requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN pip install --no-cache-dir --index-url "$PIP_INDEX_URL" -r /tmp/requirements.txt
 
 COPY apps/api ./apps/api
 COPY deploy/docker/api-entrypoint.sh /usr/local/bin/slow-api-entrypoint

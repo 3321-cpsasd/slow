@@ -8,6 +8,7 @@ release_env="$deploy_root/.release.env"
 
 : "${APP_VERSION:?APP_VERSION is required}"
 : "${IMAGE_NAME:?IMAGE_NAME is required}"
+: "${WEB_ORIGIN:?WEB_ORIGIN is required}"
 REGISTRY=${REGISTRY:-ghcr.io}
 
 cd "$deploy_root"
@@ -31,6 +32,7 @@ cat > "$release_env" <<EOF
 REGISTRY=$REGISTRY
 IMAGE_NAME=$IMAGE_NAME
 APP_VERSION=$APP_VERSION
+WEB_ORIGIN=$WEB_ORIGIN
 EOF
 
 docker compose --env-file "$release_env" -f "$compose_file" pull
@@ -54,6 +56,7 @@ if [ "$healthy" != true ]; then
 REGISTRY=$REGISTRY
 IMAGE_NAME=$IMAGE_NAME
 APP_VERSION=$previous_version
+WEB_ORIGIN=$WEB_ORIGIN
 EOF
     docker compose --env-file "$release_env" -f "$compose_file" up -d --remove-orphans
     echo "Deployment failed; rolled back to $previous_version." >&2
