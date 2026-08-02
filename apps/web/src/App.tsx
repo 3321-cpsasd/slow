@@ -1047,6 +1047,20 @@ function LearningWorkspace({
 }) {
   const [selectedBlockId, setSelectedBlockId] = useState('');
   const [selectedQuote, setSelectedQuote] = useState<TextQuote | null>(null);
+  const [compactLayout, setCompactLayout] = useState(() => window.matchMedia('(max-width: 900px)').matches);
+  const [directoryHidden, setDirectoryHidden] = useState(() => window.matchMedia('(max-width: 900px)').matches);
+  const [qaHidden, setQaHidden] = useState(() => window.matchMedia('(max-width: 900px)').matches);
+
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 900px)');
+    const adaptPanels = (event: MediaQueryListEvent) => {
+      setCompactLayout(event.matches);
+      setDirectoryHidden(event.matches);
+      setQaHidden(event.matches);
+    };
+    media.addEventListener('change', adaptPanels);
+    return () => media.removeEventListener('change', adaptPanels);
+  }, []);
 
   useEffect(() => {
     setSelectedBlockId(section?.content?.blocks[0]?.id || '');
@@ -1059,11 +1073,31 @@ function LearningWorkspace({
     setSelectedBlockId(blockId);
     setSelectedQuote(null);
   };
+  const toggleDirectory = () => {
+    if (compactLayout && directoryHidden) setQaHidden(true);
+    setDirectoryHidden((hidden) => !hidden);
+  };
+  const toggleQa = () => {
+    if (compactLayout && qaHidden) setDirectoryHidden(true);
+    setQaHidden((hidden) => !hidden);
+  };
 
   return (
-    <div className="learning-workspace">
+    <div className={`learning-workspace ${directoryHidden ? 'directory-collapsed' : ''} ${qaHidden ? 'qa-collapsed' : ''}`}>
+      {compactLayout && (!directoryHidden || !qaHidden) && (
+        <button
+          className="panel-backdrop"
+          aria-label="关闭侧栏"
+          onClick={() => {
+            setDirectoryHidden(true);
+            setQaHidden(true);
+          }}
+        />
+      )}
       <DirectoryPanel
         series={series}
+        hidden={directoryHidden}
+        onClose={() => setDirectoryHidden(true)}
         currentSectionId={section?.id}
         onSelectSection={onSelectSection}
         onGenerateChapter={onGenerateChapter}
@@ -1075,6 +1109,10 @@ function LearningWorkspace({
       />
       <ReaderPanel
         section={section}
+        directoryHidden={directoryHidden}
+        qaHidden={qaHidden}
+        onToggleDirectory={toggleDirectory}
+        onToggleQa={toggleQa}
         location={location}
         selectedBlockId={activeBlockId}
         onQuote={(quote) => {
@@ -1088,6 +1126,8 @@ function LearningWorkspace({
       <QaPanel
         key={section?.id || 'empty'}
         section={section}
+        hidden={qaHidden}
+        onClose={() => setQaHidden(true)}
         selectedBlockId={activeBlockId}
         selectedQuote={selectedQuote}
         onAnchor={selectBlock}
@@ -1142,6 +1182,8 @@ function GenerateIcon() {
 
 function DirectoryPanel({
   series,
+  hidden,
+  onClose,
   currentSectionId,
   onSelectSection,
   onGenerateChapter,
@@ -1152,6 +1194,8 @@ function DirectoryPanel({
   onDeleteBook,
 }: {
   series: Series;
+  hidden: boolean;
+  onClose: () => void;
   currentSectionId?: string;
   onSelectSection: (id: string) => Promise<Section>;
   onGenerateChapter: (chapter: Chapter) => Promise<void>;
@@ -1174,8 +1218,9 @@ function DirectoryPanel({
   }, [deleteTarget, deleting]);
 
   return (
-    <aside className="directory-panel" aria-label="课程目录">
+    <aside className="directory-panel" id="course-directory-panel" aria-label="课程目录" hidden={hidden}>
       <div className="directory-heading">
+        <button className="panel-drawer-close" aria-label="关闭目录" onClick={onClose}>×</button>
         <span className="panel-label">目录</span>
         <h2>{series.title}</h2>
         <div className="series-progress">
@@ -1383,6 +1428,10 @@ function SectionTreeButton({ item, active, onClick }: { item: SectionSummary; ac
 
 function ReaderPanel({
   section,
+  directoryHidden,
+  qaHidden,
+  onToggleDirectory,
+  onToggleQa,
   location,
   selectedBlockId,
   onQuote,
@@ -1391,6 +1440,10 @@ function ReaderPanel({
   onRefreshSeries,
 }: {
   section: Section | null;
+  directoryHidden: boolean;
+  qaHidden: boolean;
+  onToggleDirectory: () => void;
+  onToggleQa: () => void;
   location: ReturnType<typeof findSectionLocation>;
   selectedBlockId: string;
   onQuote: (quote: TextQuote) => void;
@@ -1441,6 +1494,12 @@ function ReaderPanel({
   if (!section) {
     return (
       <main className="reader-panel empty-reader">
+        <ReaderPanelToggles
+          directoryHidden={directoryHidden}
+          qaHidden={qaHidden}
+          onToggleDirectory={onToggleDirectory}
+          onToggleQa={onToggleQa}
+        />
         <span className="empty-symbol">S</span>
         <p className="eyebrow">选择左侧目录开始</p>
         <h1>今天，学清楚一个问题。</h1>
@@ -1451,6 +1510,12 @@ function ReaderPanel({
 
   return (
     <main className="reader-panel">
+      <ReaderPanelToggles
+        directoryHidden={directoryHidden}
+        qaHidden={qaHidden}
+        onToggleDirectory={onToggleDirectory}
+        onToggleQa={onToggleQa}
+      />
       <div className="reader-toolbar">
         <div>
           <p className="breadcrumb">
@@ -1522,6 +1587,43 @@ function ReaderPanel({
         </button>
       )}
     </main>
+  );
+}
+
+function ReaderPanelToggles({
+  directoryHidden,
+  qaHidden,
+  onToggleDirectory,
+  onToggleQa,
+}: {
+  directoryHidden: boolean;
+  qaHidden: boolean;
+  onToggleDirectory: () => void;
+  onToggleQa: () => void;
+}) {
+  return (
+    <>
+      <button
+        className={`reader-rail-toggle directory-toggle ${directoryHidden ? 'is-collapsed' : ''}`}
+        aria-controls="course-directory-panel"
+        aria-expanded={!directoryHidden}
+        aria-label={directoryHidden ? '显示目录' : '隐藏目录'}
+        title={directoryHidden ? '显示目录' : '隐藏目录'}
+        onClick={onToggleDirectory}
+      >
+        {directoryHidden ? '›' : '‹'}
+      </button>
+      <button
+        className={`reader-rail-toggle qa-toggle ${qaHidden ? 'is-collapsed' : ''}`}
+        aria-controls="section-qa-panel"
+        aria-expanded={!qaHidden}
+        aria-label={qaHidden ? '显示答疑' : '隐藏答疑'}
+        title={qaHidden ? '显示答疑' : '隐藏答疑'}
+        onClick={onToggleQa}
+      >
+        {qaHidden ? '‹' : '›'}
+      </button>
+    </>
   );
 }
 
@@ -1607,6 +1709,9 @@ function ContentBlock({
     boundary: '边界与反例',
     practice: '连接实践',
   };
+  const markdown = block.kind === 'table'
+    ? normalizeTableMarkdown(block.content)
+    : block.content;
   return (
     <section
       className={`content-block role-${block.role} ${selected ? 'selected' : ''}`}
@@ -1614,9 +1719,37 @@ function ContentBlock({
     >
       <div className="block-meta"><span>{String(index + 1).padStart(2, '0')}</span><b>{labels[block.role] || block.role}</b></div>
       <h2>{block.heading}</h2>
-      <pre className={block.kind === 'code' ? 'code-block' : ''}>{block.content}</pre>
+      {block.kind === 'code' ? (
+        <pre className="code-block"><code>{block.content}</code></pre>
+      ) : (
+        <div className={`content-markdown kind-${block.kind}`}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
+        </div>
+      )}
     </section>
   );
+}
+
+function normalizeTableMarkdown(content: string): string {
+  const lines = content.trim().split(/\r?\n/).filter((line) => line.trim());
+  if (lines.length < 2) return content;
+
+  const cells = (line: string) => line
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map((cell) => cell.trim());
+  const columnCount = cells(lines[0]).length;
+  if (columnCount < 2) return content;
+
+  const possibleDivider = cells(lines[1]);
+  const hasDivider = possibleDivider.length === columnCount
+    && possibleDivider.every((cell) => /^:?-{3,}:?$/.test(cell));
+  if (!hasDivider) {
+    lines.splice(1, 0, Array.from({ length: columnCount }, () => '---').join(' | '));
+  }
+  return lines.join('\n');
 }
 
 function Quiz({
@@ -1989,12 +2122,16 @@ function AskMePanel({ sectionId }: { sectionId: string }) {
 
 function QaPanel({
   section,
+  hidden,
+  onClose,
   selectedBlockId,
   selectedQuote,
   onAnchor,
   onClearQuote,
 }: {
   section: Section | null;
+  hidden: boolean;
+  onClose: () => void;
   selectedBlockId: string;
   selectedQuote: TextQuote | null;
   onAnchor: (id: string) => void;
@@ -2070,8 +2207,9 @@ function QaPanel({
   };
 
   return (
-    <aside className="qa-panel" aria-label="本节答疑">
+    <aside className="qa-panel" id="section-qa-panel" aria-label="本节答疑" hidden={hidden}>
       <div className="qa-heading">
+        <button className="panel-drawer-close" aria-label="关闭答疑" onClick={onClose}>×</button>
         <span className="panel-label">答疑</span>
         <h2>围绕当前小节追问</h2>
         <p>答疑独立保存，不会打断正文阅读。</p>
