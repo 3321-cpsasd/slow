@@ -18,6 +18,7 @@ import type {
   SectionSummary,
   Series,
   Shelf,
+  ShelfCreateInput,
 } from './model/types';
 
 type View = 'home' | 'shelf' | 'learn';
@@ -472,7 +473,19 @@ export default function App() {
 
       <main className={view === 'learn' ? 'learn-main' : 'marketing-main'}>
         {error && <div className="global-error">{error}</div>}
-        {view === 'home' && <Home data={data} onOpen={openShelf} />}
+        {view === 'home' && (
+          <Home
+            data={data}
+            onOpen={openShelf}
+            onCreate={async (body) => {
+              const value = await run('正在创建书架…', () => api.createShelf(body));
+              setData((current) => current
+                ? { ...current, shelves: [...current.shelves, value] }
+                : current);
+              openShelf(value);
+            }}
+          />
+        )}
         {view === 'shelf' && shelf && (
           <ShelfPage
             shelf={shelf}
@@ -769,12 +782,27 @@ function compactSpineTitle(title: string) {
   return seriesName.length > 18 ? `${seriesName.slice(0, 18)}…` : seriesName;
 }
 
-function Home({ data, onOpen }: { data: Bootstrap | null; onOpen: (shelf: Shelf) => void }) {
+function Home({
+  data,
+  onOpen,
+  onCreate,
+}: {
+  data: Bootstrap | null;
+  onOpen: (shelf: Shelf) => void;
+  onCreate: (body: ShelfCreateInput) => Promise<void>;
+}) {
+  const [showCreate, setShowCreate] = useState(false);
+
   return (
     <section className="landing-section">
       <p className="eyebrow">AI 时代的个人学习书架</p>
-      <h1>我的书架</h1>
-      <p className="lead">一本书是一个台阶。慢一点，真正理解、验证并留下自己的笔记。</p>
+      <div className="title-row home-title-row">
+        <div>
+          <h1>我的书架</h1>
+          <p className="lead">一本书是一个台阶。慢一点，真正理解、验证并留下自己的笔记。</p>
+        </div>
+        <button className="primary-button" onClick={() => setShowCreate(true)}>＋ 创建书架</button>
+      </div>
       <div className="shelf-grid">
         {data?.shelves.map((item) => (
           <button
@@ -817,7 +845,159 @@ function Home({ data, onOpen }: { data: Bootstrap | null; onOpen: (shelf: Shelf)
           </button>
         ))}
       </div>
+      {showCreate && (
+        <ShelfCreateDialog
+          onClose={() => setShowCreate(false)}
+          onCreate={onCreate}
+        />
+      )}
     </section>
+  );
+}
+
+function ShelfCreateDialog({
+  onClose,
+  onCreate,
+}: {
+  onClose: () => void;
+  onCreate: (body: ShelfCreateInput) => Promise<void>;
+}) {
+  const [name, setName] = useState('');
+  const [domain, setDomain] = useState('');
+  const [specialty, setSpecialty] = useState('');
+  const [tags, setTags] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState('');
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !submitting) onClose();
+    };
+    document.addEventListener('keydown', closeOnEscape);
+    return () => document.removeEventListener('keydown', closeOnEscape);
+  }, [onClose, submitting]);
+
+  const parsedTags = Array.from(new Set(
+    tags
+      .split(/[,，]/)
+      .map((item) => item.trim())
+      .filter(Boolean),
+  ));
+
+  const send = async (event: FormEvent) => {
+    event.preventDefault();
+    if (submitting) return;
+    if (parsedTags.length > 12) {
+      setFormError('主题标签最多填写 12 个');
+      return;
+    }
+    setSubmitting(true);
+    setFormError('');
+    try {
+      await onCreate({
+        name: name.trim(),
+        domain: domain.trim(),
+        specialty: specialty.trim(),
+        tags: parsedTags,
+      });
+    } catch (reason) {
+      setFormError(reason instanceof Error ? reason.message : '书架创建失败，请稍后重试');
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      className="confirm-backdrop shelf-create-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !submitting) onClose();
+      }}
+    >
+      <section
+        className="shelf-create-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="shelf-create-title"
+      >
+        <div className="shelf-create-heading">
+          <div>
+            <p className="eyebrow">建立一个学习领域</p>
+            <h2 id="shelf-create-title">创建书架</h2>
+            <p>书架用于归拢同一领域的书、学习记录和概念掌握证据。</p>
+          </div>
+          <button className="dialog-close" aria-label="关闭创建书架" disabled={submitting} onClick={onClose}>×</button>
+        </div>
+
+        <div className="shelf-create-nameplate" aria-label="书架铭牌预览">
+          <span>{(name.trim() || '新').slice(0, 1)}</span>
+          <div>
+            <small>书架铭牌预览</small>
+            <b>{name.trim() || '新书架'}</b>
+            <em>
+              {domain.trim() || '学习领域'}
+              {specialty.trim() ? ` · ${specialty.trim()}` : ''}
+            </em>
+          </div>
+        </div>
+
+        <form className="shelf-create-form" onSubmit={send}>
+          <label>
+            书架名称
+            <input
+              autoFocus
+              required
+              maxLength={100}
+              disabled={submitting}
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="例如：交互设计"
+            />
+          </label>
+          <label>
+            学习领域
+            <input
+              required
+              maxLength={100}
+              disabled={submitting}
+              value={domain}
+              onChange={(event) => setDomain(event.target.value)}
+              placeholder="例如：设计学"
+            />
+          </label>
+          <label>
+            细分方向（可选）
+            <input
+              maxLength={120}
+              disabled={submitting}
+              value={specialty}
+              onChange={(event) => setSpecialty(event.target.value)}
+              placeholder="例如：交互设计转型"
+            />
+          </label>
+          <label>
+            主题标签（可选）
+            <input
+              maxLength={240}
+              disabled={submitting}
+              value={tags}
+              onChange={(event) => {
+                setTags(event.target.value);
+                setFormError('');
+              }}
+              placeholder="用逗号分隔，例如：UX、原型、研究"
+            />
+            <small>最多 12 个，用于后续检索和画像归类。</small>
+          </label>
+          {formError && <p className="shelf-create-error" role="alert">{formError}</p>}
+          <div className="dialog-actions">
+            <button type="button" className="quiet-button" disabled={submitting} onClick={onClose}>取消</button>
+            <button className="primary-button" disabled={submitting}>
+              {submitting ? '正在创建…' : '创建并进入书架'}
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
   );
 }
 
@@ -851,9 +1031,9 @@ function ShelfPage({
       <div className="title-row">
         <div>
           <h1>{shelf.name}</h1>
-          <p className="lead">选择一个系列继续学习，或创建新的学习台阶。</p>
+          <p className="lead">选择一个系列继续学习，或规划新的学习主题。</p>
         </div>
-        <button className="primary-button" onClick={() => setShowPlan(!showPlan)}>＋ 新的台阶</button>
+        <button className="primary-button" onClick={() => setShowPlan(!showPlan)}>＋ 创建学习系列</button>
       </div>
       {showPlan && <PlanForm submit={onCreate} />}
       <div className="series-shelf-heading">
@@ -897,7 +1077,7 @@ function ShelfPage({
           {shelf.series.length === 0 && (
             <div className="empty-shelf-message">
               <span>这里还没有书</span>
-              <small>点击“新的台阶”创建第一册。</small>
+              <small>点击“创建学习系列”，从一个学习主题开始。</small>
             </div>
           )}
           <span className="bookend right" aria-hidden="true" />
