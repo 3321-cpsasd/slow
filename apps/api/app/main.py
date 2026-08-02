@@ -334,6 +334,11 @@ def create_app(
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(_request, error):
+        details = []
+        for item in error.errors():
+            sanitized = dict(item)
+            sanitized.pop("input", None)
+            details.append(sanitized)
         return JSONResponse(
             status_code=400,
             content={
@@ -342,7 +347,7 @@ def create_app(
                 "error": "请求参数无效",
                 "retryable": False,
                 "operationId": None,
-                "details": error.errors(),
+                "details": details,
             },
         )
 

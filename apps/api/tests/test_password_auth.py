@@ -175,6 +175,23 @@ def test_password_endpoint_is_not_available_in_local_mode(tmp_path):
     assert response.json()["code"] == "PASSWORD_AUTH_NOT_ENABLED"
 
 
+def test_password_validation_error_does_not_echo_password(tmp_path):
+    app = password_app(tmp_path)
+    with TestClient(app, base_url="https://testserver") as client:
+        response = client.post(
+            "/api/auth/password/login",
+            json={"username": USERNAME, "password": "secret"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "INVALID_REQUEST"
+    assert "secret" not in response.text
+    detail = response.json()["details"][0]
+    assert detail["type"] == "too_short"
+    assert detail["loc"] == ["body", "password"]
+    assert "input" not in detail
+
+
 def test_account_creation_rejects_invalid_username_and_duplicate(tmp_path):
     app = password_app(tmp_path)
     with TestClient(app, base_url="https://testserver") as client:
