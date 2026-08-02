@@ -165,6 +165,10 @@ export const api = {
     headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},
     body:JSON.stringify({quizSetId,answers}),
   }),
+  reassessQuiz:(sectionId:string,attemptId:string)=>call<import('../model/types').QuizResult>(
+    `/api/sections/${sectionId}/quiz-attempts/${attemptId}/reassess`,
+    {method:'POST'},
+  ),
   learningTask:(id:string)=>call<import('../model/types').LearningTask>(`/api/learning-tasks/${id}`),
   retryLearningTask:(id:string)=>call<import('../model/types').LearningTask>(`/api/learning-tasks/${id}/retry`,{method:'POST'}),
   ask:(id:string,blockId:string,question:string,threadId?:string,forceRelation?:'follow_up'|'new_question')=>call<import('../model/types').QaAnswer>(`/api/sections/${id}/ask`,{method:'POST',body:JSON.stringify({blockId,question,threadId,forceRelation})}),

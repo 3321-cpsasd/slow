@@ -738,7 +738,7 @@ class OpenAiAdapter:
 
     async def note(self, request: dict):
         self._begin_structured_operation()
-        return await self._parse(GeneratedNote, """把已完成小节整理为用户长期拥有的个人笔记。正文只是教学过程；笔记必须保留核心机制，同时突出用户错题、答疑、边界、实践检查点、来源和未解决问题。不得编造用户经历。中文输出。""", request, 3500)
+        return await self._parse(GeneratedNote, """把已完成小节整理为用户长期拥有的个人笔记。正文只是教学过程；笔记必须保留核心机制，同时突出用户错题、答疑、边界、实践检查点、来源和未解决问题。request.wrongConcepts 中的每个概念都必须明确写入 personal_gaps，作为需要重点巩固的内容；整节及格不代表这些概念已经掌握。不得编造用户经历。中文输出。""", request, 3500)
 
     async def ask_me(self, request: dict):
         self._begin_structured_operation()

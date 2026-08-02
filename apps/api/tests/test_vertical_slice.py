@@ -90,6 +90,27 @@ def test_quiz_grade_explains_missed_and_incorrect_multiselect_options():
     ]
 
 
+def test_quiz_grade_allows_two_errors_without_core_veto():
+    questions = [
+        {
+            "correct": [1],
+            "core": index == 0,
+            "objective": f"目标{index}",
+            "explanation": f"解析{index}",
+        }
+        for index in range(5)
+    ]
+
+    grade = grade_choice_quiz(
+        questions,
+        [[0], [0], [1], [1], [1]],
+    )
+
+    assert grade.score == 3
+    assert grade.passed is True
+    assert grade.perfect is False
+
+
 class StagedFakeAi(FakeAi):
     staged_lesson_generation = True
 
@@ -146,7 +167,7 @@ def test_complete_real_shape_vertical_slice(client):
     assert all("correct" not in question for question in section["quiz"]["questions"])
     assert all("explanation" not in question for question in section["quiz"]["questions"])
     quiz_id = section["quiz"]["id"]
-    failed = client.post(f"/api/sections/{section_id}/quiz", json={"quizSetId":quiz_id,"answers":[[0],[1],[1],[1],[1]]}).json()
+    failed = client.post(f"/api/sections/{section_id}/quiz", json={"quizSetId":quiz_id,"answers":[[0],[0],[0],[1],[1]]}).json()
     assert failed["passed"] is False
     assert failed["results"][0] == {
         "correct": False,
@@ -159,6 +180,7 @@ def test_complete_real_shape_vertical_slice(client):
     }
     assert failed["workflowTasks"][0]["type"] == "remediation_generation"
     assert failed["workflowTasks"][0]["status"] == "pending"
+    assert failed["workflowTasks"][0]["triggerId"] == failed["attemptId"]
     remediation_task = next(
         task
         for task in failed["workflowTasks"]
@@ -183,12 +205,18 @@ def test_complete_real_shape_vertical_slice(client):
     ]
     stale = client.post(f"/api/sections/{section_id}/quiz", json={"quizSetId":quiz_id,"answers":[[1],[1],[1],[1],[1]]})
     assert stale.status_code == 409 and stale.json()["code"] == "QUIZ_STALE"
-    passed = client.post(f"/api/sections/{section_id}/quiz", json={"quizSetId":remediated["quiz"]["id"],"answers":[[1],[1],[1],[1],[1]]}).json()
+    passed = client.post(f"/api/sections/{section_id}/quiz", json={"quizSetId":remediated["quiz"]["id"],"answers":[[0],[0],[1],[1],[1]]}).json()
     assert passed["passed"] is True
+    assert passed["score"] == 3
     for task in passed["workflowTasks"]:
         assert wait_for_task(client, task["taskId"])["status"] == "succeeded"
     completed = client.get(f"/api/sections/{section_id}").json()
     assert completed["note"]
+    assert completed["note"]["aiContent"]["personal_gaps"] == [
+        "目标0",
+        "目标1",
+        "目标2",
+    ]
     refreshed_series = client.get(f"/api/series/{series['id']}").json()
     refreshed_sections = refreshed_series["books"][0]["chapters"][0]["sections"]
     assert refreshed_sections[0]["status"] == "completed"
@@ -198,6 +226,81 @@ def test_complete_real_shape_vertical_slice(client):
     ).json()
     assert next_section["content"] is not None
     assert client.get("/api/learning-memory?shelf_id=shelf_technology").json()
+
+
+def test_legacy_three_of_five_attempt_can_be_reassessed(client):
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    section = client.post(
+        f"/api/sections/{chapter['sections'][0]['id']}/generate"
+    ).json()
+    passed_results = [
+        {
+            "correct": index >= 2,
+            "explanation": f"解析{index}",
+            "objective": f"目标{index}",
+            "selectedOptions": [0 if index < 2 else 1],
+            "correctOptions": [1],
+            "missedOptions": [1] if index < 2 else [],
+            "incorrectOptions": [0] if index < 2 else [],
+        }
+        for index in range(5)
+    ]
+    failed_results = [
+        {**item, "correct": index >= 3}
+        for index, item in enumerate(passed_results)
+    ]
+    with client.app.state.sessions() as db:
+        learning_run = db.scalar(
+            select(LearningRun).where(LearningRun.series_id == series["id"])
+        )
+        db.add_all([
+            QuizAttempt(
+                id="attempt_legacy_three_of_five",
+                quiz_set_id=section["quiz"]["id"],
+                learning_run_id=learning_run.id,
+                user_id=learning_run.user_id,
+                request_hash="legacy-three-of-five",
+                answers_json=json.dumps([[0], [0], [1], [1], [1]]),
+                results_json=json.dumps(passed_results, ensure_ascii=False),
+                passed=False,
+                workflow_status="completed",
+            ),
+            QuizAttempt(
+                id="attempt_legacy_two_of_five",
+                quiz_set_id=section["quiz"]["id"],
+                learning_run_id=learning_run.id,
+                user_id=learning_run.user_id,
+                request_hash="legacy-two-of-five",
+                answers_json=json.dumps([[0], [0], [0], [1], [1]]),
+                results_json=json.dumps(failed_results, ensure_ascii=False),
+                passed=False,
+                workflow_status="completed",
+            ),
+        ])
+        db.commit()
+
+    promoted = client.post(
+        f"/api/sections/{section['id']}/quiz-attempts/attempt_legacy_three_of_five/reassess"
+    )
+    assert promoted.status_code == 200
+    assert promoted.json()["passed"] is True
+    assert promoted.json()["score"] == 3
+    assert {
+        task["type"] for task in promoted.json()["workflowTasks"]
+    } == {"note_generation", "next_section_preload"}
+    assert all(
+        task["triggerId"] == "attempt_legacy_three_of_five"
+        for task in promoted.json()["workflowTasks"]
+    )
+
+    rejected = client.post(
+        f"/api/sections/{section['id']}/quiz-attempts/attempt_legacy_two_of_five/reassess"
+    )
+    assert rejected.status_code == 409
+    assert rejected.json()["code"] == "QUIZ_PASS_THRESHOLD_NOT_MET"
 
 
 def test_staged_generation_verifies_sources_before_generating_quiz(tmp_path):

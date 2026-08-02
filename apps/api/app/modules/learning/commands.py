@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ...core.errors import AppError
-from ...domain.learning import grade_choice_quiz
+from ...domain.learning import grade_choice_quiz, passing_score
 from ...infrastructure.tables import (
     Book,
     BookCapstone,
@@ -27,6 +27,7 @@ from ..artifacts.progress import ArtifactProgressStore
 from ..library.context import ActiveLearningContextResolver, SectionContext
 from .domain import ProgressionDecision, ProgressionPolicy, ProgressionSnapshot
 from .progress import ProgressStore
+from .tasks import task_view
 
 
 def _uid(prefix: str) -> str:
@@ -323,6 +324,7 @@ class SubmitQuiz:
                 status="pending",
             ))
         self.db.add_all(workflow_tasks)
+        self.db.flush()
         response = self._response(attempt, workflow_tasks)
         attempt.workflow_status = "completed"
         attempt.response_json = _dump(response)
@@ -352,6 +354,128 @@ class SubmitQuiz:
                 QuizAttempt.idempotency_key == request_key,
             )
         )
+
+    def reassess(self, section_id: str, attempt_id: str) -> dict:
+        context = self.contexts.resolve_section(
+            user_id=self.user_id,
+            section_id=section_id,
+        )
+        learning_run = self.progress.active_run(context.series.id)
+        attempt = self.db.scalar(
+            select(QuizAttempt)
+            .join(QuizSet, QuizSet.id == QuizAttempt.quiz_set_id)
+            .where(
+                QuizAttempt.id == attempt_id,
+                QuizAttempt.user_id == self.user_id,
+                QuizAttempt.learning_run_id == learning_run.id,
+                QuizSet.section_id == section_id,
+            )
+        )
+        if not attempt:
+            raise AppError(
+                "答题记录不存在",
+                code="QUIZ_ATTEMPT_NOT_FOUND",
+                status=404,
+            )
+        results = _load(attempt.results_json, [])
+        score = sum(bool(item.get("correct")) for item in results)
+        if not passing_score(score, len(results)):
+            raise AppError(
+                "当前得分仍未达到继续学习标准",
+                code="QUIZ_PASS_THRESHOLD_NOT_MET",
+                status=409,
+            )
+
+        section_progress = self.progress.for_section(
+            context.section,
+            context.chapter,
+            context.book,
+        )
+        existing_tasks = list(
+            self.db.scalars(
+                select(LearningTask).where(
+                    LearningTask.learning_run_id == learning_run.id,
+                    LearningTask.user_id == self.user_id,
+                    LearningTask.trigger_id == attempt.id,
+                    LearningTask.task_type.in_({
+                        "note_generation",
+                        "next_section_preload",
+                    }),
+                )
+            ).all()
+        )
+        if attempt.passed and section_progress.status == "completed":
+            return self._response(attempt, existing_tasks)
+
+        transition = self.db.execute(
+            update(SectionProgress)
+            .where(
+                SectionProgress.id == section_progress.id,
+                SectionProgress.status != "completed",
+                SectionProgress.version == section_progress.version,
+            )
+            .values(
+                status="completed",
+                best_score=max(section_progress.best_score, score),
+                total_score=len(results),
+                version=section_progress.version + 1,
+                updated_at=now(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        first_completion = transition.rowcount == 1
+        self.db.expire(section_progress)
+        attempt.passed = True
+        workflow_tasks = existing_tasks
+        if first_completion:
+            decision = self.policy.after_quiz_passed(
+                self.progression.snapshot(context)
+            )
+            self.progression.apply(decision)
+            self.artifacts.apply_availability(
+                learning_run_id=learning_run.id,
+                decision=decision,
+            )
+            note_task = LearningTask(
+                id=_uid("task"),
+                learning_run_id=learning_run.id,
+                section_id=context.section.id,
+                user_id=self.user_id,
+                task_type="note_generation",
+                idempotency_key=f"note:{context.section.id}",
+                trigger_id=attempt.id,
+                payload_json=_dump({"triggerAttemptId": attempt.id}),
+                status="pending",
+            )
+            workflow_tasks.append(note_task)
+            if (
+                decision.unlocked_section_id
+                or decision.unlocked_chapter_id
+                or decision.unlocked_book_id
+            ):
+                workflow_tasks.append(LearningTask(
+                    id=_uid("task"),
+                    learning_run_id=learning_run.id,
+                    section_id=context.section.id,
+                    user_id=self.user_id,
+                    task_type="next_section_preload",
+                    idempotency_key=f"next-after:{context.section.id}",
+                    trigger_id=attempt.id,
+                    payload_json=_dump({
+                        "sourceSectionId": context.section.id,
+                    }),
+                    status="pending",
+                ))
+            self.db.add_all(workflow_tasks)
+
+        self.db.flush()
+
+        response = self._response(attempt, workflow_tasks)
+        attempt.response_json = _dump(response)
+        attempt.workflow_status = "completed"
+        attempt.workflow_error_code = ""
+        self.uow.commit()
+        return response
 
     @staticmethod
     def _validate_replay(attempt: QuizAttempt, request_hash: str) -> None:
@@ -449,17 +573,7 @@ class SubmitQuiz:
             ),
             None,
         )
-        task_views = [
-            {
-                "taskId": task.id,
-                "type": task.task_type,
-                "sectionId": task.section_id,
-                "status": task.status,
-                "retryable": False,
-                "errorCode": None,
-            }
-            for task in workflow_tasks
-        ]
+        task_views = [task_view(task) for task in workflow_tasks]
         return {
             "attemptId": attempt.id,
             "score": score,

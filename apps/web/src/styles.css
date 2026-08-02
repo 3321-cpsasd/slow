@@ -1442,6 +1442,12 @@ button:disabled { cursor: not-allowed; }
 .remediation-readiness > small { flex-basis: 100%; color: var(--muted); line-height: 1.55; }
 .remediation-readiness > span i { width: 7px; height: 7px; margin-right: 8px; display: inline-block; border-radius: 50%; background: #c39b55; animation: pulse 1.2s infinite; }
 .remediation-readiness.ready { border-color: #cbdccf; background: #f2f7f3; color: var(--green); }
+.note-priority { margin: 20px 0; padding: 20px 22px; border: 1px solid #e8cfc5; border-left: 4px solid #bd654e; border-radius: 10px; background: #fff8f5; }
+.note-priority > span { color: #a15442; font-size: 10px; font-weight: 750; }
+.note-priority h3 { margin: 5px 0 12px; font-size: 19px; }
+.note-priority ul { margin: 0; padding-left: 20px; display: grid; gap: 7px; }
+.note-priority li { color: #793f34; line-height: 1.55; }
+.note-priority p { margin: 13px 0 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
 .question-card { margin: 25px 0; padding: 20px 0 8px; border: 0; border-top: 1px solid var(--line); }
 .question-card legend { width: 100%; display: grid; grid-template-columns: 28px 1fr auto; gap: 10px; align-items: start; line-height: 1.55; }
 .question-card legend > .question-number { color: var(--green); font-family: Georgia, serif; }

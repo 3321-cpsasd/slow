@@ -306,6 +306,7 @@ def task_view(task: LearningTask) -> dict:
         "taskId": task.id,
         "type": task.task_type,
         "sectionId": task.section_id,
+        "triggerId": task.trigger_id,
         "status": task.status,
         "attemptCount": task.attempt_count,
         "maxAttempts": task.max_attempts,

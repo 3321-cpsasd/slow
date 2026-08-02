@@ -1525,6 +1525,12 @@ class SlowService:
             user_id=self.user_id,
         ).execute(section_id, body, idempotency_key)
 
+    def reassess_quiz_attempt(self, section_id, attempt_id):
+        return SubmitQuiz(
+            self.db,
+            user_id=self.user_id,
+        ).reassess(section_id, attempt_id)
+
     async def execute_learning_task(
         self,
         execution: WorkerExecutionContext,

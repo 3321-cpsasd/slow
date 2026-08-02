@@ -82,6 +82,13 @@ class GenerateLearningNote:
             )
             .order_by(QuizAttempt.created_at)
         ).all()
+        quiz_evidence = [_load(item.results_json, []) for item in attempts]
+        wrong_concepts = list(dict.fromkeys(
+            str(result.get("objective", "")).strip()
+            for evidence in quiz_evidence
+            for result in evidence
+            if not result.get("correct") and str(result.get("objective", "")).strip()
+        ))
         request = {
             "section": view,
             "qa": [
@@ -92,18 +99,29 @@ class GenerateLearningNote:
                 }
                 for item in messages
             ],
-            "quizEvidence": [_load(item.results_json, []) for item in attempts],
+            "quizEvidence": quiz_evidence,
+            "wrongConcepts": wrong_concepts,
         }
         # SELECTs autobegin in SQLAlchemy. End that transaction before network I/O.
         self.uow.commit()
         generated = await self.tutor.note(request)
+        content = generated.model_dump()
+        generated_gaps = [
+            str(item).strip()
+            for item in content.get("personal_gaps", [])
+            if str(item).strip()
+        ]
+        content["personal_gaps"] = list(dict.fromkeys([
+            *wrong_concepts,
+            *generated_gaps,
+        ]))
         self.db.add(
             LearningNote(
                 id=_uid("note"),
                 learning_run_id=self.learning_run_id,
                 section_id=section.id,
                 user_id=self.user_id,
-                ai_content_json=_dump(generated.model_dump()),
+                ai_content_json=_dump(content),
                 user_content_json="{}",
             )
         )

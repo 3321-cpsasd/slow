@@ -63,6 +63,7 @@ export type LearningTask = {
   taskId:string;
   type:'initial_book_preload'|'note_generation'|'remediation_generation'|'next_section_preload';
   sectionId:string|null;
+  triggerId?:string|null;
   status:'pending'|'running'|'succeeded'|'failed';
   attemptCount?:number;
   maxAttempts?:number;

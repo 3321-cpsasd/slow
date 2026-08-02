@@ -1360,6 +1360,7 @@ function LearningWorkspace({
         }}
         onGenerate={() => section && onGenerateSection(section.id)}
         onRegenerate={() => (section ? onRegenerateSection(section.id) : Promise.resolve())}
+        onSelectSection={onSelectSection}
         onSectionChange={onSectionChange}
         onRefreshSeries={onRefreshSeries}
       />
@@ -1677,6 +1678,7 @@ function ReaderPanel({
   onQuote,
   onGenerate,
   onRegenerate,
+  onSelectSection,
   onSectionChange,
   onRefreshSeries,
 }: {
@@ -1690,6 +1692,7 @@ function ReaderPanel({
   onQuote: (quote: TextQuote) => void;
   onGenerate: () => void;
   onRegenerate: () => Promise<void>;
+  onSelectSection: (id: string) => Promise<Section>;
   onSectionChange: (section: Section) => void;
   onRefreshSeries: () => Promise<void>;
 }) {
@@ -1855,6 +1858,7 @@ function ReaderPanel({
             section={section}
             onSectionChange={onSectionChange}
             onRefreshSeries={onRefreshSeries}
+            onSelectSection={onSelectSection}
             onReviewContent={() => switchTab('content')}
             onSubmissionComplete={() => {
               if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
@@ -2113,12 +2117,14 @@ function Quiz({
   section,
   onSectionChange,
   onRefreshSeries,
+  onSelectSection,
   onReviewContent,
   onSubmissionComplete,
 }: {
   section: Section;
   onSectionChange: (section: Section) => void;
   onRefreshSeries: () => Promise<void>;
+  onSelectSection: (id: string) => Promise<Section>;
   onReviewContent: () => void;
   onSubmissionComplete: () => void;
 }) {
@@ -2185,6 +2191,29 @@ function Quiz({
   const [retryingTasks, setRetryingTasks] = useState(false);
   const [remediationReady, setRemediationReady] = useState(false);
   const [openingRemediation, setOpeningRemediation] = useState(false);
+  const [reassessing, setReassessing] = useState(false);
+  const [openingNextSection, setOpeningNextSection] = useState(false);
+  const remediationTask = result
+    ? workflowTasks.find((task) => (
+        task.type === 'remediation_generation' &&
+        task.triggerId === result.attemptId
+      ))
+    : null;
+  const remediationAvailable = (
+    remediationReady || remediationTask?.status === 'succeeded'
+  );
+  const nextSectionTask = result
+    ? workflowTasks.find((task) => (
+        task.type === 'next_section_preload' &&
+        task.triggerId === result.attemptId
+      ))
+    : null;
+  const nextSectionId = typeof nextSectionTask?.result?.targetSectionId === 'string'
+    ? nextSectionTask.result.targetSectionId
+    : null;
+  const eligibleUnderCurrentPolicy = Boolean(
+    result && !result.passed && result.total > 0 && result.score / result.total >= 0.6,
+  );
 
   useEffect(() => {
     localStorage.setItem(quizDraftKey, JSON.stringify(answers));
@@ -2226,8 +2255,6 @@ function Quiz({
         );
         if (!failures.length && passed === false) {
           setRemediationReady(true);
-        } else if (passed !== false) {
-          onSectionChange(await api.section(section.id));
         }
         await onRefreshSeries();
         return;
@@ -2289,6 +2316,50 @@ function Quiz({
       );
     } finally {
       setOpeningRemediation(false);
+    }
+  };
+
+  const reassessAttempt = async () => {
+    if (!result) return;
+    setSubmissionError('');
+    setReassessing(true);
+    try {
+      const value = await api.reassessQuiz(section.id, result.attemptId);
+      setResult(value);
+      setWorkflowTasks(value.workflowTasks);
+      try {
+        sessionStorage.setItem(quizResultStorageKey, JSON.stringify(value));
+      } catch {
+        // The promoted result remains available in memory for this render.
+      }
+      await onRefreshSeries();
+      void monitorTasks(value.workflowTasks, true).catch((reason) => {
+        setWorkflowRunning(false);
+        setSubmissionError(
+          reason instanceof Error ? reason.message : '无法读取下一节准备状态。',
+        );
+      });
+    } catch (reason) {
+      setSubmissionError(
+        reason instanceof Error ? reason.message : '无法按当前规则继续学习。',
+      );
+    } finally {
+      setReassessing(false);
+    }
+  };
+
+  const openNextSection = async () => {
+    if (!nextSectionId) return;
+    setSubmissionError('');
+    setOpeningNextSection(true);
+    try {
+      await onSelectSection(nextSectionId);
+    } catch (reason) {
+      setSubmissionError(
+        reason instanceof Error ? reason.message : '无法进入下一节。',
+      );
+    } finally {
+      setOpeningNextSection(false);
     }
   };
 
@@ -2376,16 +2447,23 @@ function Quiz({
     <div className="quiz-view">
       <p className="eyebrow">完成验证后解锁下一节</p>
       <h2>小节验证</h2>
-      <p className="quiz-rule">核心题必须答对，且总正确率至少达到 80%。</p>
+      <p className="quiz-rule">答对至少 60% 即可继续；错题仍会进入重点巩固与学习画像。</p>
       <p className="quiz-draft-note">单选题只能选择一个答案，多选题可选择多个；切回正文查阅时，当前作答会自动保留。</p>
       {result ? (
         <QuizReview
           section={section}
           result={result}
-          remediationReady={remediationReady}
+          remediationReady={remediationAvailable}
           openingRemediation={openingRemediation}
+          eligibleUnderCurrentPolicy={eligibleUnderCurrentPolicy}
+          reassessing={reassessing}
+          nextSectionTask={nextSectionTask || null}
+          nextSectionId={nextSectionId}
+          openingNextSection={openingNextSection}
           onReviewContent={onReviewContent}
           onOpenRemediation={openRemediation}
+          onReassess={reassessAttempt}
+          onOpenNextSection={openNextSection}
         />
       ) : (
         <>
@@ -2493,15 +2571,29 @@ function QuizReview({
   result,
   remediationReady,
   openingRemediation,
+  eligibleUnderCurrentPolicy,
+  reassessing,
+  nextSectionTask,
+  nextSectionId,
+  openingNextSection,
   onReviewContent,
   onOpenRemediation,
+  onReassess,
+  onOpenNextSection,
 }: {
   section: Section;
   result: QuizResult;
   remediationReady: boolean;
   openingRemediation: boolean;
+  eligibleUnderCurrentPolicy: boolean;
+  reassessing: boolean;
+  nextSectionTask: LearningTask | null;
+  nextSectionId: string | null;
+  openingNextSection: boolean;
   onReviewContent: () => void;
   onOpenRemediation: () => Promise<void>;
+  onReassess: () => Promise<void>;
+  onOpenNextSection: () => Promise<void>;
 }) {
   const questions = section.quiz?.questions || [];
   const wrongIndexes = result.results
@@ -2607,11 +2699,48 @@ function QuizReview({
         </details>
       )}
 
-      <div className={`remediation-readiness ${remediationReady ? 'ready' : ''}`}>
+      <div className={`remediation-readiness ${remediationReady || result.passed || eligibleUnderCurrentPolicy ? 'ready' : ''}`}>
         {result.passed ? (
+          nextSectionTask ? (
+            nextSectionTask.status === 'succeeded' && nextSectionId ? (
+              <>
+                <span>下一节已经准备完成</span>
+                <button
+                  className="primary-button"
+                  disabled={openingNextSection}
+                  onClick={onOpenNextSection}
+                >
+                  {openingNextSection ? '正在进入…' : '进入下一节'}
+                </button>
+              </>
+            ) : nextSectionTask.status === 'failed' ? (
+              <>
+                <span>本节已通过，下一节准备失败</span>
+                <small>可以在下方安全重试，不会影响已经保存的成绩。</small>
+              </>
+            ) : (
+              <>
+                <span><i />本节已通过，正在直接生成下一节</span>
+                <button className="primary-button" disabled>下一节准备中…</button>
+              </>
+            )
+          ) : (
+            <>
+              <span>本节验证已经完成</span>
+              <button className="secondary-button" onClick={onReviewContent}>返回正文</button>
+            </>
+          )
+        ) : eligibleUnderCurrentPolicy ? (
           <>
-            <span>本节验证已经完成</span>
-            <button className="secondary-button" onClick={onReviewContent}>返回正文</button>
+            <span>按当前规则，答对 3/5 已达到继续学习标准</span>
+            <button
+              className="primary-button"
+              disabled={reassessing}
+              onClick={onReassess}
+            >
+              {reassessing ? '正在更新进度…' : '按当前规则继续'}
+            </button>
+            <small>错题仍会进入个人笔记和掌握画像，不会被视为已经掌握。</small>
           </>
         ) : remediationReady ? (
           <>
@@ -2646,6 +2775,11 @@ function Note({
 }) {
   const [editing, setEditing] = useState(JSON.stringify(note.userContent || {}, null, 2));
   const [message, setMessage] = useState('');
+  const priorityGaps = Array.isArray(note.aiContent.personal_gaps)
+    ? note.aiContent.personal_gaps.filter(
+        (item): item is string => typeof item === 'string' && Boolean(item.trim()),
+      )
+    : [];
   const save = async () => {
     try {
       await api.note(sectionId, JSON.parse(editing));
@@ -2659,6 +2793,16 @@ function Note({
     <div className="note-view">
       <p className="eyebrow">完成后的核心资产</p>
       <h2>AI 整理笔记</h2>
+      {priorityGaps.length > 0 && (
+        <section className="note-priority" aria-labelledby="note-priority-title">
+          <span>错题留下的学习重点</span>
+          <h3 id="note-priority-title">需要重点巩固</h3>
+          <ul>
+            {priorityGaps.map((concept) => <li key={concept}>{concept}</li>)}
+          </ul>
+          <p>本节已经允许继续学习，但这些概念仍会保留在掌握画像中。</p>
+        </section>
+      )}
       <div className="note-paper"><pre>{JSON.stringify(note.aiContent, null, 2)}</pre></div>
       <h3>我的补充</h3>
       <textarea value={editing} onChange={(event) => setEditing(event.target.value)} />

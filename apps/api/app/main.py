@@ -887,6 +887,17 @@ def create_app(
         request.app.state.learning_task_wakeup.set()
         return result
 
+    @app.post("/api/sections/{section_id}/quiz-attempts/{attempt_id}/reassess")
+    def reassess_quiz_attempt(
+        request: Request,
+        section_id: str,
+        attempt_id: str,
+        s: SlowService = Depends(service),
+    ):
+        result = s.reassess_quiz_attempt(section_id, attempt_id)
+        request.app.state.learning_task_wakeup.set()
+        return result
+
     @app.post("/api/sections/{section_id}/ask")
     async def ask(section_id: str, body: AskRequest, s: SlowService = Depends(service)): return await s.ask(section_id, body)
 
