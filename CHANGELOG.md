@@ -8,6 +8,12 @@ Slow 的重要变更记录在这里。本项目采用 [Keep a Changelog](https:/
 
 ### Added · 新增
 
+- Added production-safe, invitation-only username/password authentication with administrator-only account creation, disable/enable and password-reset commands; disabling or resetting an account revokes all of its active sessions.
+- 新增可用于生产内测的邀请制账号密码鉴权，以及仅限管理员执行的账号创建、禁用/启用和密码重置命令；禁用账号或重置密码会撤销该用户的全部活跃会话。
+- Added a 24-hour idle session timeout, a seven-day absolute session lifetime, and per-IP login rate limiting at the production reverse proxy.
+- 新增 24 小时 Session 空闲超时、7 天绝对有效期，以及生产反向代理上的登录接口 IP 限流。
+- Added an explicit development-only password escrow for pre-production credential handoff, with private atomic storage, administrator reveal/purge commands, and a production startup prohibition.
+- 新增显式的仅开发期密码托管，用于上线前凭证交接；托管文件采用私有原子写入，提供管理员查看/清除命令，并在生产启动时强制禁止。
 - Added a production-facing OIDC sign-in screen, an explicit local-experience entry, and a public non-secret auth-mode endpoint so Demo state can never masquerade as real authentication.
 - 新增面向正式 OIDC 的登录页面、明确标记的本地体验入口，以及不泄密的公开鉴权模式接口，避免 Demo 状态伪装成真实登录。
 - Added a competition-review guide and a canonical evaluation index that distinguishes current evidence, historical failures, and open gates.

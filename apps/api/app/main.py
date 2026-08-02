@@ -15,13 +15,14 @@ from sqlalchemy.orm import Session
 from .auth.context import Principal, UserScope, demo_user_scope
 from .auth.local import LocalCredentialService
 from .auth.oidc import OidcClient
+from .auth.password import PasswordCredentialService
 from .auth.service import IdentityService, OidcStateService, SessionService, token_hash
 from .ai.openai_adapter import OpenAiAdapter
 from .ai.anthropic_adapter import AnthropicAdapter
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AiRuntimeUpdate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, LocalLogin, NoteUpdate, PlanCreate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ShelfCreate
+from .api.schemas import AiRuntimeUpdate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, NoteUpdate, PasswordLogin, PlanCreate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ShelfCreate
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -100,6 +101,8 @@ def create_app(
         raise RuntimeError("Production mode cannot use demo authentication")
     if effective_app_mode == "production" and effective_auth_mode == "local":
         raise RuntimeError("Production mode cannot use local authentication")
+    if effective_app_mode == "production" and settings.password_escrow_enabled:
+        raise RuntimeError("Production mode cannot enable password escrow")
     engine, sessions = build_database(database_url or settings.database_url)
     usage_recorder = AiUsageRecorder(sessions)
     if runtime_settings_path is False:
@@ -358,6 +361,7 @@ def create_app(
             auth = SessionService(
                 session,
                 ttl_seconds=settings.session_ttl_seconds,
+                idle_timeout_seconds=settings.session_idle_timeout_seconds,
             )
             scope, auth_session = auth.authenticate(
                 request.cookies.get(settings.session_cookie_name)
@@ -484,10 +488,10 @@ def create_app(
         destination = safe_return_to(return_to)
         if request.app.state.auth_mode == "demo":
             return RedirectResponse(f"{settings.web_origin}{destination}")
-        if request.app.state.auth_mode == "local":
+        if request.app.state.auth_mode in {"local", "password"}:
             raise AppError(
-                "本地账号请在登录页输入账号和密码",
-                code="LOCAL_LOGIN_FORM_REQUIRED",
+                "账号密码请在登录页输入",
+                code="PASSWORD_LOGIN_FORM_REQUIRED",
                 status=400,
             )
         state, login = OidcStateService(session).create(
@@ -513,25 +517,26 @@ def create_app(
         )
         return response
 
-    @app.post("/api/auth/local/login")
-    def local_auth_login(
+    def password_login_response(
         request: Request,
-        body: LocalLogin,
-        session: Session = Depends(db),
+        body: PasswordLogin,
+        session: Session,
+        *,
+        mode: str,
     ):
-        if request.app.state.auth_mode != "local":
-            raise AppError(
-                "当前未启用本地账号登录",
-                code="LOCAL_AUTH_NOT_ENABLED",
-                status=404,
-            )
-        user = LocalCredentialService(session).authenticate(
+        credential_service = (
+            LocalCredentialService(session)
+            if mode == "local"
+            else PasswordCredentialService(session)
+        )
+        user = credential_service.authenticate(
             username=body.username,
             password=body.password.get_secret_value(),
         )
         session_service = SessionService(
             session,
             ttl_seconds=settings.session_ttl_seconds,
+            idle_timeout_seconds=settings.session_idle_timeout_seconds,
         )
         session_service.revoke(
             request.cookies.get(settings.session_cookie_name)
@@ -554,7 +559,7 @@ def create_app(
         response = JSONResponse(
             {
                 "authenticated": True,
-                "mode": "local",
+                "mode": mode,
                 "user": {"id": user.id, "name": user.name},
                 "csrfToken": csrf_token,
             }
@@ -566,6 +571,44 @@ def create_app(
             csrf_token=csrf_token,
         )
         return response
+
+    @app.post("/api/auth/password/login")
+    def password_auth_login(
+        request: Request,
+        body: PasswordLogin,
+        session: Session = Depends(db),
+    ):
+        if request.app.state.auth_mode != "password":
+            raise AppError(
+                "当前未启用正式账号密码登录",
+                code="PASSWORD_AUTH_NOT_ENABLED",
+                status=404,
+            )
+        return password_login_response(
+            request,
+            body,
+            session,
+            mode="password",
+        )
+
+    @app.post("/api/auth/local/login")
+    def local_auth_login(
+        request: Request,
+        body: PasswordLogin,
+        session: Session = Depends(db),
+    ):
+        if request.app.state.auth_mode != "local":
+            raise AppError(
+                "当前未启用本地账号登录",
+                code="LOCAL_AUTH_NOT_ENABLED",
+                status=404,
+            )
+        return password_login_response(
+            request,
+            body,
+            session,
+            mode="local",
+        )
 
     @app.get("/api/auth/callback")
     async def auth_callback(
@@ -603,6 +646,7 @@ def create_app(
         session_service = SessionService(
             session,
             ttl_seconds=settings.session_ttl_seconds,
+            idle_timeout_seconds=settings.session_idle_timeout_seconds,
         )
         session_service.revoke(
             request.cookies.get(settings.session_cookie_name)
@@ -678,6 +722,7 @@ def create_app(
             SessionService(
                 session,
                 ttl_seconds=settings.session_ttl_seconds,
+                idle_timeout_seconds=settings.session_idle_timeout_seconds,
             ).revoke(request.cookies.get(settings.session_cookie_name))
             response.delete_cookie(
                 settings.session_cookie_name,

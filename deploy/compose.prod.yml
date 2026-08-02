@@ -10,9 +10,10 @@ services:
       DATABASE_URL: sqlite+pysqlite:////data/slow-v0.db
       ATTACHMENT_STORAGE_DIR: /data/attachments
       RUNTIME_AI_CONFIG_PATH: /data/runtime-ai.json
+      PASSWORD_ESCROW_PATH: /data/password-escrow.json
       WEB_ORIGIN: ${WEB_ORIGIN}
       APP_MODE: production
-      AUTH_MODE: oidc
+      AUTH_MODE: ${AUTH_MODE:-password}
     volumes:
       - ./data:/data
     healthcheck:

@@ -135,8 +135,8 @@ export const api = {
   login:(returnTo='/')=>{
     window.location.assign(`${BASE}/api/auth/login?return_to=${encodeURIComponent(returnTo)}`);
   },
-  localLogin:async(username:string,password:string)=>{
-    const state = await call<import('../model/types').AuthState>('/api/auth/local/login',{
+  credentialsLogin:async(mode:'local'|'password',username:string,password:string)=>{
+    const state = await call<import('../model/types').AuthState>(`/api/auth/${mode}/login`,{
       method:'POST',
       body:JSON.stringify({username,password}),
     });

@@ -65,7 +65,7 @@ export default function App() {
       const config = await api.authConfig();
       setAuthConfig(config);
       const demoEntered = sessionStorage.getItem('slow_demo_entered') === 'true';
-      if (config.mode === 'oidc' || config.mode === 'local' || demoEntered) {
+      if (config.mode === 'oidc' || config.mode === 'local' || config.mode === 'password' || demoEntered) {
         await loadAuthenticatedState();
       } else {
         setAuth(null);
@@ -113,7 +113,8 @@ export default function App() {
     setBusy('正在登录…');
     setError('');
     try {
-      const state = await api.localLogin(localUsername, localPassword);
+      const mode = authConfig?.mode === 'password' ? 'password' : 'local';
+      const state = await api.credentialsLogin(mode, localUsername, localPassword);
       const bootstrap = await api.bootstrap();
       setAuth(state);
       setData(bootstrap);
@@ -282,6 +283,8 @@ export default function App() {
   if(!auth) {
     const isDemo = authConfig?.mode === 'demo';
     const isLocal = authConfig?.mode === 'local';
+    const isPassword = authConfig?.mode === 'password';
+    const usesCredentials = isLocal || isPassword;
     const providerName = authConfig?.providerName || '统一身份账户';
     return (
       <div className="app-shell auth-shell">
@@ -305,14 +308,14 @@ export default function App() {
 
           <section className="auth-card" aria-busy={!authChecked}>
             <div className={`auth-mode-badge ${isDemo || isLocal ? 'demo' : ''}`}>
-              <i />{isDemo ? '固定体验环境' : isLocal ? '本地多账号环境' : '个人学习空间'}
+              <i />{isDemo ? '固定体验环境' : isLocal ? '本地多账号环境' : '受邀用户空间'}
             </div>
-            <h2>{isDemo ? '进入体验书架' : isLocal ? '登录学习账号' : '欢迎回来'}</h2>
+            <h2>{isDemo ? '进入体验书架' : usesCredentials ? '登录学习账号' : '欢迎回来'}</h2>
             <p>
               {isDemo
                 ? '无需配置第三方账号，使用本机固定体验身份查看完整学习闭环。'
-                : isLocal
-                  ? '输入分配给你的账号和密码，进入独立的个人学习书架。'
+                : usesCredentials
+                  ? '输入邀请时收到的账号和密码，进入独立的个人学习书架。'
                   : '登录后继续你的书架、学习记录与掌握画像。'}
             </p>
 
@@ -331,7 +334,7 @@ export default function App() {
               >
                 进入本地体验 <span>→</span>
               </button>
-            ) : isLocal ? (
+            ) : usesCredentials ? (
               <form className="local-auth-form" onSubmit={(event) => void loginWithLocalAccount(event)}>
                 <label>
                   账号
@@ -351,7 +354,7 @@ export default function App() {
                       autoComplete="current-password"
                       value={localPassword}
                       onChange={(event) => setLocalPassword(event.target.value)}
-                      placeholder="输入本地体验密码"
+                      placeholder={isPassword ? '输入你的密码' : '输入本地体验密码'}
                       minLength={8}
                       required
                     />
@@ -392,7 +395,7 @@ export default function App() {
             {error && <div className="auth-inline-error">{error}</div>}
 
             <div className="auth-trust-list">
-              <div><i>✓</i><span><b>服务端安全会话</b><small>{isLocal ? '密码使用 Argon2id 哈希，浏览器只保留会话 Cookie' : '浏览器不保存身份提供商密码'}</small></span></div>
+              <div><i>✓</i><span><b>服务端安全会话</b><small>{usesCredentials ? '密码使用 Argon2id 哈希，浏览器只保留会话 Cookie' : '浏览器不保存身份提供商密码'}</small></span></div>
               <div><i>✓</i><span><b>学习数据按用户隔离</b><small>书架、证据和画像仅属于你的账户</small></span></div>
               <div><i>✓</i><span><b>随时安全退出</b><small>退出后服务端会话立即撤销</small></span></div>
             </div>
@@ -402,6 +405,8 @@ export default function App() {
                 ? '体验模式会被明确标记，不作为真实账号或真实认证证据。'
                 : isLocal
                   ? '本地账号仅用于开发和场景验证，生产环境会拒绝启用。'
+                  : isPassword
+                    ? '账号仅由内测管理员创建，不开放公开注册。'
                   : `登录将在${providerName}页面完成，Slow 不接收你的密码。`}
             </small>
           </section>

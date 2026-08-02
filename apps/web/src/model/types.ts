@@ -27,12 +27,12 @@ export type Bootstrap = {
 };
 export type AuthState = {
   authenticated:boolean;
-  mode:'demo'|'local'|'oidc';
+  mode:'demo'|'local'|'password'|'oidc';
   user:{id:string;name:string};
   csrfToken:string;
 };
 export type AuthConfig = {
-  mode:'demo'|'local'|'oidc';
+  mode:'demo'|'local'|'password'|'oidc';
   providerName:string;
 };
 export type AiRuntime = {

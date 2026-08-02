@@ -50,7 +50,7 @@ class UserIdentity(Base):
 
 
 class LocalCredential(Base):
-    """Development-only username/password credential."""
+    """Username/password credential; the legacy table name is retained."""
 
     __tablename__ = "local_credentials"
     id: Mapped[str] = mapped_column(String, primary_key=True)

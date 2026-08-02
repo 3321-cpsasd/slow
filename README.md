@@ -28,7 +28,7 @@ Slow 是一个 AI 原生个人学习应用。它把学习目标组织为可阅�
 - 与具体学习内容绑定的 Ask AI
 - 可选的多轮 Ask Me 检查
 - 持久化后台任务、恢复与幂等处理
-- 本地开发身份和 OIDC 生产身份边界
+- 邀请制账号密码登录、本地开发身份和可选 OIDC 身份边界
 - OpenAI 与 Anthropic 兼容供应商接口
 
 ### 快速开始
@@ -61,9 +61,43 @@ cd apps/web && pnpm build
 ### 安全说明
 
 - API Key 只存在服务端，不应进入浏览器、日志或 Git。
-- 正式环境应使用 OIDC，并关闭本地开发身份与 Demo 模式。
+- 正式内测可使用管理员预创建的账号密码；生产环境必须关闭本地开发身份与 Demo 模式。
 - 解锁、评分和学习状态由服务端负责，不能信任前端状态。
 - `.env`、运行时配置、数据库、附件与内部评测证据均被 Git 忽略。
+
+### 邀请制内测账号
+
+生产内测使用 `APP_MODE=production` 与 `AUTH_MODE=password`。应用不提供公开注册；
+首次部署并完成迁移后，由管理员在 API 容器中创建账号：
+
+```bash
+docker compose -f compose.prod.yml exec api python manage_users.py create zhangsan --name '张三'
+docker compose -f compose.prod.yml exec api python manage_users.py disable zhangsan
+docker compose -f compose.prod.yml exec api python manage_users.py enable zhangsan
+docker compose -f compose.prod.yml exec api python manage_users.py reset-password zhangsan
+```
+
+创建和重置命令默认生成随机密码；也可使用 `--prompt-password` 安全输入自定密码。
+禁用账号或重置密码会撤销该用户的全部现有 Session。默认 Session 最长 7 天，
+连续 24 小时未使用则过期。
+
+上线前如确实需要管理员重复查看分发密码，可在**非生产环境**显式设置
+`PASSWORD_ESCROW_ENABLED=true`。创建或重置后的密码会写入独立的 `0600` 文件，
+然后可执行：
+
+```bash
+PYTHONPATH=apps/api .venv/bin/python apps/api/manage_users.py show-password zhangsan
+```
+
+正式上线前先关闭该环境变量，再清除托管文件：
+
+```bash
+PYTHONPATH=apps/api .venv/bin/python apps/api/manage_users.py purge-passwords --confirm
+```
+
+`APP_MODE=production` 检测到密码托管开启时会拒绝启动。清理服务器文件后，还应按
+备份保留策略删除可能含有该文件的历史备份。密码重置只撤销身份 Session，不删除或
+重建用户，因此书架、学习进度、测验记录和掌握画像均保持不变。
 
 ---
 
@@ -79,7 +113,7 @@ Slow is an AI-native personal learning application. It turns a learning goal int
 - Server-side grading, progressive unlocking, and remediation
 - Context-bound Ask AI and optional multi-round Ask Me checks
 - Durable background tasks with recovery and idempotency
-- Local development identity and an OIDC production boundary
+- Invitation-only password accounts, local development identity, and optional OIDC
 - OpenAI- and Anthropic-compatible provider interfaces
 
 ### Quick start
@@ -101,4 +135,8 @@ PYTHONPATH=apps/api .venv/bin/pytest -q apps/api/tests
 cd apps/web && pnpm build
 ```
 
-External model credentials are optional in development and must remain server-side. Production deployments should use OIDC and disable local/demo identity modes.
+Production beta deployments can use `APP_MODE=production` with
+`AUTH_MODE=password`. Accounts are created only by the server-side
+`manage_users.py` command; there is no public registration endpoint.
+
+External model credentials are optional in development and must remain server-side. Production deployments can use invitation-only password accounts or OIDC, and must disable local/demo identity modes.

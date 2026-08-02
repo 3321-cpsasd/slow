@@ -42,7 +42,7 @@ class AiRuntimeUpdate(ApiModel):
     reasoning_mode: Literal["optional", "required", "disabled"] = "optional"
 
 
-class LocalLogin(ApiModel):
+class PasswordLogin(ApiModel):
     username: str = Field(min_length=3, max_length=80)
     password: SecretStr = Field(min_length=8, max_length=200)
 

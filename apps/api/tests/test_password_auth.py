@@ -1,0 +1,243 @@
+from datetime import timedelta
+import stat
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import select
+
+from app.ai.local_adapter import LocalDemoAdapter
+from app.auth.password import PasswordCredentialService
+from app.auth.password_escrow import PasswordEscrowStore
+from app.auth.service import SessionService
+from app.infrastructure.tables import AuthSession, LocalCredential, User, now
+from app.main import create_app
+from app.services.attachment_storage import LocalAttachmentStorage
+from app.services.source_verifier import AcceptingSourceVerifier
+
+
+USERNAME = "beta-user"
+DISPLAY_NAME = "内测用户"
+PASSWORD = "Correct-Beta-Password-2026"
+
+
+def password_app(tmp_path):
+    return create_app(
+        f"sqlite+pysqlite:///{tmp_path / 'password-auth.db'}",
+        ai=LocalDemoAdapter(),
+        source_verifier=AcceptingSourceVerifier(),
+        attachment_storage=LocalAttachmentStorage(tmp_path / "attachments"),
+        auth_mode="password",
+        app_mode="production",
+        runtime_settings_path=False,
+    )
+
+
+def create_account(client: TestClient):
+    with client.app.state.sessions() as db:
+        return PasswordCredentialService(db).create_account(
+            username=USERNAME,
+            display_name=DISPLAY_NAME,
+            password=PASSWORD,
+        )
+
+
+def login(client: TestClient, password: str = PASSWORD):
+    return client.post(
+        "/api/auth/password/login",
+        json={"username": USERNAME, "password": password},
+    )
+
+
+def test_production_password_login_requires_precreated_account(tmp_path):
+    app = password_app(tmp_path)
+    with TestClient(app, base_url="https://testserver") as client:
+        config = client.get("/api/auth/config")
+        assert config.status_code == 200
+        assert config.json() == {"mode": "password", "providerName": ""}
+
+        missing = login(client)
+        assert missing.status_code == 401
+        assert missing.json()["code"] == "PASSWORD_LOGIN_INVALID"
+
+        user = create_account(client)
+        logged_in = login(client)
+        assert logged_in.status_code == 200
+        assert logged_in.json()["mode"] == "password"
+        assert logged_in.json()["user"] == {
+            "id": user.id,
+            "name": DISPLAY_NAME,
+        }
+        assert logged_in.cookies.get("slow_session")
+        assert logged_in.cookies.get("slow_csrf")
+
+        bootstrap = client.get("/api/bootstrap")
+        assert bootstrap.status_code == 200
+        assert bootstrap.json()["user"] == {
+            "id": user.id,
+            "name": DISPLAY_NAME,
+        }
+        with client.app.state.sessions() as db:
+            assert len(db.scalars(select(User)).all()) == 1
+            credential = db.scalar(select(LocalCredential))
+            assert credential.password_hash.startswith("$argon2id$")
+            assert credential.password_hash != PASSWORD
+
+
+def test_password_session_has_absolute_and_idle_expiry(tmp_path):
+    app = password_app(tmp_path)
+    with TestClient(app, base_url="https://testserver") as client:
+        create_account(client)
+        assert login(client).status_code == 200
+        with client.app.state.sessions() as db:
+            session = db.scalar(
+                select(AuthSession).where(AuthSession.status == "active")
+            )
+            session.last_seen_at = now() - timedelta(days=2)
+            db.commit()
+
+        idle_expired = client.get("/api/bootstrap")
+        assert idle_expired.status_code == 401
+        assert idle_expired.json()["code"] == "SESSION_IDLE_EXPIRED"
+
+        client.cookies.clear()
+        assert login(client).status_code == 200
+        with client.app.state.sessions() as db:
+            session = db.scalar(
+                select(AuthSession).where(AuthSession.status == "active")
+            )
+            session.expires_at = now() - timedelta(seconds=1)
+            db.commit()
+
+        absolute_expired = client.get("/api/bootstrap")
+        assert absolute_expired.status_code == 401
+        assert absolute_expired.json()["code"] == "SESSION_EXPIRED"
+
+
+def test_disable_and_password_reset_revoke_all_user_sessions(tmp_path):
+    app = password_app(tmp_path)
+    with TestClient(app, base_url="https://testserver") as client:
+        user = create_account(client)
+        with client.app.state.sessions() as db:
+            sessions = SessionService(db, ttl_seconds=604800)
+            sessions.issue(db.get(User, user.id))
+            sessions.issue(db.get(User, user.id))
+            PasswordCredentialService(db).set_account_enabled(
+                username=USERNAME,
+                enabled=False,
+            )
+            statuses = db.scalars(
+                select(AuthSession.status).where(AuthSession.user_id == user.id)
+            ).all()
+            assert statuses == ["revoked", "revoked"]
+
+        disabled = login(client)
+        assert disabled.status_code == 401
+        assert disabled.json()["code"] == "PASSWORD_LOGIN_INVALID"
+
+        with client.app.state.sessions() as db:
+            service = PasswordCredentialService(db)
+            service.set_account_enabled(username=USERNAME, enabled=True)
+        assert login(client).status_code == 200
+        shelf_id = client.get("/api/bootstrap").json()["shelves"][0]["id"]
+
+        new_password = "A-New-Beta-Password-2026"
+        with client.app.state.sessions() as db:
+            PasswordCredentialService(db).reset_password(
+                username=USERNAME,
+                password=new_password,
+            )
+            assert not db.scalar(
+                select(AuthSession).where(
+                    AuthSession.user_id == user.id,
+                    AuthSession.status == "active",
+                )
+            )
+
+        revoked = client.get("/api/bootstrap")
+        assert revoked.status_code == 401
+        client.cookies.clear()
+        assert login(client).status_code == 401
+        assert login(client, new_password).status_code == 200
+        assert client.get("/api/bootstrap").json()["shelves"][0]["id"] == shelf_id
+
+
+def test_password_endpoint_is_not_available_in_local_mode(tmp_path):
+    app = create_app(
+        "sqlite+pysqlite:///:memory:",
+        ai=LocalDemoAdapter(),
+        auth_mode="local",
+        app_mode="development",
+        runtime_settings_path=False,
+    )
+    with TestClient(app) as client:
+        response = login(client)
+    assert response.status_code == 404
+    assert response.json()["code"] == "PASSWORD_AUTH_NOT_ENABLED"
+
+
+def test_account_creation_rejects_invalid_username_and_duplicate(tmp_path):
+    app = password_app(tmp_path)
+    with TestClient(app, base_url="https://testserver") as client:
+        with client.app.state.sessions() as db:
+            service = PasswordCredentialService(db)
+            with pytest.raises(ValueError, match="账号只能包含"):
+                service.create_account(
+                    username="bad account",
+                    display_name=DISPLAY_NAME,
+                    password=PASSWORD,
+                )
+
+            service.create_account(
+                username=USERNAME,
+                display_name=DISPLAY_NAME,
+                password=PASSWORD,
+            )
+            with pytest.raises(ValueError, match="账号已存在"):
+                service.create_account(
+                    username=USERNAME.upper(),
+                    display_name="重复用户",
+                    password=PASSWORD,
+                )
+
+
+def test_development_password_escrow_is_explicit_private_and_purgeable(tmp_path):
+    path = tmp_path / "password-escrow.json"
+    disabled = PasswordEscrowStore(
+        path,
+        enabled=False,
+        app_mode="development",
+    )
+    with pytest.raises(RuntimeError, match="密码托管未启用"):
+        disabled.reveal(username=USERNAME)
+
+    escrow = PasswordEscrowStore(
+        path,
+        enabled=True,
+        app_mode="development",
+    )
+    escrow.record(username=USERNAME.upper(), password=PASSWORD)
+    assert escrow.reveal(username=USERNAME) == PASSWORD
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert "development-password-escrow" in path.read_text(encoding="utf-8")
+
+    assert escrow.purge() is True
+    assert not path.exists()
+    assert escrow.purge() is False
+
+
+def test_production_rejects_password_escrow(tmp_path, monkeypatch):
+    with pytest.raises(RuntimeError, match="生产环境禁止"):
+        PasswordEscrowStore(
+            tmp_path / "password-escrow.json",
+            enabled=True,
+            app_mode="production",
+        )
+
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "password_escrow_enabled", True)
+    with pytest.raises(
+        RuntimeError,
+        match="Production mode cannot enable password escrow",
+    ):
+        password_app(tmp_path)

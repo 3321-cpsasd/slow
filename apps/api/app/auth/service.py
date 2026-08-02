@@ -32,9 +32,20 @@ def _aware(value: datetime) -> datetime:
 
 
 class SessionService:
-    def __init__(self, db: Session, *, ttl_seconds: int):
+    def __init__(
+        self,
+        db: Session,
+        *,
+        ttl_seconds: int,
+        idle_timeout_seconds: int | None = None,
+    ):
         self.db = db
         self.ttl = timedelta(seconds=ttl_seconds)
+        self.idle_timeout = (
+            timedelta(seconds=idle_timeout_seconds)
+            if idle_timeout_seconds is not None
+            else None
+        )
 
     def issue(self, user: User) -> tuple[AuthSession, str, str]:
         if user.status != "active":
@@ -78,6 +89,17 @@ class SessionService:
             raise AppError(
                 "登录状态已失效",
                 code="SESSION_EXPIRED",
+                status=401,
+            )
+        if (
+            self.idle_timeout is not None
+            and current - _aware(session.last_seen_at) >= self.idle_timeout
+        ):
+            session.status = "expired"
+            self.db.commit()
+            raise AppError(
+                "登录状态因长时间未使用而失效",
+                code="SESSION_IDLE_EXPIRED",
                 status=401,
             )
         user = self.db.get(User, session.user_id)
