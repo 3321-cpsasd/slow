@@ -1399,9 +1399,12 @@ button:disabled { cursor: not-allowed; }
 .question-kind { color: #537061; background: #e9f0eb; }
 .question-kind.multiple { color: #5e6280; background: #eeedf5; }
 .core-question { color: #a45b3d; background: #f7eae3; }
-.question-card label { margin: 8px 0 8px 38px; padding: 10px 12px; display: grid; grid-template-columns: auto 22px 1fr; gap: 8px; border: 1px solid #e5e6e0; border-radius: 8px; color: #505750; cursor: pointer; }
+.question-card label { margin: 8px 0 8px 38px; padding: 10px 12px; display: grid; grid-template-columns: 20px 24px minmax(0, 1fr); align-items: start; gap: 8px; border: 1px solid #e5e6e0; border-radius: 8px; color: #505750; cursor: pointer; line-height: 1.55; }
 .question-card label:has(input:checked) { border-color: #86a18e; background: var(--green-soft); }
-.question-card label > span { color: #929892; font-size: 11px; }
+.question-card label > input { width: 16px; height: 16px; margin: 4px 0 0; }
+.question-card .question-option-letter,
+.question-card .question-option-text { display: block; font-size: inherit; line-height: inherit; }
+.question-card .question-option-letter { color: #929892; }
 .remediation-card { padding: 18px; border-radius: 10px; background: #f8f0e4; }
 .remediation-card > span { color: #967347; font-size: 10px; }
 .remediation-card p { color: #555d55; line-height: 1.7; }

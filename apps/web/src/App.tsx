@@ -2337,8 +2337,10 @@ function Quiz({
                     : value.filter((item) => item !== optionIndex);
                 }))}
               />
-              <span>{String.fromCharCode(65 + optionIndex)}</span>
-              {option}
+              <span className="question-option-letter">
+                {String.fromCharCode(65 + optionIndex)}
+              </span>
+              <span className="question-option-text">{option}</span>
             </label>
           ))}
         </fieldset>
