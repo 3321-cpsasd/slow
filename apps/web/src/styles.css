@@ -1405,9 +1405,10 @@ button:disabled { cursor: not-allowed; }
 .question-card .question-option-letter,
 .question-card .question-option-text { display: block; font-size: inherit; line-height: inherit; }
 .question-card .question-option-letter { color: #929892; }
-.remediation-card { padding: 18px; border-radius: 10px; background: #f8f0e4; }
+.remediation-card { padding: 18px; overflow: hidden; border-radius: 10px; background: #f8f0e4; }
 .remediation-card > span { color: #967347; font-size: 10px; }
-.remediation-card p { color: #555d55; line-height: 1.7; }
+.remediation-card .content-markdown { color: #555d55; line-height: 1.7; }
+.remediation-card .content-markdown table { min-width: 560px; }
 .result { margin-top: 16px; padding: 13px; border-radius: 8px; }
 .result.success { color: var(--green); background: var(--green-soft); }
 .result.failure { color: var(--danger); background: #fff0ed; }

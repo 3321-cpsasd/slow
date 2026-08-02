@@ -2060,9 +2060,6 @@ function ContentBlock({
     boundary: '边界与反例',
     practice: '连接实践',
   };
-  const markdown = block.kind === 'table'
-    ? normalizeTableMarkdown(block.content)
-    : block.content;
   return (
     <section
       className={`content-block role-${block.role} ${selected ? 'selected' : ''}`}
@@ -2070,14 +2067,22 @@ function ContentBlock({
     >
       <div className="block-meta"><span>{String(index + 1).padStart(2, '0')}</span><b>{labels[block.role] || block.role}</b></div>
       <h2>{block.heading}</h2>
-      {block.kind === 'code' ? (
-        <pre className="code-block"><code>{block.content}</code></pre>
-      ) : (
-        <div className={`content-markdown kind-${block.kind}`}>
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
-        </div>
-      )}
+      <BlockBody block={block} />
     </section>
+  );
+}
+
+function BlockBody({ block }: { block: Block }) {
+  if (block.kind === 'code') {
+    return <pre className="code-block"><code>{block.content}</code></pre>;
+  }
+  const markdown = block.kind === 'table'
+    ? normalizeTableMarkdown(block.content)
+    : block.content;
+  return (
+    <div className={`content-markdown kind-${block.kind}`}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
+    </div>
   );
 }
 
@@ -2310,7 +2315,12 @@ function Quiz({
       {section.remediations.map((item) => (
         <section className="remediation-card" key={item.id}>
           <span>错题补充教学 · {item.strategy}</span>
-          {item.blocks.map((block) => <div key={block.id}><h3>{block.heading}</h3><p>{block.content}</p></div>)}
+          {item.blocks.map((block) => (
+            <div key={block.id}>
+              <h3>{block.heading}</h3>
+              <BlockBody block={block} />
+            </div>
+          ))}
         </section>
       ))}
       {section.quiz?.questions.map((question, questionIndex) => (
