@@ -60,12 +60,12 @@ LOCAL_DEMO_PERSONAS = (
     LocalDemoPersona(
         user_id="user_fashion_to_ux",
         username="fashion-to-ux",
-        display_name="服装设计转交互设计",
-        scenario="服装设计专业学生跨专业转向交互设计",
-        shelf_name="交互设计",
+        display_name="产品设计学习信息可视化",
+        scenario="产品设计方向学习者系统学习信息可视化",
+        shelf_name="信息可视化",
         domain="设计学",
-        specialty="交互设计转型",
-        tags=("交互设计", "用户体验", "跨专业"),
+        specialty="产品设计与信息可视化",
+        tags=("信息可视化", "产品设计", "数据表达"),
     ),
 )
 

@@ -11,7 +11,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0022_local_credentials"
+HEAD_REVISION = "0023_correct_demo_persona"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:

@@ -6,9 +6,13 @@ from .contracts import (
     ClassifiedAnswer,
     ContentBlock,
     GeneratedChapter,
+    GeneratedContent,
     GeneratedLesson,
     GeneratedNote,
     GeneratedPlan,
+    GeneratedQuiz,
+    GeneratedRemediationContent,
+    GeneratedRemediationLesson,
     GeneratedSectionOutline,
     PlanBook,
     PlanChapter,
@@ -24,6 +28,7 @@ class LocalDemoAdapter:
 
     configured = False
     model = "local-demo-v1"
+    staged_lesson_generation = True
     capabilities = ProviderCapabilities(
         protocol="openai",
         api_mode="responses",
@@ -74,14 +79,36 @@ class LocalDemoAdapter:
             ]
         )
 
-    async def lesson(self, request, memory, prior_questions=None):
-        generation = 2 if prior_questions else 1
+    async def lesson_content(self, request, memory, prior_questions=None):
         source = Source(title="Python 官方教程（本地流程示例引用）", url="https://docs.python.org/3/tutorial/", kind="official", version="3.12")
         roles = ["conclusion", "mechanism", "example", "boundary", "practice"]
         blocks = [
             ContentBlock(kind="text", role=role, heading=f"{role}：{request['title']}", content=f"这是 {request['title']} 的{role}演示内容。请结合本节问题验证理解。", source_indexes=[0])
             for role in roles
         ]
+        schema = (
+            GeneratedRemediationContent
+            if request.get("remediationStrategy")
+            else GeneratedContent
+        )
+        return schema(
+            confidence="medium",
+            sources=[source],
+            blocks=blocks,
+        )
+
+    async def repair_lesson_sources(
+        self,
+        request,
+        memory,
+        content,
+        failed_sources,
+        prior_questions=None,
+    ):
+        return content
+
+    async def lesson_quiz(self, request, content, prior_questions=None):
+        generation = 2 if prior_questions else 1
         objectives = request.get("objectives") or [request["question"]]
         questions = [
             ChoiceQuestion(
@@ -94,7 +121,20 @@ class LocalDemoAdapter:
             )
             for index in range(5)
         ]
-        return GeneratedLesson(confidence="medium", sources=[source], blocks=blocks, questions=questions)
+        return GeneratedQuiz(questions=questions)
+
+    async def lesson(self, request, memory, prior_questions=None):
+        content = await self.lesson_content(request, memory, prior_questions)
+        quiz = await self.lesson_quiz(request, content, prior_questions)
+        schema = (
+            GeneratedRemediationLesson
+            if request.get("remediationStrategy")
+            else GeneratedLesson
+        )
+        return schema(
+            **content.model_dump(),
+            questions=quiz.questions,
+        )
 
     async def answer(self, request):
         requested = request.get("requestedThreadId")

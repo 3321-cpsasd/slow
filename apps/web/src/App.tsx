@@ -25,6 +25,24 @@ type View = 'home' | 'shelf' | 'learn';
 type ReaderTab = 'content' | 'quiz' | 'note';
 type TextQuote = { text: string; blockId: string };
 type SelectionPopup = TextQuote & { top: number; left: number };
+const AI_RUNTIME_SETTINGS_ENABLED = import.meta.env.DEV;
+const GENERATION_STAGE_LABELS: Record<string, string> = {
+  queued: '正在排队',
+  content_generation: '正在生成正文',
+  source_verification: '正在核验来源',
+  source_repair: '正在替换无法核验的来源',
+  quiz_generation: '正在生成测验',
+  persistence: '正在保存新版本',
+  persisted: '已经完成',
+  failed: '生成未完成',
+};
+
+const formatElapsed = (milliseconds: number) => {
+  const seconds = Math.max(0, Math.floor(milliseconds / 1000));
+  if (seconds < 60) return `${seconds} 秒`;
+  return `${Math.floor(seconds / 60)} 分 ${String(seconds % 60).padStart(2, '0')} 秒`;
+};
+
 type QaExchange = {
   id: string;
   question: string;
@@ -281,6 +299,35 @@ export default function App() {
     await refreshSeries();
   };
 
+  const regenerateSection = async (sectionId: string) => {
+    let polling = true;
+    let timer: number | undefined;
+    const pollGeneration = async () => {
+      try {
+        const current = await api.section(sectionId);
+        setSection(current);
+      } catch {
+        // The foreground request owns error reporting. Polling is best-effort.
+      } finally {
+        if (polling) timer = window.setTimeout(pollGeneration, 1000);
+      }
+    };
+    timer = window.setTimeout(pollGeneration, 250);
+    try {
+      const value = await run('正在重新生成并核验本节…', () => api.regenerateSection(sectionId));
+      setSection(value);
+      await refreshSeries();
+    } finally {
+      polling = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+      try {
+        setSection(await api.section(sectionId));
+      } catch {
+        // Keep the last successfully polled state when the final refresh fails.
+      }
+    }
+  };
+
   if(!auth) {
     const isDemo = authConfig?.mode === 'demo';
     const isLocal = authConfig?.mode === 'local';
@@ -443,10 +490,12 @@ export default function App() {
         <div className="header-actions">
           {busy && <span className="busy-indicator"><i />{busy}</span>}
           <span className="user-name">{auth.user.name}</span>
-          <button className="quiet-button ai-settings-trigger" onClick={() => setShowAiSettings(true)}>
-            <span aria-hidden="true" />
-            AI 设置
-          </button>
+          {AI_RUNTIME_SETTINGS_ENABLED && (
+            <button className="quiet-button ai-settings-trigger" onClick={() => setShowAiSettings(true)}>
+              <span aria-hidden="true" />
+              AI 设置
+            </button>
+          )}
           {view === 'learn' && (
             <button className="quiet-button" onClick={() => setView('home')}>返回书架</button>
           )}
@@ -545,6 +594,7 @@ export default function App() {
               section={section}
               onSelectSection={loadSection}
               onGenerateSection={generateSection}
+              onRegenerateSection={regenerateSection}
               onGenerateChapter={openChapter}
               onStartNextBook={startNextBook}
               chapterGenerationDisabled={preparingInitialSection}
@@ -585,7 +635,9 @@ export default function App() {
           </>
         )}
       </main>
-      {showAiSettings && <AiSettingsDialog onClose={() => setShowAiSettings(false)} />}
+      {AI_RUNTIME_SETTINGS_ENABLED && showAiSettings && (
+        <AiSettingsDialog onClose={() => setShowAiSettings(false)} />
+      )}
     </div>
   );
 }
@@ -1210,6 +1262,7 @@ function LearningWorkspace({
   section,
   onSelectSection,
   onGenerateSection,
+  onRegenerateSection,
   onGenerateChapter,
   onStartNextBook,
   chapterGenerationDisabled,
@@ -1222,6 +1275,7 @@ function LearningWorkspace({
   section: Section | null;
   onSelectSection: (id: string) => Promise<Section>;
   onGenerateSection: (id: string) => Promise<void>;
+  onRegenerateSection: (id: string) => Promise<void>;
   onGenerateChapter: (chapter: Chapter) => Promise<void>;
   onStartNextBook: () => Promise<void>;
   chapterGenerationDisabled: boolean;
@@ -1305,6 +1359,7 @@ function LearningWorkspace({
           setSelectedQuote(quote);
         }}
         onGenerate={() => section && onGenerateSection(section.id)}
+        onRegenerate={() => (section ? onRegenerateSection(section.id) : Promise.resolve())}
         onSectionChange={onSectionChange}
         onRefreshSeries={onRefreshSeries}
       />
@@ -1621,6 +1676,7 @@ function ReaderPanel({
   selectedBlockId,
   onQuote,
   onGenerate,
+  onRegenerate,
   onSectionChange,
   onRefreshSeries,
 }: {
@@ -1633,17 +1689,33 @@ function ReaderPanel({
   selectedBlockId: string;
   onQuote: (quote: TextQuote) => void;
   onGenerate: () => void;
+  onRegenerate: () => Promise<void>;
   onSectionChange: (section: Section) => void;
   onRefreshSeries: () => Promise<void>;
 }) {
   const [tab, setTab] = useState<ReaderTab>('content');
   const [selectionPopup, setSelectionPopup] = useState<SelectionPopup | null>(null);
+  const [regenerationConfirmOpen, setRegenerationConfirmOpen] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
+  const [regenerationStartedAt, setRegenerationStartedAt] = useState(0);
+  const [regenerationClock, setRegenerationClock] = useState(Date.now());
   const readerScrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setTab('content');
     setSelectionPopup(null);
-  }, [section?.id]);
+    setRegenerationConfirmOpen(false);
+    if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
+  }, [section?.id, section?.content?.id]);
+
+  useEffect(() => {
+    if (!regenerating) return undefined;
+    const timer = window.setInterval(
+      () => setRegenerationClock(Date.now()),
+      1000,
+    );
+    return () => window.clearInterval(timer);
+  }, [regenerating]);
 
   const switchTab = (nextTab: ReaderTab) => {
     setTab(nextTab);
@@ -1675,6 +1747,34 @@ function ReaderPanel({
       left: Math.min(Math.max(rect.left + rect.width / 2, 54), window.innerWidth - 54),
     });
   };
+
+  const activeGeneration =
+    section?.generation?.operation === 'regeneration'
+      ? section.generation
+      : null;
+  const generationTrace = activeGeneration?.trace || {};
+  const generationStage =
+    typeof generationTrace.stage === 'string'
+      ? generationTrace.stage
+      : 'queued';
+  const maxSourceAttempts =
+    typeof generationTrace.maxSourceAttempts === 'number'
+      ? generationTrace.maxSourceAttempts
+      : 4;
+  const maxQuizAttempts =
+    typeof generationTrace.maxQuizAttempts === 'number'
+      ? generationTrace.maxQuizAttempts
+      : 4;
+  const generationRound =
+    typeof generationTrace.sourceAttempt === 'number'
+      ? `来源第 ${generationTrace.sourceAttempt}/${maxSourceAttempts} 轮`
+      : typeof generationTrace.quizAttempt === 'number'
+        ? `测验第 ${generationTrace.quizAttempt}/${maxQuizAttempts} 轮`
+        : '';
+  const generationElapsed = Math.max(
+    activeGeneration?.durationMs || 0,
+    regenerationStartedAt ? regenerationClock - regenerationStartedAt : 0,
+  );
 
   if (!section) {
     return (
@@ -1712,9 +1812,20 @@ function ReaderPanel({
           </p>
           <h1>{section.title}</h1>
         </div>
-        <span className={`lesson-status ${section.status}`}>
-          {section.status === 'completed' ? '已完成' : section.status === 'available' ? '学习中' : '未解锁'}
-        </span>
+        <div className="reader-toolbar-actions">
+          <span className={`lesson-status ${section.status}`}>
+            {section.status === 'completed' ? '已完成' : section.status === 'available' ? '学习中' : '未解锁'}
+          </span>
+          {section.content && section.bestScore === 0 && section.totalScore === 0 && (
+            <button
+              className="quiet-button regenerate-trigger"
+              disabled={regenerating}
+              onClick={() => setRegenerationConfirmOpen(true)}
+            >
+              重新生成本节
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="reader-tabs" role="tablist">
@@ -1753,6 +1864,53 @@ function ReaderPanel({
           <Note sectionId={section.id} note={section.note} onSaved={onSectionChange} />
         )}
       </div>
+      {regenerationConfirmOpen && (
+        <div
+          className="confirm-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !regenerating) setRegenerationConfirmOpen(false);
+          }}
+        >
+          <section
+            className="delete-confirm regenerate-confirm"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="regenerate-section-title"
+          >
+            <p className="eyebrow">重新生成本节</p>
+            <h2 id="regenerate-section-title">{section.title}</h2>
+            <p>系统会生成新的正文与测验版本，旧版本会保留在审计记录中。已经提交过测验的内容不能重新生成，以免改写学习证据。</p>
+            {regenerating && (
+              <div className="regeneration-progress" aria-live="polite">
+                <span><i />{GENERATION_STAGE_LABELS[generationStage] || '正在处理'}</span>
+                <b>{generationRound || '准备中'} · 已用 {formatElapsed(generationElapsed)}</b>
+                <small>正文来源核验通过后才会生成测验。</small>
+              </div>
+            )}
+            <div>
+              <button className="quiet-button" disabled={regenerating} onClick={() => setRegenerationConfirmOpen(false)}>取消</button>
+              <button
+                className="primary-button"
+                disabled={regenerating}
+                onClick={async () => {
+                  const startedAt = Date.now();
+                  setRegenerationStartedAt(startedAt);
+                  setRegenerationClock(startedAt);
+                  setRegenerating(true);
+                  try {
+                    await onRegenerate();
+                    setRegenerationConfirmOpen(false);
+                  } finally {
+                    setRegenerating(false);
+                  }
+                }}
+              >
+                {regenerating ? '正在重新生成…' : '确认重新生成'}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
       {selectionPopup && (
         <button
           className="selection-qa-button"
@@ -1864,7 +2022,15 @@ function LessonContent({
           <a href={source.url} target="_blank" rel="noreferrer" key={`${source.url}-${index}`}>
             <span>{index + 1}</span>
             <b>{source.title}</b>
-            <small>{source.version} · {section.content?.sourceVerification[index]?.reachable ? '服务端可达' : '核验失败'}</small>
+            <small>
+              {source.version} · {
+                section.content?.sourceVerification[index]?.verificationStatus === 'server_unverifiable'
+                  ? '站点拒绝自动核验'
+                  : section.content?.sourceVerification[index]?.reachable
+                    ? '服务端可达'
+                    : '核验失败'
+              }
+            </small>
           </a>
         ))}
       </details>

@@ -2,7 +2,7 @@ from asyncio import CancelledError
 import hashlib
 import json
 import re
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 from collections import Counter
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from ..auth.context import UserScope, WorkerExecutionContext
 
+from ..ai.contracts import GeneratedLesson, GeneratedRemediationLesson
 from ..ai.port import AiPort
 from ..core.errors import AiError, AppError, safe_error_code
 from ..demo_personas import LOCAL_DEMO_PERSONAS_BY_USER_ID
@@ -66,9 +67,19 @@ from ..modules.learning.tasks import (
 )
 from ..modules.tutoring.commands import GenerateLearningNote
 from ..read_models.library import LibraryReadModel
+from ..services.source_verifier import SourceVerificationError
 
 DEMO_USER_ID = "user_demo"
 EXPECTED_SECTIONS_PER_CHAPTER = 4
+GENERATION_ARTIFACT_MARKERS = (
+    "候选 JSON",
+    "原始候选",
+    "目标 JSON Schema",
+    "JSON 结构修复器",
+    "无法恢复原有事实内容",
+    "最小可验证结构",
+    "服务端校验拒绝",
+)
 
 
 def uid(prefix):
@@ -92,6 +103,66 @@ def timestamp(value):
 
 def normalized(value: str):
     return re.sub(r"[\W_]+", "", value, flags=re.UNICODE).lower()
+
+
+def assert_lesson_content_quality(lesson) -> None:
+    """Reject provider/repair diagnostics masquerading as lesson content."""
+
+    combined = "\n".join(
+        f"{block.heading}\n{block.content}"
+        for block in lesson.blocks
+    )
+    marker = next(
+        (value for value in GENERATION_ARTIFACT_MARKERS if value in combined),
+        None,
+    )
+    if marker:
+        raise AiError(
+            "AI 返回了生成过程说明而不是教材正文；内容未保存，可安全重新生成",
+            code="AI_CONTENT_QUALITY_FAILED",
+        )
+
+
+def apply_source_repair_scope(before, candidate, failed_sources: list[dict]):
+    """Merge only failed sources and their dependent blocks from a repair."""
+
+    failed_urls = {item["url"] for item in failed_sources}
+    failed_indexes = {
+        index
+        for index, source in enumerate(before.sources)
+        if source.url in failed_urls
+    }
+    if len(before.sources) != len(candidate.sources) or len(before.blocks) != len(candidate.blocks):
+        raise AiError(
+            "来源修复改变了教材整体结构；内容未保存",
+            code="SOURCE_REPAIR_SCOPE_VIOLATION",
+        )
+    if not failed_indexes:
+        raise AiError(
+            "来源修复没有匹配到失败来源；内容未保存",
+            code="SOURCE_REPAIR_SCOPE_VIOLATION",
+        )
+    merged = before.model_copy(deep=True)
+    for index, new_source in enumerate(candidate.sources):
+        if index not in failed_indexes and new_source != before.sources[index]:
+            raise AiError(
+                "来源修复改变了无需替换的来源顺序或内容；内容未保存",
+                code="SOURCE_REPAIR_SCOPE_VIOLATION",
+            )
+        if index in failed_indexes and new_source.url in failed_urls:
+            raise AiError(
+                "来源修复仍返回服务端已拒绝的来源；内容未保存",
+                code="SOURCE_REPAIR_SCOPE_VIOLATION",
+            )
+        if index in failed_indexes:
+            merged.sources[index] = new_source
+    for index, (old_block, new_block) in enumerate(
+        zip(before.blocks, candidate.blocks, strict=True)
+    ):
+        affected = bool(set(old_block.source_indexes) & failed_indexes)
+        if affected:
+            merged.blocks[index] = new_block
+    return merged
 
 
 class SlowService:
@@ -818,11 +889,17 @@ class SlowService:
             self.db.commit()
         return self._chapter(chapter)
 
-    async def generate_section(self, section_id, retry=False, retry_attempt_id=None):
+    async def generate_section(
+        self,
+        section_id,
+        retry=False,
+        retry_attempt_id=None,
+        regenerate=False,
+    ):
         resource_key = f"section:{section_id}"
         owner_id = acquire_generation_lease(self.db, resource_key)
         if owner_id is None:
-            if not retry and self.db.scalar(
+            if not retry and not regenerate and self.db.scalar(
                 select(ContentVersion)
                 .where(ContentVersion.section_id == section_id)
                 .order_by(ContentVersion.version.desc())
@@ -838,6 +915,7 @@ class SlowService:
                 section_id,
                 retry=retry,
                 retry_attempt_id=retry_attempt_id,
+                regenerate=regenerate,
                 resource_key=resource_key,
                 owner_id=owner_id,
             )
@@ -849,6 +927,7 @@ class SlowService:
         section_id,
         retry=False,
         retry_attempt_id=None,
+        regenerate=False,
         resource_key=None,
         owner_id=None,
     ):
@@ -865,8 +944,30 @@ class SlowService:
             raise AppError("小节未解锁", code="SECTION_LOCKED", status=403)
         existing = self.db.scalar(select(ContentVersion).where(ContentVersion.section_id == section.id).order_by(ContentVersion.version.desc()))
         latest_quiz = self.db.scalar(select(QuizSet).where(QuizSet.section_id == section.id).order_by(QuizSet.generation.desc()))
-        if existing and not retry:
+        if existing and not retry and not regenerate:
             return self.section(section.id)
+        if regenerate:
+            if not existing:
+                raise AppError(
+                    "本节还没有正文，请直接生成",
+                    code="SECTION_CONTENT_MISSING",
+                    status=409,
+                )
+            assessed = self.db.scalar(
+                select(func.count())
+                .select_from(QuizAttempt)
+                .join(QuizSet, QuizSet.id == QuizAttempt.quiz_set_id)
+                .where(
+                    QuizSet.section_id == section.id,
+                    QuizAttempt.user_id == self.user_id,
+                )
+            ) or 0
+            if assessed:
+                raise AppError(
+                    "本节已有答题证据，不能由学习者重新生成；请联系管理员处理内容纠错",
+                    code="SECTION_ALREADY_ASSESSED",
+                    status=409,
+                )
         running = self.db.scalar(select(GenerationRun).where(GenerationRun.section_id == section.id, GenerationRun.status == "running").order_by(GenerationRun.started_at.desc()))
         if running:
             started = running.started_at if running.started_at.tzinfo else running.started_at.replace(tzinfo=timezone.utc)
@@ -875,55 +976,272 @@ class SlowService:
             running.status, running.error_code, running.error_message, running.finished_at = "failed", "GENERATION_ABANDONED", "上一次生成超过 5 分钟未完成，已允许安全重试", now()
             self.db.commit()
         attempt = (self.db.scalar(select(func.max(GenerationRun.attempt)).where(GenerationRun.section_id == section.id)) or 0) + 1
+        regeneration_trace = {
+            "regenerate": regenerate,
+            **(
+                {
+                    "supersedesContentVersionId": existing.id,
+                    "supersedesQuizSetId": latest_quiz.id if latest_quiz else None,
+                }
+                if regenerate
+                else {}
+            ),
+        }
         run = GenerationRun(
             id=uid("generation"),
             section_id=section.id,
-            operation="remediation" if retry else "lesson",
+            operation=(
+                "remediation"
+                if retry
+                else "regeneration"
+                if regenerate
+                else "lesson"
+            ),
             attempt=attempt,
             status="running",
             model=getattr(self.ai, "model", ""),
-            trace_json=dump({"stage": "model_call", "retry": retry}),
+            trace_json=dump({
+                "stage": "queued",
+                "retry": retry,
+                **regeneration_trace,
+            }),
         )
         self.db.add(run)
         self.db.commit()
+        stage_history: list[dict] = []
+        active_stage_started = None
+
+        def close_active_stage(finished_at):
+            nonlocal active_stage_started
+            if not stage_history or active_stage_started is None:
+                return
+            stage_history[-1]["finishedAt"] = timestamp(finished_at)
+            stage_history[-1]["durationMs"] = max(
+                0,
+                int((finished_at - active_stage_started).total_seconds() * 1000),
+            )
+            active_stage_started = None
+
+        def update_generation_stage(stage: str, **details):
+            nonlocal active_stage_started
+            started_at = now()
+            close_active_stage(started_at)
+            active_stage_started = started_at
+            stage_history.append({
+                "stage": stage,
+                "startedAt": timestamp(started_at),
+                **details,
+            })
+            run.trace_json = dump({
+                "stage": stage,
+                "retry": retry,
+                **regeneration_trace,
+                "stageHistory": stage_history,
+                **details,
+            })
+            self.db.commit()
         try:
-            prior = load(latest_quiz.questions_json, []) if retry and latest_quiz else []
+            prior = (
+                load(latest_quiz.questions_json, [])
+                if (retry or regenerate) and latest_quiz
+                else []
+            )
             book = self._book_for_section(section)
             remediation_count = self.db.scalar(select(func.count()).select_from(Remediation).where(Remediation.section_id == section.id)) if retry else 0
             remediation_strategy = ["paragraph_locator", "alternative_explanation", "prerequisite_supplement"][min(remediation_count, 2)] if retry else None
+            memory = self._memory(book.shelf_id)
+            memory_trace = {
+                "memoryApplied": bool(memory),
+                "memoryConceptCount": len(memory),
+            }
+            lesson_request = {
+                **self._section_summary(section),
+                "rejectedSourceUrls": [],
+                "rejectedSourceHosts": [],
+            }
+            if retry:
+                lesson_request["remediationStrategy"] = remediation_strategy
             lesson = None
             verification = []
             rejected_source_urls: list[str] = []
+            rejected_source_hosts: list[str] = []
             ai_harness_trace: list[dict] = []
             max_generation_attempts = 4
-            for novelty_attempt in range(1, max_generation_attempts + 1):
-                memory = self._memory(book.shelf_id)
-                memory_trace = {"memoryApplied": bool(memory), "memoryConceptCount": len(memory)}
-                run.trace_json = dump({"stage": "model_call", "retry": retry, "noveltyAttempt": novelty_attempt, **memory_trace})
-                self.db.commit()
-                lesson_request = {**self._section_summary(section), "rejectedSourceUrls": rejected_source_urls}
-                if retry:
-                    lesson_request["remediationStrategy"] = remediation_strategy
-                lesson = await self.ai.lesson(lesson_request, memory, prior)
+            if getattr(self.ai, "staged_lesson_generation", False):
+                update_generation_stage(
+                    "content_generation",
+                    sourceAttempt=1,
+                    maxSourceAttempts=max_generation_attempts,
+                    **memory_trace,
+                )
+                content_result = await self.ai.lesson_content(
+                    lesson_request,
+                    memory,
+                    prior,
+                )
+                assert_lesson_content_quality(content_result)
                 self._renew_generation_lease(resource_key, owner_id)
-                ai_harness_trace = self._ai_harness_trace()
-                run.trace_json = dump({"stage": "source_verification", "retry": retry, "noveltyAttempt": novelty_attempt, "sourceUrls": [item.url for item in lesson.sources], "aiHarness": ai_harness_trace, **memory_trace})
-                self.db.commit()
-                try:
-                    verification = await self.source_verifier.verify(lesson.sources)
+
+                for source_attempt in range(1, max_generation_attempts + 1):
+                    update_generation_stage(
+                        "source_verification",
+                        sourceAttempt=source_attempt,
+                        maxSourceAttempts=max_generation_attempts,
+                        sourceUrls=[item.url for item in content_result.sources],
+                        **memory_trace,
+                    )
+                    try:
+                        verification = await self.source_verifier.verify(
+                            content_result.sources
+                        )
+                        self._renew_generation_lease(resource_key, owner_id)
+                        break
+                    except SourceVerificationError as error:
+                        failed_sources = [
+                            item.failure_dict() for item in error.failures
+                        ]
+                        rejected_source_urls.extend(
+                            item["url"] for item in failed_sources
+                        )
+                        rejected_source_urls = list(
+                            dict.fromkeys(rejected_source_urls)
+                        )
+                        rejected_source_hosts.extend(
+                            host
+                            for item in failed_sources
+                            if item.get("reason") == "not_found"
+                            and (host := urlparse(item["url"]).hostname)
+                        )
+                        rejected_source_hosts = list(
+                            dict.fromkeys(rejected_source_hosts)
+                        )
+                        if source_attempt == max_generation_attempts:
+                            raise
+                        lesson_request["rejectedSourceUrls"] = (
+                            rejected_source_urls
+                        )
+                        lesson_request["rejectedSourceHosts"] = (
+                            rejected_source_hosts
+                        )
+                        update_generation_stage(
+                            "source_repair",
+                            sourceAttempt=source_attempt + 1,
+                            maxSourceAttempts=max_generation_attempts,
+                            failedSources=failed_sources,
+                            **memory_trace,
+                        )
+                        previous_content = content_result
+                        content_result = (
+                            await self.ai.repair_lesson_sources(
+                                lesson_request,
+                                memory,
+                                content_result,
+                                failed_sources,
+                                prior,
+                            )
+                        )
+                        content_result = apply_source_repair_scope(
+                            previous_content,
+                            content_result,
+                            failed_sources,
+                        )
+                        assert_lesson_content_quality(content_result)
+                        self._renew_generation_lease(resource_key, owner_id)
+
+                quiz_result = None
+                previous_quiz_rejection = None
+                for quiz_attempt in range(1, max_generation_attempts + 1):
+                    update_generation_stage(
+                        "quiz_generation",
+                        quizAttempt=quiz_attempt,
+                        maxQuizAttempts=max_generation_attempts,
+                        **(
+                            {"previousRejection": previous_quiz_rejection}
+                            if previous_quiz_rejection
+                            else {}
+                        ),
+                        **memory_trace,
+                    )
+                    quiz_result = await self.ai.lesson_quiz(
+                        lesson_request,
+                        content_result,
+                        prior,
+                    )
                     self._renew_generation_lease(resource_key, owner_id)
-                except AppError as error:
-                    rejected_source_urls.extend(item.url for item in lesson.sources)
-                    rejected_source_urls = list(dict.fromkeys(rejected_source_urls))
-                    if error.code == "SOURCE_UNREACHABLE" and novelty_attempt < max_generation_attempts:
-                        lesson = None
-                        continue
-                    raise
-                if not retry or self._questions_are_novel(prior, [item.model_dump() for item in lesson.questions]):
-                    break
-                lesson = None
+                    if prior and len(prior) == len(quiz_result.questions):
+                        for question, previous in zip(
+                            quiz_result.questions,
+                            prior,
+                            strict=True,
+                        ):
+                            question.objective = previous["objective"]
+                            question.core = previous.get("core", False)
+                            question.difficulty = "standard"
+                    previous_quiz_rejection = self._questions_novelty_issue(
+                        prior,
+                        [item.model_dump() for item in quiz_result.questions],
+                    ) if (retry or regenerate) else None
+                    if not previous_quiz_rejection:
+                        break
+                    quiz_result = None
+                if quiz_result is not None:
+                    lesson_schema = (
+                        GeneratedRemediationLesson if retry else GeneratedLesson
+                    )
+                    lesson = lesson_schema(
+                        **content_result.model_dump(),
+                        questions=quiz_result.questions,
+                    )
+                ai_harness_trace = self._ai_harness_trace()
+            else:
+                for novelty_attempt in range(1, max_generation_attempts + 1):
+                    lesson_request["rejectedSourceUrls"] = rejected_source_urls
+                    update_generation_stage(
+                        "combined_generation",
+                        noveltyAttempt=novelty_attempt,
+                        maxGenerationAttempts=max_generation_attempts,
+                        **memory_trace,
+                    )
+                    lesson = await self.ai.lesson(
+                        lesson_request,
+                        memory,
+                        prior,
+                    )
+                    assert_lesson_content_quality(lesson)
+                    self._renew_generation_lease(resource_key, owner_id)
+                    ai_harness_trace = self._ai_harness_trace()
+                    update_generation_stage(
+                        "source_verification",
+                        noveltyAttempt=novelty_attempt,
+                        maxGenerationAttempts=max_generation_attempts,
+                        sourceUrls=[item.url for item in lesson.sources],
+                        **memory_trace,
+                    )
+                    try:
+                        verification = await self.source_verifier.verify(
+                            lesson.sources
+                        )
+                        self._renew_generation_lease(resource_key, owner_id)
+                    except SourceVerificationError as error:
+                        rejected_source_urls.extend(
+                            item.url for item in error.failures
+                        )
+                        rejected_source_urls = list(
+                            dict.fromkeys(rejected_source_urls)
+                        )
+                        if novelty_attempt < max_generation_attempts:
+                            lesson = None
+                            continue
+                        raise
+                    if not (retry or regenerate) or self._questions_are_novel(
+                        prior,
+                        [item.model_dump() for item in lesson.questions],
+                    ):
+                        break
+                    lesson = None
             if lesson is None:
                 raise AppError("模型连续返回与旧题实质相同的题集", code="QUIZ_NOT_NOVEL", status=502)
+            update_generation_stage("persistence", **memory_trace)
             content = existing
             if not retry:
                 content = ContentVersion(
@@ -980,11 +1298,24 @@ class SlowService:
                         strategy=remediation_strategy,
                     )
                 )
-            run.status, run.finished_at = "succeeded", now()
-            run.trace_json = dump({"stage": "persisted", "contentVersionId": content.id if content else None, "quizSetId": quiz.id, "sourceVerification": verification, "aiHarness": ai_harness_trace, **memory_trace})
+            finished_at = now()
+            close_active_stage(finished_at)
+            run.status, run.finished_at = "succeeded", finished_at
+            run.trace_json = dump({
+                "stage": "persisted",
+                "contentVersionId": content.id if content else None,
+                "quizSetId": quiz.id,
+                "sourceVerification": verification,
+                "aiHarness": ai_harness_trace,
+                "stageHistory": stage_history,
+                **regeneration_trace,
+                **memory_trace,
+            })
             self.db.commit()
             return self.section(section.id)
         except BaseException as error:
+            failure_finished_at = now()
+            close_active_stage(failure_finished_at)
             self.db.rollback()
             operation_id = run.id
             run = self.db.get(GenerationRun, operation_id)
@@ -996,12 +1327,13 @@ class SlowService:
                     if isinstance(error, AppError)
                     else "生成失败，请稍后重试"
                 )
-                run.finished_at = now()
+                run.finished_at = failure_finished_at
                 previous_trace = load(run.trace_json, {})
                 harness_trace = self._ai_harness_trace()
                 run.trace_json = dump({
                     **previous_trace,
                     "stage": "failed",
+                    "stageHistory": stage_history,
                     **({"aiHarness": harness_trace} if harness_trace else {}),
                 })
                 self.db.commit()
@@ -1024,10 +1356,15 @@ class SlowService:
         return value if isinstance(value, list) else []
 
     def _questions_are_novel(self, prior, current):
-        if not prior or len(prior) != len(current):
-            return False
+        return self._questions_novelty_issue(prior, current) is None
+
+    def _questions_novelty_issue(self, prior, current):
+        if not prior:
+            return "prior_questions_missing"
+        if len(prior) != len(current):
+            return "question_count_mismatch"
         if Counter(item["objective"] for item in prior) != Counter(item["objective"] for item in current):
-            return False
+            return "objective_set_mismatch"
         prior_by_objective = {}
         for item in prior:
             prior_by_objective.setdefault(item["objective"], []).append(item)
@@ -1035,13 +1372,18 @@ class SlowService:
             candidates = prior_by_objective.get(question["objective"], [])
             if any(
                 normalized(question["prompt"]) == normalized(old["prompt"])
-                or {normalized(option) for option in question["options"]} == {normalized(option) for option in old["options"]}
                 for old in candidates
             ):
-                return False
+                return "prompt_duplicate"
+            if any(
+                {normalized(option) for option in question["options"]}
+                == {normalized(option) for option in old["options"]}
+                for old in candidates
+            ):
+                return "options_duplicate"
             if question.get("difficulty", "standard") != "standard":
-                return False
-        return True
+                return "difficulty_mismatch"
+        return None
 
     def section(self, section_id):
         section_context = self.contexts.resolve_section(
@@ -1148,6 +1490,14 @@ class SlowService:
         }
 
     def _generation(self, run):
+        started = (
+            run.started_at
+            if run.started_at.tzinfo
+            else run.started_at.replace(tzinfo=timezone.utc)
+        )
+        finished = run.finished_at or now()
+        if finished.tzinfo is None:
+            finished = finished.replace(tzinfo=timezone.utc)
         return {
             "id": run.id,
             "operation": run.operation,
@@ -1159,6 +1509,10 @@ class SlowService:
             "error": run.error_message or None,
             "startedAt": timestamp(run.started_at),
             "finishedAt": timestamp(run.finished_at),
+            "durationMs": max(
+                0,
+                int((finished - started).total_seconds() * 1000),
+            ),
         }
 
     async def submit_quiz(self, section_id, body, idempotency_key=None):

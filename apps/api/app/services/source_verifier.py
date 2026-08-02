@@ -14,13 +14,70 @@ class Verification:
     status_code: int
     pinned: bool
 
+    @property
+    def failure_reason(self) -> str:
+        if self.status_code in {401, 403, 405, 429}:
+            return "access_restricted"
+        if self.status_code in {404, 410}:
+            return "not_found"
+        if self.status_code == 0:
+            return "network_error"
+        return "http_error"
+
     def as_dict(self):
         return {
             "url": self.url,
             "reachable": self.reachable,
             "statusCode": self.status_code,
             "pinned": self.pinned,
+            "verificationStatus": (
+                "verified"
+                if self.reachable
+                else "server_unverifiable"
+                if self.failure_reason == "access_restricted"
+                else "failed"
+            ),
         }
+
+    def failure_dict(self):
+        return {
+            **self.as_dict(),
+            "reason": self.failure_reason,
+        }
+
+
+class SourceVerificationError(AppError):
+    """A source gate failure with machine-readable, non-secret details."""
+
+    def __init__(self, failures: list[Verification]):
+        self.failures = tuple(failures)
+        access_restricted = all(
+            item.failure_reason == "access_restricted"
+            for item in failures
+        )
+        if access_restricted:
+            details = ", ".join(
+                f"{item.url}（站点拒绝自动检查，HTTP {item.status_code}）"
+                for item in failures
+            )
+            message = (
+                f"有 {len(failures)} 个来源当前无法由服务端核验：{details}。"
+                "这不代表来源内容错误，系统会尝试替换为可核验来源。"
+            )
+            code = "SOURCE_UNVERIFIABLE"
+        else:
+            details = ", ".join(
+                f"{item.url} ({item.status_code or 'network error'})"
+                for item in failures
+            )
+            message = f"有 {len(failures)} 个来源无法由服务端访问：{details}"
+            code = "SOURCE_UNREACHABLE"
+        super().__init__(
+            message,
+            code=code,
+            status=502,
+            retryable=True,
+        )
 
 
 class HttpSourceVerifier:
@@ -28,15 +85,20 @@ class HttpSourceVerifier:
 
     async def verify(self, sources: list[Source]) -> list[dict]:
         async with httpx.AsyncClient(timeout=8, follow_redirects=True) as client:
-            results = await asyncio.gather(*(self._one(client, source) for source in sources))
-        failures = [item for item in results if not item.reachable]
-        if failures:
-            details = ", ".join(f"{item.url} ({item.status_code or 'network error'})" for item in failures)
-            raise AppError(
-                f"有 {len(failures)} 个来源无法由服务端访问：{details}",
-                code="SOURCE_UNREACHABLE",
-                status=502,
+            results = await asyncio.gather(
+                *(self._one(client, source) for source in sources)
             )
+        # A site refusing automated HEAD/Range requests is different from a
+        # missing or unreachable source. Preserve that distinction in lineage
+        # and allow publication with an explicit "server_unverifiable" label.
+        failures = [
+            item
+            for item in results
+            if not item.reachable
+            and item.failure_reason != "access_restricted"
+        ]
+        if failures:
+            raise SourceVerificationError(failures)
         return [item.as_dict() for item in results]
 
     async def _one(self, client: httpx.AsyncClient, source: Source) -> Verification:

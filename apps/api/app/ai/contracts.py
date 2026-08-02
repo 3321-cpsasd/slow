@@ -118,6 +118,22 @@ class GeneratedRemediationLesson(GeneratedRemediationContent):
     questions: list[ChoiceQuestion] = Field(min_length=4, max_length=5)
 
 
+class SourceRepairBlock(StrictModel):
+    block_index: int = Field(ge=0, le=11)
+    heading: str
+    content: str
+
+
+class SourceRepairReplacement(StrictModel):
+    source_index: int = Field(ge=0, le=11)
+    source: Source
+    blocks: list[SourceRepairBlock] = Field(default_factory=list, max_length=12)
+
+
+class GeneratedSourceRepair(StrictModel):
+    replacements: list[SourceRepairReplacement] = Field(min_length=1, max_length=12)
+
+
 class ClassifiedAnswer(StrictModel):
     relation: Literal["follow_up", "new_question"]
     thread_id: str

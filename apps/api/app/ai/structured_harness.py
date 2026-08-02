@@ -75,11 +75,17 @@ def trace_entry(
     invalid_outputs: list[str],
     last_error: ValidationError | None,
     outcome: str,
+    token_budgets: list[int] | None = None,
+    repair_attempts: int | None = None,
 ) -> dict:
-    return {
+    entry = {
         "schema": schema.__name__,
         "attempts": attempts,
-        "repairAttempts": max(0, attempts - 1),
+        "repairAttempts": (
+            max(0, attempts - 1)
+            if repair_attempts is None
+            else repair_attempts
+        ),
         "outcome": outcome,
         "invalidOutputDigests": [
             output_digest(content) for content in invalid_outputs
@@ -88,3 +94,6 @@ def trace_entry(
             validation_issues(last_error) if last_error else []
         ),
     }
+    if token_budgets is not None:
+        entry["tokenBudgets"] = token_budgets
+    return entry

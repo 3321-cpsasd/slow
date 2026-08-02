@@ -1,10 +1,11 @@
 import asyncio
 import json
 from contextvars import ContextVar
+from urllib.parse import urlparse
 from openai import AsyncOpenAI
 from pydantic import ValidationError
 from ..core.errors import AiError
-from .contracts import AskMeTurn, ClassifiedAnswer, EvaluationQuizAnswers, EvaluationReview, GeneratedChapter, GeneratedContent, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedQuiz, GeneratedRemediationContent, GeneratedRemediationLesson, ReplannedBook
+from .contracts import AskMeTurn, ClassifiedAnswer, EvaluationQuizAnswers, EvaluationReview, GeneratedChapter, GeneratedContent, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedQuiz, GeneratedRemediationContent, GeneratedRemediationLesson, GeneratedSourceRepair, ReplannedBook
 from .port import ProviderCapabilities
 from .structured_harness import (
     clean_json_output,
@@ -18,6 +19,8 @@ from .metering import (
 
 
 class OpenAiAdapter:
+    staged_lesson_generation = True
+
     def __init__(
         self,
         api_key: str,
@@ -101,6 +104,7 @@ class OpenAiAdapter:
             "GeneratedContent": "lesson_content",
             "GeneratedRemediationContent": "remediation_content",
             "GeneratedQuiz": "lesson_quiz",
+            "GeneratedSourceRepair": "source_repair",
             "ClassifiedAnswer": "qa_answer",
             "GeneratedNote": "learning_note",
             "AskMeTurn": "ask_me",
@@ -244,17 +248,30 @@ class OpenAiAdapter:
         chat_error = None
         invalid_outputs: list[str] = []
         repair = None
+        attempt_count = 0
+        repair_attempt_count = 0
+        token_budgets: list[int] = []
         for schema_attempt in range(3):
+            attempt_count = schema_attempt + 1
+            attempt_tokens = tokens * (2 ** schema_attempt)
+            token_budgets.append(attempt_tokens)
+            if repair is not None:
+                repair_attempt_count += 1
             try:
                 content = await self._chat_parse_once(
                     schema,
                     developer,
                     payload,
-                    tokens,
+                    attempt_tokens,
                     repair=repair,
                 )
             except Exception as error:
                 chat_error = error
+                if (
+                    schema_attempt < 2
+                    and self._structured_output_retryable(error)
+                ):
+                    continue
                 break
             try:
                 result = schema.model_validate_json(content)
@@ -267,6 +284,8 @@ class OpenAiAdapter:
                         if isinstance(chat_error, ValidationError)
                         else None,
                         outcome="succeeded",
+                        token_budgets=token_budgets,
+                        repair_attempts=repair_attempt_count,
                     )
                 )
                 return result
@@ -286,13 +305,28 @@ class OpenAiAdapter:
             self._record_structured_trace(
                 trace_entry(
                     schema=schema,
-                    attempts=len(invalid_outputs) + 1,
+                    attempts=attempt_count,
                     invalid_outputs=invalid_outputs,
                     last_error=None,
                     outcome="provider_failed",
+                    token_budgets=token_budgets,
+                    repair_attempts=repair_attempt_count,
                 )
             )
             raise provider_error from chat_error
+        if isinstance(chat_error, AiError):
+            self._record_structured_trace(
+                trace_entry(
+                    schema=schema,
+                    attempts=attempt_count,
+                    invalid_outputs=invalid_outputs,
+                    last_error=None,
+                    outcome="failed",
+                    token_budgets=token_budgets,
+                    repair_attempts=repair_attempt_count,
+                )
+            )
+            raise chat_error
         if isinstance(chat_error, ValidationError):
             self._record_structured_trace(
                 trace_entry(
@@ -301,6 +335,8 @@ class OpenAiAdapter:
                     invalid_outputs=invalid_outputs,
                     last_error=chat_error,
                     outcome="failed",
+                    token_budgets=token_budgets,
+                    repair_attempts=repair_attempt_count,
                 )
             )
         raise AiError(
@@ -375,6 +411,11 @@ class OpenAiAdapter:
         self._succeed_invocation(invocation_id, completion, usage)
         self._record_usage(usage)
         content = clean_json_output(content)
+        if not content:
+            raise AiError(
+                "AI 请求已完成，但没有返回可用正文；已停止自动修复，请重新生成",
+                code="AI_EMPTY_RESPONSE",
+            )
         return content
 
     async def _thinking_stream(self, options):
@@ -398,6 +439,27 @@ class OpenAiAdapter:
             return
         self.input_tokens += int(getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", 0) or 0)
         self.output_tokens += int(getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", 0) or 0)
+
+    @staticmethod
+    def _structured_output_retryable(error) -> bool:
+        if isinstance(error, AiError):
+            return error.code in {
+                "AI_EMPTY_RESPONSE",
+                "AI_STRUCTURED_OUTPUT_FAILED",
+                "AI_STRUCTURED_OUTPUT_INVALID",
+            }
+        message = str(error).lower()
+        return any(
+            marker in message
+            for marker in (
+                "output became abnormal",
+                "partial output may be incomplete",
+                "invalid json",
+                "maximum context length",
+                "max_tokens",
+                "finish_reason=length",
+            )
+        )
 
     @staticmethod
     def _provider_error(error):
@@ -442,19 +504,162 @@ class OpenAiAdapter:
         self._begin_structured_operation()
         return await self._parse(GeneratedChapter, """把一个章节拆成 3-5 个递进小节。每节只解决一个清晰问题，总学习投入 15-25 分钟。输出标题、问题和可验证目标，不生成正文。避免重复学习者已有证据。中文输出。""", {"chapter": request, "relevant_learning_memory": memory}, 3500)
 
-    async def lesson(self, request: dict, memory: list[dict], prior_questions: list[dict] | None = None):
+    @staticmethod
+    def _lesson_contract(request: dict):
+        retry = bool(request.get("remediationStrategy"))
+        return (
+            retry,
+            GeneratedRemediationContent if retry else GeneratedContent,
+            GeneratedRemediationLesson if retry else GeneratedLesson,
+        )
+
+    async def lesson_content(
+        self,
+        request: dict,
+        memory: list[dict],
+        prior_questions: list[dict] | None = None,
+    ):
         self._begin_structured_operation()
-        retry = bool(prior_questions)
-        content_schema = GeneratedRemediationContent if retry else GeneratedContent
+        # Prior questions are also supplied for a full regeneration so the new
+        # quiz can be checked for novelty. Only an explicit remediation strategy
+        # selects the compact remediation content contract.
+        retry, content_schema, _lesson_schema = self._lesson_contract(request)
+        controlled_thinking = self.capabilities.reasoning_mode == "required"
         content_prompt = """你是严格的补救教学作者。只针对 remediationStrategy 和旧题暴露的知识缺口，生成 1-3 个紧凑补充块及来源，不重写完整正文，不生成题目。paragraph_locator 要定位原机制并澄清；alternative_explanation 要换角度解释；prerequisite_supplement 要补必要前置。优先只引用版本明确的官方文档，避免源码引用；若确实必须引用源码，kind 必须为 source_code，URL 必须是 GitHub /blob/<不可变 tag 或 commit>/ 文件地址，version 必须与 URL 中 ref 完全一致。绝不能再次使用 section.rejectedSourceUrls 中已被服务端判定不可达的地址。中文输出。""" if retry else """你是严格的技术教材作者。生成一个可验证小节的正文与来源，不生成题目。只用 5 个紧凑内容块，依次覆盖核心结论、机制、贴合角色的例子、边界或反例、实践连接。内容块保持纯文本和短代码，避免嵌套 JSON。关键事实给出可追溯官方来源；只有具体讨论开源实现时才引用绑定 tag/commit 的 GitHub blob URL。绝不能再次使用 section.rejectedSourceUrls 中已被服务端判定不可达的地址；如果无法确认某个深层文档链接，改用可达的官方索引页或不可变源码链接。不能核实时降低 confidence 并明确不确定性。中文输出。"""
-        content = await self._parse(content_schema, content_prompt, {"section": request, "memory": memory, "prior_questions": prior_questions or []}, 3400 if not retry else 1800)
-        quiz = await self._parse(GeneratedQuiz, """只为给定小节生成 4-5 道可确定评分的选择题。至少一道 core=true，所有题仅凭正文可答，覆盖小节目标，difficulty 固定为 standard。若 prior_questions 存在，新题必须考查相同 objective，但题干和每组选项都实质不同，且不降低难度。中文输出。""", {"section": request, "content": content.model_dump(), "prior_questions": prior_questions or []}, 2400)
+        content_tokens = (
+            12000
+            if controlled_thinking and not retry
+            else 2600
+            if controlled_thinking
+            else 3400
+            if not retry
+            else 1800
+        )
+        return await self._parse(
+            content_schema,
+            content_prompt,
+            {
+                "section": request,
+                "memory": memory,
+                "prior_questions": prior_questions or [],
+            },
+            content_tokens,
+        )
+
+    async def repair_lesson_sources(
+        self,
+        request: dict,
+        memory: list[dict],
+        content,
+        failed_sources: list[dict],
+        prior_questions: list[dict] | None = None,
+    ):
+        retry, _content_schema, _lesson_schema = self._lesson_contract(request)
+        controlled_thinking = self.capabilities.reasoning_mode == "required"
+        repair_tokens = (
+            5200
+            if controlled_thinking and not retry
+            else 2400
+            if controlled_thinking
+            else 2800
+            if not retry
+            else 1600
+        )
+        failed_urls = {item["url"] for item in failed_sources}
+        rejected_urls = set(request.get("rejectedSourceUrls") or [])
+        rejected_hosts = set(request.get("rejectedSourceHosts") or [])
+        failed_indexes = {
+            index
+            for index, source in enumerate(content.sources)
+            if source.url in failed_urls
+        }
+        allowed_blocks = {
+            source_index: [
+                block_index
+                for block_index, block in enumerate(content.blocks)
+                if source_index in block.source_indexes
+            ]
+            for source_index in failed_indexes
+        }
+        repair = await self._parse(
+            GeneratedSourceRepair,
+            """你是教材来源修复编辑，只输出最小来源补丁，不得返回整份教材。每个 replacement.source_index 必须来自 failed_source_indexes 且各出现一次；新来源替换原索引位置，不得再次使用 rejectedSourceUrls，也不得使用 rejectedSourceHosts 中主机的任何年份或路径变体。blocks 只能包含 allowed_block_indexes 中的块，只提供修正后的 heading 和 content；不要改块角色、类型、顺序或引用索引。未列出的来源与块由服务端原样保留。新来源须直接支持修正后的事实，优先无需登录、允许服务器访问的官方索引页、标准或论文落地页；不确定深层链接时应更换到其他权威主机，不得猜测年份或 URL 路径。不生成题目。中文输出。""",
+            {
+                "section": request,
+                "memory": memory,
+                "current_content": content.model_dump(),
+                "failed_sources": failed_sources,
+                "failed_source_indexes": sorted(failed_indexes),
+                "allowed_block_indexes": allowed_blocks,
+                "prior_questions": prior_questions or [],
+            },
+            repair_tokens,
+        )
+        replacement_indexes = [
+            item.source_index for item in repair.replacements
+        ]
+        if set(replacement_indexes) != failed_indexes or len(replacement_indexes) != len(set(replacement_indexes)):
+            raise AiError(
+                "来源修复补丁与失败来源索引不一致；内容未保存",
+                code="SOURCE_REPAIR_SCOPE_VIOLATION",
+            )
+        merged = content.model_copy(deep=True)
+        for replacement in repair.replacements:
+            replacement_host = urlparse(replacement.source.url).hostname
+            if (
+                replacement.source.url in failed_urls
+                or replacement.source.url in rejected_urls
+                or replacement_host in rejected_hosts
+            ):
+                raise AiError(
+                    "来源修复仍返回服务端已拒绝的来源或主机；内容未保存",
+                    code="SOURCE_REPAIR_SCOPE_VIOLATION",
+                )
+            merged.sources[replacement.source_index] = replacement.source
+            allowed = set(allowed_blocks[replacement.source_index])
+            seen_blocks = set()
+            for block_patch in replacement.blocks:
+                if block_patch.block_index not in allowed or block_patch.block_index in seen_blocks:
+                    raise AiError(
+                        "来源修复补丁试图改写无关或重复内容块；内容未保存",
+                        code="SOURCE_REPAIR_SCOPE_VIOLATION",
+                    )
+                seen_blocks.add(block_patch.block_index)
+                merged.blocks[block_patch.block_index].heading = block_patch.heading
+                merged.blocks[block_patch.block_index].content = block_patch.content
+        return merged
+
+    async def lesson_quiz(
+        self,
+        request: dict,
+        content,
+        prior_questions: list[dict] | None = None,
+    ):
+        quiz_tokens = (
+            3600
+            if self.capabilities.reasoning_mode == "required"
+            else 2400
+        )
+        return await self._parse(
+            GeneratedQuiz,
+            """只为给定且已经通过来源核验的小节生成 4-5 道可确定评分的选择题。至少一道 core=true，所有题仅凭正文可答，覆盖小节目标，difficulty 固定为 standard。若 prior_questions 存在：questions 数量必须与 prior_questions 完全一致；第 i 道题必须考查 prior_questions[i] 的同一 objective 并保持 core 值，但题干和整组选项都必须实质不同，且不降低难度。中文输出。""",
+            {
+                "section": request,
+                "content": content.model_dump(),
+                "prior_questions": prior_questions or [],
+            },
+            quiz_tokens,
+        )
+
+    async def lesson(self, request: dict, memory: list[dict], prior_questions: list[dict] | None = None):
+        content = await self.lesson_content(request, memory, prior_questions)
+        quiz = await self.lesson_quiz(request, content, prior_questions)
         if prior_questions and len(prior_questions) == len(quiz.questions):
             for question, previous in zip(quiz.questions, prior_questions, strict=True):
                 question.objective = previous["objective"]
                 question.core = previous.get("core", False)
                 question.difficulty = "standard"
-        lesson_schema = GeneratedRemediationLesson if retry else GeneratedLesson
+        _retry, _content_schema, lesson_schema = self._lesson_contract(request)
         return lesson_schema(**content.model_dump(), questions=quiz.questions)
 
     async def answer(self, request: dict):

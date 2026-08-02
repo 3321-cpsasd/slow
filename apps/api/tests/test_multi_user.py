@@ -445,6 +445,27 @@ def test_fashion_to_ux_account_has_its_own_profile_and_rejects_wrong_password(
     assert shelf["tags"] == list(persona.tags)
 
 
+def test_fashion_to_ux_persona_targets_information_visualization_for_product_design():
+    persona = next(
+        item for item in LOCAL_DEMO_PERSONAS if item.username == "fashion-to-ux"
+    )
+
+    assert persona.display_name == "产品设计学习信息可视化"
+    assert persona.scenario == "产品设计方向学习者系统学习信息可视化"
+    assert persona.shelf_name == "信息可视化"
+    assert persona.specialty == "产品设计与信息可视化"
+    assert persona.tags == ("信息可视化", "产品设计", "数据表达")
+    assert "服装" not in " ".join(
+        (
+            persona.display_name,
+            persona.scenario,
+            persona.shelf_name,
+            persona.specialty,
+            *persona.tags,
+        )
+    )
+
+
 def test_two_local_users_interleave_learning_tasks_without_cross_access(
     tmp_path,
 ):
@@ -452,15 +473,15 @@ def test_two_local_users_interleave_learning_tasks_without_cross_access(
         def __init__(self):
             self.failed_remediation = False
 
-        async def lesson(self, request, memory, prior_questions=None):
-            if prior_questions and not self.failed_remediation:
+        async def lesson_content(self, request, memory, prior_questions=None):
+            if request.get("remediationStrategy") and not self.failed_remediation:
                 self.failed_remediation = True
                 raise AppError(
                     "simulated non-retryable remediation failure",
                     code="SIMULATED_REMEDIATION_FAILURE",
                     retryable=False,
                 )
-            return await super().lesson(request, memory, prior_questions)
+            return await super().lesson_content(request, memory, prior_questions)
 
     app = create_app(
         f"sqlite+pysqlite:///{tmp_path / 'two-user-tasks.db'}",

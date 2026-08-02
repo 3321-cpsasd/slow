@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from app.ai.anthropic_adapter import AnthropicAdapter
+from app.ai.contracts import GeneratedContent, GeneratedQuiz, GeneratedSourceRepair
 from app.ai.metering import AiUsageRecorder
 from app.ai.openai_adapter import OpenAiAdapter
 from app.ai.port import ProviderCapabilities
@@ -117,6 +118,264 @@ def test_openai_chat_repairs_invalid_schema_with_validation_feedback():
     assert trace[0]["outcome"] == "succeeded"
     assert len(trace[0]["invalidOutputDigests"]) == 1
     assert trace[0]["lastValidationIssues"][0]["path"] == "value"
+
+
+def test_openai_chat_rejects_empty_content_without_invoking_repair():
+    async def run():
+        adapter, completions = await chat_adapter(
+            ["", "", ""]
+        )
+        with pytest.raises(AiError) as raised:
+            await adapter._parse(
+                StructuredAnswer,
+                "Return JSON.",
+                {"question": "test"},
+                100,
+            )
+        return raised.value, completions.calls, adapter.structured_trace()
+
+    error, calls, trace = asyncio.run(run())
+
+    assert error.code == "AI_EMPTY_RESPONSE"
+    assert len(calls) == 3
+    assert [item["max_tokens"] for item in calls] == [100, 200, 400]
+    assert trace[0]["outcome"] == "failed"
+    assert trace[0]["repairAttempts"] == 0
+    assert trace[0]["tokenBudgets"] == [100, 200, 400]
+
+
+def test_openai_chat_doubles_budget_after_incomplete_json_provider_abort():
+    async def run():
+        adapter, completions = await chat_adapter([
+            RuntimeError(
+                "Model output became abnormal; partial output may be incomplete or invalid JSON"
+            ),
+            '{"value":"ok"}',
+        ])
+        answer = await adapter._parse(
+            StructuredAnswer,
+            "Return JSON.",
+            {"question": "test"},
+            100,
+        )
+        return answer, completions.calls, adapter.structured_trace()
+
+    answer, calls, trace = asyncio.run(run())
+
+    assert answer.value == "ok"
+    assert [item["max_tokens"] for item in calls] == [100, 200]
+    assert trace[0]["tokenBudgets"] == [100, 200]
+    assert trace[0]["repairAttempts"] == 0
+
+
+def test_regeneration_with_prior_questions_uses_full_lesson_contract():
+    async def run():
+        adapter, _completions = await chat_adapter([])
+        adapter.capabilities = ProviderCapabilities(
+            protocol="openai",
+            api_mode="chat_completions",
+            structured_output=True,
+            streaming=True,
+            reasoning_mode="required",
+        )
+        calls = []
+        prior = [
+            {
+                "prompt": f"旧题 {index}",
+                "options": ["A", "B", "C"],
+                "correct": [0],
+                "core": index == 0,
+                "objective": f"目标 {index}",
+                "explanation": "旧解释",
+                "difficulty": "standard",
+            }
+            for index in range(4)
+        ]
+
+        async def fake_parse(schema, prompt, payload, tokens):
+            calls.append((schema, prompt, payload, tokens))
+            if schema is GeneratedContent:
+                return GeneratedContent.model_validate({
+                    "confidence": "high",
+                    "sources": [{
+                        "title": "官方来源",
+                        "url": "https://example.com/reference",
+                        "kind": "official",
+                        "version": "2026-08-02",
+                    }],
+                    "blocks": [
+                        {
+                            "kind": "text",
+                            "role": role,
+                            "heading": f"标题 {index}",
+                            "content": f"正文 {index}",
+                            "source_indexes": [0],
+                        }
+                        for index, role in enumerate(
+                            ["conclusion", "mechanism", "example", "boundary", "practice"],
+                            1,
+                        )
+                    ],
+                })
+            assert schema is GeneratedQuiz
+            return GeneratedQuiz.model_validate({
+                "questions": [
+                    {
+                        "prompt": f"新题 {index}",
+                        "options": ["A", "B", "C"],
+                        "correct": [1],
+                        "core": False,
+                        "objective": f"会被旧目标覆盖 {index}",
+                        "explanation": "新解释",
+                        "difficulty": "standard",
+                    }
+                    for index in range(4)
+                ]
+            })
+
+        adapter._parse = fake_parse
+        lesson = await adapter.lesson(
+            {"id": "section_test", "rejectedSourceUrls": []},
+            [],
+            prior,
+        )
+        return lesson, calls, prior
+
+    lesson, calls, prior = asyncio.run(run())
+
+    assert calls[0][0] is GeneratedContent
+    assert calls[0][3] == 12000
+    assert calls[1][3] == 3600
+    assert "数量必须与 prior_questions 完全一致" in calls[1][1]
+    assert len(lesson.blocks) == 5
+    assert [item.objective for item in lesson.questions] == [
+        item["objective"] for item in prior
+    ]
+
+
+def test_source_repair_uses_indexed_patch_and_preserves_other_blocks():
+    async def run():
+        adapter, _completions = await chat_adapter([])
+        adapter.capabilities = ProviderCapabilities(
+            protocol="openai",
+            api_mode="chat_completions",
+            structured_output=True,
+            streaming=True,
+            reasoning_mode="required",
+        )
+        content = GeneratedContent.model_validate({
+            "confidence": "high",
+            "sources": [
+                {"title": "A", "url": "https://example.com/a", "kind": "official", "version": "1"},
+                {"title": "B", "url": "https://example.com/b", "kind": "official", "version": "1"},
+            ],
+            "blocks": [
+                {
+                    "kind": "text",
+                    "role": role,
+                    "heading": f"标题 {index}",
+                    "content": f"正文 {index}",
+                    "source_indexes": [index % 2],
+                }
+                for index, role in enumerate(
+                    ["conclusion", "mechanism", "example", "boundary", "practice"]
+                )
+            ],
+        })
+        calls = []
+
+        async def fake_parse(schema, prompt, payload, tokens):
+            calls.append((schema, prompt, payload, tokens))
+            return GeneratedSourceRepair.model_validate({
+                "replacements": [{
+                    "source_index": 1,
+                    "source": {
+                        "title": "B2",
+                        "url": "https://replacement.example.org/b2",
+                        "kind": "official",
+                        "version": "2",
+                    },
+                    "blocks": [{
+                        "block_index": 1,
+                        "heading": "修正标题",
+                        "content": "修正正文",
+                    }],
+                }],
+            })
+
+        adapter._parse = fake_parse
+        repaired = await adapter.repair_lesson_sources(
+            {
+                "rejectedSourceUrls": ["https://example.com/b"],
+                "rejectedSourceHosts": ["example.com"],
+            },
+            [],
+            content,
+            [{"url": "https://example.com/b", "statusCode": 404}],
+        )
+        return content, repaired, calls
+
+    original, repaired, calls = asyncio.run(run())
+
+    assert calls[0][0] is GeneratedSourceRepair
+    assert calls[0][2]["failed_source_indexes"] == [1]
+    assert calls[0][2]["allowed_block_indexes"] == {1: [1, 3]}
+    assert repaired.sources[0] == original.sources[0]
+    assert repaired.sources[1].url == "https://replacement.example.org/b2"
+    assert repaired.blocks[0] == original.blocks[0]
+    assert repaired.blocks[1].content == "修正正文"
+    assert repaired.blocks[3] == original.blocks[3]
+
+
+def test_source_repair_rejects_a_new_path_on_a_failed_host():
+    async def run():
+        adapter, _ = await chat_adapter([])
+        content = GeneratedContent.model_validate({
+            "confidence": "high",
+            "sources": [{
+                "title": "Old",
+                "url": "https://docs.example.com/2023/missing",
+                "kind": "official",
+                "version": "2023",
+            }],
+            "blocks": [{
+                "kind": "text",
+                "role": role,
+                "heading": role,
+                "content": role,
+                "source_indexes": [0],
+            } for role in ["conclusion", "mechanism", "example", "boundary", "practice"]],
+        })
+
+        async def fake_parse(schema, prompt, payload, tokens):
+            return GeneratedSourceRepair.model_validate({
+                "replacements": [{
+                    "source_index": 0,
+                    "source": {
+                        "title": "Guessed",
+                        "url": "https://docs.example.com/2024/missing",
+                        "kind": "official",
+                        "version": "2024",
+                    },
+                    "blocks": [],
+                }],
+            })
+
+        adapter._parse = fake_parse
+        with pytest.raises(AiError) as raised:
+            await adapter.repair_lesson_sources(
+                {
+                    "rejectedSourceUrls": ["https://docs.example.com/2023/missing"],
+                    "rejectedSourceHosts": ["docs.example.com"],
+                },
+                [],
+                content,
+                [{"url": "https://docs.example.com/2023/missing", "statusCode": 404}],
+            )
+        return raised.value
+
+    error = asyncio.run(run())
+    assert error.code == "SOURCE_REPAIR_SCOPE_VIOLATION"
 
 
 def test_openai_chat_fails_closed_after_repair_budget_is_exhausted():

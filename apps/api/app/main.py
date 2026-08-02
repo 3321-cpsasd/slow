@@ -871,6 +871,10 @@ def create_app(
     @app.post("/api/sections/{section_id}/generate")
     async def generate_section(section_id: str, s: SlowService = Depends(service)): return await s.generate_section(section_id)
 
+    @app.post("/api/sections/{section_id}/regenerate")
+    async def regenerate_section(section_id: str, s: SlowService = Depends(service)):
+        return await s.generate_section(section_id, regenerate=True)
+
     @app.post("/api/sections/{section_id}/quiz")
     async def quiz(
         request: Request,

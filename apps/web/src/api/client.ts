@@ -159,6 +159,7 @@ export const api = {
   chapter:(id:string)=>call<import('../model/types').Chapter>(`/api/chapters/${id}/generate`,{method:'POST'}),
   section:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}`),
   generateSection:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}/generate`,{method:'POST'}),
+  regenerateSection:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}/regenerate`,{method:'POST'}),
   quiz:(id:string,quizSetId:string,answers:number[][],idempotencyKey:string)=>call<import('../model/types').QuizResult>(`/api/sections/${id}/quiz`,{
     method:'POST',
     headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},

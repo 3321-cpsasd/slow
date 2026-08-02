@@ -10,7 +10,8 @@ import pytest
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, event, select
-from app.ai.contracts import AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedChapter, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedSectionOutline, PlanBook, PlanChapter, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
+from app.ai.contracts import AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedChapter, GeneratedContent, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedQuiz, GeneratedSectionOutline, PlanBook, PlanChapter, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
+from app.application.service import apply_source_repair_scope
 from app.main import create_app
 from app.core.errors import AiError
 from app.evaluation.runner import (
@@ -24,11 +25,14 @@ from app.services.source_verifier import AcceptingSourceVerifier
 from app.infrastructure.tables import (
     Book,
     ChapterRevision,
+    ContentVersion,
+    GenerationRun,
     LearningEvidence,
     LearningTask,
     LearningPlan,
     LearningRun,
     QuizAttempt,
+    QuizSet,
     Section,
     SectionProgress,
     Series,
@@ -56,6 +60,40 @@ class FakeAi:
         return AskMeTurn(dimension=dimension, prompt=f"请说明 {dimension}", evaluation="not_evaluated" if not request.get("previousAnswer") else "strong", rationale="回答覆盖关键点")
     async def replan_book(self, request, memory):
         return ReplannedBook(rationale="根据学习记忆减少重复", chapters=[ReplannedChapter(title="重规划章节", objective="验证迁移")])
+
+
+class StagedFakeAi(FakeAi):
+    staged_lesson_generation = True
+
+    def __init__(self, events):
+        self.events = events
+
+    async def lesson_content(self, request, memory, prior_questions=None):
+        self.events.append("content")
+        lesson = await super().lesson(request, memory, prior_questions)
+        return GeneratedContent(
+            confidence=lesson.confidence,
+            sources=lesson.sources,
+            blocks=lesson.blocks,
+        )
+
+    async def repair_lesson_sources(self, request, memory, content, failed_sources, prior_questions=None):
+        self.events.append("repair")
+        return content
+
+    async def lesson_quiz(self, request, content, prior_questions=None):
+        self.events.append("quiz")
+        lesson = await super().lesson(request, [], prior_questions)
+        return GeneratedQuiz(questions=lesson.questions)
+
+
+class RecordingVerifier(AcceptingSourceVerifier):
+    def __init__(self, events):
+        self.events = events
+
+    async def verify(self, sources):
+        self.events.append("verify")
+        return await super().verify(sources)
 
 
 @pytest.fixture
@@ -98,9 +136,10 @@ def test_complete_real_shape_vertical_slice(client):
         {
             "url": "https://kubernetes.io/docs/",
             "reachable": True,
-            "statusCode": 200,
-            "pinned": True,
-        }
+                "statusCode": 200,
+                "pinned": True,
+                "verificationStatus": "verified",
+            }
     ]
     stale = client.post(f"/api/sections/{section_id}/quiz", json={"quizSetId":quiz_id,"answers":[[1],[1],[1],[1],[1]]})
     assert stale.status_code == 409 and stale.json()["code"] == "QUIZ_STALE"
@@ -119,6 +158,58 @@ def test_complete_real_shape_vertical_slice(client):
     ).json()
     assert next_section["content"] is not None
     assert client.get("/api/learning-memory?shelf_id=shelf_technology").json()
+
+
+def test_staged_generation_verifies_sources_before_generating_quiz(tmp_path):
+    events = []
+    app = create_app(
+        "sqlite+pysqlite:///:memory:",
+        StagedFakeAi(events),
+        RecordingVerifier(events),
+        LocalAttachmentStorage(tmp_path / "attachments"),
+    )
+    with TestClient(app) as staged_client:
+        plan = staged_client.post("/api/plans", json={
+            "shelfId": "shelf_technology",
+            "topic": "Staged generation",
+            "role": "技术人员",
+            "experience": "会 Docker",
+            "purpose": "验证调用顺序",
+            "depth": "deep",
+        }).json()
+        chapter_id = plan["books"][0]["chapters"][0]["id"]
+        chapter = staged_client.post(f"/api/chapters/{chapter_id}/generate").json()
+        section_id = chapter["sections"][0]["id"]
+        response = staged_client.post(f"/api/sections/{section_id}/generate")
+
+    assert response.status_code == 200
+    assert events[-3:] == ["content", "verify", "quiz"]
+
+
+def test_source_repair_scope_discards_unaffected_block_rewrite():
+    source_a = Source(title="A", url="https://example.com/a", kind="official", version="1")
+    source_b = Source(title="B", url="https://example.com/b", kind="official", version="1")
+    before = GeneratedContent(
+        confidence="high",
+        sources=[source_a, source_b],
+        blocks=[
+            ContentBlock(kind="text", role=role, heading=role, content=f"原文 {index}", source_indexes=[index % 2])
+            for index, role in enumerate(["conclusion", "mechanism", "example", "boundary", "practice"])
+        ],
+    )
+    after = before.model_copy(deep=True)
+    after.sources[1] = Source(title="B2", url="https://example.com/b2", kind="official", version="2")
+    after.blocks[0].content = "不应被来源修复改写"
+
+    merged = apply_source_repair_scope(
+        before,
+        after,
+        [{"url": "https://example.com/b"}],
+    )
+
+    assert merged.sources[0] == before.sources[0]
+    assert merged.sources[1] == after.sources[1]
+    assert merged.blocks[0] == before.blocks[0]
 
 
 def test_semantic_evidence_scopes_remediation_generation_to_remediation():
@@ -1077,6 +1168,102 @@ def test_generation_failure_is_observable_and_retry_safe():
             state["generation"]["trace"]["aiHarness"][0]["outcome"]
             == "provider_failed"
         )
+
+
+def test_section_regeneration_appends_versions_and_preserves_audit(client):
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    original = client.post(
+        f"/api/sections/{chapter['sections'][0]['id']}/generate"
+    ).json()
+
+    regenerated = client.post(
+        f"/api/sections/{original['id']}/regenerate"
+    )
+
+    assert regenerated.status_code == 200
+    replacement = regenerated.json()
+    assert replacement["content"]["version"] == 2
+    assert replacement["content"]["id"] != original["content"]["id"]
+    assert replacement["quiz"]["generation"] == 2
+    assert replacement["quiz"]["id"] != original["quiz"]["id"]
+    assert replacement["generation"]["operation"] == "regeneration"
+    assert replacement["generation"]["trace"]["supersedesContentVersionId"] == original["content"]["id"]
+    assert replacement["generation"]["trace"]["supersedesQuizSetId"] == original["quiz"]["id"]
+
+    with client.app.state.sessions() as db:
+        versions = db.scalars(
+            select(ContentVersion)
+            .where(ContentVersion.section_id == original["id"])
+            .order_by(ContentVersion.version)
+        ).all()
+        quizzes = db.scalars(
+            select(QuizSet)
+            .where(QuizSet.section_id == original["id"])
+            .order_by(QuizSet.generation)
+        ).all()
+        runs = db.scalars(
+            select(GenerationRun)
+            .where(GenerationRun.section_id == original["id"])
+            .order_by(GenerationRun.attempt)
+        ).all()
+    assert [item.id for item in versions] == [original["content"]["id"], replacement["content"]["id"]]
+    assert [item.id for item in quizzes] == [original["quiz"]["id"], replacement["quiz"]["id"]]
+    assert [item.operation for item in runs] == ["lesson", "regeneration"]
+
+    stale = client.post(
+        f"/api/sections/{original['id']}/quiz",
+        json={
+            "quizSetId": original["quiz"]["id"],
+            "answers": [[1] for _ in original["quiz"]["questions"]],
+        },
+    )
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "QUIZ_STALE"
+
+    assessed = client.post(
+        f"/api/sections/{original['id']}/quiz",
+        json={
+            "quizSetId": replacement["quiz"]["id"],
+            "answers": [[1] for _ in replacement["quiz"]["questions"]],
+        },
+    )
+    assert assessed.status_code == 200
+    blocked = client.post(f"/api/sections/{original['id']}/regenerate")
+    assert blocked.status_code == 409
+    assert blocked.json()["code"] == "SECTION_ALREADY_ASSESSED"
+
+
+class GenerationArtifactAi(FakeAi):
+    async def lesson(self, request, memory, prior_questions=None):
+        lesson = await super().lesson(request, memory, prior_questions)
+        lesson.blocks[0].content = "候选 JSON 为空字符串，无法恢复原有事实内容。"
+        return lesson
+
+
+def test_generation_artifact_is_rejected_before_persistence():
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            GenerationArtifactAi(),
+            AcceptingSourceVerifier(),
+        ),
+        raise_server_exceptions=False,
+    ) as artifact_client:
+        series = create_series(artifact_client)
+        chapter = artifact_client.post(
+            f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+        ).json()
+        section_id = chapter["sections"][0]["id"]
+        response = artifact_client.post(f"/api/sections/{section_id}/generate")
+
+        assert response.status_code == 502
+        assert response.json()["code"] == "AI_CONTENT_QUALITY_FAILED"
+        state = artifact_client.get(f"/api/sections/{section_id}").json()
+        assert state["content"] is None
+        assert state["generation"]["errorCode"] == "AI_CONTENT_QUALITY_FAILED"
 
 
 class DuplicateRetryAi(FakeAi):
