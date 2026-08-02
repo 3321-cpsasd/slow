@@ -28,7 +28,7 @@ from .core.config import settings
 from .core.errors import AppError
 from .demo_personas import LOCAL_DEMO_PERSONAS
 from .infrastructure.database import build_database
-from .infrastructure.tables import Base, LearningTask, User
+from .infrastructure.tables import Base, LearningTask, QuizAttempt, Remediation, User
 from .modules.learning.tasks import claim_task, heartbeat_task, recoverable_task_ids
 from .services.source_verifier import AcceptingSourceVerifier, HttpSourceVerifier
 from .services.attachment_storage import LocalAttachmentStorage
@@ -806,6 +806,52 @@ def create_app(
         if request.app.state.runtime_verifier_managed:
             request.app.state.source_verifier = HttpSourceVerifier() if candidate.configured else AcceptingSourceVerifier()
         return runtime_status(request)
+
+    @app.post("/api/runtime/remediations/{remediation_id}/regenerate")
+    async def regenerate_runtime_remediation(
+        remediation_id: str,
+        request: Request,
+        session: Session = Depends(db),
+    ):
+        require_local_runtime_access(request)
+        remediation = session.get(Remediation, remediation_id)
+        if not remediation:
+            raise AppError(
+                "补救内容不存在",
+                code="REMEDIATION_NOT_FOUND",
+                status=404,
+            )
+        attempt = session.get(QuizAttempt, remediation.attempt_id)
+        if not attempt:
+            raise AppError(
+                "补救内容对应的答题记录不存在",
+                code="REMEDIATION_ATTEMPT_NOT_FOUND",
+                status=409,
+            )
+        user_scope = UserScope(
+            Principal(
+                actor_kind="user",
+                actor_id=attempt.user_id,
+                subject_user_id=attempt.user_id,
+                session_id=None,
+            )
+        )
+        maintenance_service = SlowService(
+            session,
+            request.app.state.ai,
+            request.app.state.source_verifier,
+            request.app.state.attachment_storage,
+            scope=user_scope,
+        )
+        with request.app.state.ai_usage_recorder.attributed(
+            user_scope.principal
+        ):
+            return await maintenance_service.generate_section(
+                remediation.section_id,
+                retry=True,
+                retry_attempt_id=remediation.attempt_id,
+                supersede_remediation_id=remediation.id,
+            )
 
     @app.get("/api/bootstrap")
     def bootstrap(s: SlowService = Depends(service)): return s.bootstrap()

@@ -83,7 +83,17 @@ class LocalDemoAdapter:
         source = Source(title="Python 官方教程（本地流程示例引用）", url="https://docs.python.org/3/tutorial/", kind="official", version="3.12")
         roles = ["conclusion", "mechanism", "example", "boundary", "practice"]
         blocks = [
-            ContentBlock(kind="text", role=role, heading=f"{role}：{request['title']}", content=f"这是 {request['title']} 的{role}演示内容。请结合本节问题验证理解。", source_indexes=[0])
+            ContentBlock(
+                kind="text",
+                role=role,
+                heading=f"{role}：{request['title']}",
+                content=(
+                    f"这是 {request['title']} 的{role}演示内容。它会先说明本节概念与问题之间的关系，"
+                    "再用一个可观察的例子解释判断依据，并指出容易混淆的边界。"
+                    "学习者可以据此复述机制、检查反例，并通过后续选择题验证自己是否真正理解。"
+                ),
+                source_indexes=[0],
+            )
             for role in roles
         ]
         schema = (

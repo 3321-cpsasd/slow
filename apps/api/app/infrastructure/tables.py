@@ -416,8 +416,11 @@ class Remediation(Base):
     __tablename__ = "remediations"
     id: Mapped[str] = mapped_column(String, primary_key=True)
     section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
-    attempt_id: Mapped[str] = mapped_column(ForeignKey("quiz_attempts.id"), unique=True)
+    attempt_id: Mapped[str] = mapped_column(ForeignKey("quiz_attempts.id"), index=True)
     replacement_quiz_id: Mapped[str] = mapped_column(ForeignKey("quiz_sets.id"), unique=True)
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("remediations.id"), nullable=True, unique=True
+    )
     blocks_json: Mapped[str] = mapped_column(Text)
     objectives_json: Mapped[str] = mapped_column(Text)
     strategy: Mapped[str] = mapped_column(String(40))

@@ -113,6 +113,31 @@ class GeneratedLesson(GeneratedContent):
 class GeneratedRemediationContent(GeneratedContent):
     blocks: list[ContentBlock] = Field(min_length=1, max_length=5)
 
+    @model_validator(mode="after")
+    def valid_remediation_completeness(self):
+        sentence_endings = tuple("。！？.!?；;：:）)]】」』”’\"'|")
+        for block in self.blocks:
+            heading = block.heading.strip()
+            content = block.content.strip()
+            if len(heading) < 4:
+                raise ValueError("remediation block heading is too short")
+            table_rows = [
+                line.strip()
+                for line in content.splitlines()
+                if line.strip().startswith("|")
+            ]
+            if any(not line.endswith("|") for line in table_rows):
+                raise ValueError("remediation markdown table is incomplete")
+            if len(content) < 80:
+                raise ValueError("remediation block content is too short")
+            if content == heading:
+                raise ValueError("remediation block repeats its heading")
+            if block.kind not in {"code", "formula"} and not content.endswith(
+                sentence_endings
+            ):
+                raise ValueError("remediation block ends mid-sentence")
+        return self
+
 
 class GeneratedRemediationLesson(GeneratedRemediationContent):
     questions: list[ChoiceQuestion] = Field(min_length=4, max_length=5)

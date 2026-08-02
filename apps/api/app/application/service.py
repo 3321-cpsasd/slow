@@ -895,6 +895,7 @@ class SlowService:
         retry=False,
         retry_attempt_id=None,
         regenerate=False,
+        supersede_remediation_id=None,
     ):
         resource_key = f"section:{section_id}"
         owner_id = acquire_generation_lease(self.db, resource_key)
@@ -916,6 +917,7 @@ class SlowService:
                 retry=retry,
                 retry_attempt_id=retry_attempt_id,
                 regenerate=regenerate,
+                supersede_remediation_id=supersede_remediation_id,
                 resource_key=resource_key,
                 owner_id=owner_id,
             )
@@ -928,6 +930,7 @@ class SlowService:
         retry=False,
         retry_attempt_id=None,
         regenerate=False,
+        supersede_remediation_id=None,
         resource_key=None,
         owner_id=None,
     ):
@@ -936,6 +939,38 @@ class SlowService:
             section_id=section_id,
         )
         section = section_context.section
+        superseded_remediation = None
+        if supersede_remediation_id:
+            if not retry or not retry_attempt_id:
+                raise AppError(
+                    "补救内容再生成必须绑定原补救记录和答题记录",
+                    code="REMEDIATION_REGENERATION_SCOPE_INVALID",
+                    status=400,
+                )
+            superseded_remediation = self.db.get(
+                Remediation,
+                supersede_remediation_id,
+            )
+            if (
+                not superseded_remediation
+                or superseded_remediation.section_id != section.id
+                or superseded_remediation.attempt_id != retry_attempt_id
+            ):
+                raise AppError(
+                    "原补救记录不属于当前小节或答题",
+                    code="REMEDIATION_REGENERATION_SCOPE_INVALID",
+                    status=409,
+                )
+            if self.db.scalar(
+                select(Remediation).where(
+                    Remediation.supersedes_id == superseded_remediation.id
+                )
+            ):
+                raise AppError(
+                    "该补救内容已有更新版本",
+                    code="REMEDIATION_ALREADY_SUPERSEDED",
+                    status=409,
+                )
         if self.progress.for_section(
             section,
             section_context.chapter,
@@ -978,6 +1013,11 @@ class SlowService:
         attempt = (self.db.scalar(select(func.max(GenerationRun.attempt)).where(GenerationRun.section_id == section.id)) or 0) + 1
         regeneration_trace = {
             "regenerate": regenerate,
+            **(
+                {"supersedesRemediationId": superseded_remediation.id}
+                if superseded_remediation
+                else {}
+            ),
             **(
                 {
                     "supersedesContentVersionId": existing.id,
@@ -1047,8 +1087,26 @@ class SlowService:
                 else []
             )
             book = self._book_for_section(section)
-            remediation_count = self.db.scalar(select(func.count()).select_from(Remediation).where(Remediation.section_id == section.id)) if retry else 0
-            remediation_strategy = ["paragraph_locator", "alternative_explanation", "prerequisite_supplement"][min(remediation_count, 2)] if retry else None
+            remediation_count = (
+                self.db.scalar(
+                    select(func.count(func.distinct(Remediation.attempt_id)))
+                    .select_from(Remediation)
+                    .where(Remediation.section_id == section.id)
+                )
+                if retry
+                else 0
+            )
+            remediation_strategy = (
+                superseded_remediation.strategy
+                if superseded_remediation
+                else [
+                    "paragraph_locator",
+                    "alternative_explanation",
+                    "prerequisite_supplement",
+                ][min(remediation_count, 2)]
+                if retry
+                else None
+            )
             memory = self._memory(book.shelf_id)
             memory_trace = {
                 "memoryApplied": bool(memory),
@@ -1293,6 +1351,11 @@ class SlowService:
                         section_id=section.id,
                         attempt_id=retry_attempt_id,
                         replacement_quiz_id=quiz.id,
+                        supersedes_id=(
+                            superseded_remediation.id
+                            if superseded_remediation
+                            else None
+                        ),
                         blocks_json=dump(remediation_blocks),
                         objectives_json=dump(failed_objectives),
                         strategy=remediation_strategy,
@@ -1402,7 +1465,7 @@ class SlowService:
             )
         )
         run = self.db.scalar(select(GenerationRun).where(GenerationRun.section_id == section.id).order_by(GenerationRun.started_at.desc()))
-        remediations = self.db.scalars(
+        remediation_revisions = self.db.scalars(
             select(Remediation)
             .join(QuizAttempt, QuizAttempt.id == Remediation.attempt_id)
             .where(
@@ -1411,6 +1474,10 @@ class SlowService:
             )
             .order_by(Remediation.created_at)
         ).all()
+        latest_remediation_by_attempt = {
+            item.attempt_id: item for item in remediation_revisions
+        }
+        remediations = list(latest_remediation_by_attempt.values())
         remediation_runs = self.db.scalars(
             select(GenerationRun)
             .where(
@@ -1663,6 +1730,7 @@ class SlowService:
                         QuizAttempt.learning_run_id == task.learning_run_id,
                         QuizAttempt.user_id == task.user_id,
                     )
+                    .order_by(Remediation.created_at.desc())
                 )
                 if existing_remediation:
                     result = {

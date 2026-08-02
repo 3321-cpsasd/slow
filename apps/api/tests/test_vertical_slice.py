@@ -34,6 +34,7 @@ from app.infrastructure.tables import (
     LearningRun,
     QuizAttempt,
     QuizSet,
+    Remediation,
     Section,
     SectionProgress,
     Series,
@@ -48,9 +49,12 @@ class FakeAi:
     async def chapter(self, request, memory):
         return GeneratedChapter(sections=[GeneratedSectionOutline(title=f"第{i}节", question=f"问题{i}", objectives=[f"目标{i}"]) for i in range(1,4)])
     async def lesson(self, request, memory, prior_questions=None):
-        generation = 2 if prior_questions else 1
+        generation = 1
+        if prior_questions:
+            previous_prefix = prior_questions[0]["prompt"].split("套", 1)[0]
+            generation = int(previous_prefix.removeprefix("第")) + 1
         roles = ["conclusion","mechanism","example","boundary","practice"]
-        return GeneratedLesson(confidence="high", sources=[Source(title="Kubernetes Docs", url="https://kubernetes.io/docs/", kind="official", version="v1.30")], blocks=[ContentBlock(kind="text", role=role, heading=role, content=f"{role} 内容", source_indexes=[0]) for role in roles], questions=[ChoiceQuestion(prompt=f"第{generation}套题{i}", options=[f"A{generation}",f"B{generation}",f"C{generation}"], correct=[1], core=i==0, objective=f"目标{i}", explanation=f"因为 B{generation}") for i in range(5)])
+        return GeneratedLesson(confidence="high", sources=[Source(title="Kubernetes Docs", url="https://kubernetes.io/docs/", kind="official", version="v1.30")], blocks=[ContentBlock(kind="text", role=role, heading=f"{role} 完整说明", content=f"{role} 内容用于解释当前目标的核心机制、观察依据和适用边界。学习者需要把对象之间的关系说清楚，并能用一个反例检查结论是否仍然成立。完成阅读后，再通过选择题验证自己是否真正掌握这一判断方法。", source_indexes=[0]) for role in roles], questions=[ChoiceQuestion(prompt=f"第{generation}套题{i}", options=[f"A{generation}",f"B{generation}",f"C{generation}"], correct=[1], core=i==0, objective=f"目标{i}", explanation=f"因为 B{generation}") for i in range(5)])
     async def answer(self, request):
         requested = request.get("requestedThreadId")
         return ClassifiedAnswer(relation="follow_up" if requested else "new_question", thread_id=request.get("newThreadId") or requested, answer="基于当前段落回答", thread_summary="已澄清机制")
@@ -781,6 +785,47 @@ def test_remediation_task_recovery_reuses_already_persisted_result(client):
     refreshed = client.get(f"/api/sections/{section_id}").json()
     assert len(refreshed["remediations"]) == 1
     assert refreshed["quiz"]["generation"] == 2
+
+
+def test_local_maintenance_regenerates_remediation_as_a_new_revision(client):
+    series = create_series(client)
+    initialization = wait_for_task(
+        client,
+        series["initializationTask"]["taskId"],
+    )
+    section_id = initialization["result"]["targetSectionId"]
+    section = client.get(f"/api/sections/{section_id}").json()
+    failed = client.post(
+        f"/api/sections/{section_id}/quiz",
+        json={
+            "quizSetId": section["quiz"]["id"],
+            "answers": [[0] for _ in section["quiz"]["questions"]],
+        },
+    ).json()
+    remediation_task = next(
+        task
+        for task in failed["workflowTasks"]
+        if task["type"] == "remediation_generation"
+    )
+    assert wait_for_task(client, remediation_task["taskId"])["status"] == "succeeded"
+    first = client.get(f"/api/sections/{section_id}").json()["remediations"][0]
+
+    regenerated = client.post(
+        f"/api/runtime/remediations/{first['id']}/regenerate"
+    )
+
+    assert regenerated.status_code == 200
+    view = regenerated.json()
+    assert len(view["remediations"]) == 1
+    current = view["remediations"][0]
+    assert current["id"] != first["id"]
+    assert current["attemptId"] == first["attemptId"]
+    assert view["quiz"]["generation"] == 3
+    with client.app.state.sessions() as db:
+        old = db.get(Remediation, first["id"])
+        new = db.get(Remediation, current["id"])
+        assert old is not None
+        assert new.supersedes_id == old.id
 
 
 def test_quiz_response_does_not_wait_for_post_quiz_ai(tmp_path):

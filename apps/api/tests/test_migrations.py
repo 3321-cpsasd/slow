@@ -11,7 +11,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0023_correct_demo_persona"
+HEAD_REVISION = "0024_version_remediations"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -86,6 +86,13 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
             row[1]: row
             for row in connection.execute("PRAGMA table_info(local_credentials)")
         }
+        remediation_columns = {
+            row[1]: row
+            for row in connection.execute("PRAGMA table_info(remediations)")
+        }
+        remediation_indexes = list(
+            connection.execute("PRAGMA index_list(remediations)")
+        )
 
     assert revision == HEAD_REVISION
     assert "uq_quiz_attempts_run_user_idempotency" in attempt_schema
@@ -118,6 +125,11 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
         "failed_attempts",
         "locked_until",
     }.issubset(local_credential_columns)
+    assert "supersedes_id" in remediation_columns
+    assert any(
+        row[1] == "ix_remediations_attempt_id" and row[2] == 0
+        for row in remediation_indexes
+    )
 
 
 def test_generation_lease_migration_accepts_orm_precreated_table(tmp_path):

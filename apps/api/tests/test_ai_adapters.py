@@ -4,11 +4,16 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import select
 
 from app.ai.anthropic_adapter import AnthropicAdapter
-from app.ai.contracts import GeneratedContent, GeneratedQuiz, GeneratedSourceRepair
+from app.ai.contracts import (
+    GeneratedContent,
+    GeneratedQuiz,
+    GeneratedRemediationContent,
+    GeneratedSourceRepair,
+)
 from app.ai.metering import AiUsageRecorder
 from app.ai.openai_adapter import OpenAiAdapter
 from app.ai.port import ProviderCapabilities
@@ -166,6 +171,107 @@ def test_openai_chat_doubles_budget_after_incomplete_json_provider_abort():
     assert [item["max_tokens"] for item in calls] == [100, 200]
     assert trace[0]["tokenBudgets"] == [100, 200]
     assert trace[0]["repairAttempts"] == 0
+
+
+def test_openai_chat_repairs_semantically_incomplete_remediation():
+    bad = json.dumps(
+        {
+            "confidence": "high",
+            "sources": [
+                {
+                    "title": "官方来源",
+                    "url": "https://example.com/reference",
+                    "kind": "official",
+                    "version": "2026-08-03",
+                }
+            ],
+            "blocks": [
+                {
+                    "kind": "text",
+                    "role": "mechanism",
+                    "heading": "换个角度理解三要素",
+                    "content": "把信息可视化想象成一次",
+                    "source_indexes": [0],
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+    good_content = (
+        "把信息可视化想象成一次有目的的翻译：原始数据是待翻译的事实，视觉编码是把属性转换为位置、长度和颜色的规则，"
+        "认知目标则规定读者最终要比较、发现或判断什么。三者必须形成闭环；缺少数据便没有内容，缺少编码便无法观察，"
+        "缺少认知目标则只剩装饰。用同一份销售记录分别支持趋势判断和门店比较时，编码选择也会随目标改变。"
+    )
+    good = json.dumps(
+        {
+            "confidence": "high",
+            "sources": [
+                {
+                    "title": "官方来源",
+                    "url": "https://example.com/reference",
+                    "kind": "official",
+                    "version": "2026-08-03",
+                }
+            ],
+            "blocks": [
+                {
+                    "kind": "text",
+                    "role": "mechanism",
+                    "heading": "换个角度理解三要素",
+                    "content": good_content,
+                    "source_indexes": [0],
+                }
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+    async def run():
+        adapter, completions = await chat_adapter([bad, good])
+        answer = await adapter._parse(
+            GeneratedRemediationContent,
+            "生成完整补救内容。",
+            {"section": "test"},
+            2600,
+        )
+        return answer, completions.calls, adapter.structured_trace()
+
+    answer, calls, trace = asyncio.run(run())
+
+    assert answer.blocks[0].content == good_content
+    assert [item["max_tokens"] for item in calls] == [2600, 5200]
+    assert "JSON 结构修复器" in calls[1]["messages"][0]["content"]
+    assert trace[0]["repairAttempts"] == 1
+    assert trace[0]["tokenBudgets"] == [2600, 5200]
+
+
+def test_remediation_rejects_an_incomplete_markdown_table():
+    with pytest.raises(ValidationError, match="markdown table is incomplete"):
+        GeneratedRemediationContent.model_validate(
+            {
+                "confidence": "high",
+                "sources": [
+                    {
+                        "title": "官方来源",
+                        "url": "https://example.com/reference",
+                        "kind": "official",
+                        "version": "2026-08-03",
+                    }
+                ],
+                "blocks": [
+                    {
+                        "kind": "table",
+                        "role": "practice",
+                        "heading": "三要素速查对照表",
+                        "content": (
+                            "| 要素 | 检查问题 |\n|---|---|\n"
+                            "| 抽象数据 | 这份数据在现实中有没有对应事实，是否足以支持当前判断目标"
+                        ),
+                        "source_indexes": [0],
+                    }
+                ],
+            }
+        )
 
 
 def test_regeneration_with_prior_questions_uses_full_lesson_contract():

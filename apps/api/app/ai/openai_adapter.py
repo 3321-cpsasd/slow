@@ -525,7 +525,7 @@ class OpenAiAdapter:
         # selects the compact remediation content contract.
         retry, content_schema, _lesson_schema = self._lesson_contract(request)
         controlled_thinking = self.capabilities.reasoning_mode == "required"
-        content_prompt = """你是严格的补救教学作者。只针对 remediationStrategy 和旧题暴露的知识缺口，生成 1-3 个紧凑补充块及来源，不重写完整正文，不生成题目。paragraph_locator 要定位原机制并澄清；alternative_explanation 要换角度解释；prerequisite_supplement 要补必要前置。优先只引用版本明确的官方文档，避免源码引用；若确实必须引用源码，kind 必须为 source_code，URL 必须是 GitHub /blob/<不可变 tag 或 commit>/ 文件地址，version 必须与 URL 中 ref 完全一致。绝不能再次使用 section.rejectedSourceUrls 中已被服务端判定不可达的地址。中文输出。""" if retry else """你是严格的技术教材作者。生成一个可验证小节的正文与来源，不生成题目。只用 5 个紧凑内容块，依次覆盖核心结论、机制、贴合角色的例子、边界或反例、实践连接。内容块保持纯文本和短代码，避免嵌套 JSON。关键事实给出可追溯官方来源；只有具体讨论开源实现时才引用绑定 tag/commit 的 GitHub blob URL。绝不能再次使用 section.rejectedSourceUrls 中已被服务端判定不可达的地址；如果无法确认某个深层文档链接，改用可达的官方索引页或不可变源码链接。不能核实时降低 confidence 并明确不确定性。中文输出。"""
+        content_prompt = """你是严格的补救教学作者。只针对 remediationStrategy 和旧题暴露的知识缺口，生成 1-3 个紧凑补充块及来源，不重写完整正文，不生成题目。每个补充块至少 120 个中文字符，必须表达完整、以完整句子结束，不能只复述标题；若使用 Markdown 表格，必须输出完整表头、分隔行、所有数据行及每行末尾竖线。paragraph_locator 要定位原机制并澄清；alternative_explanation 要换角度解释；prerequisite_supplement 要补必要前置。优先只引用版本明确的官方文档，避免源码引用；若确实必须引用源码，kind 必须为 source_code，URL 必须是 GitHub /blob/<不可变 tag 或 commit>/ 文件地址，version 必须与 URL 中 ref 完全一致。绝不能再次使用 section.rejectedSourceUrls 中已被服务端判定不可达的地址。中文输出。""" if retry else """你是严格的技术教材作者。生成一个可验证小节的正文与来源，不生成题目。只用 5 个紧凑内容块，依次覆盖核心结论、机制、贴合角色的例子、边界或反例、实践连接。内容块保持纯文本和短代码，避免嵌套 JSON。关键事实给出可追溯官方来源；只有具体讨论开源实现时才引用绑定 tag/commit 的 GitHub blob URL。绝不能再次使用 section.rejectedSourceUrls 中已被服务端判定不可达的地址；如果无法确认某个深层文档链接，改用可达的官方索引页或不可变源码链接。不能核实时降低 confidence 并明确不确定性。中文输出。"""
         content_tokens = (
             12000
             if controlled_thinking and not retry
