@@ -2167,7 +2167,8 @@ function Quiz({
         typeof saved.attemptId === 'string' &&
         typeof saved.passed === 'boolean' &&
         Array.isArray(saved.results) &&
-        saved.results.length === (section.quiz?.questions.length || 0)
+        Array.isArray(saved.questions) &&
+        saved.results.length === saved.questions.length
       ) {
         return saved;
       }
@@ -2178,7 +2179,7 @@ function Quiz({
         // The new quiz can still open when browser session storage is unavailable.
       }
     }
-    return null;
+    return section.latestAttemptReview;
   });
   const [submissionError, setSubmissionError] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -2307,7 +2308,12 @@ function Quiz({
       if (!remediation || next.quiz?.id !== remediation.replacementQuizId) {
         throw new Error('补充教学尚未准备完成，请稍后再试。');
       }
-      sessionStorage.removeItem(quizResultStorageKey);
+      try {
+        sessionStorage.removeItem(quizResultStorageKey);
+      } catch {
+        // Opening the replacement quiz does not depend on browser storage.
+      }
+      setResult(null);
       onSectionChange(next);
       onSubmissionComplete();
     } catch (reason) {
@@ -2325,10 +2331,11 @@ function Quiz({
     setReassessing(true);
     try {
       const value = await api.reassessQuiz(section.id, result.attemptId);
-      setResult(value);
+      const reviewValue = {...value, questions: result.questions};
+      setResult(reviewValue);
       setWorkflowTasks(value.workflowTasks);
       try {
-        sessionStorage.setItem(quizResultStorageKey, JSON.stringify(value));
+        sessionStorage.setItem(quizResultStorageKey, JSON.stringify(reviewValue));
       } catch {
         // The promoted result remains available in memory for this render.
       }
@@ -2411,9 +2418,10 @@ function Quiz({
         answers,
         requestId,
       );
-      setResult(value);
+      const reviewValue = {...value, questions: section.quiz.questions};
+      setResult(reviewValue);
       try {
-        sessionStorage.setItem(quizResultStorageKey, JSON.stringify(value));
+        sessionStorage.setItem(quizResultStorageKey, JSON.stringify(reviewValue));
       } catch {
         // The current in-memory review remains available for this render.
       }
@@ -2595,7 +2603,7 @@ function QuizReview({
   onReassess: () => Promise<void>;
   onOpenNextSection: () => Promise<void>;
 }) {
-  const questions = section.quiz?.questions || [];
+  const questions = result.questions || section.quiz?.questions || [];
   const wrongIndexes = result.results
     .map((item, index) => (item.correct ? -1 : index))
     .filter((index) => index >= 0);

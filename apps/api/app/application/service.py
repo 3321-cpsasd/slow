@@ -1436,17 +1436,51 @@ class SlowService:
         ).all()
         verification = self.db.scalar(select(SourceVerification).where(SourceVerification.content_version_id == content.id)) if content else None
         questions = load(quiz.questions_json, []) if quiz else []
-        public = [
-            {
-                **{
-                    key: value
-                    for key, value in question.items()
-                    if key not in {"correct", "explanation"}
-                },
-                "selectionMode": "multiple" if len(set(question.get("correct", []))) > 1 else "single",
-            }
-            for question in questions
-        ]
+        def public_questions(items):
+            return [
+                {
+                    **{
+                        key: value
+                        for key, value in question.items()
+                        if key not in {"correct", "explanation"}
+                    },
+                    "selectionMode": (
+                        "multiple"
+                        if len(set(question.get("correct", []))) > 1
+                        else "single"
+                    ),
+                }
+                for question in items
+            ]
+
+        public = public_questions(questions)
+        latest_attempt = self.db.scalar(
+            select(QuizAttempt)
+            .join(QuizSet, QuizSet.id == QuizAttempt.quiz_set_id)
+            .where(
+                QuizAttempt.learning_run_id == learning_run.id,
+                QuizAttempt.user_id == self.user_id,
+                QuizSet.section_id == section.id,
+            )
+            .order_by(QuizAttempt.created_at.desc())
+        )
+        latest_attempt_results = (
+            load(latest_attempt.results_json, []) if latest_attempt else []
+        )
+        latest_attempt_quiz = (
+            self.db.get(QuizSet, latest_attempt.quiz_set_id)
+            if latest_attempt
+            else None
+        )
+        latest_attempt_tasks = (
+            [
+                task_view(task)
+                for task in workflow_tasks
+                if task.trigger_id == latest_attempt.id
+            ]
+            if latest_attempt
+            else []
+        )
         return {
             **self._section_summary(section),
             "generation": self._generation(run) if run else None,
@@ -1461,6 +1495,30 @@ class SlowService:
             if content
             else None,
             "quiz": {"id": quiz.id, "generation": quiz.generation, "questions": public} if quiz else None,
+            "latestAttemptReview": (
+                {
+                    "attemptId": latest_attempt.id,
+                    "score": sum(
+                        bool(item.get("correct"))
+                        for item in latest_attempt_results
+                    ),
+                    "total": len(latest_attempt_results),
+                    "passed": latest_attempt.passed,
+                    "perfect": bool(latest_attempt_results) and all(
+                        item.get("correct") for item in latest_attempt_results
+                    ),
+                    "results": latest_attempt_results,
+                    "questions": public_questions(
+                        load(latest_attempt_quiz.questions_json, [])
+                    ) if latest_attempt_quiz else [],
+                    "remediation": None,
+                    "nextQuiz": None,
+                    "workflowTasks": latest_attempt_tasks,
+                    "noteGeneration": None,
+                }
+                if latest_attempt
+                else None
+            ),
             "remediations": [
                 {
                     "id": item.id,

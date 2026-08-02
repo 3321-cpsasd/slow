@@ -160,6 +160,7 @@ def test_complete_real_shape_vertical_slice(client):
     chapter = client.post(f"/api/chapters/{chapter_id}/generate").json()
     section_id = chapter["sections"][0]["id"]
     section = client.post(f"/api/sections/{section_id}/generate").json()
+    assert section["latestAttemptReview"] is None
     assert len(section["content"]["blocks"]) == 5
     assert all(block["id"].startswith(f"block_{section['content']['id']}_") for block in section["content"]["blocks"])
     assert all(item["reachable"] for item in section["content"]["sourceVerification"])
@@ -212,6 +213,14 @@ def test_complete_real_shape_vertical_slice(client):
         assert wait_for_task(client, task["taskId"])["status"] == "succeeded"
     completed = client.get(f"/api/sections/{section_id}").json()
     assert completed["note"]
+    assert completed["latestAttemptReview"]["attemptId"] == passed["attemptId"]
+    assert completed["latestAttemptReview"]["passed"] is True
+    assert completed["latestAttemptReview"]["score"] == 3
+    assert len(completed["latestAttemptReview"]["questions"]) == 5
+    assert all(
+        "correct" not in question and "explanation" not in question
+        for question in completed["latestAttemptReview"]["questions"]
+    )
     assert completed["note"]["aiContent"]["personal_gaps"] == [
         "目标0",
         "目标1",

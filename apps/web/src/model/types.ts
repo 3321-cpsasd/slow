@@ -58,7 +58,7 @@ export type SourceVerification = {url:string;reachable:boolean;statusCode:number
 export type Remediation = {id:string;attemptId:string;replacementQuizId:string;blocks:Block[];objectives:string[];strategy:string;sourceVerification:SourceVerification[];sourceLineage:{mode:"generation_trace"|"missing";generationRunId:string|null}};
 export type Note = {id:string;aiContent:Record<string,unknown>;userContent:Record<string,unknown>;version:number};
 export type AskMe = {id:string;status:string;round:number;dimension:string;prompt:string|null;entries:{dimension:string;prompt:string;answer:string|null;evaluation:string;rationale:string}[]};
-export type Section = SectionSummary & { generation:null|Generation; content:null|{id:string;version:number;blocks:Block[];sources:Source[];sourceVerification:SourceVerification[];confidence:string}; quiz:null|{id:string;generation:number;questions:Question[]}; remediations:Remediation[]; note:null|Note; workflowTasks:LearningTask[] };
+export type Section = SectionSummary & { generation:null|Generation; content:null|{id:string;version:number;blocks:Block[];sources:Source[];sourceVerification:SourceVerification[];confidence:string}; quiz:null|{id:string;generation:number;questions:Question[]}; latestAttemptReview:QuizResult|null; remediations:Remediation[]; note:null|Note; workflowTasks:LearningTask[] };
 export type LearningTask = {
   taskId:string;
   type:'initial_book_preload'|'note_generation'|'remediation_generation'|'next_section_preload';
@@ -89,6 +89,7 @@ export type QuizResult = {
     missedOptions?:number[];
     incorrectOptions?:number[];
   }[];
+  questions?:Question[];
   remediation:Remediation|null;
   nextQuiz:Section['quiz'];
   workflowTasks:LearningTask[];
