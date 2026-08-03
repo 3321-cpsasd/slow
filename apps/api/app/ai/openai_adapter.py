@@ -642,7 +642,7 @@ class OpenAiAdapter:
         )
         return await self._parse(
             GeneratedQuiz,
-            """只为给定且已经通过来源核验的小节生成 4-5 道可确定评分的选择题。至少一道 core=true，所有题仅凭正文可答，覆盖小节目标，difficulty 固定为 standard。若 prior_questions 存在：questions 数量必须与 prior_questions 完全一致；第 i 道题必须考查 prior_questions[i] 的同一 objective 并保持 core 值，但题干和整组选项都必须实质不同，且不降低难度。中文输出。""",
+            """只为给定小节生成 4-5 道可确定评分的选择题。至少一道 core=true，所有题仅凭正文可答，覆盖小节目标，difficulty 固定为 standard。若 section.unverifiedSourceIndexes 非空，这些索引关联的内容属于模型生成但来源未核验：不得让 core=true 的题只依赖这部分内容，不得把具体版本、数值或时效性事实作为强掌握证据；优先考查跨来源一致的机制、边界和推理。若 prior_questions 存在：questions 数量必须与 prior_questions 完全一致；第 i 道题必须考查 prior_questions[i] 的同一 objective 并保持 core 值，但题干和整组选项都必须实质不同，且不降低难度。中文输出。""",
             {
                 "section": request,
                 "content": content.model_dump(),

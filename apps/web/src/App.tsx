@@ -2022,10 +2022,16 @@ function LessonContent({
         <button className="primary-button large" onClick={onGenerate}>
           {section.generation?.status === 'failed' ? '安全重试' : '生成正文并开始学习'}
         </button>
-        <small className="generation-note">正文和题目会经过结构校验，引用由服务端核验后才会保存。</small>
+        <small className="generation-note">正文和题目会经过结构校验，引用会尽量优先采用可访问的权威来源。</small>
       </div>
     );
   }
+
+  const visibleSources = section.content.sources.flatMap((source, index) => (
+    section.content?.sourceVerification[index]?.verificationStatus === 'failed'
+      ? []
+      : [{ source, index }]
+  ));
 
   return (
     <article className="lesson-document">
@@ -2041,24 +2047,16 @@ function LessonContent({
           selected={block.id === selectedBlockId}
         />
       ))}
-      <details className="source-list">
-        <summary>来源与核验记录 · {section.content.sources.length}</summary>
-        {section.content.sources.map((source, index) => (
+      {visibleSources.length > 0 && <details className="source-list">
+        <summary>参考来源 · {visibleSources.length}</summary>
+        {visibleSources.map(({ source, index }) => (
           <a href={source.url} target="_blank" rel="noreferrer" key={`${source.url}-${index}`}>
             <span>{index + 1}</span>
             <b>{source.title}</b>
-            <small>
-              {source.version} · {
-                section.content?.sourceVerification[index]?.verificationStatus === 'server_unverifiable'
-                  ? '站点拒绝自动核验'
-                  : section.content?.sourceVerification[index]?.reachable
-                    ? '服务端可达'
-                    : '核验失败'
-              }
-            </small>
+            <small>{source.version}</small>
           </a>
         ))}
-      </details>
+      </details>}
       <div className="lesson-complete-action">
         <span>正文阅读完成</span>
         <h3>现在，验证你是否真正理解。</h3>

@@ -166,6 +166,60 @@ def apply_source_repair_scope(before, candidate, failed_sources: list[dict]):
     return merged
 
 
+def source_blacklist_from_generation_traces(
+    traces: list[dict],
+) -> tuple[list[str], list[str]]:
+    """Carry permanent source failures across retries of the same operation."""
+
+    rejected_urls: list[str] = []
+    rejected_hosts: list[str] = []
+    for trace in traces:
+        for stage in trace.get("stageHistory", []):
+            if stage.get("stage") not in {
+                "source_repair",
+                "source_verification_degraded",
+                "source_verification_failed",
+            }:
+                continue
+            for failure in stage.get("failedSources", []):
+                if failure.get("reason") != "not_found":
+                    continue
+                url = failure.get("url")
+                if not isinstance(url, str) or not url:
+                    continue
+                if url not in rejected_urls:
+                    rejected_urls.append(url)
+                host = urlparse(url).hostname
+                if host and host not in rejected_hosts:
+                    rejected_hosts.append(host)
+    return rejected_urls, rejected_hosts
+
+
+def degraded_source_verification_report(
+    sources,
+    error: SourceVerificationError,
+) -> list[dict]:
+    """Build an index-aligned report without treating reachability as truth."""
+
+    available: dict[str, list] = {}
+    for result in error.results:
+        available.setdefault(result.url, []).append(result)
+    report = []
+    for source in sources:
+        matches = available.get(source.url, [])
+        if matches:
+            report.append(matches.pop(0).as_dict())
+            continue
+        report.append({
+            "url": source.url,
+            "reachable": False,
+            "statusCode": 0,
+            "pinned": source.kind != "source_code" or source.version in source.url,
+            "verificationStatus": "failed",
+        })
+    return report
+
+
 class SlowService:
     def __init__(
         self,
@@ -1034,8 +1088,34 @@ class SlowService:
             running.status, running.error_code, running.error_message, running.finished_at = "failed", "GENERATION_ABANDONED", "上一次生成超过 5 分钟未完成，已允许安全重试", now()
             self.db.commit()
         attempt = (self.db.scalar(select(func.max(GenerationRun.attempt)).where(GenerationRun.section_id == section.id)) or 0) + 1
+        generation_operation = (
+            "remediation"
+            if retry
+            else "regeneration"
+            if regenerate
+            else "lesson"
+        )
+        prior_failed_runs = self.db.scalars(
+            select(GenerationRun)
+            .where(
+                GenerationRun.section_id == section.id,
+                GenerationRun.operation == generation_operation,
+                GenerationRun.status == "failed",
+            )
+            .order_by(GenerationRun.started_at.desc())
+            .limit(10)
+        ).all()
+        carried_rejected_urls, carried_rejected_hosts = (
+            source_blacklist_from_generation_traces(
+                [load(item.trace_json, {}) for item in prior_failed_runs]
+            )
+        )
         regeneration_trace = {
             "regenerate": regenerate,
+            "carriedSourceBlacklist": {
+                "urlCount": len(carried_rejected_urls),
+                "hostCount": len(carried_rejected_hosts),
+            },
             **(
                 {"supersedesRemediationId": superseded_remediation.id}
                 if superseded_remediation
@@ -1053,13 +1133,7 @@ class SlowService:
         run = GenerationRun(
             id=uid("generation"),
             section_id=section.id,
-            operation=(
-                "remediation"
-                if retry
-                else "regeneration"
-                if regenerate
-                else "lesson"
-            ),
+            operation=generation_operation,
             attempt=attempt,
             status="running",
             model=getattr(self.ai, "model", ""),
@@ -1137,15 +1211,15 @@ class SlowService:
             }
             lesson_request = {
                 **self._section_summary(section),
-                "rejectedSourceUrls": [],
-                "rejectedSourceHosts": [],
+                "rejectedSourceUrls": list(carried_rejected_urls),
+                "rejectedSourceHosts": list(carried_rejected_hosts),
             }
             if retry:
                 lesson_request["remediationStrategy"] = remediation_strategy
             lesson = None
             verification = []
-            rejected_source_urls: list[str] = []
-            rejected_source_hosts: list[str] = []
+            rejected_source_urls = list(carried_rejected_urls)
+            rejected_source_hosts = list(carried_rejected_hosts)
             ai_harness_trace: list[dict] = []
             max_generation_attempts = 4
             if getattr(self.ai, "staged_lesson_generation", False):
@@ -1196,36 +1270,102 @@ class SlowService:
                         rejected_source_hosts = list(
                             dict.fromkeys(rejected_source_hosts)
                         )
-                        if source_attempt == max_generation_attempts:
-                            raise
                         lesson_request["rejectedSourceUrls"] = (
                             rejected_source_urls
                         )
                         lesson_request["rejectedSourceHosts"] = (
                             rejected_source_hosts
                         )
+                        if source_attempt == max_generation_attempts:
+                            verification = degraded_source_verification_report(
+                                content_result.sources,
+                                error,
+                            )
+                            unverified_source_indexes = [
+                                index
+                                for index, item in enumerate(verification)
+                                if item["verificationStatus"] == "failed"
+                            ]
+                            lesson_request["unverifiedSourceIndexes"] = (
+                                unverified_source_indexes
+                            )
+                            lesson_request["contentReliability"] = (
+                                "model_generated_unverified"
+                            )
+                            content_result = content_result.model_copy(
+                                update={"confidence": "low"}
+                            )
+                            update_generation_stage(
+                                "source_verification_degraded",
+                                sourceAttempt=source_attempt,
+                                maxSourceAttempts=max_generation_attempts,
+                                failedSources=failed_sources,
+                                unverifiedSourceIndexes=(
+                                    unverified_source_indexes
+                                ),
+                                rejectedSourceUrlCount=len(
+                                    rejected_source_urls
+                                ),
+                                rejectedSourceHostCount=len(
+                                    rejected_source_hosts
+                                ),
+                                **memory_trace,
+                            )
+                            self._renew_generation_lease(
+                                resource_key,
+                                owner_id,
+                            )
+                            break
                         update_generation_stage(
                             "source_repair",
                             sourceAttempt=source_attempt + 1,
                             maxSourceAttempts=max_generation_attempts,
                             failedSources=failed_sources,
+                            rejectedSourceUrlCount=len(rejected_source_urls),
+                            rejectedSourceHostCount=len(rejected_source_hosts),
                             **memory_trace,
                         )
                         previous_content = content_result
-                        content_result = (
-                            await self.ai.repair_lesson_sources(
-                                lesson_request,
-                                memory,
+                        try:
+                            content_result = (
+                                await self.ai.repair_lesson_sources(
+                                    lesson_request,
+                                    memory,
+                                    content_result,
+                                    failed_sources,
+                                    prior,
+                                )
+                            )
+                            content_result = apply_source_repair_scope(
+                                previous_content,
                                 content_result,
                                 failed_sources,
-                                prior,
                             )
-                        )
-                        content_result = apply_source_repair_scope(
-                            previous_content,
-                            content_result,
-                            failed_sources,
-                        )
+                        except AiError as repair_error:
+                            if (
+                                repair_error.code
+                                != "SOURCE_REPAIR_SCOPE_VIOLATION"
+                            ):
+                                raise
+                            content_result = previous_content
+                            update_generation_stage(
+                                "source_repair_rejected",
+                                sourceAttempt=source_attempt + 1,
+                                maxSourceAttempts=max_generation_attempts,
+                                repairErrorCode=repair_error.code,
+                                rejectedSourceUrlCount=len(
+                                    rejected_source_urls
+                                ),
+                                rejectedSourceHostCount=len(
+                                    rejected_source_hosts
+                                ),
+                                **memory_trace,
+                            )
+                            self._renew_generation_lease(
+                                resource_key,
+                                owner_id,
+                            )
+                            continue
                         assert_lesson_content_quality(content_result)
                         self._renew_generation_lease(resource_key, owner_id)
 
@@ -1313,7 +1453,41 @@ class SlowService:
                         if novelty_attempt < max_generation_attempts:
                             lesson = None
                             continue
-                        raise
+                        verification = degraded_source_verification_report(
+                            lesson.sources,
+                            error,
+                        )
+                        unverified_source_indexes = [
+                            index
+                            for index, item in enumerate(verification)
+                            if item["verificationStatus"] == "failed"
+                        ]
+                        lesson_request["unverifiedSourceIndexes"] = (
+                            unverified_source_indexes
+                        )
+                        lesson_request["contentReliability"] = (
+                            "model_generated_unverified"
+                        )
+                        lesson = lesson.model_copy(
+                            update={"confidence": "low"}
+                        )
+                        update_generation_stage(
+                            "source_verification_degraded",
+                            noveltyAttempt=novelty_attempt,
+                            maxGenerationAttempts=max_generation_attempts,
+                            failedSources=[
+                                item.failure_dict()
+                                for item in error.failures
+                            ],
+                            unverifiedSourceIndexes=(
+                                unverified_source_indexes
+                            ),
+                            **memory_trace,
+                        )
+                        self._renew_generation_lease(
+                            resource_key,
+                            owner_id,
+                        )
                     if not (retry or regenerate) or self._questions_are_novel(
                         prior,
                         [item.model_dump() for item in lesson.questions],

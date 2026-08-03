@@ -11,7 +11,10 @@ from pydantic import ValidationError
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, event, select
 from app.ai.contracts import AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedChapter, GeneratedContent, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedQuiz, GeneratedSectionOutline, PlanBook, PlanChapter, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
-from app.application.service import apply_source_repair_scope
+from app.application.service import (
+    apply_source_repair_scope,
+    source_blacklist_from_generation_traces,
+)
 from app.domain.learning import grade_choice_quiz
 from app.main import create_app
 from app.core.errors import AiError
@@ -22,7 +25,11 @@ from app.evaluation.runner import (
     run,
 )
 from app.services.attachment_storage import LocalAttachmentStorage
-from app.services.source_verifier import AcceptingSourceVerifier
+from app.services.source_verifier import (
+    AcceptingSourceVerifier,
+    SourceVerificationError,
+    Verification,
+)
 from app.infrastructure.tables import (
     Book,
     ChapterRevision,
@@ -147,6 +154,250 @@ class RecordingVerifier(AcceptingSourceVerifier):
     async def verify(self, sources):
         self.events.append("verify")
         return await super().verify(sources)
+
+
+MISSING_SOURCE_URL = "https://docs.missing.example/2025/removed"
+WORKING_SOURCE_URL = "https://docs.working.example/guide"
+
+
+class MissingSourceVerifier:
+    async def verify(self, sources):
+        results = []
+        failures = []
+        for source in sources:
+            verification = Verification(
+                url=source.url,
+                reachable=source.url != MISSING_SOURCE_URL,
+                status_code=(
+                    404 if source.url == MISSING_SOURCE_URL else 200
+                ),
+                pinned=True,
+            )
+            results.append(verification)
+            if not verification.reachable:
+                failures.append(verification)
+        if failures:
+            raise SourceVerificationError(failures, results=results)
+        return [item.as_dict() for item in results]
+
+
+class RecoveringSourceRepairAi(StagedFakeAi):
+    def __init__(self):
+        super().__init__([])
+        self.repair_requests = []
+
+    async def lesson_content(self, request, memory, prior_questions=None):
+        content = await super().lesson_content(
+            request,
+            memory,
+            prior_questions,
+        )
+        content.sources[0] = Source(
+            title="Missing",
+            url=MISSING_SOURCE_URL,
+            kind="official",
+            version="2025",
+        )
+        return content
+
+    async def repair_lesson_sources(
+        self,
+        request,
+        memory,
+        content,
+        failed_sources,
+        prior_questions=None,
+    ):
+        self.repair_requests.append({
+            "urls": list(request["rejectedSourceUrls"]),
+            "hosts": list(request["rejectedSourceHosts"]),
+        })
+        if len(self.repair_requests) == 1:
+            raise AiError(
+                "repair reused a rejected source",
+                code="SOURCE_REPAIR_SCOPE_VIOLATION",
+            )
+        repaired = content.model_copy(deep=True)
+        repaired.sources[0] = Source(
+            title="Working",
+            url=WORKING_SOURCE_URL,
+            kind="official",
+            version="current",
+        )
+        return repaired
+
+
+class RetryBlacklistAi(StagedFakeAi):
+    def __init__(self):
+        super().__init__([])
+        self.content_requests = []
+        self.quiz_requests = []
+
+    async def lesson_content(self, request, memory, prior_questions=None):
+        self.content_requests.append({
+            "urls": list(request["rejectedSourceUrls"]),
+            "hosts": list(request["rejectedSourceHosts"]),
+        })
+        content = await super().lesson_content(
+            request,
+            memory,
+            prior_questions,
+        )
+        blacklisted = "docs.missing.example" in request[
+            "rejectedSourceHosts"
+        ]
+        content.sources[0] = Source(
+            title="Working" if blacklisted else "Missing",
+            url=WORKING_SOURCE_URL if blacklisted else MISSING_SOURCE_URL,
+            kind="official",
+            version="current" if blacklisted else "2025",
+        )
+        return content
+
+    async def repair_lesson_sources(
+        self,
+        request,
+        memory,
+        content,
+        failed_sources,
+        prior_questions=None,
+    ):
+        raise AiError(
+            "repair reused a rejected source",
+            code="SOURCE_REPAIR_SCOPE_VIOLATION",
+        )
+
+    async def lesson_quiz(
+        self,
+        request,
+        content,
+        prior_questions=None,
+    ):
+        self.quiz_requests.append({
+            "unverifiedSourceIndexes": list(
+                request.get("unverifiedSourceIndexes", [])
+            ),
+            "contentReliability": request.get("contentReliability"),
+        })
+        return await super().lesson_quiz(
+            request,
+            content,
+            prior_questions,
+        )
+
+
+def test_source_blacklist_carries_only_permanent_not_found_failures():
+    urls, hosts = source_blacklist_from_generation_traces([
+        {
+            "stageHistory": [
+                {
+                    "stage": "source_repair",
+                    "failedSources": [
+                        {
+                            "url": MISSING_SOURCE_URL,
+                            "reason": "not_found",
+                        },
+                        {
+                            "url": "https://temporary.example/guide",
+                            "reason": "network_error",
+                        },
+                    ],
+                }
+            ]
+        }
+    ])
+
+    assert urls == [MISSING_SOURCE_URL]
+    assert hosts == ["docs.missing.example"]
+
+
+def test_source_repair_scope_violation_retries_inside_generation():
+    ai = RecoveringSourceRepairAi()
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            ai,
+            MissingSourceVerifier(),
+        )
+    ) as source_client:
+        series = create_series(source_client)
+        task = wait_for_task(
+            source_client,
+            series["initializationTask"]["taskId"],
+        )
+        refreshed = source_client.get(
+            f"/api/series/{series['id']}"
+        ).json()
+        first_section_id = refreshed["books"][0]["chapters"][0][
+            "sections"
+        ][0]["id"]
+        generated = source_client.get(
+            f"/api/sections/{first_section_id}"
+        )
+
+    assert task["status"] == "succeeded"
+    assert generated.status_code == 200
+    assert len(ai.repair_requests) == 2
+    assert all(
+        request["urls"] == [MISSING_SOURCE_URL]
+        for request in ai.repair_requests
+    )
+    assert all(
+        request["hosts"] == ["docs.missing.example"]
+        for request in ai.repair_requests
+    )
+    body = generated.json()
+    assert body["content"]["sources"][0]["url"] == WORKING_SOURCE_URL
+    assert "source_repair_rejected" in [
+        stage["stage"]
+        for stage in body["generation"]["trace"]["stageHistory"]
+    ]
+
+
+def test_unreachable_source_degrades_after_repair_budget_is_exhausted():
+    ai = RetryBlacklistAi()
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            ai,
+            MissingSourceVerifier(),
+        ),
+        raise_server_exceptions=False,
+    ) as source_client:
+        series = create_series(source_client)
+        task = wait_for_task(
+            source_client,
+            series["initializationTask"]["taskId"],
+        )
+        refreshed = source_client.get(
+            f"/api/series/{series['id']}"
+        ).json()
+        section_id = refreshed["books"][0]["chapters"][0]["sections"][
+            0
+        ]["id"]
+        recovered = source_client.get(f"/api/sections/{section_id}")
+
+    assert task["status"] == "succeeded"
+    assert task["attemptCount"] == 1
+    assert recovered.status_code == 200
+    assert ai.content_requests == [{"urls": [], "hosts": []}]
+    assert ai.quiz_requests == [{
+        "unverifiedSourceIndexes": [0],
+        "contentReliability": "model_generated_unverified",
+    }]
+    body = recovered.json()
+    assert body["content"]["confidence"] == "low"
+    assert body["content"]["sourceVerification"] == [{
+        "url": MISSING_SOURCE_URL,
+        "reachable": False,
+        "statusCode": 404,
+        "pinned": True,
+        "verificationStatus": "failed",
+    }]
+    assert "source_verification_degraded" in [
+        stage["stage"]
+        for stage in body["generation"]["trace"]["stageHistory"]
+    ]
 
 
 @pytest.fixture
@@ -1353,10 +1604,22 @@ def test_generation_persists_safe_structured_harness_audit():
 def test_generation_failure_is_observable_and_retry_safe():
     with TestClient(create_app("sqlite+pysqlite:///:memory:", FailingLessonAi(), AcceptingSourceVerifier()), raise_server_exceptions=False) as failing:
         series = create_series(failing)
+        assert wait_for_task(
+            failing,
+            series["initializationTask"]["taskId"],
+        )["status"] == "failed"
         chapter = failing.post(f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate").json()
         section_id = chapter["sections"][0]["id"]
+        with failing.app.state.sessions() as db:
+            progress = db.scalar(
+                select(SectionProgress).where(
+                    SectionProgress.section_id == section_id
+                )
+            )
+            progress.status = "available"
+            db.commit()
         generated = failing.post(f"/api/sections/{section_id}/generate")
-        assert generated.status_code == 502
+        assert generated.status_code == 502, generated.json()
         assert generated.json()["retryable"] is True
         assert generated.json()["operationId"].startswith("generation_")
         state = failing.get(f"/api/sections/{section_id}").json()
@@ -1452,13 +1715,25 @@ def test_generation_artifact_is_rejected_before_persistence():
         raise_server_exceptions=False,
     ) as artifact_client:
         series = create_series(artifact_client)
+        assert wait_for_task(
+            artifact_client,
+            series["initializationTask"]["taskId"],
+        )["status"] == "failed"
         chapter = artifact_client.post(
             f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
         ).json()
         section_id = chapter["sections"][0]["id"]
+        with artifact_client.app.state.sessions() as db:
+            progress = db.scalar(
+                select(SectionProgress).where(
+                    SectionProgress.section_id == section_id
+                )
+            )
+            progress.status = "available"
+            db.commit()
         response = artifact_client.post(f"/api/sections/{section_id}/generate")
 
-        assert response.status_code == 502
+        assert response.status_code == 502, response.json()
         assert response.json()["code"] == "AI_CONTENT_QUALITY_FAILED"
         state = artifact_client.get(f"/api/sections/{section_id}").json()
         assert state["content"] is None

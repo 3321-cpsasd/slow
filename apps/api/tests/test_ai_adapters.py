@@ -353,6 +353,7 @@ def test_regeneration_with_prior_questions_uses_full_lesson_contract():
     assert calls[0][3] == 12000
     assert calls[1][3] == 3600
     assert "数量必须与 prior_questions 完全一致" in calls[1][1]
+    assert "不得让 core=true 的题只依赖这部分内容" in calls[1][1]
     assert len(lesson.blocks) == 5
     assert [item.objective for item in lesson.questions] == [
         item["objective"] for item in prior

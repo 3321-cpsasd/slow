@@ -45,3 +45,4 @@ def test_missing_source_remains_a_blocking_failure(monkeypatch):
 
     assert raised.value.code == "SOURCE_UNREACHABLE"
     assert raised.value.failures[0].failure_reason == "not_found"
+    assert raised.value.results[0].url == source().url

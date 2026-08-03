@@ -49,8 +49,14 @@ class Verification:
 class SourceVerificationError(AppError):
     """A source gate failure with machine-readable, non-secret details."""
 
-    def __init__(self, failures: list[Verification]):
+    def __init__(
+        self,
+        failures: list[Verification],
+        *,
+        results: list[Verification] | None = None,
+    ):
         self.failures = tuple(failures)
+        self.results = tuple(results or failures)
         access_restricted = all(
             item.failure_reason == "access_restricted"
             for item in failures
@@ -98,7 +104,7 @@ class HttpSourceVerifier:
             and item.failure_reason != "access_restricted"
         ]
         if failures:
-            raise SourceVerificationError(failures)
+            raise SourceVerificationError(failures, results=results)
         return [item.as_dict() for item in results]
 
     async def _one(self, client: httpx.AsyncClient, source: Source) -> Verification:
