@@ -71,11 +71,18 @@ cd apps/web && pnpm build
 首次部署并完成迁移后，由管理员在 API 容器中创建账号：
 
 ```bash
-docker compose -f compose.prod.yml exec api python manage_users.py create zhangsan --name '张三'
-docker compose -f compose.prod.yml exec api python manage_users.py disable zhangsan
-docker compose -f compose.prod.yml exec api python manage_users.py enable zhangsan
-docker compose -f compose.prod.yml exec api python manage_users.py reset-password zhangsan
+./create-demo-user.sh
+./create-demo-user.sh --name '张三'
+docker compose --env-file .release.env -f compose.prod.yml -f compose.https.yml exec api python manage_users.py create zhangsan --name '张三'
+docker compose --env-file .release.env -f compose.prod.yml -f compose.https.yml exec api python manage_users.py disable zhangsan
+docker compose --env-file .release.env -f compose.prod.yml -f compose.https.yml exec api python manage_users.py enable zhangsan
+docker compose --env-file .release.env -f compose.prod.yml -f compose.https.yml exec api python manage_users.py reset-password zhangsan
 ```
+
+`create-demo-user.sh` 必须在 ECS 的 `/opt/slow` 下调用。它会使用生产 HTTPS
+Compose 配置自动创建 `slow-demo` 加五位随机数的账号，并生成一个 24 位强密码。
+账号和 Argon2id 密码哈希随 SQLite 数据库持久化到 `/opt/slow/data`；明文密码只在
+调用终端显示一次，不会进入密码托管文件。请立即复制并通过私密渠道发送给用户。
 
 创建和重置命令默认生成随机密码；也可使用 `--prompt-password` 安全输入自定密码。
 禁用账号或重置密码会撤销该用户的全部现有 Session。默认 Session 最长 7 天，

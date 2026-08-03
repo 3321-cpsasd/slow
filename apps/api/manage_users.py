@@ -2,6 +2,7 @@
 
 import argparse
 import getpass
+import random
 import secrets
 import sys
 
@@ -11,8 +12,64 @@ from app.core.config import settings
 from app.infrastructure.database import build_database
 
 
+DEMO_USERNAME_PREFIX = "slow-demo"
+DEMO_USERNAME_ATTEMPTS = 20
+PASSWORD_LENGTH = 24
+PASSWORD_LOWERCASE = "abcdefghijkmnopqrstuvwxyz"
+PASSWORD_UPPERCASE = "ABCDEFGHJKLMNPQRSTUVWXYZ"
+PASSWORD_DIGITS = "23456789"
+PASSWORD_SYMBOLS = "!@#$%^&*()-_=+"
+
+
 def generated_password() -> str:
-    return secrets.token_urlsafe(18)
+    """Return a copy-friendly password containing every required character class."""
+
+    alphabet = (
+        PASSWORD_LOWERCASE
+        + PASSWORD_UPPERCASE
+        + PASSWORD_DIGITS
+        + PASSWORD_SYMBOLS
+    )
+    characters = [
+        secrets.choice(PASSWORD_LOWERCASE),
+        secrets.choice(PASSWORD_UPPERCASE),
+        secrets.choice(PASSWORD_DIGITS),
+        secrets.choice(PASSWORD_SYMBOLS),
+    ]
+    characters.extend(
+        secrets.choice(alphabet)
+        for _ in range(PASSWORD_LENGTH - len(characters))
+    )
+    random.SystemRandom().shuffle(characters)
+    return "".join(characters)
+
+
+def generated_demo_username() -> str:
+    return f"{DEMO_USERNAME_PREFIX}{secrets.randbelow(100_000):05d}"
+
+
+def create_demo_account(
+    service: PasswordCredentialService,
+    *,
+    display_name: str | None = None,
+):
+    """Create a random demo account, retrying the small username namespace."""
+
+    for _ in range(DEMO_USERNAME_ATTEMPTS):
+        username = generated_demo_username()
+        password = generated_password()
+        try:
+            user = service.create_account(
+                username=username,
+                display_name=display_name or username,
+                password=password,
+            )
+        except ValueError as error:
+            if str(error) == "账号已存在":
+                continue
+            raise
+        return user, username, password
+    raise RuntimeError("连续生成的演示账号均已存在，请重试")
 
 
 def selected_password(arguments: argparse.Namespace) -> str:
@@ -42,6 +99,15 @@ def parser() -> argparse.ArgumentParser:
     create_password = create.add_mutually_exclusive_group()
     create_password.add_argument("--prompt-password", action="store_true")
     create_password.add_argument("--password-stdin", action="store_true")
+
+    create_demo = commands.add_parser(
+        "create-demo",
+        help="自动生成 slow-demo 加五位数字的受邀账号",
+    )
+    create_demo.add_argument(
+        "--name",
+        help="用户显示名称；默认与随机账号相同",
+    )
 
     for command, help_text in (
         ("disable", "禁用账号并撤销全部会话"),
@@ -114,6 +180,16 @@ def main() -> int:
                     print("该密码已写入显式开发期托管，可用 show-password 查看。")
                 else:
                     print("请通过私密渠道发送；系统不会再次显示该密码。")
+            elif arguments.command == "create-demo":
+                user, username, password = create_demo_account(
+                    service,
+                    display_name=arguments.name,
+                )
+                print(f"已创建演示账号：{username}（{user.name}）")
+                print(f"账号：{username}")
+                print(f"初始密码：{password}")
+                print("账号已写入数据库；请立即通过私密渠道发送以上凭据。")
+                print("系统只保存 Argon2id 密码哈希，不会再次显示该密码。")
             elif arguments.command == "disable":
                 service.set_account_enabled(
                     username=arguments.username,

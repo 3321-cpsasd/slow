@@ -118,6 +118,9 @@ jobs:
           scp -P "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
             deploy/scripts/remote-deploy.sh \
             "$ECS_USER@$ECS_HOST:/opt/slow/remote-deploy.sh"
+          scp -P "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
+            deploy/scripts/create-demo-user.sh \
+            "$ECS_USER@$ECS_HOST:/opt/slow/create-demo-user.sh"
       - name: Pull and deploy release
         shell: bash
         run: |
@@ -126,7 +129,7 @@ jobs:
             "docker login ghcr.io -u '$GITHUB_ACTOR' --password-stdin"
           ssh -p "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
             "$ECS_USER@$ECS_HOST" \
-            "chmod 700 /opt/slow/remote-deploy.sh && APP_VERSION='$GITHUB_SHA' REGISTRY='ghcr.io' IMAGE_NAME='$GITHUB_REPOSITORY' WEB_ORIGIN='$WEB_ORIGIN' /opt/slow/remote-deploy.sh"
+            "chmod 700 /opt/slow/remote-deploy.sh /opt/slow/create-demo-user.sh && APP_VERSION='$GITHUB_SHA' REGISTRY='ghcr.io' IMAGE_NAME='$GITHUB_REPOSITORY' WEB_ORIGIN='$WEB_ORIGIN' /opt/slow/remote-deploy.sh"
 
   deploy-ecs-demo:
     # The mainland ECS currently runs the explicit local-login demo. Build on
