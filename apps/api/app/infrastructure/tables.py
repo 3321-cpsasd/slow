@@ -172,6 +172,7 @@ class Shelf(Base):
     domain: Mapped[str] = mapped_column(String(100))
     specialty: Mapped[str] = mapped_column(String(120), default="")
     tags_json: Mapped[str] = mapped_column(Text, default="[]")
+    origin: Mapped[str] = mapped_column(String(32), default="user_created", index=True)
 
 
 class LearningPlan(Base):

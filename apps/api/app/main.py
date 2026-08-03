@@ -262,7 +262,7 @@ def create_app(
                     storage,
                     scope=demo_user_scope(DEMO_USER_ID),
                 )
-                startup_service.ensure_seed()
+                startup_service.ensure_demo_seed()
         elif effective_auth_mode == "local":
             with sessions() as db:
                 LocalCredentialService(db).ensure_seed_accounts()
@@ -273,7 +273,7 @@ def create_app(
                         verifier,
                         storage,
                         scope=demo_user_scope(persona.user_id),
-                    ).ensure_seed()
+                    ).ensure_demo_seed()
         app.state.sessions, app.state.ai, app.state.source_verifier, app.state.attachment_storage = sessions, adapter, verifier, storage
         app.state.ai_usage_recorder = usage_recorder
         app.state.ai_runtime = initial_runtime
@@ -566,7 +566,7 @@ def create_app(
                     session_id=auth_session.id,
                 )
             ),
-        ).ensure_seed()
+        ).ensure_user()
         response = JSONResponse({
             "authenticated": True,
             "mode": mode,
@@ -676,7 +676,7 @@ def create_app(
             request.app.state.source_verifier,
             request.app.state.attachment_storage,
             scope=user_scope,
-        ).ensure_seed()
+        ).ensure_user()
         response = RedirectResponse(
             f"{settings.web_origin}{safe_return_to(login.return_to)}"
         )

@@ -427,6 +427,24 @@ button:disabled { cursor: not-allowed; }
   gap: 34px;
   margin-top: 48px;
 }
+.empty-library-message {
+  min-height: 260px;
+  display: grid;
+  place-items: center;
+  place-content: center;
+  gap: 10px;
+  border: 1px dashed #cfd6cf;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, .48);
+  text-align: center;
+  color: var(--muted);
+}
+.empty-library-message span {
+  color: var(--ink);
+  font-family: Georgia, "Songti SC", serif;
+  font-size: 22px;
+}
+.empty-library-message small { margin-bottom: 8px; }
 .shelf-card {
   width: 100%;
   border: 0;

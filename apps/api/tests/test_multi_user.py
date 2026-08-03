@@ -305,7 +305,7 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
     bootstrap = client.get("/api/bootstrap")
     assert bootstrap.status_code == 200
     assert bootstrap.json()["user"]["id"] == me["user"]["id"]
-    assert len(bootstrap.json()["shelves"]) == 1
+    assert bootstrap.json()["shelves"] == []
 
     missing_csrf = client.post(
         "/api/shelves",

@@ -11,7 +11,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0025_profile_onboarding"
+HEAD_REVISION = "0026_shelf_origin_cleanup"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -101,6 +101,10 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
             row[1]: row
             for row in connection.execute("PRAGMA table_info(user_onboardings)")
         }
+        shelf_columns = {
+            row[1]: row
+            for row in connection.execute("PRAGMA table_info(shelves)")
+        }
 
     assert revision == HEAD_REVISION
     assert "uq_quiz_attempts_run_user_idempotency" in attempt_schema
@@ -148,6 +152,7 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
     assert {"flow_id", "status", "current_step"}.issubset(
         onboarding_columns
     )
+    assert shelf_columns["origin"][3] == 1
 
 
 def test_generation_lease_migration_accepts_orm_precreated_table(tmp_path):
@@ -207,6 +212,68 @@ def test_migrations_recover_when_orm_precreated_future_tables(tmp_path):
         "heartbeat_at",
     }.issubset(task_columns)
     assert foreign_key_errors == []
+
+
+def test_shelf_origin_migration_removes_only_empty_non_demo_defaults(tmp_path):
+    database = tmp_path / "default-shelf-cleanup.db"
+    run_alembic(database, "upgrade", "0025_profile_onboarding")
+
+    with sqlite3.connect(database) as connection:
+        connection.executemany(
+            "INSERT INTO users (id, name) VALUES (?, ?)",
+            [
+                ("user_empty", "Empty"),
+                ("user_retained", "Retained"),
+                ("user_demo", "Demo"),
+            ],
+        )
+        connection.executemany(
+            """
+            INSERT INTO shelves (
+                id, user_id, name, domain, specialty, tags_json
+            ) VALUES (?, ?, '技术', '计算机', '软件工程', '["AI","云原生"]')
+            """,
+            [
+                ("shelf_empty", "user_empty"),
+                ("shelf_retained", "user_retained"),
+                ("shelf_demo", "user_demo"),
+            ],
+        )
+        connection.execute(
+            """
+            INSERT INTO learning_plans (
+                id, shelf_id, topic, role, experience, purpose, depth,
+                details, assumptions_json, confidence, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "plan_retained",
+                "shelf_retained",
+                "已开始的学习",
+                "学习者",
+                "已有记录",
+                "继续学习",
+                "overview",
+                "",
+                "[]",
+                "high",
+                "active",
+                "2026-08-03 00:00:00",
+            ),
+        )
+        connection.commit()
+
+    run_alembic(database, "upgrade", "head")
+
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            "SELECT id, origin FROM shelves ORDER BY id"
+        ).fetchall()
+
+    assert rows == [
+        ("shelf_demo", "demo_seed"),
+        ("shelf_retained", "legacy_auto_seed"),
+    ]
 
 
 def test_populated_0014_database_upgrades_without_losing_user_facts(tmp_path):

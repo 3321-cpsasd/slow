@@ -13,7 +13,7 @@ class ApiModel(BaseModel):
 
 class ShelfCreate(ApiModel):
     name: str = Field(min_length=1, max_length=100)
-    domain: str = Field(min_length=1, max_length=100)
+    domain: str = Field(default="", max_length=100)
     specialty: str = Field(default="", max_length=120)
     tags: list[str] = Field(default_factory=list, max_length=12)
 

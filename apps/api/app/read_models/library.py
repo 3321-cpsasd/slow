@@ -44,13 +44,13 @@ class LibraryReadModel:
         self.user_id = user_id
 
     def bootstrap(self) -> dict:
+        user = self.db.get(User, self.user_id)
         shelf_rows = self.db.execute(
-            select(Shelf, User)
-            .join(User, User.id == Shelf.user_id)
+            select(Shelf)
             .where(Shelf.user_id == self.user_id)
             .order_by(Shelf.name, Shelf.id)
-        ).all()
-        shelves = [shelf for shelf, _user in shelf_rows]
+        ).scalars().all()
+        shelves = list(shelf_rows)
         rows = self.db.execute(
             select(Series, LearningRun)
             .join(Shelf, Shelf.id == Series.shelf_id)
@@ -81,7 +81,7 @@ class LibraryReadModel:
         return {
             "user": {
                 "id": self.user_id,
-                "name": shelf_rows[0][1].name if shelf_rows else "",
+                "name": user.name if user else "",
             },
             "shelves": [
                 {

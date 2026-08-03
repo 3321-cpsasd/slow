@@ -262,7 +262,8 @@ class SlowService:
                     status=409,
                 )
 
-    def ensure_seed(self):
+    def ensure_user(self):
+        """Ensure the authenticated user row exists without creating library data."""
         persona = LOCAL_DEMO_PERSONAS_BY_USER_ID.get(self.user_id)
         user = self.db.get(User, self.user_id)
         if not user:
@@ -272,24 +273,31 @@ class SlowService:
             )
             self.db.add(user)
             self.db.flush()
-        if persona or self.user_id == DEMO_USER_ID:
-            ProfileService(self.db, self.user_id).seed_complete(
-                profession=(
-                    persona.display_name if persona else "体验学习者"
-                ),
-                stage="beginner",
-                purpose=(
-                    persona.scenario
-                    if persona
-                    else "体验从教材生成到验证和笔记的完整学习闭环"
-                ),
-                domains=(
-                    [persona.domain, persona.specialty]
-                    if persona
-                    else ["计算机科学"]
-                ),
-                experience="本地演示账号的预置基础画像",
-            )
+        self.db.commit()
+
+    def ensure_demo_seed(self):
+        """Seed profile and shelf data only for explicit demo identities."""
+        persona = LOCAL_DEMO_PERSONAS_BY_USER_ID.get(self.user_id)
+        if not persona and self.user_id != DEMO_USER_ID:
+            self.ensure_user()
+            return
+
+        self.ensure_user()
+        ProfileService(self.db, self.user_id).seed_complete(
+            profession=persona.display_name if persona else "体验学习者",
+            stage="beginner",
+            purpose=(
+                persona.scenario
+                if persona
+                else "体验从教材生成到验证和笔记的完整学习闭环"
+            ),
+            domains=(
+                [persona.domain, persona.specialty]
+                if persona
+                else ["计算机科学"]
+            ),
+            experience="本地演示账号的预置基础画像",
+        )
         shelf = self.db.scalar(
             select(Shelf).where(Shelf.user_id == self.user_id)
         )
@@ -314,6 +322,7 @@ class SlowService:
                         if persona
                         else '["AI","云原生"]'
                     ),
+                    origin="demo_seed",
                 )
             )
         self.db.commit()
@@ -396,6 +405,7 @@ class SlowService:
             domain=body.domain,
             specialty=body.specialty,
             tags_json=dump(body.tags),
+            origin="user_created",
         )
         self.db.add(row)
         self.db.commit()

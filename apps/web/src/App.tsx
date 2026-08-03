@@ -852,6 +852,10 @@ function compactSpineTitle(title: string) {
   return seriesName.length > 18 ? `${seriesName.slice(0, 18)}…` : seriesName;
 }
 
+function shelfDescriptor(shelf: Pick<Shelf, 'domain' | 'specialty'>) {
+  return [shelf.domain, shelf.specialty].filter(Boolean).join(' · ');
+}
+
 function Home({
   data,
   onOpen,
@@ -874,6 +878,13 @@ function Home({
         <button className="primary-button" onClick={() => setShowCreate(true)}>＋ 创建书架</button>
       </div>
       <div className="shelf-grid">
+        {data && data.shelves.length === 0 && (
+          <div className="empty-library-message">
+            <span>还没有书架</span>
+            <small>创建第一个书架，把想学的内容放进来。</small>
+            <button className="primary-button" onClick={() => setShowCreate(true)}>创建第一个书架</button>
+          </div>
+        )}
         {data?.shelves.map((item) => (
           <button
             className="shelf-card bookshelf-card"
@@ -908,7 +919,7 @@ function Home({
               <span className="shelf-monogram">{item.name.slice(0, 1)}</span>
               <span>
                 <b>{item.name}</b>
-                <small>{item.domain} · {item.specialty}</small>
+                {shelfDescriptor(item) && <small>{shelfDescriptor(item)}</small>}
               </span>
               <em>进入书架 <i>→</i></em>
             </div>
@@ -1003,10 +1014,9 @@ function ShelfCreateDialog({
           <div>
             <small>书架铭牌预览</small>
             <b>{name.trim() || '新书架'}</b>
-            <em>
-              {domain.trim() || '学习领域'}
-              {specialty.trim() ? ` · ${specialty.trim()}` : ''}
-            </em>
+            {(domain.trim() || specialty.trim()) && (
+              <em>{[domain.trim(), specialty.trim()].filter(Boolean).join(' · ')}</em>
+            )}
           </div>
         </div>
 
@@ -1020,18 +1030,15 @@ function ShelfCreateDialog({
               disabled={submitting}
               value={name}
               onChange={(event) => setName(event.target.value)}
-              placeholder="例如：交互设计"
             />
           </label>
           <label>
-            学习领域
+            学习领域（可选）
             <input
-              required
               maxLength={100}
               disabled={submitting}
               value={domain}
               onChange={(event) => setDomain(event.target.value)}
-              placeholder="例如：设计学"
             />
           </label>
           <label>
@@ -1041,7 +1048,6 @@ function ShelfCreateDialog({
               disabled={submitting}
               value={specialty}
               onChange={(event) => setSpecialty(event.target.value)}
-              placeholder="例如：交互设计转型"
             />
           </label>
           <label>
@@ -1054,7 +1060,6 @@ function ShelfCreateDialog({
                 setTags(event.target.value);
                 setFormError('');
               }}
-              placeholder="用逗号分隔，例如：UX、原型、研究"
             />
             <small>最多 12 个，用于后续检索和画像归类。</small>
           </label>
@@ -1099,7 +1104,7 @@ function ShelfPage({
 
   return (
     <section className="landing-section">
-      <p className="eyebrow">{shelf.domain} · {shelf.specialty}</p>
+      {shelfDescriptor(shelf) && <p className="eyebrow">{shelfDescriptor(shelf)}</p>}
       <div className="title-row">
         <div>
           <h1>{shelf.name}</h1>

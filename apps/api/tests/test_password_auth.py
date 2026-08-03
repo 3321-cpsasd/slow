@@ -9,7 +9,7 @@ from app.ai.local_adapter import LocalDemoAdapter
 from app.auth.password import PasswordCredentialService
 from app.auth.password_escrow import PasswordEscrowStore
 from app.auth.service import SessionService
-from app.infrastructure.tables import AuthSession, LocalCredential, User, now
+from app.infrastructure.tables import AuthSession, LocalCredential, Shelf, User, now
 from app.main import create_app
 from app.services.attachment_storage import LocalAttachmentStorage
 from app.services.source_verifier import AcceptingSourceVerifier
@@ -98,8 +98,10 @@ def test_production_password_login_requires_precreated_account(tmp_path):
             "id": user.id,
             "name": DISPLAY_NAME,
         }
+        assert bootstrap.json()["shelves"] == []
         with client.app.state.sessions() as db:
             assert len(db.scalars(select(User)).all()) == 1
+            assert db.scalars(select(Shelf)).all() == []
             credential = db.scalar(select(LocalCredential))
             assert credential.password_hash.startswith("$argon2id$")
             assert credential.password_hash != PASSWORD
@@ -161,11 +163,20 @@ def test_disable_and_password_reset_revoke_all_user_sessions(tmp_path):
             service.set_account_enabled(username=USERNAME, enabled=True)
         logged_in = login(client)
         assert logged_in.status_code == 200
-        assert complete_profile(
+        completed = complete_profile(
             client,
             logged_in.json()["csrfToken"],
-        ).status_code == 200
-        shelf_id = client.get("/api/bootstrap").json()["shelves"][0]["id"]
+        )
+        assert completed.status_code == 200
+        assert client.get("/api/bootstrap").json()["shelves"] == []
+        created = client.post(
+            "/api/shelves",
+            headers={"X-CSRF-Token": logged_in.json()["csrfToken"]},
+            json={"name": "我的学习书架"},
+        )
+        assert created.status_code == 201
+        assert created.json()["domain"] == ""
+        shelf_id = created.json()["id"]
 
         new_password = "A-New-Beta-Password-2026"
         with client.app.state.sessions() as db:
