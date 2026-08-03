@@ -106,6 +106,11 @@ PYTHONPATH=apps/api .venv/bin/python apps/api/manage_users.py purge-passwords --
 备份保留策略删除可能含有该文件的历史备份。密码重置只撤销身份 Session，不删除或
 重建用户，因此书架、学习进度、测验记录和掌握画像均保持不变。
 
+### 许可证
+
+本项目源代码依据 [GNU Affero General Public License v3.0](LICENSE)
+发布，仅适用该版本（`AGPL-3.0-only`）。
+
 ---
 
 ## English
@@ -147,3 +152,9 @@ Production beta deployments can use `APP_MODE=production` with
 `manage_users.py` command; there is no public registration endpoint.
 
 External model credentials are optional in development and must remain server-side. Production deployments can use invitation-only password accounts or OIDC, and must disable local/demo identity modes.
+
+### License
+
+This project's source code is licensed under the
+[GNU Affero General Public License v3.0](LICENSE), version 3 only
+(`AGPL-3.0-only`).

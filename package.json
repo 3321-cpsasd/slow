@@ -2,6 +2,7 @@
   "name": "zhi-xing-bookshelf",
   "version": "0.2.0",
   "private": true,
+  "license": "AGPL-3.0-only",
   "description": "React + FastAPI front-end/back-end separated learning MVP",
   "packageManager": "pnpm@11.9.0",
   "engines": {
