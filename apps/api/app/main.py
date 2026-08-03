@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from sqlalchemy.orm import Session
 from .auth.context import Principal, UserScope, demo_user_scope
+from .auth.profile import ProfileService
 from .auth.local import LocalCredentialService
 from .auth.oidc import OidcClient
 from .auth.password import PasswordCredentialService
@@ -22,7 +23,7 @@ from .ai.anthropic_adapter import AnthropicAdapter
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AiRuntimeUpdate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, NoteUpdate, PasswordLogin, PlanCreate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ShelfCreate
+from .api.schemas import AiRuntimeUpdate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, NoteUpdate, PasswordLogin, PlanCreate, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ShelfCreate
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -387,6 +388,7 @@ def create_app(
         session: Session = Depends(db),
         scope: UserScope = Depends(current_scope),
     ):
+        ProfileService(session, scope.user_id).require_complete()
         return SlowService(
             session,
             request.app.state.ai,
@@ -561,14 +563,13 @@ def create_app(
                 )
             ),
         ).ensure_seed()
-        response = JSONResponse(
-            {
-                "authenticated": True,
-                "mode": mode,
-                "user": {"id": user.id, "name": user.name},
-                "csrfToken": csrf_token,
-            }
-        )
+        response = JSONResponse({
+            "authenticated": True,
+            "mode": mode,
+            "user": {"id": user.id, "name": user.name},
+            "csrfToken": csrf_token,
+            "onboarding": ProfileService(session, user.id).state(),
+        })
         set_session_cookies(
             response,
             request,
@@ -713,6 +714,7 @@ def create_app(
             "mode": request.app.state.auth_mode,
             "user": {"id": user.id, "name": user.name},
             "csrfToken": csrf_token,
+            "onboarding": ProfileService(session, user.id).state(),
         }
 
     @app.post("/api/auth/logout", status_code=204)
@@ -735,6 +737,38 @@ def create_app(
             )
             response.delete_cookie("slow_csrf", path="/")
         return response
+
+    @app.get("/api/onboarding")
+    def onboarding(
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        return ProfileService(session, scope.user_id).state()
+
+    @app.patch("/api/onboarding/profile")
+    def save_onboarding_profile_draft(
+        body: ProfileDraftUpdate,
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        values = body.model_dump(
+            exclude={"current_step"},
+            exclude_none=True,
+        )
+        return ProfileService(session, scope.user_id).save_draft(
+            current_step=body.current_step,
+            values=values,
+        )
+
+    @app.post("/api/onboarding/profile/complete")
+    def complete_onboarding_profile(
+        body: ProfileComplete,
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        return ProfileService(session, scope.user_id).complete(
+            body.model_dump()
+        )
 
     @app.get("/api/runtime/ai")
     def get_runtime_ai(request: Request):

@@ -11,6 +11,7 @@ from sqlalchemy import delete, event, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from ..auth.context import UserScope, WorkerExecutionContext
+from ..auth.profile import ProfileService
 
 from ..ai.contracts import GeneratedLesson, GeneratedRemediationLesson
 from ..ai.port import AiPort
@@ -217,6 +218,24 @@ class SlowService:
             )
             self.db.add(user)
             self.db.flush()
+        if persona or self.user_id == DEMO_USER_ID:
+            ProfileService(self.db, self.user_id).seed_complete(
+                profession=(
+                    persona.display_name if persona else "体验学习者"
+                ),
+                stage="beginner",
+                purpose=(
+                    persona.scenario
+                    if persona
+                    else "体验从教材生成到验证和笔记的完整学习闭环"
+                ),
+                domains=(
+                    [persona.domain, persona.specialty]
+                    if persona
+                    else ["计算机科学"]
+                ),
+                experience="本地演示账号的预置基础画像",
+            )
         shelf = self.db.scalar(
             select(Shelf).where(Shelf.user_id == self.user_id)
         )
@@ -253,6 +272,10 @@ class SlowService:
 
     def bootstrap(self):
         view = self.library_reads.bootstrap()
+        view["profile"] = ProfileService(
+            self.db,
+            self.user_id,
+        ).state()["profile"]
         view["resume"] = self.resume_position()
         return view
 

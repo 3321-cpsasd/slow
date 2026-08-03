@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api } from './api/client';
+import { ProfileOnboardingFlow } from './ProfileOnboardingFlow';
 import type {
   AskMe,
   AiRuntime,
@@ -12,6 +13,7 @@ import type {
   Bootstrap,
   Chapter,
   LearningTask,
+  LearningProfile,
   Note as NoteType,
   QuizResult,
   Section,
@@ -72,9 +74,12 @@ export default function App() {
 
   const loadAuthenticatedState = async () => {
     const value = await api.authMe();
-    const bootstrap = await api.bootstrap();
     setAuth(value);
-    setData(bootstrap);
+    if (value.onboarding.required) {
+      setData(null);
+      return;
+    }
+    setData(await api.bootstrap());
   };
 
   const initializeAuth = async () => {
@@ -134,9 +139,8 @@ export default function App() {
     try {
       const mode = authConfig?.mode === 'password' ? 'password' : 'local';
       const state = await api.credentialsLogin(mode, localUsername, localPassword);
-      const bootstrap = await api.bootstrap();
       setAuth(state);
-      setData(bootstrap);
+      setData(state.onboarding.required ? null : await api.bootstrap());
       setLocalPassword('');
       setShowLocalPassword(false);
     } catch (reason) {
@@ -149,6 +153,20 @@ export default function App() {
   const openShelf = (value: Shelf) => {
     setShelf(value);
     setView('shelf');
+  };
+
+  const logout = async () => {
+    try {
+      await api.logout();
+    } finally {
+      sessionStorage.removeItem('slow_demo_entered');
+      setAuth(null);
+      setData(null);
+      setShelf(null);
+      setSeries(null);
+      setSection(null);
+      setView('home');
+    }
   };
 
   const loadSection = async (sectionId: string) => {
@@ -463,6 +481,17 @@ export default function App() {
     );
   }
 
+  if (auth.onboarding.required) {
+    return (
+      <ProfileOnboardingFlow
+        initial={auth.onboarding}
+        userName={auth.user.name}
+        onComplete={loadAuthenticatedState}
+        onLogout={logout}
+      />
+    );
+  }
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -501,19 +530,7 @@ export default function App() {
           )}
           <button
             className="quiet-button"
-            onClick={async () => {
-              try {
-                await api.logout();
-              } finally {
-                sessionStorage.removeItem('slow_demo_entered');
-                setAuth(null);
-                setData(null);
-                setShelf(null);
-                setSeries(null);
-                setSection(null);
-                setView('home');
-              }
-            }}
+            onClick={() => void logout()}
           >
             退出
           </button>
@@ -538,6 +555,7 @@ export default function App() {
         {view === 'shelf' && shelf && (
           <ShelfPage
             shelf={shelf}
+            profile={data!.profile}
             onCreate={async (body, idempotencyKey) => {
               const value = await run('AI 正在规划系列…', () => api.createPlan({ ...body, shelfId: shelf.id }, idempotencyKey));
               setSeries(value);
@@ -1055,11 +1073,13 @@ function ShelfCreateDialog({
 
 function ShelfPage({
   shelf,
+  profile,
   onCreate,
   onOpen,
   onDelete,
 }: {
   shelf: Shelf;
+  profile: LearningProfile;
   onCreate: (body: object, idempotencyKey: string) => Promise<void>;
   onOpen: (id: string) => void;
   onDelete: (id: string) => Promise<void>;
@@ -1087,7 +1107,7 @@ function ShelfPage({
         </div>
         <button className="primary-button" onClick={() => setShowPlan(!showPlan)}>＋ 创建学习系列</button>
       </div>
-      {showPlan && <PlanForm submit={onCreate} />}
+      {showPlan && <PlanForm profile={profile} submit={onCreate} />}
       <div className="series-shelf-heading">
         <span>技术书架 · 第 1 层</span>
         <small>{shelf.series.length} 册在架</small>
@@ -1189,11 +1209,11 @@ function TrashIcon({ size = 16 }: { size?: number }) {
   );
 }
 
-function PlanForm({ submit }: { submit: (body: object, idempotencyKey: string) => Promise<void> }) {
+function PlanForm({ profile, submit }: { profile: LearningProfile; submit: (body: object, idempotencyKey: string) => Promise<void> }) {
   const [topic, setTopic] = useState('');
-  const [background, setBackground] = useState('');
-  const [experience, setExperience] = useState('');
-  const [purpose, setPurpose] = useState('');
+  const [background, setBackground] = useState(profile.profession);
+  const [experience, setExperience] = useState(profile.experience || '暂无直接经验，希望从当前基础开始建立理解。');
+  const [purpose, setPurpose] = useState(profile.purpose);
   const [depth, setDepth] = useState('');
   const [formError, setFormError] = useState('');
   const [submitting, setSubmitting] = useState(false);

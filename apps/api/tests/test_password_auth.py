@@ -48,6 +48,20 @@ def login(client: TestClient, password: str = PASSWORD):
     )
 
 
+def complete_profile(client: TestClient, csrf_token: str):
+    return client.post(
+        "/api/onboarding/profile/complete",
+        headers={"X-CSRF-Token": csrf_token},
+        json={
+            "profession": "产品设计师",
+            "stage": "foundation",
+            "purpose": "系统学习信息可视化并完成作品集项目",
+            "domains": ["信息可视化", "交互设计"],
+            "experience": "有产品设计经验，缺少数据表达基础",
+        },
+    )
+
+
 def test_production_password_login_requires_precreated_account(tmp_path):
     app = password_app(tmp_path)
     with TestClient(app, base_url="https://testserver") as client:
@@ -69,7 +83,15 @@ def test_production_password_login_requires_precreated_account(tmp_path):
         }
         assert logged_in.cookies.get("slow_session")
         assert logged_in.cookies.get("slow_csrf")
+        assert logged_in.json()["onboarding"]["required"] is True
 
+        bootstrap = client.get("/api/bootstrap")
+        assert bootstrap.status_code == 428
+        assert bootstrap.json()["code"] == "PROFILE_REQUIRED"
+
+        completed = complete_profile(client, logged_in.json()["csrfToken"])
+        assert completed.status_code == 200
+        assert completed.json()["required"] is False
         bootstrap = client.get("/api/bootstrap")
         assert bootstrap.status_code == 200
         assert bootstrap.json()["user"] == {
@@ -137,7 +159,12 @@ def test_disable_and_password_reset_revoke_all_user_sessions(tmp_path):
         with client.app.state.sessions() as db:
             service = PasswordCredentialService(db)
             service.set_account_enabled(username=USERNAME, enabled=True)
-        assert login(client).status_code == 200
+        logged_in = login(client)
+        assert logged_in.status_code == 200
+        assert complete_profile(
+            client,
+            logged_in.json()["csrfToken"],
+        ).status_code == 200
         shelf_id = client.get("/api/bootstrap").json()["shelves"][0]["id"]
 
         new_password = "A-New-Beta-Password-2026"

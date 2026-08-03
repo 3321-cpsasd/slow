@@ -30,6 +30,67 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class UserProfile(Base):
+    __tablename__ = "user_profiles"
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id"), primary_key=True
+    )
+    profession: Mapped[str] = mapped_column(String(120), default="")
+    stage: Mapped[str] = mapped_column(String(40), default="")
+    purpose: Mapped[str] = mapped_column(Text, default="")
+    domains_json: Mapped[str] = mapped_column(Text, default="[]")
+    experience: Mapped[str] = mapped_column(Text, default="")
+    version: Mapped[int] = mapped_column(Integer, default=0)
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now
+    )
+
+
+class UserProfileRevision(Base):
+    __tablename__ = "user_profile_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "version",
+            name="uq_user_profile_revisions_user_version",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    snapshot_json: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(String(40), default="self_report")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now
+    )
+
+
+class UserOnboarding(Base):
+    __tablename__ = "user_onboardings"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "flow_id",
+            name="uq_user_onboardings_user_flow",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    flow_id: Mapped[str] = mapped_column(String(80))
+    flow_version: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(24), default="required", index=True)
+    current_step: Mapped[str] = mapped_column(String(80), default="identity")
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now
+    )
+
+
 class UserIdentity(Base):
     __tablename__ = "user_identities"
     __table_args__ = (

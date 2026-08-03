@@ -24,13 +24,38 @@ export type ResumePosition = {
 export type Bootstrap = {
   user:{id:string;name:string};
   shelves:Shelf[];
+  profile:LearningProfile;
   resume:ResumePosition|null;
+};
+export type LearningProfile = {
+  profession:string;
+  stage:'exploring'|'beginner'|'foundation'|'practice'|'advanced'|'';
+  purpose:string;
+  domains:string[];
+  experience:string;
+  version:number;
+  completedAt:string|null;
+};
+export type OnboardingStep = {
+  id:'identity'|'direction'|'review';
+  title:string;
+  description:string;
+};
+export type OnboardingState = {
+  flowId:string;
+  flowVersion:number;
+  required:boolean;
+  status:'required'|'completed';
+  currentStep:OnboardingStep['id'];
+  steps:OnboardingStep[];
+  profile:LearningProfile;
 };
 export type AuthState = {
   authenticated:boolean;
   mode:'demo'|'local'|'password'|'oidc';
   user:{id:string;name:string};
   csrfToken:string;
+  onboarding:OnboardingState;
 };
 export type AuthConfig = {
   mode:'demo'|'local'|'password'|'oidc';

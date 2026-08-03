@@ -47,6 +47,32 @@ class PasswordLogin(ApiModel):
     password: SecretStr = Field(min_length=8, max_length=200)
 
 
+ProfileStage = Literal[
+    "exploring",
+    "beginner",
+    "foundation",
+    "practice",
+    "advanced",
+]
+
+
+class ProfileDraftUpdate(ApiModel):
+    current_step: Literal["identity", "direction", "review"]
+    profession: str | None = Field(default=None, max_length=120)
+    stage: ProfileStage | None = None
+    purpose: str | None = Field(default=None, max_length=1000)
+    domains: list[str] | None = Field(default=None, max_length=6)
+    experience: str | None = Field(default=None, max_length=1000)
+
+
+class ProfileComplete(ApiModel):
+    profession: str = Field(min_length=1, max_length=120)
+    stage: ProfileStage
+    purpose: str = Field(min_length=1, max_length=1000)
+    domains: list[str] = Field(min_length=1, max_length=6)
+    experience: str = Field(default="", max_length=1000)
+
+
 class QuizSubmit(ApiModel):
     quiz_set_id: str
     answers: list[list[int]]

@@ -41,6 +41,9 @@ from app.infrastructure.tables import (
     Series,
     Shelf,
     User,
+    UserOnboarding,
+    UserProfile,
+    UserProfileRevision,
     now,
 )
 from app.main import create_app
@@ -242,6 +245,62 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
     assert me["user"]["name"] == "用户 A"
     assert me["mode"] == "oidc"
     assert me["csrfToken"]
+    assert me["onboarding"]["required"] is True
+
+    bootstrap = client.get("/api/bootstrap")
+    assert bootstrap.status_code == 428
+    assert bootstrap.json()["code"] == "PROFILE_REQUIRED"
+
+    missing_profile_csrf = client.patch(
+        "/api/onboarding/profile",
+        json={"currentStep": "direction", "profession": "产品设计师"},
+    )
+    assert missing_profile_csrf.status_code == 403
+    assert missing_profile_csrf.json()["code"] == "CSRF_INVALID"
+
+    saved = client.patch(
+        "/api/onboarding/profile",
+        headers={"X-CSRF-Token": me["csrfToken"]},
+        json={
+            "currentStep": "direction",
+            "profession": "产品设计师",
+            "stage": "foundation",
+        },
+    )
+    assert saved.status_code == 200
+    assert saved.json()["currentStep"] == "direction"
+    resumed = client.get("/api/onboarding")
+    assert resumed.json()["profile"]["profession"] == "产品设计师"
+    assert resumed.json()["required"] is True
+
+    completed = client.post(
+        "/api/onboarding/profile/complete",
+        headers={"X-CSRF-Token": me["csrfToken"]},
+        json={
+            "profession": "产品设计师",
+            "stage": "foundation",
+            "purpose": "系统学习信息可视化并用于作品集",
+            "domains": ["信息可视化", "交互设计"],
+            "experience": "有产品设计基础",
+        },
+    )
+    assert completed.status_code == 200
+    assert completed.json()["required"] is False
+    with client.app.state.sessions() as db:
+        profile = db.get(UserProfile, me["user"]["id"])
+        revision = db.scalar(
+            select(UserProfileRevision).where(
+                UserProfileRevision.user_id == me["user"]["id"]
+            )
+        )
+        flow = db.scalar(
+            select(UserOnboarding).where(
+                UserOnboarding.user_id == me["user"]["id"]
+            )
+        )
+        assert profile.version == 1
+        assert revision.source == "self_report"
+        assert flow.status == "completed"
 
     bootstrap = client.get("/api/bootstrap")
     assert bootstrap.status_code == 200

@@ -147,6 +147,15 @@ export const api = {
     await call<void>('/api/auth/logout',{method:'POST'});
     csrfToken = '';
   },
+  onboarding:()=>call<import('../model/types').OnboardingState>('/api/onboarding'),
+  saveProfileDraft:(body:object)=>call<import('../model/types').OnboardingState>('/api/onboarding/profile',{
+    method:'PATCH',
+    body:JSON.stringify(body),
+  }),
+  completeProfile:(body:object)=>call<import('../model/types').OnboardingState>('/api/onboarding/profile/complete',{
+    method:'POST',
+    body:JSON.stringify(body),
+  }),
   bootstrap:()=>call<import('../model/types').Bootstrap>('/api/bootstrap'),
   createShelf:(body:import('../model/types').ShelfCreateInput)=>call<import('../model/types').Shelf>('/api/shelves',{method:'POST',body:JSON.stringify(body)}),
   updateResume:(sectionId:string,blockId='')=>call<import('../model/types').ResumePosition>(`/api/sections/${sectionId}/resume`,{method:'PUT',body:JSON.stringify({blockId})}),

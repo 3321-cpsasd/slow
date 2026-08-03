@@ -1127,7 +1127,8 @@ def test_library_read_model_has_fixed_query_budget_and_no_writes(client):
         event.remove(engine, "before_cursor_execute", record_statement)
 
     assert response.status_code == 200
-    assert sum(item.startswith("SELECT") for item in statements) <= 8
+    # The ninth fixed query is the authenticated user's required-profile gate.
+    assert sum(item.startswith("SELECT") for item in statements) <= 9
     assert not any(
         item.startswith(("INSERT", "UPDATE", "DELETE"))
         for item in statements
