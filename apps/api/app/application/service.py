@@ -866,7 +866,18 @@ class SlowService:
         self.db.commit()
         return self.book(book.id)
 
-    async def generate_chapter(self, chapter_id):
+    async def generate_chapter(
+        self,
+        chapter_id,
+        *,
+        first_section_status="available",
+    ):
+        if first_section_status not in {"available", "preparing"}:
+            raise AppError(
+                "首节准备状态无效",
+                code="SECTION_PREPARATION_STATUS_INVALID",
+                status=500,
+            )
         chapter_context = self.contexts.resolve_chapter(
             user_id=self.user_id,
             chapter_id=chapter_id,
@@ -890,6 +901,7 @@ class SlowService:
                 chapter_id,
                 resource_key,
                 owner_id,
+                first_section_status,
             )
         finally:
             release_generation_lease(self.db, resource_key, owner_id)
@@ -907,6 +919,7 @@ class SlowService:
         chapter_id,
         resource_key,
         owner_id,
+        first_section_status,
     ):
         chapter_context = self.contexts.resolve_chapter(user_id=self.user_id, chapter_id=chapter_id)
         chapter = chapter_context.chapter
@@ -944,7 +957,11 @@ class SlowService:
                 self.progress.add_section(
                     self.progress.active_run(chapter_context.series.id),
                     section,
-                    status="available" if position == 1 else "locked",
+                    status=(
+                        first_section_status
+                        if position == 1
+                        else "locked"
+                    ),
                 )
             practice = ChapterPractice(
                 id=uid("practice"),
@@ -1048,12 +1065,22 @@ class SlowService:
                     code="REMEDIATION_ALREADY_SUPERSEDED",
                     status=409,
                 )
-        if self.progress.for_section(
+        section_progress = self.progress.for_section(
             section,
             section_context.chapter,
             section_context.book,
-        ).status == "locked":
+        )
+        if section_progress.status == "locked":
             raise AppError("小节未解锁", code="SECTION_LOCKED", status=403)
+        if (
+            section_progress.status == "preparing"
+            and not isinstance(self.scope, WorkerExecutionContext)
+        ):
+            raise AppError(
+                "下一节正文和验证题仍在准备中",
+                code="SECTION_PREPARING",
+                status=409,
+            )
         existing = self.db.scalar(select(ContentVersion).where(ContentVersion.section_id == section.id).order_by(ContentVersion.version.desc()))
         latest_quiz = self.db.scalar(select(QuizSet).where(QuizSet.section_id == section.id).order_by(QuizSet.generation.desc()))
         if existing and not retry and not regenerate:
@@ -1651,6 +1678,20 @@ class SlowService:
             section_id=section_id,
         )
         section = section_context.section
+        section_progress = self.progress.for_section(
+            section,
+            section_context.chapter,
+            section_context.book,
+        )
+        if (
+            section_progress.status == "preparing"
+            and not isinstance(self.scope, WorkerExecutionContext)
+        ):
+            raise AppError(
+                "下一节正文和验证题仍在准备中",
+                code="SECTION_PREPARING",
+                status=409,
+            )
         learning_run = self.progress.active_run(section_context.series.id)
         content = self.db.scalar(select(ContentVersion).where(ContentVersion.section_id == section.id).order_by(ContentVersion.version.desc()))
         quiz = self.db.scalar(select(QuizSet).where(QuizSet.section_id == section.id).order_by(QuizSet.generation.desc()))
@@ -1982,7 +2023,10 @@ class SlowService:
                 code="INITIAL_CHAPTER_MISSING",
                 status=500,
             )
-        await self.generate_chapter(chapter_id)
+        await self.generate_chapter(
+            chapter_id,
+            first_section_status="preparing",
+        )
         target = self.db.scalar(
             select(Section)
             .where(Section.chapter_id == chapter_id)
@@ -1994,7 +2038,13 @@ class SlowService:
                 code="INITIAL_SECTION_MISSING",
                 status=500,
             )
+        target_progress = self.progress.for_section(target)
+        if target_progress.status != "preparing":
+            self.progress.set_status(target_progress, "preparing")
+            self.db.commit()
         await self.generate_section(target.id)
+        self.progress.set_status(target_progress, "available")
+        self.db.commit()
         return {"targetSectionId": target.id}
 
     async def _preload_next_section(self, source_section_id):
@@ -2039,7 +2089,10 @@ class SlowService:
                     else None
                 )
             if next_chapter:
-                await self.generate_chapter(next_chapter.id)
+                await self.generate_chapter(
+                    next_chapter.id,
+                    first_section_status="preparing",
+                )
                 target = self.db.scalar(
                     select(Section)
                     .where(Section.chapter_id == next_chapter.id)
@@ -2047,7 +2100,13 @@ class SlowService:
                 )
         if not target:
             return {"targetSectionId": None, "endOfSeries": True}
+        target_progress = self.progress.for_section(target)
+        if target_progress.status != "preparing":
+            self.progress.set_status(target_progress, "preparing")
+            self.db.commit()
         await self.generate_section(target.id)
+        self.progress.set_status(target_progress, "available")
+        self.db.commit()
         return {"targetSectionId": target.id, "endOfSeries": False}
 
     def learning_task(self, task_id):
@@ -2321,7 +2380,7 @@ class SlowService:
             section_context.chapter,
             section_context.book,
         ).ask_me_unlocked:
-            raise AppError("小节满分后才解锁 Ask Me", code="ASK_ME_LOCKED", status=403)
+            raise AppError("小节满分后才解锁深入讨论", code="ASK_ME_LOCKED", status=403)
         session = self.db.scalar(
             select(AskMeSession).where(
                 AskMeSession.section_id == section.id,
@@ -2335,7 +2394,7 @@ class SlowService:
             return self._ask_me(session)
         if not session:
             if answer:
-                raise AppError("请先开始 Ask Me 再作答", code="ASK_ME_NOT_STARTED")
+                raise AppError("请先开始深入讨论再作答", code="ASK_ME_NOT_STARTED")
             section_view = self.section(section_id)
             self.db.commit()
             turn = None

@@ -48,6 +48,7 @@ DEFAULT_PROVIDER_CAPABILITIES = ProviderCapabilities(
 )
 
 logger = logging.getLogger(__name__)
+LEARNING_TASK_CONCURRENCY = 2
 
 
 def provider_capabilities(config: dict) -> ProviderCapabilities:
@@ -191,6 +192,42 @@ def create_app(
                     if not heartbeat_task(heartbeat_db, context):
                         break
 
+    async def execute_learning_task(task_id: str, app: FastAPI):
+        if app.state.learning_task_stop.is_set():
+            return
+        with sessions() as db:
+            context = claim_task(
+                db,
+                task_id,
+                lease_owner=worker_id,
+            )
+            if not context:
+                return
+            worker_service = SlowService(
+                db,
+                app.state.ai,
+                app.state.source_verifier,
+                app.state.attachment_storage,
+                scope=context,
+            )
+            heartbeat_stop = asyncio.Event()
+            heartbeat = asyncio.create_task(
+                task_heartbeat_loop(context, heartbeat_stop)
+            )
+            try:
+                with usage_recorder.attributed(context.principal):
+                    await worker_service.execute_learning_task(context)
+            except Exception:
+                logger.exception(
+                    "Learning task worker recovered after task %s failed",
+                    task_id,
+                )
+            finally:
+                heartbeat_stop.set()
+                heartbeat.cancel()
+                with suppress(asyncio.CancelledError):
+                    await heartbeat
+
     async def learning_task_worker(app: FastAPI):
         while not app.state.learning_task_stop.is_set():
             app.state.learning_task_wakeup.clear()
@@ -199,43 +236,10 @@ def create_app(
                     task_ids = recoverable_task_ids(db)
                 if not task_ids:
                     break
-                for task_id in task_ids:
-                    if app.state.learning_task_stop.is_set():
-                        break
-                    with sessions() as db:
-                        context = claim_task(
-                            db,
-                            task_id,
-                            lease_owner=worker_id,
-                        )
-                        if not context:
-                            continue
-                        worker_service = SlowService(
-                            db,
-                            app.state.ai,
-                            app.state.source_verifier,
-                            app.state.attachment_storage,
-                            scope=context,
-                        )
-                        heartbeat_stop = asyncio.Event()
-                        heartbeat = asyncio.create_task(
-                            task_heartbeat_loop(context, heartbeat_stop)
-                        )
-                        try:
-                            with usage_recorder.attributed(context.principal):
-                                await worker_service.execute_learning_task(
-                                    context
-                                )
-                        except Exception:
-                            logger.exception(
-                                "Learning task worker recovered after task %s failed",
-                                task_id,
-                            )
-                        finally:
-                            heartbeat_stop.set()
-                            heartbeat.cancel()
-                            with suppress(asyncio.CancelledError):
-                                await heartbeat
+                await asyncio.gather(*(
+                    execute_learning_task(task_id, app)
+                    for task_id in task_ids[:LEARNING_TASK_CONCURRENCY]
+                ))
             if app.state.learning_task_stop.is_set():
                 break
             try:

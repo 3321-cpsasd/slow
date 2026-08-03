@@ -1674,15 +1674,23 @@ function BookTree({
 }
 
 function SectionTreeButton({ item, active, onClick }: { item: SectionSummary; active: boolean; onClick: () => void }) {
-  const state = item.status === 'completed' ? '✓' : item.status === 'locked' ? <LockIcon size={11} /> : item.position;
+  const preparing = item.status === 'preparing';
+  const state = item.status === 'completed'
+    ? '✓'
+    : item.status === 'locked'
+      ? <LockIcon size={11} />
+      : preparing
+        ? '…'
+        : item.position;
   return (
     <button
       className={`section-tree-button ${active ? 'active' : ''} ${item.status}`}
-      disabled={item.status === 'locked'}
+      disabled={item.status === 'locked' || preparing}
+      title={preparing ? '正文和验证题准备完成后即可进入' : undefined}
       onClick={onClick}
     >
       <span>{state}</span>
-      <b>{item.title}</b>
+      <b>{item.title}{preparing ? ' · 准备中' : ''}</b>
     </button>
   );
 }
@@ -1837,7 +1845,13 @@ function ReaderPanel({
         </div>
         <div className="reader-toolbar-actions">
           <span className={`lesson-status ${section.status}`}>
-            {section.status === 'completed' ? '已完成' : section.status === 'available' ? '学习中' : '未解锁'}
+            {section.status === 'completed'
+              ? '已完成'
+              : section.status === 'available'
+                ? '学习中'
+                : section.status === 'preparing'
+                  ? '准备中'
+                  : '未解锁'}
           </span>
           {section.content && section.bestScore === 0 && section.totalScore === 0 && (
             <button
@@ -2060,7 +2074,7 @@ function LessonContent({
       <div className="lesson-complete-action">
         <span>正文阅读完成</span>
         <h3>现在，验证你是否真正理解。</h3>
-        <p>完成选择题并达到及格线，才会解锁下一节；满分后还会开放 Ask Me 隐藏关卡。</p>
+        <p>完成选择题并达到及格线，才会解锁下一节；满分后还会开放“深入讨论”。</p>
         <button className="primary-button" onClick={onStartQuiz}>开始验证 <i>→</i></button>
       </div>
     </article>
@@ -2548,7 +2562,15 @@ function Quiz({
       )}
       <div id="quiz-submission-feedback" aria-live="polite">
         {submissionError && <p className="result failure" role="alert">{submissionError}</p>}
-        {result && <p className={result.passed ? 'result success' : 'result failure'}>{result.passed ? '验证已通过，下一节已经解锁。' : '本次未通过，评分结果已经保存。'}</p>}
+        {result && (
+          <p className={result.passed ? 'result success' : 'result failure'}>
+            {result.passed
+              ? nextSectionTask
+                ? '验证已通过，下一节正在准备；正文和验证题完成后即可进入。'
+                : '验证已通过，学习结果已经保存。'
+              : '本次未通过，评分结果已经保存。'}
+          </p>
+        )}
         {workflowMessage && <p className={failedTasks.length ? 'result failure' : 'result success'}>{workflowMessage}</p>}
         {workflowTasks.length > 0 && (
           <div className="workflow-task-list" aria-label="后台任务状态">
@@ -2848,11 +2870,11 @@ function AskMePanel({ sectionId }: { sectionId: string }) {
   };
   return (
     <div className="askme-view">
-      <p className="eyebrow">满分隐藏关卡</p>
+      <p className="eyebrow">满分解锁 · 深入讨论</p>
       <h2>机制 → 边界 → 迁移</h2>
-      <p>这里是口试，不是继续教学。系统会依次探测你能否解释机制、识别边界，并迁移到新场景。</p>
+      <p>这是一场围绕本节内容的深入讨论。系统会依次与你探讨机制、边界和迁移，帮助你检验理解是否稳固。</p>
       {!askMe ? (
-        <button className="primary-button large" onClick={runAskMe}>开始三轮口试</button>
+        <button className="primary-button large" onClick={runAskMe}>开始深入讨论</button>
       ) : (
         <>
           <div className="oral-timeline">
@@ -2871,7 +2893,7 @@ function AskMePanel({ sectionId }: { sectionId: string }) {
               <button className="primary-button" onClick={runAskMe}>提交本轮</button>
             </>
           ) : (
-            <p className="result success">三轮口试完成，证据已写入掌握画像。</p>
+            <p className="result success">深入讨论完成，证据已写入掌握画像。</p>
           )}
         </>
       )}

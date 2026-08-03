@@ -1138,6 +1138,17 @@ button:disabled { cursor: not-allowed; }
 }
 .section-tree-button b { font-size: 11px; line-height: 1.45; font-weight: 600; }
 .section-tree-button.locked { opacity: .48; }
+.section-tree-button.preparing { opacity: .72; color: #7d7048; }
+.section-tree-button.preparing > span {
+  border-color: #d8c89d;
+  background: #fff9e8;
+  color: #8a7440;
+  animation: preparation-pulse 1.4s ease-in-out infinite;
+}
+@keyframes preparation-pulse {
+  0%, 100% { opacity: .55; }
+  50% { opacity: 1; }
+}
 .artifact-submit {
   margin: 3px 7px;
   display: flex;
@@ -1193,6 +1204,7 @@ button:disabled { cursor: not-allowed; }
 .reader-toolbar-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 9px; }
 .lesson-status { flex: 0 0 auto; border-radius: 99px; padding: 6px 10px; font-size: 10px; background: #f0f1ed; color: #6f756f; }
 .lesson-status.completed { background: var(--green-soft); color: var(--green); }
+.lesson-status.preparing { background: #fff9e8; color: #7d7048; }
 .regenerate-trigger { color: var(--green); }
 .regenerate-confirm .eyebrow { color: var(--green); }
 .regeneration-progress {

@@ -142,7 +142,7 @@ class ProgressionRepository:
             book = self.db.get(Book, chapter.book_id)
             section_progress = self.progress.for_section(section, chapter, book)
             if section_progress.status == "locked":
-                self.progress.set_status(section_progress, "available")
+                self.progress.set_status(section_progress, "preparing")
         if decision.completed_chapter_id:
             chapter = self.db.get(Chapter, decision.completed_chapter_id)
             self.progress.set_status(

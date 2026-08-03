@@ -223,7 +223,7 @@ export function ProfileOnboardingFlow({
                 </dl>
                 <div className="profile-evidence-note">
                   <span>自述</span>
-                  <p><b>不会直接计为“已掌握”</b>答题、错题、口试和实践结果才会形成掌握证据。</p>
+                  <p><b>不会直接计为“已掌握”</b>答题、错题、深入讨论和实践结果才会形成掌握证据。</p>
                 </div>
               </div>
             )}

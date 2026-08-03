@@ -4,6 +4,7 @@ import json
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -72,6 +73,29 @@ class FakeAi:
         return AskMeTurn(dimension=dimension, prompt=f"请说明 {dimension}", evaluation="not_evaluated" if not request.get("previousAnswer") else "strong", rationale="回答覆盖关键点")
     async def replan_book(self, request, memory):
         return ReplannedBook(rationale="根据学习记忆减少重复", chapters=[ReplannedChapter(title="重规划章节", objective="验证迁移")])
+
+
+class ParallelWorkflowAi(FakeAi):
+    def __init__(self):
+        self.parallel_phase = False
+        self.next_section_started = Event()
+        self.release_next_section = Event()
+        self.events: list[str] = []
+
+    async def note(self, request):
+        if self.parallel_phase:
+            self.events.append("note_start")
+            await asyncio.to_thread(self.next_section_started.wait, 2)
+            self.events.append("note_end")
+        return await super().note(request)
+
+    async def lesson(self, request, memory, prior_questions=None):
+        if self.parallel_phase:
+            self.events.append("next_section_start")
+            self.next_section_started.set()
+            await asyncio.to_thread(self.release_next_section.wait, 3)
+            self.events.append("next_section_end")
+        return await super().lesson(request, memory, prior_questions)
 
 
 def test_quiz_grade_explains_missed_and_incorrect_multiselect_options():
@@ -405,6 +429,76 @@ def client(tmp_path):
     storage = LocalAttachmentStorage(tmp_path / "attachments")
     with TestClient(create_app("sqlite+pysqlite:///:memory:", FakeAi(), AcceptingSourceVerifier(), storage)) as value:
         yield value
+
+
+def test_note_and_next_section_run_in_parallel_without_early_unlock(tmp_path):
+    ai = ParallelWorkflowAi()
+    storage = LocalAttachmentStorage(tmp_path / "parallel-attachments")
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'parallel.db'}"
+
+    with TestClient(
+        create_app(database_url, ai, AcceptingSourceVerifier(), storage)
+    ) as parallel_client:
+        series = create_series(parallel_client)
+        initialization = wait_for_task(
+            parallel_client,
+            series["initializationTask"]["taskId"],
+        )
+        assert initialization["status"] == "succeeded"
+        refreshed = parallel_client.get(
+            f"/api/series/{series['id']}"
+        ).json()
+        first_section = refreshed["books"][0]["chapters"][0]["sections"][0]
+        section = parallel_client.get(
+            f"/api/sections/{first_section['id']}"
+        ).json()
+
+        ai.parallel_phase = True
+        result = parallel_client.post(
+            f"/api/sections/{first_section['id']}/quiz",
+            json={
+                "quizSetId": section["quiz"]["id"],
+                "answers": [[1], [1], [1], [1], [1]],
+            },
+        ).json()
+        tasks = {task["type"]: task for task in result["workflowTasks"]}
+
+        try:
+            assert ai.next_section_started.wait(2)
+            assert ai.events.index("next_section_start") < ai.events.index("note_end")
+
+            preparing_series = parallel_client.get(
+                f"/api/series/{series['id']}"
+            ).json()
+            preparing_sections = preparing_series["books"][0]["chapters"][0]["sections"]
+            assert preparing_sections[0]["status"] == "completed"
+            assert preparing_sections[1]["status"] == "preparing"
+
+            preparing = parallel_client.get(
+                f"/api/sections/{preparing_sections[1]['id']}"
+            )
+            assert preparing.status_code == 409
+            assert preparing.json()["code"] == "SECTION_PREPARING"
+        finally:
+            ai.release_next_section.set()
+
+        assert wait_for_task(
+            parallel_client,
+            tasks["note_generation"]["taskId"],
+        )["status"] == "succeeded"
+        assert wait_for_task(
+            parallel_client,
+            tasks["next_section_preload"]["taskId"],
+        )["status"] == "succeeded"
+
+        ready_series = parallel_client.get(
+            f"/api/series/{series['id']}"
+        ).json()
+        ready_section = ready_series["books"][0]["chapters"][0]["sections"][1]
+        assert ready_section["status"] == "available"
+        assert parallel_client.get(
+            f"/api/sections/{ready_section['id']}"
+        ).status_code == 200
 
 
 def test_complete_real_shape_vertical_slice(client):
