@@ -21,6 +21,8 @@ from ..infrastructure.tables import (
     ArtifactAttachment,
     ArtifactSubmission,
     AskMeSession,
+    AssessmentObservation,
+    AssessmentTarget,
     Book,
     BookCapstone,
     Chapter,
@@ -32,10 +34,14 @@ from ..infrastructure.tables import (
     LearningEvidence,
     LearningMemory,
     LearningNote,
+    LearningNoteReviewSupplement,
+    LearningNoteSummary,
+    LearningNoteUserRevision,
     LearningRun,
     LearningTask,
     LearningPlan,
     LearningResumePosition,
+    KnowledgeStateProjection,
     PlanCreationRequest,
     QaMessage,
     QaSession,
@@ -44,6 +50,7 @@ from ..infrastructure.tables import (
     QuizSet,
     Remediation,
     Section,
+    SectionAssessmentTarget,
     Series,
     Shelf,
     SourceVerification,
@@ -53,11 +60,18 @@ from ..infrastructure.tables import (
 from ..modules.library.context import ActiveLearningContextResolver
 from ..modules.artifacts.progress import ArtifactProgressStore
 from ..modules.learning.commands import SubmitQuiz
+from ..modules.learning.assessment import (
+    assessment_contract_view,
+    bind_questions_to_targets,
+    due_review_queue,
+    failed_target_ids_for_attempt,
+)
 from ..modules.learning.generation_leases import (
     acquire_generation_lease,
     release_generation_lease,
     renew_generation_lease,
 )
+from ..modules.learning.milestones import MilestoneService
 from ..modules.learning.progress import ProgressStore
 from ..modules.learning.tasks import (
     complete_task,
@@ -238,6 +252,7 @@ class SlowService:
         self.progress = ProgressStore(db, user_id=self.user_id)
         self.artifacts = ArtifactProgressStore(db, user_id=self.user_id)
         self.library_reads = LibraryReadModel(db, user_id=self.user_id)
+        self.milestones = MilestoneService(db, user_id=self.user_id, uid=uid)
         if isinstance(scope, WorkerExecutionContext):
             self._install_worker_fence(scope)
 
@@ -335,12 +350,22 @@ class SlowService:
 
     def bootstrap(self):
         view = self.library_reads.bootstrap()
-        view["profile"] = ProfileService(
+        profile = ProfileService(
             self.db,
             self.user_id,
         ).state()["profile"]
-        view["resume"] = self.resume_position()
+        resume = self.resume_position()
+        view["profile"] = profile
+        view["resume"] = resume
+        view["milestoneDashboard"] = self.milestones.dashboard(
+            library=view,
+            profile=profile,
+            resume=resume,
+        )
         return view
+
+    def confirm_milestone_path(self, series_id: str):
+        return self.milestones.confirm(series_id)
 
     def resume_position(self):
         row = self.db.scalar(
@@ -486,6 +511,7 @@ class SlowService:
         learning_run = self.progress.create_run(series.id)
         self.db.flush()
         initial_chapter_id = None
+        milestone_chapters = {}
         for book_position, item in enumerate(generated.books, 1):
             book = Book(
                 id=uid("book"),
@@ -530,6 +556,10 @@ class SlowService:
                     objective=chapter.objective,
                 )
                 self.db.add(chapter_row)
+                milestone_chapters[(book_position, chapter_position)] = (
+                    chapter_row,
+                    book,
+                )
                 self.progress.add_chapter(
                     learning_run,
                     chapter_row,
@@ -541,6 +571,11 @@ class SlowService:
                 )
                 if book_position == 1 and chapter_position == 1:
                     initial_chapter_id = chapter_row.id
+        self.milestones.create_for_plan(
+            series_id=series.id,
+            generated=generated,
+            chapter_map=milestone_chapters,
+        )
         if initial_chapter_id:
             self.db.add(
                 LearningTask(
@@ -1220,6 +1255,24 @@ class SlowService:
                 if (retry or regenerate) and latest_quiz
                 else []
             )
+            remediation_targets: set[str] = set()
+            if retry and retry_attempt_id:
+                failed_attempt = self.db.get(QuizAttempt, retry_attempt_id)
+                failed_quiz = (
+                    self.db.get(QuizSet, failed_attempt.quiz_set_id)
+                    if failed_attempt
+                    else None
+                )
+                remediation_targets = failed_target_ids_for_attempt(
+                    self.db,
+                    attempt_id=retry_attempt_id,
+                )
+                if failed_quiz and remediation_targets:
+                    prior = [
+                        question
+                        for question in load(failed_quiz.questions_json, [])
+                        if question.get("assessmentTargetId") in remediation_targets
+                    ]
             book = self._book_for_section(section)
             remediation_count = (
                 self.db.scalar(
@@ -1248,11 +1301,22 @@ class SlowService:
             }
             lesson_request = {
                 **self._section_summary(section),
+                "assessmentTargets": assessment_contract_view(self.db, section),
                 "rejectedSourceUrls": list(carried_rejected_urls),
                 "rejectedSourceHosts": list(carried_rejected_hosts),
             }
             if retry:
                 lesson_request["remediationStrategy"] = remediation_strategy
+                if remediation_targets:
+                    lesson_request["assessmentTargets"] = [
+                        item
+                        for item in lesson_request["assessmentTargets"]
+                        if item["assessmentTargetId"] in remediation_targets
+                    ]
+                    lesson_request["objectives"] = [
+                        item["objective"]
+                        for item in lesson_request["assessmentTargets"]
+                    ]
             lesson = None
             verification = []
             rejected_source_urls = list(carried_rejected_urls)
@@ -1554,12 +1618,17 @@ class SlowService:
                 self.db.add(content)
                 self.db.flush()
                 self.db.add(SourceVerification(id=uid("verification"), content_version_id=content.id, report_json=dump(verification)))
+            question_payloads = bind_questions_to_targets(
+                self.db,
+                section,
+                [item.model_dump() for item in lesson.questions],
+            )
             quiz = QuizSet(
                 id=uid("quiz"),
                 section_id=section.id,
                 content_version_id=content.id,
                 generation=(latest_quiz.generation + 1 if latest_quiz else 1),
-                questions_json=dump([item.model_dump() for item in lesson.questions]),
+                questions_json=dump(question_payloads),
             )
             self.db.add(quiz)
             self.db.flush()
@@ -2187,8 +2256,96 @@ class SlowService:
         memory.updated_at = now()
 
     def _memory(self, shelf_id, limit=30):
-        rows = self.db.scalars(select(LearningMemory).where(LearningMemory.user_id == self.user_id, LearningMemory.shelf_id == shelf_id).order_by(LearningMemory.updated_at.desc()).limit(limit)).all()
-        return [{"concept": item.concept, "mastery": item.mastery_score, "evidenceCount": item.evidence_count, "summary": item.summary} for item in rows]
+        target_scope = (
+            select(SectionAssessmentTarget.assessment_target_id)
+            .join(Section, Section.id == SectionAssessmentTarget.section_id)
+            .join(Chapter, Chapter.id == Section.chapter_id)
+            .join(Book, Book.id == Chapter.book_id)
+            .where(
+                Book.shelf_id == shelf_id,
+                Book.deleted_at.is_(None),
+            )
+        )
+        projection_rows = self.db.execute(
+            select(KnowledgeStateProjection, AssessmentTarget)
+            .join(
+                AssessmentTarget,
+                AssessmentTarget.id
+                == KnowledgeStateProjection.assessment_target_id,
+            )
+            .where(
+                KnowledgeStateProjection.user_id == self.user_id,
+                KnowledgeStateProjection.assessment_target_id.in_(target_scope),
+            )
+            .order_by(KnowledgeStateProjection.updated_at.desc())
+            .limit(limit)
+        ).all()
+        target_ids = [target.id for _, target in projection_rows]
+        evidence_counts = dict(
+            self.db.execute(
+                select(
+                    AssessmentObservation.assessment_target_id,
+                    func.count(AssessmentObservation.id),
+                )
+                .where(
+                    AssessmentObservation.user_id == self.user_id,
+                    AssessmentObservation.assessment_target_id.in_(target_ids),
+                )
+                .group_by(AssessmentObservation.assessment_target_id)
+            ).all()
+        ) if target_ids else {}
+        result = [
+            {
+                "concept": target.objective_statement,
+                "mastery": round(state.p_known_ppm / 10_000),
+                "evidenceCount": evidence_counts.get(target.id, 0),
+                "summary": (
+                    f"BKT 掌握概率 {state.p_known_ppm / 10_000:.1f}%；"
+                    f"声明 {state.claim_status}；保持轮次 {state.retention_rounds}"
+                ),
+                "assessmentTargetId": target.id,
+                "pKnown": round(state.p_known_ppm / 1_000_000, 6),
+                "uncertainty": round(state.uncertainty_ppm / 1_000_000, 6),
+                "claimStatus": state.claim_status,
+                "retentionRounds": state.retention_rounds,
+                "parameterSetVersion": state.parameter_set_version,
+                "projectionRuleVersion": state.projection_rule_version,
+                "sourceObservationWatermark": state.source_observation_watermark,
+            }
+            for state, target in projection_rows
+        ]
+
+        # Ask Me and pre-M2 evidence still use the legacy memory projection.
+        # Keep it as a compatibility fallback, but never let it override a BKT
+        # projection for the same measured objective.
+        projected_concepts = {
+            " ".join(item["concept"].strip().casefold().split())
+            for item in result
+        }
+        if len(result) < limit:
+            legacy_rows = self.db.scalars(
+                select(LearningMemory)
+                .where(
+                    LearningMemory.user_id == self.user_id,
+                    LearningMemory.shelf_id == shelf_id,
+                )
+                .order_by(LearningMemory.updated_at.desc())
+                .limit(limit)
+            ).all()
+            for item in legacy_rows:
+                key = " ".join(item.concept.strip().casefold().split())
+                if key in projected_concepts:
+                    continue
+                result.append({
+                    "concept": item.concept,
+                    "mastery": item.mastery_score,
+                    "evidenceCount": item.evidence_count,
+                    "summary": item.summary,
+                    "projectionRuleVersion": "legacy_linear_v1",
+                })
+                if len(result) == limit:
+                    break
+        return result
 
     def learning_memory(self, shelf_id=None):
         if shelf_id:
@@ -2196,6 +2353,13 @@ class SlowService:
             return self._memory(shelf_id, 200)
         shelves = self.db.scalars(select(Shelf).where(Shelf.user_id == self.user_id)).all()
         return {item.id: self._memory(item.id, 200) for item in shelves}
+
+    def due_reviews(self, daily_budget=10):
+        return due_review_queue(
+            self.db,
+            user_id=self.user_id,
+            daily_budget=daily_budget,
+        )
 
     async def _ensure_note(self, section):
         context = self.contexts.resolve_section(
@@ -2211,7 +2375,125 @@ class SlowService:
         ).execute(section)
 
     def _note(self, note):
-        return {"id": note.id, "aiContent": load(note.ai_content_json, {}), "userContent": load(note.user_content_json, {}), "version": note.version}
+        summaries = self.db.scalars(
+            select(LearningNoteSummary)
+            .where(LearningNoteSummary.note_id == note.id)
+            .order_by(LearningNoteSummary.version)
+        ).all()
+        supplements = self.db.scalars(
+            select(LearningNoteReviewSupplement)
+            .where(LearningNoteReviewSupplement.note_id == note.id)
+            .order_by(
+                LearningNoteReviewSupplement.created_at,
+                LearningNoteReviewSupplement.id,
+            )
+        ).all()
+        user_revisions = self.db.scalars(
+            select(LearningNoteUserRevision)
+            .where(LearningNoteUserRevision.note_id == note.id)
+            .order_by(LearningNoteUserRevision.version)
+        ).all()
+        verification_rows = self.db.execute(
+            select(KnowledgeStateProjection, AssessmentTarget)
+            .join(
+                AssessmentTarget,
+                AssessmentTarget.id
+                == KnowledgeStateProjection.assessment_target_id,
+            )
+            .join(
+                SectionAssessmentTarget,
+                SectionAssessmentTarget.assessment_target_id
+                == AssessmentTarget.id,
+            )
+            .where(
+                KnowledgeStateProjection.user_id == self.user_id,
+                SectionAssessmentTarget.section_id == note.section_id,
+            )
+            .order_by(AssessmentTarget.created_at)
+        ).all()
+        latest_summary = summaries[-1] if summaries else None
+        latest_user = user_revisions[-1] if user_revisions else None
+        return {
+            "id": note.id,
+            "aiContent": load(
+                latest_summary.content_json if latest_summary else note.ai_content_json,
+                {},
+            ),
+            "userContent": load(
+                latest_user.content_json if latest_user else note.user_content_json,
+                {},
+            ),
+            "version": note.version,
+            "layers": {
+                "learningSummary": (
+                    {
+                        "version": latest_summary.version,
+                        "content": load(latest_summary.content_json, {}),
+                        "sourceContentVersionId": (
+                            latest_summary.source_content_version_id
+                        ),
+                        "sourceContractVersion": (
+                            latest_summary.source_contract_version
+                        ),
+                        "sourceObservationWatermark": (
+                            latest_summary.source_observation_watermark
+                        ),
+                        "generationRuleVersion": (
+                            latest_summary.generation_rule_version
+                        ),
+                        "createdAt": timestamp(latest_summary.created_at),
+                    }
+                    if latest_summary
+                    else None
+                ),
+                "reviewSupplements": [
+                    {
+                        "id": item.id,
+                        "reviewEpisodeId": item.review_episode_id,
+                        "content": load(item.content_json, {}),
+                        "authorKind": item.author_kind,
+                        "sourceObservationWatermark": (
+                            item.source_observation_watermark
+                        ),
+                        "createdAt": timestamp(item.created_at),
+                    }
+                    for item in supplements
+                ],
+                "userRevision": (
+                    {
+                        "version": latest_user.version,
+                        "content": load(latest_user.content_json, {}),
+                        "basedOnSummaryVersion": (
+                            latest_user.based_on_summary_version
+                        ),
+                        "source": latest_user.source,
+                        "createdAt": timestamp(latest_user.created_at),
+                    }
+                    if latest_user
+                    else None
+                ),
+            },
+            "verificationAnnotations": [
+                {
+                    "assessmentTargetId": target.id,
+                    "objective": target.objective_statement,
+                    "dimension": target.dimension,
+                    "pKnown": round(state.p_known_ppm / 1_000_000, 6),
+                    "uncertainty": round(
+                        state.uncertainty_ppm / 1_000_000,
+                        6,
+                    ),
+                    "claimStatus": state.claim_status,
+                    "retentionRounds": state.retention_rounds,
+                    "parameterSetVersion": state.parameter_set_version,
+                    "projectionRuleVersion": state.projection_rule_version,
+                    "sourceObservationWatermark": (
+                        state.source_observation_watermark
+                    ),
+                }
+                for state, target in verification_rows
+            ],
+        }
 
     def update_note(self, section_id, content):
         context = self.contexts.resolve_section(user_id=self.user_id, section_id=section_id)
@@ -2225,8 +2507,118 @@ class SlowService:
         )
         if not note:
             raise AppError("笔记不存在", code="NOTE_NOT_FOUND", status=404)
-        note.user_content_json, note.version, note.updated_at = dump(content), note.version + 1, now()
+        latest_version = self.db.scalar(
+            select(func.max(LearningNoteUserRevision.version)).where(
+                LearningNoteUserRevision.note_id == note.id
+            )
+        ) or 0
+        summary_version = self.db.scalar(
+            select(func.max(LearningNoteSummary.version)).where(
+                LearningNoteSummary.note_id == note.id
+            )
+        ) or 1
+        self.db.add(
+            LearningNoteUserRevision(
+                id=uid("note_user_revision"),
+                note_id=note.id,
+                version=latest_version + 1,
+                content_json=dump(content),
+                based_on_summary_version=summary_version,
+                source="user_edit",
+            )
+        )
+        note.user_content_json, note.version, note.updated_at = (
+            dump(content),
+            note.version + 1,
+            now(),
+        )
         self.db.commit()
+        return self._note(note)
+
+    def add_note_review_supplement(
+        self,
+        section_id: str,
+        review_episode_id: str,
+        content: dict,
+    ):
+        context = self.contexts.resolve_section(
+            user_id=self.user_id,
+            section_id=section_id,
+        )
+        learning_run = self.progress.active_run(context.series.id)
+        note = self.db.scalar(
+            select(LearningNote).where(
+                LearningNote.section_id == section_id,
+                LearningNote.user_id == self.user_id,
+                LearningNote.learning_run_id == learning_run.id,
+            )
+        )
+        if not note:
+            raise AppError("笔记不存在", code="NOTE_NOT_FOUND", status=404)
+        existing = self.db.scalar(
+            select(LearningNoteReviewSupplement).where(
+                LearningNoteReviewSupplement.note_id == note.id,
+                LearningNoteReviewSupplement.review_episode_id
+                == review_episode_id,
+            )
+        )
+        if existing:
+            if load(existing.content_json, {}) != content:
+                raise AppError(
+                    "该复习轮次已经形成了不同的笔记补充",
+                    code="NOTE_REVIEW_EPISODE_REUSED",
+                    status=409,
+                )
+            return self._note(note)
+        watermark = self.db.scalar(
+            select(func.max(AssessmentObservation.sequence)).where(
+                AssessmentObservation.learning_run_id == learning_run.id,
+                AssessmentObservation.user_id == self.user_id,
+                AssessmentObservation.section_id == section_id,
+                AssessmentObservation.learning_episode_id == review_episode_id,
+                AssessmentObservation.assistance_mode == "unassisted_review",
+                AssessmentObservation.qualification_at_creation.in_(
+                    ("eligible", "eligible_grouped")
+                ),
+            )
+        )
+        if not watermark:
+            raise AppError(
+                "复习补充必须绑定一次已完成的无辅助复习",
+                code="NOTE_REVIEW_EPISODE_INVALID",
+                status=409,
+            )
+        self.db.add(
+            LearningNoteReviewSupplement(
+                id=uid("note_review_supplement"),
+                note_id=note.id,
+                review_episode_id=review_episode_id,
+                content_json=dump(content),
+                author_kind="user",
+                source_observation_watermark=watermark,
+            )
+        )
+        note.version += 1
+        note.updated_at = now()
+        try:
+            self.db.commit()
+        except IntegrityError:
+            self.db.rollback()
+            concurrent = self.db.scalar(
+                select(LearningNoteReviewSupplement).where(
+                    LearningNoteReviewSupplement.note_id == note.id,
+                    LearningNoteReviewSupplement.review_episode_id
+                    == review_episode_id,
+                )
+            )
+            if not concurrent:
+                raise
+            if load(concurrent.content_json, {}) != content:
+                raise AppError(
+                    "该复习轮次已经形成了不同的笔记补充",
+                    code="NOTE_REVIEW_EPISODE_REUSED",
+                    status=409,
+                )
         return self._note(note)
 
     def prepare_ask(self, section_id, body):

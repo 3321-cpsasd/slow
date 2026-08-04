@@ -4,6 +4,7 @@ import json
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from threading import Event
 from types import SimpleNamespace
 
@@ -11,7 +12,7 @@ import pytest
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, event, select
-from app.ai.contracts import AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedChapter, GeneratedContent, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedQuiz, GeneratedSectionOutline, PlanBook, PlanChapter, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
+from app.ai.contracts import AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedChapter, GeneratedContent, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedQuiz, GeneratedSectionOutline, PlanBook, PlanChapter, PlanMilestone, PlanMilestoneCriterion, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
 from app.application.service import (
     apply_source_repair_scope,
     source_blacklist_from_generation_traces,
@@ -32,28 +33,115 @@ from app.services.source_verifier import (
     Verification,
 )
 from app.infrastructure.tables import (
+    AssessmentGateState,
+    AssessmentObservation,
+    AssessmentTarget,
     Book,
     ChapterRevision,
     ContentVersion,
+    EvidenceQualificationEvent,
     GenerationRun,
+    KnowledgeStateProjection,
     LearningEvidence,
+    LearningNote,
+    LearningNoteReviewSupplement,
+    LearningNoteSummary,
+    LearningNoteUserRevision,
     LearningTask,
     LearningPlan,
     LearningRun,
+    MilestonePath,
+    MilestonePathRevision,
     QuizAttempt,
     QuizSet,
+    ReviewState,
+    ScoringResult,
     Remediation,
     Section,
+    SectionAssessmentTarget,
     SectionProgress,
     Series,
+    now,
 )
+from app.modules.learning.assessment import (
+    bind_questions_to_targets,
+    rebuild_assessment_projections,
+)
+from app.modules.learning.rebuild import rebuild_user_projections
 
 
 class FakeAi:
     configured, model = True, "fake-structured"
     async def close(self): pass
     async def plan(self, request, memory):
-        return GeneratedPlan(series_title="K8s 台阶", rationale="从对象到排障", assumptions=[], confidence="high", books=[PlanBook(title="K8s（一）基础", topic="K8s", description="核心对象", estimated_minutes=300, chapters=[PlanChapter(title="Pod 与调度", objective="理解对象和调度"), PlanChapter(title="部署", objective="完成基础部署")]), PlanBook(title="K8s（二）网络", topic="K8s 网络", description="网络与服务", estimated_minutes=300, chapters=[PlanChapter(title="Service", objective="理解服务发现"), PlanChapter(title="排障", objective="定位网络问题")])])
+        return GeneratedPlan(
+            series_title="K8s 台阶",
+            rationale="从对象到排障",
+            assumptions=[],
+            confidence="high",
+            books=[
+                PlanBook(
+                    title="K8s（一）基础",
+                    topic="K8s",
+                    description="核心对象",
+                    estimated_minutes=300,
+                    chapters=[
+                        PlanChapter(title="Pod 与调度", objective="理解对象和调度"),
+                        PlanChapter(title="部署", objective="完成基础部署"),
+                    ],
+                ),
+                PlanBook(
+                    title="K8s（二）网络",
+                    topic="K8s 网络",
+                    description="网络与服务",
+                    estimated_minutes=300,
+                    chapters=[
+                        PlanChapter(title="Service", objective="理解服务发现"),
+                        PlanChapter(title="排障", objective="定位网络问题"),
+                    ],
+                ),
+            ],
+            milestones=[
+                PlanMilestone(
+                    title="解释核心对象与调度",
+                    outcome="能够解释对象关系和调度机制",
+                    criteria=[
+                        PlanMilestoneCriterion(
+                            statement="理解对象和调度",
+                            book_position=1,
+                            chapter_position=1,
+                        )
+                    ],
+                ),
+                PlanMilestone(
+                    title="完成部署并理解服务发现",
+                    outcome="能够从部署推进到网络服务发现",
+                    criteria=[
+                        PlanMilestoneCriterion(
+                            statement="完成基础部署",
+                            book_position=1,
+                            chapter_position=2,
+                        ),
+                        PlanMilestoneCriterion(
+                            statement="理解服务发现",
+                            book_position=2,
+                            chapter_position=1,
+                        ),
+                    ],
+                ),
+                PlanMilestone(
+                    title="定位网络问题",
+                    outcome="能够综合定位网络边界问题",
+                    criteria=[
+                        PlanMilestoneCriterion(
+                            statement="定位网络问题",
+                            book_position=2,
+                            chapter_position=2,
+                        )
+                    ],
+                ),
+            ],
+        )
     async def chapter(self, request, memory):
         return GeneratedChapter(sections=[GeneratedSectionOutline(title=f"第{i}节", question=f"问题{i}", objectives=[f"目标{i}"]) for i in range(1,4)])
     async def lesson(self, request, memory, prior_questions=None):
@@ -62,7 +150,9 @@ class FakeAi:
             previous_prefix = prior_questions[0]["prompt"].split("套", 1)[0]
             generation = int(previous_prefix.removeprefix("第")) + 1
         roles = ["conclusion","mechanism","example","boundary","practice"]
-        return GeneratedLesson(confidence="high", sources=[Source(title="Kubernetes Docs", url="https://kubernetes.io/docs/", kind="official", version="v1.30")], blocks=[ContentBlock(kind="text", role=role, heading=f"{role} 完整说明", content=f"{role} 内容用于解释当前目标的核心机制、观察依据和适用边界。学习者需要把对象之间的关系说清楚，并能用一个反例检查结论是否仍然成立。完成阅读后，再通过选择题验证自己是否真正掌握这一判断方法。", source_indexes=[0]) for role in roles], questions=[ChoiceQuestion(prompt=f"第{generation}套题{i}", options=[f"A{generation}",f"B{generation}",f"C{generation}"], correct=[1], core=i==0, objective=f"目标{i}", explanation=f"因为 B{generation}") for i in range(5)])
+        objectives = request.get("objectives") or [request["question"]]
+        question_count = len(prior_questions) if prior_questions else 5
+        return GeneratedLesson(confidence="high", sources=[Source(title="Kubernetes Docs", url="https://kubernetes.io/docs/", kind="official", version="v1.30")], blocks=[ContentBlock(kind="text", role=role, heading=f"{role} 完整说明", content=f"{role} 内容用于解释当前目标的核心机制、观察依据和适用边界。学习者需要把对象之间的关系说清楚，并能用一个反例检查结论是否仍然成立。完成阅读后，再通过选择题验证自己是否真正掌握这一判断方法。", source_indexes=[0]) for role in roles], questions=[ChoiceQuestion(prompt=f"第{generation}套题{i}", options=[f"A{generation}",f"B{generation}",f"C{generation}"], correct=[1], core=i==0, objective=objectives[i % len(objectives)], explanation=f"因为 B{generation}") for i in range(question_count)])
     async def answer(self, request):
         requested = request.get("requestedThreadId")
         return ClassifiedAnswer(relation="follow_up" if requested else "new_question", thread_id=request.get("newThreadId") or requested, answer="基于当前段落回答", thread_summary="已澄清机制")
@@ -125,7 +215,7 @@ def test_quiz_grade_explains_missed_and_incorrect_multiselect_options():
     ]
 
 
-def test_quiz_grade_allows_two_errors_without_core_veto():
+def test_quiz_grade_requires_eighty_percent_and_core_resolution():
     questions = [
         {
             "correct": [1],
@@ -142,8 +232,22 @@ def test_quiz_grade_allows_two_errors_without_core_veto():
     )
 
     assert grade.score == 3
-    assert grade.passed is True
+    assert grade.passed is False
     assert grade.perfect is False
+
+    core_failed = grade_choice_quiz(
+        questions,
+        [[0], [1], [1], [1], [1]],
+    )
+    assert core_failed.score == 4
+    assert core_failed.passed is False
+
+    passed = grade_choice_quiz(
+        questions,
+        [[1], [0], [1], [1], [1]],
+    )
+    assert passed.score == 4
+    assert passed.passed is True
 
 
 class StagedFakeAi(FakeAi):
@@ -465,6 +569,9 @@ def test_note_and_next_section_run_in_parallel_without_early_unlock(tmp_path):
 
         try:
             assert ai.next_section_started.wait(2)
+            deadline = time.monotonic() + 2
+            while "note_end" not in ai.events and time.monotonic() < deadline:
+                time.sleep(0.01)
             assert ai.events.index("next_section_start") < ai.events.index("note_end")
 
             preparing_series = parallel_client.get(
@@ -522,7 +629,7 @@ def test_complete_real_shape_vertical_slice(client):
     assert failed["results"][0] == {
         "correct": False,
         "explanation": "因为 B1",
-        "objective": "目标0",
+        "objective": "目标1",
         "selectedOptions": [0],
         "correctOptions": [1],
         "missedOptions": [1],
@@ -536,7 +643,8 @@ def test_complete_real_shape_vertical_slice(client):
         for task in failed["workflowTasks"]
         if task["type"] == "remediation_generation"
     )
-    assert wait_for_task(client, remediation_task["taskId"])["status"] == "succeeded"
+    remediation_result = wait_for_task(client, remediation_task["taskId"])
+    assert remediation_result["status"] == "succeeded", remediation_result
     remediated = client.get(f"/api/sections/{section_id}").json()
     assert remediated["quiz"]["generation"] == 2
     assert remediated["remediations"][-1]["blocks"]
@@ -555,26 +663,22 @@ def test_complete_real_shape_vertical_slice(client):
     ]
     stale = client.post(f"/api/sections/{section_id}/quiz", json={"quizSetId":quiz_id,"answers":[[1],[1],[1],[1],[1]]})
     assert stale.status_code == 409 and stale.json()["code"] == "QUIZ_STALE"
-    passed = client.post(f"/api/sections/{section_id}/quiz", json={"quizSetId":remediated["quiz"]["id"],"answers":[[0],[0],[1],[1],[1]]}).json()
+    passed = client.post(f"/api/sections/{section_id}/quiz", json={"quizSetId":remediated["quiz"]["id"],"answers":[[1],[0],[1],[1],[1]]}).json()
     assert passed["passed"] is True
-    assert passed["score"] == 3
+    assert passed["score"] == 4
     for task in passed["workflowTasks"]:
         assert wait_for_task(client, task["taskId"])["status"] == "succeeded"
     completed = client.get(f"/api/sections/{section_id}").json()
     assert completed["note"]
     assert completed["latestAttemptReview"]["attemptId"] == passed["attemptId"]
     assert completed["latestAttemptReview"]["passed"] is True
-    assert completed["latestAttemptReview"]["score"] == 3
+    assert completed["latestAttemptReview"]["score"] == 4
     assert len(completed["latestAttemptReview"]["questions"]) == 5
     assert all(
         "correct" not in question and "explanation" not in question
         for question in completed["latestAttemptReview"]["questions"]
     )
-    assert completed["note"]["aiContent"]["personal_gaps"] == [
-        "目标0",
-        "目标1",
-        "目标2",
-    ]
+    assert completed["note"]["aiContent"]["personal_gaps"] == ["目标1"]
     refreshed_series = client.get(f"/api/series/{series['id']}").json()
     refreshed_sections = refreshed_series["books"][0]["chapters"][0]["sections"]
     assert refreshed_sections[0]["status"] == "completed"
@@ -586,7 +690,140 @@ def test_complete_real_shape_vertical_slice(client):
     assert client.get("/api/learning-memory?shelf_id=shelf_technology").json()
 
 
-def test_legacy_three_of_five_attempt_can_be_reassessed(client):
+def test_layered_note_preserves_history_and_reads_live_annotations(client):
+    series = create_series(client)
+    assert wait_for_task(
+        client,
+        series["initializationTask"]["taskId"],
+    )["status"] == "succeeded"
+    refreshed = client.get(f"/api/series/{series['id']}").json()
+    section_id = refreshed["books"][0]["chapters"][0]["sections"][0]["id"]
+    section = client.get(f"/api/sections/{section_id}").json()
+    if not section["content"]:
+        section = client.post(f"/api/sections/{section_id}/generate").json()
+    passed = client.post(
+        f"/api/sections/{section_id}/quiz",
+        json={
+            "quizSetId": section["quiz"]["id"],
+            "answers": [[1], [1], [1], [1], [1]],
+        },
+    ).json()
+    assert passed["passed"] is True
+    for task in passed["workflowTasks"]:
+        assert wait_for_task(client, task["taskId"])["status"] == "succeeded"
+
+    original = client.get(f"/api/sections/{section_id}").json()["note"]
+    summary = original["layers"]["learningSummary"]
+    assert summary["sourceContentVersionId"] == section["content"]["id"]
+    assert summary["sourceContractVersion"] == "generated_note_v1"
+    assert summary["sourceObservationWatermark"] > 0
+    assert original["layers"]["reviewSupplements"] == []
+    assert original["layers"]["userRevision"] is None
+
+    invalid = client.post(
+        f"/api/sections/{section_id}/note/review-supplements",
+        json={
+            "reviewEpisodeId": "review:missing-episode",
+            "content": {"core_mechanism": ["不应写入"]},
+        },
+    )
+    assert invalid.status_code == 409
+    assert invalid.json()["code"] == "NOTE_REVIEW_EPISODE_INVALID"
+
+    first_revision = {**summary["content"], "boundaries": ["用户写的边界"]}
+    saved = client.patch(
+        f"/api/sections/{section_id}/note",
+        json={"content": first_revision},
+    ).json()
+    second_revision = {**first_revision, "unresolved": ["用户保留的问题"]}
+    saved_again = client.patch(
+        f"/api/sections/{section_id}/note",
+        json={"content": second_revision},
+    ).json()
+    assert saved["layers"]["userRevision"]["version"] == 1
+    assert saved_again["layers"]["userRevision"]["version"] == 2
+    assert saved_again["layers"]["learningSummary"]["content"] == summary["content"]
+    assert saved_again["aiContent"] == summary["content"]
+
+    review_episode_id = "review:episode-0001"
+    with client.app.state.sessions() as db:
+        observations = db.scalars(
+            select(AssessmentObservation).where(
+                AssessmentObservation.section_id == section_id,
+                AssessmentObservation.user_id == "user_demo",
+            )
+        ).all()
+        observation_count = len(observations)
+        assert observation_count > 0
+        for observation in observations:
+            observation.assistance_mode = "unassisted_review"
+            observation.learning_episode_id = review_episode_id
+        db.commit()
+
+    supplement_content = {"core_mechanism": ["复习后看清了一个新边界"]}
+    supplemented = client.post(
+        f"/api/sections/{section_id}/note/review-supplements",
+        json={
+            "reviewEpisodeId": review_episode_id,
+            "content": supplement_content,
+        },
+    )
+    assert supplemented.status_code == 201
+    assert supplemented.json()["layers"]["reviewSupplements"][0]["content"] == supplement_content
+
+    idempotent = client.post(
+        f"/api/sections/{section_id}/note/review-supplements",
+        json={
+            "reviewEpisodeId": review_episode_id,
+            "content": supplement_content,
+        },
+    )
+    assert idempotent.status_code == 201
+    assert len(idempotent.json()["layers"]["reviewSupplements"]) == 1
+    conflict = client.post(
+        f"/api/sections/{section_id}/note/review-supplements",
+        json={
+            "reviewEpisodeId": review_episode_id,
+            "content": {"core_mechanism": ["冲突内容"]},
+        },
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "NOTE_REVIEW_EPISODE_REUSED"
+
+    before_projection_change = client.get(
+        f"/api/sections/{section_id}"
+    ).json()["note"]
+    frozen_layers = before_projection_change["layers"]
+    with client.app.state.sessions() as db:
+        projection = db.scalar(
+            select(KnowledgeStateProjection).where(
+                KnowledgeStateProjection.user_id == "user_demo"
+            )
+        )
+        assert projection is not None
+        projection.claim_status = "invalidated_for_test"
+        projection.p_known_ppm = 1
+        db.commit()
+    after_projection_change = client.get(
+        f"/api/sections/{section_id}"
+    ).json()["note"]
+    assert after_projection_change["layers"] == frozen_layers
+    assert any(
+        item["claimStatus"] == "invalidated_for_test"
+        for item in after_projection_change["verificationAnnotations"]
+    )
+
+    with client.app.state.sessions() as db:
+        note = db.scalar(
+            select(LearningNote).where(LearningNote.section_id == section_id)
+        )
+        assert len(db.scalars(select(LearningNoteSummary).where(LearningNoteSummary.note_id == note.id)).all()) == 1
+        assert len(db.scalars(select(LearningNoteReviewSupplement).where(LearningNoteReviewSupplement.note_id == note.id)).all()) == 1
+        assert len(db.scalars(select(LearningNoteUserRevision).where(LearningNoteUserRevision.note_id == note.id)).all()) == 2
+        assert len(db.scalars(select(AssessmentObservation).where(AssessmentObservation.section_id == section_id)).all()) == observation_count
+
+
+def test_legacy_four_of_five_attempt_can_be_reassessed(client):
     series = create_series(client)
     chapter = client.post(
         f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
@@ -596,18 +833,18 @@ def test_legacy_three_of_five_attempt_can_be_reassessed(client):
     ).json()
     passed_results = [
         {
-            "correct": index >= 2,
+            "correct": index >= 1,
             "explanation": f"解析{index}",
             "objective": f"目标{index}",
-            "selectedOptions": [0 if index < 2 else 1],
+            "selectedOptions": [0 if index < 1 else 1],
             "correctOptions": [1],
-            "missedOptions": [1] if index < 2 else [],
-            "incorrectOptions": [0] if index < 2 else [],
+            "missedOptions": [1] if index < 1 else [],
+            "incorrectOptions": [0] if index < 1 else [],
         }
         for index in range(5)
     ]
     failed_results = [
-        {**item, "correct": index >= 3}
+        {**item, "correct": index >= 2}
         for index, item in enumerate(passed_results)
     ]
     with client.app.state.sessions() as db:
@@ -616,23 +853,23 @@ def test_legacy_three_of_five_attempt_can_be_reassessed(client):
         )
         db.add_all([
             QuizAttempt(
+                id="attempt_legacy_four_of_five",
+                quiz_set_id=section["quiz"]["id"],
+                learning_run_id=learning_run.id,
+                user_id=learning_run.user_id,
+                request_hash="legacy-four-of-five",
+                answers_json=json.dumps([[0], [1], [1], [1], [1]]),
+                results_json=json.dumps(passed_results, ensure_ascii=False),
+                passed=False,
+                workflow_status="completed",
+            ),
+            QuizAttempt(
                 id="attempt_legacy_three_of_five",
                 quiz_set_id=section["quiz"]["id"],
                 learning_run_id=learning_run.id,
                 user_id=learning_run.user_id,
                 request_hash="legacy-three-of-five",
                 answers_json=json.dumps([[0], [0], [1], [1], [1]]),
-                results_json=json.dumps(passed_results, ensure_ascii=False),
-                passed=False,
-                workflow_status="completed",
-            ),
-            QuizAttempt(
-                id="attempt_legacy_two_of_five",
-                quiz_set_id=section["quiz"]["id"],
-                learning_run_id=learning_run.id,
-                user_id=learning_run.user_id,
-                request_hash="legacy-two-of-five",
-                answers_json=json.dumps([[0], [0], [0], [1], [1]]),
                 results_json=json.dumps(failed_results, ensure_ascii=False),
                 passed=False,
                 workflow_status="completed",
@@ -641,21 +878,21 @@ def test_legacy_three_of_five_attempt_can_be_reassessed(client):
         db.commit()
 
     promoted = client.post(
-        f"/api/sections/{section['id']}/quiz-attempts/attempt_legacy_three_of_five/reassess"
+        f"/api/sections/{section['id']}/quiz-attempts/attempt_legacy_four_of_five/reassess"
     )
     assert promoted.status_code == 200
     assert promoted.json()["passed"] is True
-    assert promoted.json()["score"] == 3
+    assert promoted.json()["score"] == 4
     assert {
         task["type"] for task in promoted.json()["workflowTasks"]
     } == {"note_generation", "next_section_preload"}
     assert all(
-        task["triggerId"] == "attempt_legacy_three_of_five"
+        task["triggerId"] == "attempt_legacy_four_of_five"
         for task in promoted.json()["workflowTasks"]
     )
 
     rejected = client.post(
-        f"/api/sections/{section['id']}/quiz-attempts/attempt_legacy_two_of_five/reassess"
+        f"/api/sections/{section['id']}/quiz-attempts/attempt_legacy_three_of_five/reassess"
     )
     assert rejected.status_code == 409
     assert rejected.json()["code"] == "QUIZ_PASS_THRESHOLD_NOT_MET"
@@ -896,8 +1133,26 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
                 LearningEvidence.evidence_type == "quiz",
             )
         ).all()
+        scoring = db.scalars(
+            select(ScoringResult).where(ScoringResult.attempt_id == attempts[0].id)
+        ).all()
+        observations = db.scalars(
+            select(AssessmentObservation).where(
+                AssessmentObservation.attempt_id == attempts[0].id
+            )
+        ).all()
+        qualification = db.scalars(
+            select(EvidenceQualificationEvent).where(
+                EvidenceQualificationEvent.observation_id.in_(
+                    [item.id for item in observations]
+                )
+            )
+        ).all()
         assert len(attempts) == 1
         assert len(evidence) == len(section["quiz"]["questions"])
+        assert len(scoring) == 1
+        assert len(observations) == len(section["quiz"]["questions"])
+        assert len(qualification) == len(observations) * 3
 
     conflict = client.post(
         f"/api/sections/{section['id']}/quiz",
@@ -906,6 +1161,269 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
     )
     assert conflict.status_code == 409
     assert conflict.json()["code"] == "IDEMPOTENCY_KEY_REUSED"
+
+
+def test_assessment_gate_remediates_only_failed_target_and_rebuilds(client):
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    section_id = chapter["sections"][0]["id"]
+    client.post(f"/api/sections/{section_id}/generate")
+    with client.app.state.sessions() as db:
+        stored = db.get(Section, section_id)
+        stored.objectives_json = json.dumps(["核心目标", "辅助目标"], ensure_ascii=False)
+        db.execute(
+            delete(SectionAssessmentTarget).where(
+                SectionAssessmentTarget.section_id == section_id
+            )
+        )
+        quiz = db.scalar(
+            select(QuizSet)
+            .where(QuizSet.section_id == section_id)
+            .order_by(QuizSet.generation.desc())
+        )
+        questions = json.loads(quiz.questions_json)
+        for index, question in enumerate(questions):
+            question["objective"] = "核心目标" if index < 4 else "辅助目标"
+            question.pop("assessmentTargetId", None)
+            question.pop("equivalenceGroupId", None)
+        quiz.questions_json = json.dumps(
+            bind_questions_to_targets(db, stored, questions),
+            ensure_ascii=False,
+        )
+        db.commit()
+
+    section = client.get(f"/api/sections/{section_id}").json()
+    original_targets = {
+        question["objective"]: question["assessmentTargetId"]
+        for question in section["quiz"]["questions"]
+    }
+    assert set(original_targets) == {"核心目标", "辅助目标"}
+    assert all(
+        question["core"] == (question["objective"] == "核心目标")
+        for question in section["quiz"]["questions"]
+    )
+
+    answers = [[1] for _ in section["quiz"]["questions"]]
+    for index, question in enumerate(section["quiz"]["questions"]):
+        if question["objective"] == "核心目标":
+            answers[index] = [0]
+    failed = client.post(
+        f"/api/sections/{section_id}/quiz",
+        json={"quizSetId": section["quiz"]["id"], "answers": answers},
+    ).json()
+    assert failed["score"] == 1
+    assert failed["passed"] is False
+    remediation_task = next(
+        task for task in failed["workflowTasks"]
+        if task["type"] == "remediation_generation"
+    )
+
+    with client.app.state.sessions() as db:
+        core_target_id = original_targets["核心目标"]
+        p_known_after_failure = db.scalar(
+            select(KnowledgeStateProjection).where(
+                KnowledgeStateProjection.assessment_target_id == core_target_id
+            )
+        ).p_known_ppm
+
+    remediation_result = wait_for_task(client, remediation_task["taskId"])
+    assert remediation_result["status"] == "succeeded", remediation_result
+    remediated = client.get(f"/api/sections/{section_id}").json()
+    replacement = remediated["quiz"]
+    assert {
+        question["assessmentTargetId"] for question in replacement["questions"]
+    } == {original_targets["核心目标"]}
+    assert original_targets["辅助目标"] not in {
+        question["assessmentTargetId"] for question in replacement["questions"]
+    }
+
+    remediation_answers = [[1] for _ in replacement["questions"]]
+    resolved = client.post(
+        f"/api/sections/{section_id}/quiz",
+        json={"quizSetId": replacement["id"], "answers": remediation_answers},
+    ).json()
+    assert resolved["passed"] is True
+
+    memory = client.get(
+        "/api/learning-memory?shelf_id=shelf_technology"
+    ).json()
+    core_memory = next(
+        item for item in memory
+        if item.get("assessmentTargetId") == original_targets["核心目标"]
+    )
+    assert core_memory["projectionRuleVersion"] == "mastery_v2"
+    assert core_memory["pKnown"] == 0.056604
+    assert core_memory["mastery"] == 6
+
+    with client.app.state.sessions() as db:
+        state = db.scalar(
+            select(KnowledgeStateProjection).where(
+                KnowledgeStateProjection.assessment_target_id == core_target_id
+            )
+        )
+        gate = db.scalar(
+            select(AssessmentGateState).where(
+                AssessmentGateState.section_id == section_id,
+                AssessmentGateState.assessment_target_id == core_target_id,
+            )
+        )
+        assert p_known_after_failure == 38462
+        # Initial and immediate remediation share one episode: replay applies
+        # one assisted aggregate update, not two independent BKT updates.
+        assert state.p_known_ppm == 56604
+        assert gate.status == "resolved_remediation"
+        expected = (
+            state.p_known_ppm,
+            state.retention_rounds,
+            state.claim_status,
+            gate.status,
+        )
+        state.p_known_ppm = 999999
+        state.retention_rounds = 99
+        state.claim_status = "corrupted"
+        gate.status = "unresolved"
+        db.commit()
+
+        report = rebuild_user_projections(db, user_id=state.user_id)
+        db.refresh(state)
+        db.refresh(gate)
+        assert report["assessment"]["observations"] == len(section["quiz"]["questions"]) + len(replacement["questions"])
+        assert (
+            state.p_known_ppm,
+            state.retention_rounds,
+            state.claim_status,
+            gate.status,
+        ) == expected
+
+
+def test_retention_discounts_same_source_and_counts_delayed_novel_review(client):
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    section = client.post(
+        f"/api/sections/{chapter['sections'][0]['id']}/generate"
+    ).json()
+    answers = [[1] for _ in section["quiz"]["questions"]]
+    initial = client.post(
+        f"/api/sections/{section['id']}/quiz",
+        json={"quizSetId": section["quiz"]["id"], "answers": answers},
+    ).json()
+    duplicate = client.post(
+        f"/api/sections/{section['id']}/quiz",
+        json={"quizSetId": section["quiz"]["id"], "answers": answers},
+    ).json()
+
+    with client.app.state.sessions() as db:
+        initial_rows = db.scalars(
+            select(AssessmentObservation).where(
+                AssessmentObservation.attempt_id == initial["attemptId"]
+            )
+        ).all()
+        duplicate_rows = db.scalars(
+            select(AssessmentObservation).where(
+                AssessmentObservation.attempt_id == duplicate["attemptId"]
+            )
+        ).all()
+        initial_at = min(item.created_at for item in initial_rows)
+        for item in duplicate_rows:
+            item.created_at = initial_at + timedelta(days=4)
+        rebuild_assessment_projections(db, user_id=initial_rows[0].user_id)
+        target_id = initial_rows[0].assessment_target_id
+        state = db.scalar(
+            select(KnowledgeStateProjection).where(
+                KnowledgeStateProjection.user_id == initial_rows[0].user_id,
+                KnowledgeStateProjection.assessment_target_id == target_id,
+            )
+        )
+        assert state.retention_rounds == 0
+
+        original_quiz = db.get(QuizSet, section["quiz"]["id"])
+        novel_questions = json.loads(original_quiz.questions_json)
+        for index, question in enumerate(novel_questions):
+            question["prompt"] = f"延迟复习变式 {index}"
+            question["equivalenceGroupId"] = f"novel-review-{index}"
+        novel_quiz = QuizSet(
+            id="quiz_delayed_novel_review",
+            section_id=section["id"],
+            content_version_id=original_quiz.content_version_id,
+            generation=original_quiz.generation + 1,
+            questions_json=json.dumps(novel_questions, ensure_ascii=False),
+        )
+        db.add(novel_quiz)
+        db.commit()
+
+    novel = client.post(
+        f"/api/sections/{section['id']}/quiz",
+        json={"quizSetId": "quiz_delayed_novel_review", "answers": answers},
+    ).json()
+    with client.app.state.sessions() as db:
+        novel_rows = db.scalars(
+            select(AssessmentObservation).where(
+                AssessmentObservation.attempt_id == novel["attemptId"]
+            )
+        ).all()
+        # This fact has a later sequence but an earlier event time than the
+        # already-inserted duplicate review. Rebuild must replay event time.
+        for item in novel_rows:
+            item.created_at = initial_at + timedelta(days=2)
+        rebuild_assessment_projections(db, user_id=novel_rows[0].user_id)
+        state = db.scalar(
+            select(KnowledgeStateProjection).where(
+                KnowledgeStateProjection.user_id == novel_rows[0].user_id,
+                KnowledgeStateProjection.assessment_target_id == target_id,
+            )
+        )
+        assert state.retention_rounds == 1
+        assert state.claim_status == "verified_delayed"
+
+
+def test_due_review_api_enforces_daily_budget_without_creating_task_debt(client):
+    current = now()
+    with client.app.state.sessions() as db:
+        targets = []
+        for index, priority in enumerate((20, 90, 50)):
+            target = AssessmentTarget(
+                id=f"target_budget_{index}",
+                objective_key=f"budget-key-{index}",
+                objective_statement=f"预算目标 {index}",
+                dimension="recognition",
+                target_depth="standard",
+                status="active",
+            )
+            targets.append(target)
+            db.add(target)
+            db.add(ReviewState(
+                id=f"review_budget_{index}",
+                user_id="user_demo",
+                assessment_target_id=target.id,
+                status="scheduled",
+                next_due_at=current - timedelta(days=index + 1),
+                priority=priority,
+                reason="retention_follow_up",
+                spacing_stage=0,
+            ))
+        db.commit()
+
+    queue = client.get("/api/reviews/due?daily_budget=2")
+    assert queue.status_code == 200
+    body = queue.json()
+    assert body["dailyBudget"] == body["selectedCount"] == 2
+    assert [item["assessmentTargetId"] for item in body["items"]] == [
+        "target_budget_1",
+        "target_budget_2",
+    ]
+    with client.app.state.sessions() as db:
+        assert db.scalar(
+            select(ReviewState).where(ReviewState.id == "review_budget_0")
+        ).status == "scheduled"
+        assert db.scalar(
+            select(LearningTask).where(
+                LearningTask.task_type == "review"
+            )
+        ) is None
 
 
 def test_concurrent_passing_submissions_trigger_first_completion_once(
@@ -1394,6 +1912,75 @@ def test_deleting_available_book_unlocks_next_and_last_book_hides_series(client)
 
 def create_series(client):
     return client.post("/api/plans", json={"shelfId":"shelf_technology","topic":"Kubernetes","role":"技术人员","experience":"会 Docker","depth":"deep"}).json()
+
+
+def test_milestone_path_is_proposed_confirmed_and_reconciled_with_goal_version(client):
+    series = create_series(client)
+
+    bootstrap = client.get("/api/bootstrap").json()
+    dashboard = bootstrap["milestoneDashboard"]
+    assert dashboard["goal"]["statement"]
+    assert dashboard["path"]["seriesId"] == series["id"]
+    assert dashboard["path"]["status"] == "proposed"
+    assert dashboard["path"]["goalAligned"] is True
+    assert 3 <= len(dashboard["path"]["milestones"]) <= 5
+    assert dashboard["path"]["milestones"][0]["criteria"][0]["evidenceRule"] == "all_section_quizzes_passed"
+    assert dashboard["today"]["seriesId"] == series["id"]
+
+    confirmed = client.post(
+        f"/api/series/{series['id']}/milestone-path/confirm"
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.json()["status"] == "confirmed"
+
+    profile = bootstrap["profile"]
+    corrected = client.put(
+        "/api/profile",
+        json={
+            "profession": profile["profession"],
+            "stage": profile["stage"],
+            "purpose": "能够独立设计并解释一个可靠的 Kubernetes 平台",
+            "domains": profile["domains"],
+            "experience": profile["experience"],
+            "weeklyMinutes": 300,
+            "targetDate": "2027-01-31",
+        },
+    )
+    assert corrected.status_code == 200
+    assert corrected.json()["weeklyMinutes"] == 300
+
+    stale = client.get("/api/bootstrap").json()["milestoneDashboard"]
+    assert stale["goal"]["statement"].startswith("能够独立设计")
+    assert stale["path"]["goalAligned"] is False
+
+    reconfirmed = client.post(
+        f"/api/series/{series['id']}/milestone-path/confirm"
+    )
+    assert reconfirmed.status_code == 200
+    aligned = client.get("/api/bootstrap").json()["milestoneDashboard"]
+    assert aligned["path"]["goalAligned"] is True
+
+    with client.app.state.sessions() as db:
+        path = db.scalar(
+            select(MilestonePath).where(MilestonePath.series_id == series["id"])
+        )
+        revisions = db.scalars(
+            select(MilestonePathRevision)
+            .where(MilestonePathRevision.path_id == path.id)
+            .order_by(MilestonePathRevision.version)
+        ).all()
+        assert [item.source for item in revisions] == [
+            "ai_generation",
+            "user_confirmation",
+            "user_confirmation",
+        ]
+        assert [item.version for item in revisions] == [1, 2, 3]
+
+
+def test_milestone_confirmation_rejects_unknown_series(client):
+    response = client.post("/api/series/series_not_owned/milestone-path/confirm")
+    assert response.status_code == 404
+    assert response.json()["code"] == "MILESTONE_PATH_NOT_FOUND"
 
 
 def wait_for_task(client, task_id, timeout=3):

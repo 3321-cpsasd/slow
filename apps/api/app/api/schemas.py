@@ -71,6 +71,8 @@ class ProfileComplete(ApiModel):
     purpose: str = Field(min_length=1, max_length=1000)
     domains: list[str] = Field(min_length=1, max_length=6)
     experience: str = Field(default="", max_length=1000)
+    weekly_minutes: int = Field(default=0, ge=0, le=10080)
+    target_date: str = Field(default="", max_length=10, pattern=r"^$|^\d{4}-\d{2}-\d{2}$")
 
 
 class QuizSubmit(ApiModel):
@@ -91,6 +93,11 @@ class QaClassificationUpdate(ApiModel):
 
 
 class NoteUpdate(ApiModel):
+    content: dict
+
+
+class NoteReviewSupplementCreate(ApiModel):
+    review_episode_id: str = Field(min_length=8, max_length=120)
     content: dict
 
 

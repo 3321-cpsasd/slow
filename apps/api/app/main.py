@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
-from fastapi import Depends, FastAPI, Header, Request
+from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
@@ -23,7 +23,7 @@ from .ai.anthropic_adapter import AnthropicAdapter
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AiRuntimeUpdate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, NoteUpdate, PasswordLogin, PlanCreate, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ShelfCreate
+from .api.schemas import AiRuntimeUpdate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PlanCreate, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ShelfCreate
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -774,6 +774,17 @@ def create_app(
             body.model_dump()
         )
 
+    @app.put("/api/profile")
+    def update_profile(
+        body: ProfileComplete,
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        return ProfileService(session, scope.user_id).complete(
+            body.model_dump(),
+            source="self_correction",
+        )["profile"]
+
     @app.get("/api/runtime/ai")
     def get_runtime_ai(request: Request):
         require_local_runtime_access(request)
@@ -919,6 +930,13 @@ def create_app(
     @app.get("/api/series/{series_id}")
     def series(series_id: str, s: SlowService = Depends(service)): return s.series(series_id)
 
+    @app.post("/api/series/{series_id}/milestone-path/confirm")
+    def confirm_milestone_path(
+        series_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return s.confirm_milestone_path(series_id)
+
     @app.delete("/api/series/{series_id}", status_code=204)
     def delete_series(series_id: str, s: SlowService = Depends(service)): s.delete_series(series_id)
 
@@ -982,6 +1000,13 @@ def create_app(
         request.app.state.learning_task_wakeup.set()
         return result
 
+    @app.get("/api/reviews/due")
+    def due_reviews(
+        daily_budget: int = Query(default=10, ge=0, le=100),
+        s: SlowService = Depends(service),
+    ):
+        return s.due_reviews(daily_budget)
+
     @app.post("/api/sections/{section_id}/ask")
     async def ask(section_id: str, body: AskRequest, s: SlowService = Depends(service)): return await s.ask(section_id, body)
 
@@ -1044,6 +1069,18 @@ def create_app(
 
     @app.patch("/api/sections/{section_id}/note")
     def note(section_id: str, body: NoteUpdate, s: SlowService = Depends(service)): return s.update_note(section_id, body.content)
+
+    @app.post("/api/sections/{section_id}/note/review-supplements", status_code=201)
+    def add_note_review_supplement(
+        section_id: str,
+        body: NoteReviewSupplementCreate,
+        s: SlowService = Depends(service),
+    ):
+        return s.add_note_review_supplement(
+            section_id,
+            body.review_episode_id,
+            body.content,
+        )
 
     @app.get("/api/learning-tasks/{task_id}")
     def learning_task(task_id: str, s: SlowService = Depends(service)):

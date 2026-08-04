@@ -11,7 +11,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0026_shelf_origin_cleanup"
+HEAD_REVISION = "0028_trustworthy_assessment_notes"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -105,6 +105,35 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
             row[1]: row
             for row in connection.execute("PRAGMA table_info(shelves)")
         }
+        milestone_path_columns = {
+            row[1]: row
+            for row in connection.execute("PRAGMA table_info(milestone_paths)")
+        }
+        milestone_revision_indexes = list(
+            connection.execute("PRAGMA index_list(milestone_path_revisions)")
+        )
+        trustworthy_tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        assessment_target_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(assessment_targets)")
+        }
+        gate_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(assessment_gate_states)")
+        }
+        knowledge_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(knowledge_state_projections)")
+        }
+        review_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(review_states)")
+        }
 
     assert revision == HEAD_REVISION
     assert "uq_quiz_attempts_run_user_idempotency" in attempt_schema
@@ -153,6 +182,35 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
         onboarding_columns
     )
     assert shelf_columns["origin"][3] == 1
+    assert {"weekly_minutes", "target_date"}.issubset(profile_columns)
+    assert {
+        "user_id",
+        "series_id",
+        "goal_profile_version",
+        "definition_json",
+        "ruleset_version",
+    }.issubset(milestone_path_columns)
+    assert {
+        "assessment_targets",
+        "section_assessment_targets",
+        "scoring_results",
+        "assessment_observations",
+        "evidence_qualification_events",
+        "assessment_gate_states",
+        "knowledge_state_projections",
+        "review_states",
+        "learning_note_summaries",
+        "learning_note_review_supplements",
+        "learning_note_user_revisions",
+    }.issubset(trustworthy_tables)
+    assert "section_id" not in assessment_target_columns
+    assert "projection_version" in gate_columns
+    assert "projection_version" in knowledge_columns
+    assert "projection_version" in review_columns
+    assert any(
+        row[1] == "sqlite_autoindex_milestone_path_revisions_2" or row[2] == 1
+        for row in milestone_revision_indexes
+    )
 
 
 def test_generation_lease_migration_accepts_orm_precreated_table(tmp_path):
@@ -180,6 +238,209 @@ def test_generation_lease_migration_accepts_orm_precreated_table(tmp_path):
             "SELECT version_num FROM alembic_version"
         ).fetchone()[0]
     assert revision == HEAD_REVISION
+
+
+def test_layered_note_migration_preserves_legacy_ai_and_user_content(tmp_path):
+    database = tmp_path / "legacy-notes.db"
+    run_alembic(database, "upgrade", "0027_milestone_paths")
+    ai_content = {
+        "solved_question": "旧 AI 总结",
+        "core_mechanism": ["稳定底稿不能丢"],
+    }
+    user_content = {
+        "solved_question": "用户自己的表述",
+        "boundaries": ["不能被 AI 覆盖"],
+    }
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO users (id, name) VALUES (?, ?)",
+            ("legacy_user", "Legacy"),
+        )
+        connection.execute(
+            """
+            INSERT INTO shelves (
+                id, user_id, name, domain, specialty, tags_json, origin
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy_shelf",
+                "legacy_user",
+                "迁移书架",
+                "技术",
+                "",
+                "[]",
+                "user_created",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO learning_plans (
+                id, shelf_id, topic, role, experience, purpose, depth,
+                details, assumptions_json, confidence, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy_plan",
+                "legacy_shelf",
+                "迁移",
+                "学习者",
+                "",
+                "",
+                "overview",
+                "",
+                "[]",
+                "high",
+                "active",
+                "2026-08-01 07:00:00",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO series (
+                id, plan_id, shelf_id, title, rationale, deleted_at
+            ) VALUES (?, ?, ?, ?, ?, NULL)
+            """,
+            (
+                "legacy_series",
+                "legacy_plan",
+                "legacy_shelf",
+                "迁移系列",
+                "验证笔记迁移",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO books (
+                id, series_id, shelf_id, position, title, topic,
+                description, estimated_minutes, deleted_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
+            """,
+            (
+                "legacy_book",
+                "legacy_series",
+                "legacy_shelf",
+                1,
+                "迁移书",
+                "迁移",
+                "",
+                20,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO chapters (
+                id, book_id, position, title, objective
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy_chapter",
+                "legacy_book",
+                1,
+                "迁移章",
+                "验证笔记升级",
+            ),
+        )
+        connection.executemany(
+            """
+            INSERT INTO sections (
+                id, chapter_id, position, title, question, objectives_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "legacy_section",
+                    "legacy_chapter",
+                    1,
+                    "迁移节一",
+                    "旧笔记是否保留？",
+                    "[]",
+                ),
+                (
+                    "legacy_section_2",
+                    "legacy_chapter",
+                    2,
+                    "迁移节二",
+                    "空用户版本是否跳过？",
+                    "[]",
+                ),
+            ],
+        )
+        connection.execute(
+            """
+            INSERT INTO learning_runs (
+                id, user_id, series_id, status, created_at, completed_at
+            ) VALUES (?, ?, ?, ?, ?, NULL)
+            """,
+            (
+                "legacy_run",
+                "legacy_user",
+                "legacy_series",
+                "active",
+                "2026-08-01 07:30:00",
+            ),
+        )
+        connection.executemany(
+            """
+            INSERT INTO learning_notes (
+                id, learning_run_id, section_id, user_id, ai_content_json,
+                user_content_json, version, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "legacy_note_with_user",
+                    "legacy_run",
+                    "legacy_section",
+                    "legacy_user",
+                    json.dumps(ai_content, ensure_ascii=False),
+                    json.dumps(user_content, ensure_ascii=False),
+                    4,
+                    "2026-08-01 08:00:00",
+                ),
+                (
+                    "legacy_note_without_user",
+                    "legacy_run",
+                    "legacy_section_2",
+                    "legacy_user",
+                    json.dumps({"solved_question": "只有 AI"}, ensure_ascii=False),
+                    "{}",
+                    1,
+                    "2026-08-01 09:00:00",
+                ),
+            ],
+        )
+        connection.commit()
+
+    run_alembic(database, "upgrade", "head")
+
+    with sqlite3.connect(database) as connection:
+        summaries = connection.execute(
+            """
+            SELECT note_id, content_json, source_contract_version,
+                   generation_rule_version
+            FROM learning_note_summaries
+            ORDER BY note_id
+            """
+        ).fetchall()
+        revisions = connection.execute(
+            """
+            SELECT note_id, content_json, source
+            FROM learning_note_user_revisions
+            ORDER BY note_id
+            """
+        ).fetchall()
+
+    assert [row[0] for row in summaries] == [
+        "legacy_note_with_user",
+        "legacy_note_without_user",
+    ]
+    assert json.loads(summaries[0][1]) == ai_content
+    assert all(row[2] == "legacy_learning_note_v1" for row in summaries)
+    assert all(row[3] == "legacy_note_import_v1" for row in summaries)
+    assert len(revisions) == 1
+    assert revisions[0][0] == "legacy_note_with_user"
+    assert json.loads(revisions[0][1]) == user_content
+    assert revisions[0][2] == "legacy_user_import_v1"
 
 
 def test_migrations_recover_when_orm_precreated_future_tables(tmp_path):

@@ -16,6 +16,8 @@ from .contracts import (
     GeneratedSectionOutline,
     PlanBook,
     PlanChapter,
+    PlanMilestone,
+    PlanMilestoneCriterion,
     ReplannedBook,
     ReplannedChapter,
     Source,
@@ -66,6 +68,46 @@ class LocalDemoAdapter:
                     chapters=[
                         PlanChapter(title="迁移场景", objective=f"把 {topic} 机制迁移到新场景"),
                         PlanChapter(title="综合排障", objective=f"综合定位 {topic} 的边界问题"),
+                    ],
+                ),
+            ],
+            milestones=[
+                PlanMilestone(
+                    title=f"建立 {topic} 的核心理解",
+                    outcome=f"能够解释 {topic} 的核心对象与关系",
+                    criteria=[
+                        PlanMilestoneCriterion(
+                            statement=f"解释 {topic} 的核心对象及关系",
+                            book_position=1,
+                            chapter_position=1,
+                        ),
+                    ],
+                ),
+                PlanMilestone(
+                    title=f"判断 {topic} 的边界并迁移",
+                    outcome=f"能够识别 {topic} 的适用边界，并把机制用于新场景",
+                    criteria=[
+                        PlanMilestoneCriterion(
+                            statement=f"识别 {topic} 的适用边界并完成实践",
+                            book_position=1,
+                            chapter_position=2,
+                        ),
+                        PlanMilestoneCriterion(
+                            statement=f"把 {topic} 机制迁移到新场景",
+                            book_position=2,
+                            chapter_position=1,
+                        ),
+                    ],
+                ),
+                PlanMilestone(
+                    title=f"综合诊断 {topic} 的异常",
+                    outcome=f"能够在综合场景中定位 {topic} 的边界问题",
+                    criteria=[
+                        PlanMilestoneCriterion(
+                            statement=f"综合定位 {topic} 的边界问题",
+                            book_position=2,
+                            chapter_position=2,
+                        ),
                     ],
                 ),
             ],
@@ -120,16 +162,25 @@ class LocalDemoAdapter:
     async def lesson_quiz(self, request, content, prior_questions=None):
         generation = 2 if prior_questions else 1
         objectives = request.get("objectives") or [request["question"]]
+        question_count = len(prior_questions) if prior_questions else 5
         questions = [
             ChoiceQuestion(
                 prompt=f"第 {generation} 套：关于目标 {index + 1}，哪项符合本节结论？",
                 options=[f"干扰项 {generation}-A-{index}", f"正确项 {generation}-B-{index}", f"干扰项 {generation}-C-{index}"],
                 correct=[1],
-                core=index == 0,
-                objective=objectives[index % len(objectives)],
+                core=(
+                    prior_questions[index].get("core", False)
+                    if prior_questions
+                    else index == 0
+                ),
+                objective=(
+                    prior_questions[index]["objective"]
+                    if prior_questions
+                    else objectives[index % len(objectives)]
+                ),
                 explanation="正确项与本地演示正文中的机制描述一致。",
             )
-            for index in range(5)
+            for index in range(question_count)
         ]
         return GeneratedQuiz(questions=questions)
 

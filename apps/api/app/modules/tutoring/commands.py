@@ -2,11 +2,13 @@ import json
 from collections.abc import Callable
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ...infrastructure.tables import (
+    AssessmentObservation,
     LearningNote,
+    LearningNoteSummary,
     QaMessage,
     QaSession,
     QuizAttempt,
@@ -59,6 +61,23 @@ class GenerateLearningNote:
             )
         )
         if existing:
+            summary = self.db.scalar(
+                select(LearningNoteSummary).where(
+                    LearningNoteSummary.note_id == existing.id
+                )
+            )
+            if not summary:
+                self.db.add(
+                    LearningNoteSummary(
+                        id=_uid("note_summary"),
+                        note_id=existing.id,
+                        version=1,
+                        content_json=existing.ai_content_json,
+                        source_contract_version="legacy_learning_note_v1",
+                        source_observation_watermark=0,
+                        generation_rule_version="legacy_note_import_v1",
+                    )
+                )
             self.uow.commit()
             return
         view = self.section_reader(section.id)
@@ -83,6 +102,13 @@ class GenerateLearningNote:
             .order_by(QuizAttempt.created_at)
         ).all()
         quiz_evidence = [_load(item.results_json, []) for item in attempts]
+        source_observation_watermark = self.db.scalar(
+            select(func.max(AssessmentObservation.sequence)).where(
+                AssessmentObservation.learning_run_id == self.learning_run_id,
+                AssessmentObservation.user_id == self.user_id,
+                AssessmentObservation.section_id == section.id,
+            )
+        ) or 0
         wrong_concepts = list(dict.fromkeys(
             str(result.get("objective", "")).strip()
             for evidence in quiz_evidence
@@ -115,13 +141,28 @@ class GenerateLearningNote:
             *wrong_concepts,
             *generated_gaps,
         ]))
+        note = LearningNote(
+            id=_uid("note"),
+            learning_run_id=self.learning_run_id,
+            section_id=section.id,
+            user_id=self.user_id,
+            ai_content_json=_dump(content),
+            user_content_json="{}",
+        )
+        self.db.add(note)
+        self.db.flush()
+        content_version_id = (
+            view.get("content", {}).get("id") if view.get("content") else None
+        )
         self.db.add(
-            LearningNote(
-                id=_uid("note"),
-                learning_run_id=self.learning_run_id,
-                section_id=section.id,
-                user_id=self.user_id,
-                ai_content_json=_dump(content),
-                user_content_json="{}",
+            LearningNoteSummary(
+                id=_uid("note_summary"),
+                note_id=note.id,
+                version=1,
+                content_json=_dump(content),
+                source_content_version_id=content_version_id,
+                source_contract_version="generated_note_v1",
+                source_observation_watermark=source_observation_watermark,
+                generation_rule_version="note_summary_v2",
             )
         )

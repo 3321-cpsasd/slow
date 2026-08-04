@@ -18,6 +18,7 @@ from ...infrastructure.tables import (
     LearningTask,
     QuizAttempt,
     QuizSet,
+    Remediation,
     Section,
     SectionProgress,
     now,
@@ -26,6 +27,7 @@ from ...platform.unit_of_work import SqlAlchemyUnitOfWork
 from ..artifacts.progress import ArtifactProgressStore
 from ..library.context import ActiveLearningContextResolver, SectionContext
 from .domain import ProgressionDecision, ProgressionPolicy, ProgressionSnapshot
+from .assessment import record_scoring_facts, section_gate_decision
 from .progress import ProgressStore
 from .tasks import task_view
 
@@ -241,8 +243,42 @@ class SubmitQuiz:
         )
         was_completed = section_progress.status == "completed"
         self.db.add(attempt)
+        self.db.flush()
+        remediation = self.db.scalar(
+            select(Remediation).where(Remediation.replacement_quiz_id == quiz.id)
+        )
+        assistance_mode = (
+            "assisted_immediate"
+            if remediation
+            else "unassisted_review"
+            if was_completed
+            else "unassisted_initial"
+        )
+        record_scoring_facts(
+            self.db,
+            attempt=attempt,
+            section=section,
+            questions=questions,
+            results=grade.results,
+            score=grade.score,
+            total=grade.total,
+            passed=grade.passed,
+            assistance_mode=assistance_mode,
+            learning_episode_id=(
+                f"quiz:{remediation.attempt_id}"
+                if remediation
+                else f"quiz:{attempt.id}"
+            ),
+        )
+        gate_decision = section_gate_decision(
+            self.db,
+            learning_run_id=learning_run.id,
+            section_id=section.id,
+        )
+        completion_passed = grade.passed if was_completed else gate_decision.passed
+        attempt.passed = completion_passed
         first_completion = False
-        if grade.passed and not was_completed:
+        if completion_passed and not was_completed:
             transition = self.db.execute(
                 update(SectionProgress)
                 .where(
@@ -270,9 +306,9 @@ class SubmitQuiz:
             section_progress.ask_me_unlocked |= grade.perfect
             section_progress.version += 1
             section_progress.updated_at = now()
-            if grade.passed:
+            if completion_passed:
                 section_progress.status = "completed"
-        if not grade.passed and not was_completed:
+        if not completion_passed and not was_completed:
             section_progress.status = "available"
         self._record_evidence(context, questions, grade.results, attempt.id)
 
@@ -311,7 +347,7 @@ class SubmitQuiz:
                     payload_json=_dump({"sourceSectionId": section.id}),
                     status="pending",
                 ))
-        if not grade.passed:
+        if not completion_passed and not was_completed:
             workflow_tasks.append(LearningTask(
                 id=_uid("task"),
                 learning_run_id=learning_run.id,

@@ -20,12 +20,36 @@ class PlanBook(StrictModel):
     chapters: list[PlanChapter] = Field(min_length=2, max_length=10)
 
 
+class PlanMilestoneCriterion(StrictModel):
+    statement: str
+    book_position: int = Field(ge=1, le=6)
+    chapter_position: int = Field(ge=1, le=10)
+
+
+class PlanMilestone(StrictModel):
+    title: str
+    outcome: str
+    criteria: list[PlanMilestoneCriterion] = Field(min_length=1, max_length=6)
+
+
 class GeneratedPlan(StrictModel):
     series_title: str
     rationale: str
     assumptions: list[str] = Field(max_length=6)
     confidence: Literal["high", "medium", "low"]
     books: list[PlanBook] = Field(min_length=1, max_length=6)
+    milestones: list[PlanMilestone] = Field(min_length=3, max_length=5)
+
+    @model_validator(mode="after")
+    def valid_milestone_references(self):
+        for milestone in self.milestones:
+            for criterion in milestone.criteria:
+                if criterion.book_position > len(self.books):
+                    raise ValueError("milestone references a missing book")
+                book = self.books[criterion.book_position - 1]
+                if criterion.chapter_position > len(book.chapters):
+                    raise ValueError("milestone references a missing chapter")
+        return self
 
 
 class GeneratedSectionOutline(StrictModel):
@@ -103,7 +127,9 @@ class GeneratedContent(StrictModel):
 
 
 class GeneratedQuiz(StrictModel):
-    questions: list[ChoiceQuestion] = Field(min_length=4, max_length=5)
+    # Initial quizzes still request 4-5 items. A remediation quiz may contain a
+    # single failed target and must not be padded with already-passed targets.
+    questions: list[ChoiceQuestion] = Field(min_length=1, max_length=5)
 
 
 class GeneratedLesson(GeneratedContent):
@@ -140,7 +166,7 @@ class GeneratedRemediationContent(GeneratedContent):
 
 
 class GeneratedRemediationLesson(GeneratedRemediationContent):
-    questions: list[ChoiceQuestion] = Field(min_length=4, max_length=5)
+    questions: list[ChoiceQuestion] = Field(min_length=1, max_length=5)
 
 
 class SourceRepairBlock(StrictModel):

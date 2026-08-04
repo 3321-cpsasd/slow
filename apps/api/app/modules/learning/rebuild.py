@@ -25,6 +25,7 @@ from ...infrastructure.tables import (
     User,
     now,
 )
+from .assessment import rebuild_assessment_projections, section_gate_decision
 
 
 def _uid(prefix: str) -> str:
@@ -86,6 +87,7 @@ def rebuild_user_projections(db: Session, *, user_id: str) -> dict:
         "sections": 0,
         "artifacts": 0,
         "memories": 0,
+        "assessment": rebuild_assessment_projections(db, user_id=user_id),
     }
 
     for run in runs:
@@ -143,13 +145,18 @@ def rebuild_user_projections(db: Session, *, user_id: str) -> dict:
                     }
                 )
 
-        section_completed = {
-            section_id: any(
-                attempt["passed"]
-                for attempt in attempts
+        section_completed = {}
+        for section_id, attempts in attempts_by_section.items():
+            gate = section_gate_decision(
+                db,
+                learning_run_id=run.id,
+                section_id=section_id,
             )
-            for section_id, attempts in attempts_by_section.items()
-        }
+            section_completed[section_id] = (
+                gate.passed
+                if gate.fixed_total
+                else any(attempt["passed"] for attempt in attempts)
+            )
         chapter_completed = {}
         for chapters in chapters_by_book.values():
             for chapter in chapters:

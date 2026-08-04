@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-PASS_RATE = 0.6
+PASS_RATE = 0.8
 
 
 @dataclass(frozen=True)
@@ -32,7 +32,12 @@ def grade_choice_quiz(questions: list[dict], answers: list[list[int]]) -> Grade:
                 "incorrectOptions": [index for index in actual if index not in expected],
             }
         )
-    passed = score / len(questions) >= PASS_RATE
+    core_resolved = all(
+        result["correct"]
+        for question, result in zip(questions, results, strict=True)
+        if question.get("core", False)
+    )
+    passed = score / len(questions) >= PASS_RATE and core_resolved
     return Grade(score, len(questions), passed, score == len(questions), results)
 
 

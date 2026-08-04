@@ -204,10 +204,12 @@ class ProfileService:
         return result[:6]
 
     def _apply(self, profile: UserProfile, values: dict) -> None:
-        for field in ("profession", "stage", "purpose", "experience"):
+        for field in ("profession", "stage", "purpose", "experience", "target_date"):
             value = values.get(field)
             if value is not None:
                 setattr(profile, field, str(value).strip())
+        if values.get("weekly_minutes") is not None:
+            profile.weekly_minutes = max(0, min(10080, int(values["weekly_minutes"])))
         if values.get("domains") is not None:
             profile.domains_json = _dump(
                 self._normalized_domains(_dump(values["domains"]))
@@ -222,6 +224,8 @@ class ProfileService:
                 "purpose": "",
                 "domains": [],
                 "experience": "",
+                "weeklyMinutes": 0,
+                "targetDate": "",
                 "version": 0,
                 "completedAt": None,
             }
@@ -231,6 +235,8 @@ class ProfileService:
             "purpose": profile.purpose,
             "domains": self._normalized_domains(profile.domains_json),
             "experience": profile.experience,
+            "weeklyMinutes": profile.weekly_minutes,
+            "targetDate": profile.target_date,
             "version": profile.version,
             "completedAt": (
                 profile.completed_at.isoformat()

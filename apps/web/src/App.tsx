@@ -15,6 +15,7 @@ import type {
   LearningTask,
   LearningProfile,
   Note as NoteType,
+  NoteContent,
   QuizResult,
   Section,
   SectionSummary,
@@ -23,7 +24,7 @@ import type {
   ShelfCreateInput,
 } from './model/types';
 
-type View = 'home' | 'shelf' | 'learn';
+type View = 'home' | 'shelf' | 'learn' | 'profile';
 type ReaderTab = 'content' | 'quiz' | 'note';
 type TextQuote = { text: string; blockId: string };
 type SelectionPopup = TextQuote & { top: number; left: number };
@@ -61,7 +62,7 @@ export default function App() {
   const [localPassword, setLocalPassword] = useState('');
   const [showLocalPassword, setShowLocalPassword] = useState(false);
   const [data, setData] = useState<Bootstrap | null>(null);
-  const [view, setView] = useState<View>('home');
+  const [view, setView] = useState<View>(() => window.location.pathname === '/profile' ? 'profile' : 'home');
   const [shelf, setShelf] = useState<Shelf | null>(null);
   const [series, setSeries] = useState<Series | null>(null);
   const [section, setSection] = useState<Section | null>(null);
@@ -113,10 +114,20 @@ export default function App() {
       setSeries(null);
       setSection(null);
       setView('home');
+      window.history.replaceState({}, '', '/');
       setAuthChecked(true);
     };
     api.setUnauthorizedHandler(clearUserState);
     void initializeAuth();
+    const handleHistory = () => {
+      const nextView: View = window.location.pathname === '/profile' ? 'profile' : 'home';
+      setView(nextView);
+      setShelf(null);
+      setSeries(null);
+      setSection(null);
+    };
+    window.addEventListener('popstate', handleHistory);
+    return () => window.removeEventListener('popstate', handleHistory);
   }, []);
 
   const run = async <T,>(label: string, action: () => Promise<T>) => {
@@ -166,7 +177,26 @@ export default function App() {
       setSeries(null);
       setSection(null);
       setView('home');
+      window.history.replaceState({}, '', '/');
     }
+  };
+
+  const goHome = () => {
+    if (window.location.pathname !== '/') window.history.pushState({}, '', '/');
+    setView('home');
+    setSeries(null);
+    setSection(null);
+    void api.bootstrap()
+      .then(setData)
+      .catch((reason) => setError(reason instanceof Error ? reason.message : '主页刷新失败'));
+  };
+
+  const openProfileCenter = () => {
+    if (window.location.pathname !== '/profile') window.history.pushState({}, '', '/profile');
+    setShelf(null);
+    setSeries(null);
+    setSection(null);
+    setView('profile');
   };
 
   const loadSection = async (sectionId: string) => {
@@ -498,11 +528,7 @@ export default function App() {
         <button
           className="brand"
           aria-label="返回 Slow 首页"
-          onClick={() => {
-            setView('home');
-            setSeries(null);
-            setSection(null);
-          }}
+          onClick={goHome}
         >
           <span className="brand-mark"><i /></span>
           <b>slow</b>
@@ -513,12 +539,13 @@ export default function App() {
             <i>·</i>
             <span>{series.progress}%</span>
           </div>
+        ) : view === 'profile' ? (
+          <small>个人中心</small>
         ) : (
           <small>一步一步，学成自己的书</small>
         )}
         <div className="header-actions">
           {busy && <span className="busy-indicator"><i />{busy}</span>}
-          <span className="user-name">{auth.user.name}</span>
           {AI_RUNTIME_SETTINGS_ENABLED && (
             <button className="quiet-button ai-settings-trigger" onClick={() => setShowAiSettings(true)}>
               <span aria-hidden="true" />
@@ -526,23 +553,28 @@ export default function App() {
             </button>
           )}
           {view === 'learn' && (
-            <button className="quiet-button" onClick={() => setView('home')}>返回书架</button>
+            <button className="quiet-button" onClick={goHome}>返回书架</button>
           )}
           <button
-            className="quiet-button"
-            onClick={() => void logout()}
+            className={`user-center-trigger ${view === 'profile' ? 'is-active' : ''}`}
+            aria-label={`打开${auth.user.name}的个人中心`}
+            aria-current={view === 'profile' ? 'page' : undefined}
+            onClick={openProfileCenter}
           >
-            退出
+            <span aria-hidden="true">{auth.user.name.trim().slice(0, 1).toUpperCase() || '我'}</span>
+            <b>{auth.user.name}</b>
+            <i aria-hidden="true">⌄</i>
           </button>
         </div>
       </header>
 
-      <main className={view === 'learn' ? 'learn-main' : 'marketing-main'}>
+      <main className={view === 'learn' ? 'learn-main' : view === 'profile' ? 'profile-main' : 'marketing-main'}>
         {error && <div className="global-error">{error}</div>}
         {view === 'home' && (
           <Home
             data={data}
             onOpen={openShelf}
+            onContinue={openSeries}
             onCreate={async (body) => {
               const value = await run('正在创建书架…', () => api.createShelf(body));
               setData((current) => current
@@ -576,12 +608,53 @@ export default function App() {
             }}
           />
         )}
+        {view === 'profile' && data && (
+          <ProfileCenterPage
+            user={auth.user}
+            mode={auth.mode}
+            profile={data.profile}
+            stats={{
+              shelves: data.shelves.length,
+              series: data.shelves.reduce((total, item) => total + item.series.length, 0),
+            }}
+            onBack={goHome}
+            onSave={async (body) => {
+              await run('正在更新学习画像…', () => api.updateProfile(body));
+              setData(await api.bootstrap());
+            }}
+            onLogout={logout}
+          />
+        )}
         {view === 'learn' && series && (
           <>
-            {series.initializationTask
-              && series.initializationTask.status !== 'succeeded' && (
-              <div
-                className={`initial-task-alert ${series.initializationTask.status}`}
+            {((data?.milestoneDashboard.path?.seriesId === series.id
+              && (data.milestoneDashboard.path.status === 'proposed' || !data.milestoneDashboard.path.goalAligned))
+              || (series.initializationTask && series.initializationTask.status !== 'succeeded')) && (
+              <div className="workspace-alert-stack">
+                {data?.milestoneDashboard.path?.seriesId === series.id
+                  && (data.milestoneDashboard.path.status === 'proposed' || !data.milestoneDashboard.path.goalAligned) && (
+                  <div className="path-confirm-alert" role="status">
+                    <span>
+                      <b>{data.milestoneDashboard.path.goalAligned ? '确认这条学习路径' : '学习画像已更新'}</b>
+                      <small>{data.milestoneDashboard.path.goalAligned
+                        ? '确认后，这个系列会按当前目标记录里程碑。'
+                        : '请检查这个系列是否仍然符合你的最新目标。'}</small>
+                    </span>
+                    <button
+                      className="secondary-button"
+                      onClick={async () => {
+                        await run('正在确认里程碑路径…', () => api.confirmMilestonePath(series.id));
+                        setData(await api.bootstrap());
+                      }}
+                    >
+                      {data.milestoneDashboard.path.goalAligned ? '确认路径' : '按新目标重新确认'}
+                    </button>
+                  </div>
+                )}
+                {series.initializationTask
+                  && series.initializationTask.status !== 'succeeded' && (
+                <div
+                  className={`initial-task-alert ${series.initializationTask.status}`}
                 role={series.initializationTask.status === 'failed' ? 'alert' : 'status'}
               >
                 <span>
@@ -604,6 +677,8 @@ export default function App() {
                   >
                     {preparingInitialSection ? '正在重试…' : '安全重试第一节'}
                   </button>
+                )}
+              </div>
                 )}
               </div>
             )}
@@ -847,11 +922,6 @@ function AiSettingsDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-function compactSpineTitle(title: string) {
-  const seriesName = title.split(/[：:]/)[0].trim();
-  return seriesName.length > 18 ? `${seriesName.slice(0, 18)}…` : seriesName;
-}
-
 function shelfDescriptor(shelf: Pick<Shelf, 'domain' | 'specialty'>) {
   return [shelf.domain, shelf.specialty].filter(Boolean).join(' · ');
 }
@@ -859,78 +929,387 @@ function shelfDescriptor(shelf: Pick<Shelf, 'domain' | 'specialty'>) {
 function Home({
   data,
   onOpen,
+  onContinue,
   onCreate,
 }: {
   data: Bootstrap | null;
   onOpen: (shelf: Shelf) => void;
+  onContinue: (seriesId: string) => Promise<void>;
   onCreate: (body: ShelfCreateInput) => Promise<void>;
 }) {
   const [showCreate, setShowCreate] = useState(false);
+  const dashboard = data?.milestoneDashboard;
+  const shelfCount = data?.shelves.length || 0;
+  const seriesCount = data?.shelves.reduce((total, item) => total + item.series.length, 0) || 0;
+  const bookCount = data?.shelves.reduce(
+    (total, item) => total + item.series.reduce((count, itemSeries) => count + itemSeries.books.length, 0),
+    0,
+  ) || 0;
 
   return (
-    <section className="landing-section">
-      <p className="eyebrow">AI 时代的个人学习书架</p>
-      <div className="title-row home-title-row">
-        <div>
-          <h1>我的书架</h1>
-          <p className="lead">一本书是一个台阶。慢一点，真正理解、验证并留下自己的笔记。</p>
+    <section className="library-dashboard">
+      <header className="library-hero">
+        <div className="library-hero-copy">
+          <p className="library-kicker">知行书架 · Personal library</p>
+          <h1>把正在学的，<br /><em>放回眼前。</em></h1>
+          <p>这里不是藏书统计，而是你的学习入口。先继续今天的一节，再回到所属领域查看完整路径。</p>
         </div>
-        <button className="primary-button" onClick={() => setShowCreate(true)}>＋ 创建书架</button>
+        <div className="library-hero-aside">
+          <p className="library-summary">
+            <strong>{shelfCount}</strong> 个领域 · <strong>{seriesCount}</strong> 个学习系列 · <strong>{bookCount}</strong> 本教材
+          </p>
+          <button className="library-create-button" onClick={() => setShowCreate(true)}>
+            <span aria-hidden="true">＋</span> 创建新书架
+          </button>
+        </div>
+      </header>
+
+      <div className="library-focus-grid">
+        <article className={`library-focus-card today-focus-card ${dashboard?.today ? '' : 'is-empty'}`}>
+          <header>
+            <span className="focus-card-label">今天从这里继续</span>
+            {dashboard?.today && <small>约 {dashboard.today.estimatedMinutes} 分钟</small>}
+          </header>
+          {dashboard?.today ? (
+            <>
+              <div className="today-book-path">
+                <span>{dashboard.today.bookTitle}</span>
+                <i aria-hidden="true">/</i>
+                <span>{dashboard.today.chapterTitle}</span>
+              </div>
+              <h2>{dashboard.today.sectionTitle}</h2>
+              <p className="today-question">{dashboard.today.question}</p>
+              <div className="today-reason">
+                <span aria-hidden="true">↳</span>
+                <p><b>为什么学这一节</b>{dashboard.today.reason}</p>
+              </div>
+              <button className="today-continue-button" onClick={() => void onContinue(dashboard.today!.seriesId)}>
+                继续学习 <span aria-hidden="true">→</span>
+              </button>
+            </>
+          ) : (
+            <div className="focus-empty-copy">
+              <h2>先放入一本真正想学的书。</h2>
+              <p>创建书架与教材后，下一节会固定出现在这里。</p>
+              <button onClick={() => setShowCreate(true)}>创建第一个书架 <span aria-hidden="true">→</span></button>
+            </div>
+          )}
+        </article>
+
+        <article className="library-focus-card review-focus-card">
+          <header>
+            <span className="focus-card-label">待复习</span>
+            <small>跨书架</small>
+          </header>
+          <div className="review-empty-state">
+            <span>今日已清空</span>
+            <h2>没有到期的复习</h2>
+            <p>完成测验后，薄弱概念会按间隔自动回到这里。到期时可直接开始，不需要先打开队列。</p>
+          </div>
+          <div className="review-cadence" aria-label="复习间隔">
+            <span>复习节奏</span>
+            <ol>
+              <li>1 天</li>
+              <li>3 天</li>
+              <li>7 天</li>
+              <li>14 天</li>
+            </ol>
+          </div>
+        </article>
       </div>
-      <div className="shelf-grid">
+
+      <section className="library-catalog" aria-labelledby="library-catalog-title">
+        <header className="catalog-heading">
+          <div>
+            <p>按领域归档</p>
+            <h2 id="library-catalog-title">我的书架</h2>
+          </div>
+          <p>每个书架保存该领域的教材、学习记录与掌握证据。</p>
+        </header>
+
+        <div className="library-shelf-grid">
         {data && data.shelves.length === 0 && (
           <div className="empty-library-message">
             <span>还没有书架</span>
-            <small>创建第一个书架，把想学的内容放进来。</small>
+            <small>从一个明确的领域开始，把教材、测验与掌握证据放在一起。</small>
             <button className="primary-button" onClick={() => setShowCreate(true)}>创建第一个书架</button>
           </div>
         )}
-        {data?.shelves.map((item) => (
+        {data?.shelves.map((item, shelfIndex) => {
+          const itemBookCount = item.series.reduce((total, itemSeries) => total + itemSeries.books.length, 0);
+          return (
           <button
-            className="shelf-card bookshelf-card"
+            className="library-shelf-card"
             key={item.id}
             aria-label={`进入${item.name}书架，共 ${item.series.length} 个学习系列`}
             onClick={() => onOpen(item)}
           >
-            <div className="shelf-card-top">
-              <span>{item.name}书架</span>
-              <small>{item.series.length} 册在架</small>
-            </div>
-            <div className="bookshelf-scene">
-              <div className="book-row">
-                <span className="bookend left" aria-hidden="true" />
-                {item.series.map((series, index) => (
-                  <span
-                    className={`book-spine book-tone-${index % 6}`}
-                    style={{ height: `${154 + ((index * 23) % 48)}px` }}
-                    title={series.title}
-                    key={series.id}
-                  >
-                    <i />
-                    <b>{compactSpineTitle(series.title)}</b>
-                    <small>{series.progress}%</small>
+            <span className="shelf-index-rail" aria-hidden="true">
+              <b>{String(shelfIndex + 1).padStart(2, '0')}</b>
+              <i>领域书架</i>
+            </span>
+            <span className="shelf-card-content">
+              <span className="shelf-card-heading">
+                <span>
+                  <small>{shelfDescriptor(item) || '未设置领域说明'}</small>
+                  <strong>{item.name}</strong>
+                </span>
+                <em>{item.series.length} 个系列 · {itemBookCount} 本教材</em>
+              </span>
+
+              {item.tags.length > 0 && (
+                <span className="shelf-tags" aria-label="书架标签">
+                  {item.tags.slice(0, 4).map((tag) => <i key={tag}>{tag}</i>)}
+                </span>
+              )}
+
+              <span className="shelf-series-list">
+                {item.series.slice(0, 3).map((itemSeries) => (
+                  <span className="shelf-series-row" key={itemSeries.id}>
+                    <span>
+                      <b>{itemSeries.title}</b>
+                      <small>{itemSeries.books.length} 本教材</small>
+                    </span>
+                    <span className="series-progress-value">{itemSeries.progress}%</span>
+                    <span className="series-progress-track" aria-hidden="true">
+                      <i style={{ width: `${itemSeries.progress}%` }} />
+                    </span>
                   </span>
                 ))}
-                <span className="bookend right" aria-hidden="true" />
-              </div>
-              <span className="shelf-board" aria-hidden="true"><i /></span>
-            </div>
-            <div className="shelf-plaque">
-              <span className="shelf-monogram">{item.name.slice(0, 1)}</span>
-              <span>
-                <b>{item.name}</b>
-                {shelfDescriptor(item) && <small>{shelfDescriptor(item)}</small>}
+                {item.series.length === 0 && (
+                  <span className="shelf-series-empty">还没有教材系列，进入书架开始规划。</span>
+                )}
+                {item.series.length > 3 && (
+                  <span className="more-series">另有 {item.series.length - 3} 个系列</span>
+                )}
               </span>
-              <em>进入书架 <i>→</i></em>
-            </div>
+
+              <span className="shelf-card-action">
+                打开书架 <i aria-hidden="true">→</i>
+              </span>
+            </span>
           </button>
-        ))}
-      </div>
+          );
+        })}
+        </div>
+      </section>
       {showCreate && (
         <ShelfCreateDialog
           onClose={() => setShowCreate(false)}
           onCreate={onCreate}
         />
+      )}
+    </section>
+  );
+}
+
+const PROFILE_STAGE_OPTIONS: { value: LearningProfile['stage']; label: string }[] = [
+  { value: 'exploring', label: '正在探索' },
+  { value: 'beginner', label: '刚刚入门' },
+  { value: 'foundation', label: '已有基础' },
+  { value: 'practice', label: '实践提升' },
+  { value: 'advanced', label: '系统进阶' },
+];
+
+function parseProfileDomains(value: string) {
+  return Array.from(new Set(
+    value
+      .split(/[,，、\n]/)
+      .map((item) => item.trim())
+      .filter(Boolean),
+  )).slice(0, 6);
+}
+
+function ProfileCenterPage({
+  user,
+  mode,
+  profile,
+  stats,
+  onBack,
+  onSave,
+  onLogout,
+}: {
+  user: AuthState['user'];
+  mode: AuthState['mode'];
+  profile: LearningProfile;
+  stats: { shelves: number; series: number };
+  onBack: () => void;
+  onSave: (body: object) => Promise<void>;
+  onLogout: () => Promise<void>;
+}) {
+  const [section, setSection] = useState<'profile' | 'account'>('profile');
+  const [profession, setProfession] = useState(profile.profession);
+  const [stage, setStage] = useState<LearningProfile['stage']>(profile.stage);
+  const [purpose, setPurpose] = useState(profile.purpose);
+  const [domainText, setDomainText] = useState(profile.domains.join('，'));
+  const [experience, setExperience] = useState(profile.experience);
+  const [weeklyMinutes, setWeeklyMinutes] = useState(profile.weeklyMinutes || 0);
+  const [targetDate, setTargetDate] = useState(profile.targetDate || '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+
+  const domains = useMemo(() => parseProfileDomains(domainText), [domainText]);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!profession.trim() || !stage || !purpose.trim() || domains.length === 0) {
+      setError('请完整填写当前身份、学习阶段、目标领域和学习目的。');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    setMessage('');
+    try {
+      await onSave({
+        profession: profession.trim(),
+        stage,
+        purpose: purpose.trim(),
+        domains,
+        experience: experience.trim(),
+        weeklyMinutes,
+        targetDate,
+      });
+      setMessage(`已保存为学习画像 V${profile.version + 1}。已有测验与掌握证据保持不变。`);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '学习画像保存失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const modeLabel = {
+    demo: '固定体验账号',
+    local: '本地独立账号',
+    password: '受邀学习账号',
+    oidc: '统一身份账号',
+  }[mode];
+
+  return (
+    <section className="profile-center-page" aria-labelledby="profile-center-title">
+      <aside className="profile-center-sidebar">
+        <p className="profile-center-kicker">PERSONAL CENTER</p>
+        <div className="profile-sidebar-identity">
+          <span className="profile-avatar" aria-hidden="true">{user.name.trim().slice(0, 1).toUpperCase() || '我'}</span>
+          <div><h2>{user.name}</h2><small>{modeLabel}</small></div>
+        </div>
+
+        <nav aria-label="个人中心导航">
+          <button className={section === 'profile' ? 'active' : ''} aria-current={section === 'profile' ? 'page' : undefined} onClick={() => setSection('profile')}>
+            <span>学习画像</span><small>目标、背景与节奏</small>
+          </button>
+          <button className={section === 'account' ? 'active' : ''} aria-current={section === 'account' ? 'page' : undefined} onClick={() => setSection('account')}>
+            <span>账号与数据</span><small>身份、归属与退出</small>
+          </button>
+        </nav>
+
+        <div className="profile-sidebar-ledger">
+          <span>当前画像版本</span><b>V{profile.version}</b>
+          <small>每次自述修改都会留下新版本。</small>
+        </div>
+        <button type="button" className="profile-back-button" onClick={onBack}><span aria-hidden="true">←</span> 返回书架</button>
+      </aside>
+
+      {section === 'profile' ? (
+        <form className="profile-center-form" onSubmit={(event) => void submit(event)}>
+          <header className="profile-page-heading">
+            <p className="eyebrow">学习画像</p>
+            <h1 id="profile-center-title">让教材始终认识<br />现在的你。</h1>
+            <p>这是所有书架共用的学习设置。修改会形成新版本，但不会改写已经产生的测验、笔记与掌握证据。</p>
+          </header>
+
+          <fieldset className="profile-field-group">
+            <legend>当前起点</legend>
+            <div className="profile-two-columns">
+              <label>当前身份或职业
+                <input required maxLength={120} value={profession} onChange={(event) => setProfession(event.target.value)} />
+              </label>
+              <label>学习阶段
+                <select required value={stage} onChange={(event) => setStage(event.target.value as LearningProfile['stage'])}>
+                  {PROFILE_STAGE_OPTIONS.map((item) => <option value={item.value} key={item.value}>{item.label}</option>)}
+                </select>
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset className="profile-field-group">
+            <legend>学习方向</legend>
+            <label>目标领域
+              <input required maxLength={240} value={domainText} onChange={(event) => setDomainText(event.target.value)} placeholder="用逗号分隔，最多 6 个" />
+              <small>当前识别：{domains.length ? domains.join(' · ') : '尚未填写'}</small>
+            </label>
+            <label>我最终想获得的能力
+              <textarea required maxLength={1000} value={purpose} onChange={(event) => setPurpose(event.target.value)} />
+            </label>
+            <label>相关经验 <em>可选</em>
+              <textarea className="profile-experience-field" maxLength={1000} value={experience} onChange={(event) => setExperience(event.target.value)} />
+            </label>
+          </fieldset>
+
+          <fieldset className="profile-field-group">
+            <legend>学习节奏</legend>
+            <div className="profile-two-columns">
+              <label>每周投入
+                <select value={weeklyMinutes} onChange={(event) => setWeeklyMinutes(Number(event.target.value))}>
+                  <option value={0}>暂不设定</option>
+                  <option value={120}>2 小时</option>
+                  <option value={180}>3 小时</option>
+                  <option value={300}>5 小时</option>
+                  <option value={480}>8 小时</option>
+                  <option value={600}>10 小时</option>
+                </select>
+              </label>
+              <label>目标日期 <em>可选</em>
+                <input type="date" value={targetDate} onChange={(event) => setTargetDate(event.target.value)} />
+              </label>
+            </div>
+          </fieldset>
+
+          <div className="profile-version-note"><span>版本化自述</span><p>保存后，相关学习系列会在各自页面提示你重新确认路径。</p></div>
+          {error && <p className="profile-flow-error" role="alert">{error}</p>}
+          {message && <p className="profile-save-message" role="status">{message}</p>}
+          <footer>
+            <button className="primary-button" disabled={saving}>{saving ? '正在保存…' : '保存学习画像'}</button>
+          </footer>
+        </form>
+      ) : (
+        <section className="profile-account-page" aria-labelledby="account-page-title">
+          <header className="profile-page-heading">
+            <p className="eyebrow">账号与数据</p>
+            <h1 id="account-page-title">一个账号，<br />一套学习记录。</h1>
+            <p>书架、阅读位置、测验证据和画像版本都绑定到当前账号，不会与其他用户混合。</p>
+          </header>
+
+          <div className="account-summary-card">
+            <span className="profile-avatar" aria-hidden="true">{user.name.trim().slice(0, 1).toUpperCase() || '我'}</span>
+            <div><small>当前登录账号</small><h2>{user.name}</h2><p>{modeLabel}</p></div>
+            <dl>
+              <div><dt>书架</dt><dd>{stats.shelves}</dd></div>
+              <div><dt>学习系列</dt><dd>{stats.series}</dd></div>
+              <div><dt>画像版本</dt><dd>V{profile.version}</dd></div>
+            </dl>
+          </div>
+
+          <div className="account-policy-grid">
+            <article>
+              <span>数据归属</span>
+              <h3>学习事实属于当前账号</h3>
+              <p>书架、答题记录、复习状态和掌握证据均由服务端按用户隔离。</p>
+            </article>
+            <article>
+              <span>登录安全</span>
+              <h3>浏览器只保存安全会话</h3>
+              <p>{mode === 'local' || mode === 'password'
+                ? '密码不会写入浏览器存储，退出后服务端会话立即撤销。'
+                : '身份由登录服务确认，Slow 不接收身份提供商密码。'}</p>
+            </article>
+          </div>
+
+          <section className="account-exit-panel">
+            <div><h3>退出当前账号</h3><p>退出不会删除任何书架或学习记录，下次登录后可继续。</p></div>
+            <button type="button" disabled={saving} onClick={() => void onLogout()}>退出账号</button>
+          </section>
+        </section>
       )}
     </section>
   );
@@ -2817,6 +3196,50 @@ function QuizReview({
   );
 }
 
+const NOTE_LIST_FIELDS: { key: keyof NoteContent; label: string; hint: string }[] = [
+  { key: 'core_mechanism', label: '核心机制', hint: '每行写一个机制' },
+  { key: 'personal_gaps', label: '仍需留意', hint: '每行写一个需要继续巩固的点' },
+  { key: 'boundaries', label: '适用边界', hint: '每行写一个边界条件' },
+  { key: 'practice_checks', label: '自检方法', hint: '每行写一个自检问题或练习' },
+  { key: 'sources', label: '参考来源', hint: '每行写一个来源' },
+  { key: 'unresolved', label: '尚未解决', hint: '每行写一个待解决问题' },
+];
+
+function noteList(content: NoteContent, key: keyof NoteContent) {
+  const value = content[key];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && Boolean(item.trim()))
+    : [];
+}
+
+function NoteContentView({ content, empty }: { content: NoteContent; empty: string }) {
+  const solvedQuestion = typeof content.solved_question === 'string'
+    ? content.solved_question.trim()
+    : '';
+  const populatedFields = NOTE_LIST_FIELDS
+    .map((field) => ({ ...field, values: noteList(content, field.key) }))
+    .filter((field) => field.values.length > 0);
+  if (!solvedQuestion && populatedFields.length === 0) {
+    return <p className="note-empty-layer">{empty}</p>;
+  }
+  return (
+    <div className="note-content-grid">
+      {solvedQuestion && (
+        <section className="note-solved-question">
+          <span>本节解决的问题</span>
+          <p>{solvedQuestion}</p>
+        </section>
+      )}
+      {populatedFields.map((field) => (
+        <section key={String(field.key)}>
+          <h4>{field.label}</h4>
+          <ul>{field.values.map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul>
+        </section>
+      ))}
+    </div>
+  );
+}
+
 function Note({
   sectionId,
   note,
@@ -2826,40 +3249,129 @@ function Note({
   note: NoteType;
   onSaved: (section: Section) => void;
 }) {
-  const [editing, setEditing] = useState(JSON.stringify(note.userContent || {}, null, 2));
+  const initialContent = note.layers.userRevision?.content
+    ?? note.layers.learningSummary?.content
+    ?? note.aiContent;
+  const [editing, setEditing] = useState<NoteContent>(initialContent);
   const [message, setMessage] = useState('');
-  const priorityGaps = Array.isArray(note.aiContent.personal_gaps)
-    ? note.aiContent.personal_gaps.filter(
-        (item): item is string => typeof item === 'string' && Boolean(item.trim()),
-      )
-    : [];
+  const summary = note.layers.learningSummary;
+  const revision = note.layers.userRevision;
+  useEffect(() => {
+    setEditing(
+      note.layers.userRevision?.content
+      ?? note.layers.learningSummary?.content
+      ?? note.aiContent,
+    );
+  }, [note]);
+  const updateList = (key: keyof NoteContent, value: string) => {
+    setEditing((current) => ({
+      ...current,
+      [key]: value.split('\n').map((item) => item.trim()).filter(Boolean),
+    }));
+  };
   const save = async () => {
     try {
-      await api.note(sectionId, JSON.parse(editing));
+      await api.note(sectionId, editing);
       onSaved(await api.section(sectionId));
-      setMessage('已保存；AI 笔记未被覆盖。');
+      setMessage('已保存为新的个人版本；底稿与复习补充保持不变。');
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : '保存失败');
     }
   };
   return (
     <div className="note-view">
-      <p className="eyebrow">完成后的核心资产</p>
-      <h2>AI 整理笔记</h2>
-      {priorityGaps.length > 0 && (
-        <section className="note-priority" aria-labelledby="note-priority-title">
-          <span>错题留下的学习重点</span>
-          <h3 id="note-priority-title">需要重点巩固</h3>
+      <p className="eyebrow">完成后持续生长的学习资产</p>
+      <h2>三层学习笔记</h2>
+      <p className="note-intro">底稿记录首次通过时的理解，真正完成复习后只追加补充；你的改写单独保存，不会覆盖前两层。</p>
+
+      <article className="note-layer note-summary-layer">
+        <header>
+          <span className="note-layer-index">01</span>
+          <div><b>学习总结</b><small>首次通过时冻结的稳定底稿</small></div>
+          {summary && <em>V{summary.version}</em>}
+        </header>
+        <NoteContentView content={summary?.content ?? note.aiContent} empty="本节还没有学习总结。" />
+        {summary && (
+          <footer>
+            <span>内容版本 {summary.sourceContentVersionId ?? '旧数据'}</span>
+            <span>契约 {summary.sourceContractVersion}</span>
+            <span>观察水位 {summary.sourceObservationWatermark}</span>
+          </footer>
+        )}
+      </article>
+
+      <section className="note-layer note-review-layer">
+        <header>
+          <span className="note-layer-index">02</span>
+          <div><b>复习补充</b><small>按完成时间追加，不改写底稿</small></div>
+          <em>{note.layers.reviewSupplements.length} 条</em>
+        </header>
+        {note.layers.reviewSupplements.length === 0 ? (
+          <p className="note-empty-layer">完成一次无辅助复习后，新的理解会出现在这里。单纯答对不会自动生成正文。</p>
+        ) : (
+          <div className="note-review-timeline">
+            {note.layers.reviewSupplements.map((supplement, index) => (
+              <article key={supplement.id}>
+                <div>
+                  <b>复习补充 {index + 1}</b>
+                  <time dateTime={supplement.createdAt}>{new Date(supplement.createdAt).toLocaleDateString('zh-CN')}</time>
+                </div>
+                <NoteContentView content={supplement.content} empty="这次复习没有新增正文。" />
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <article className="note-layer note-user-layer">
+        <header>
+          <span className="note-layer-index">03</span>
+          <div><b>我的版本</b><small>只有你的保存操作会创建新版本</small></div>
+          <em>{revision ? `V${revision.version}` : '未创建'}</em>
+        </header>
+        {revision && <NoteContentView content={revision.content} empty="当前个人版本为空。" />}
+        <div className="note-editor">
+          <label>
+            <span>我如何描述本节解决的问题</span>
+            <textarea
+              value={typeof editing.solved_question === 'string' ? editing.solved_question : ''}
+              onChange={(event) => setEditing((current) => ({ ...current, solved_question: event.target.value }))}
+            />
+          </label>
+          <div className="note-editor-grid">
+            {NOTE_LIST_FIELDS.map((field) => (
+              <label key={String(field.key)}>
+                <span>{field.label}</span>
+                <textarea
+                  aria-label={field.label}
+                  placeholder={field.hint}
+                  value={noteList(editing, field.key).join('\n')}
+                  onChange={(event) => updateList(field.key, event.target.value)}
+                />
+              </label>
+            ))}
+          </div>
+          <button className="primary-button" onClick={save}>保存为新的个人版本</button>
+        </div>
+      </article>
+
+      <aside className="note-verification" aria-label="当前验证标注">
+        <header><b>当前验证标注</b><span>只读 · 会随后续证据变化</span></header>
+        <p>这些状态来自测量与掌握度投影，不属于笔记正文，也不会静默改写任何版本。</p>
+        {note.verificationAnnotations.length === 0 ? (
+          <small>目前没有可显示的验证标注。</small>
+        ) : (
           <ul>
-            {priorityGaps.map((concept) => <li key={concept}>{concept}</li>)}
+            {note.verificationAnnotations.map((annotation) => (
+              <li key={annotation.assessmentTargetId}>
+                <span><b>{annotation.objective}</b><small>{annotation.dimension}</small></span>
+                <em>{annotation.claimStatus}</em>
+                <strong>{Math.round(annotation.pKnown * 100)}%</strong>
+              </li>
+            ))}
           </ul>
-          <p>本节已经允许继续学习，但这些概念仍会保留在掌握画像中。</p>
-        </section>
-      )}
-      <div className="note-paper"><pre>{JSON.stringify(note.aiContent, null, 2)}</pre></div>
-      <h3>我的补充</h3>
-      <textarea value={editing} onChange={(event) => setEditing(event.target.value)} />
-      <button className="primary-button" onClick={save}>保存我的内容</button>
+        )}
+      </aside>
       {message && <p className="save-message">{message}</p>}
     </div>
   );
