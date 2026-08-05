@@ -76,6 +76,8 @@ def _complete_initial_quiz_and_make_due(client):
         },
     )
     assert response.status_code == 200, response.json()
+    for task in response.json().get("workflowTasks", []):
+        assert wait_for_task(client, task["taskId"])["status"] == "succeeded"
     with client.app.state.sessions() as db:
         review = db.scalar(select(ReviewState).where(ReviewState.user_id == "user_demo"))
         review.status = "scheduled"

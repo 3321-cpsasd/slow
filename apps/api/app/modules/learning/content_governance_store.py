@@ -243,9 +243,12 @@ def bind_remediation_questions_to_source_claims(
     for position, question in enumerate(questions):
         payload = dict(question)
         objective = _normalized_objective(payload.get("objective", ""))
+        target_id = str(payload.get("assessmentTargetId", ""))
         prior = prior_questions[position] if position < len(prior_questions) else {}
         prior_objective = _normalized_objective(prior.get("objective", ""))
         prior_indexes = prior.get("claim_block_indexes", [])
+        if not isinstance(prior_indexes, list):
+            prior_indexes = []
         valid_indexes = [
             index
             for index in prior_indexes
@@ -257,6 +260,8 @@ def bind_remediation_questions_to_source_claims(
                 and isinstance(blocks[index], dict)
                 and objective
                 and objective == prior_objective
+                and target_id
+                and target_id == str(prior.get("assessmentTargetId", ""))
                 and objective in {
                     _normalized_objective(item)
                     for item in blocks[index].get("assessment_objectives", [])

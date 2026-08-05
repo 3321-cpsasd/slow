@@ -3498,10 +3498,10 @@ function Quiz({
       <h2>小节验证</h2>
       <p className="quiz-rule">答对至少 60% 即可继续；错题仍会进入重点巩固与学习画像。</p>
       <p className="quiz-draft-note">单选题只能选择一个答案，多选题可选择多个；切回正文查阅时，当前作答会自动保留。</p>
-      {section.quiz?.governance && !section.quiz.governance.assessmentEligible && (
+      {section.quiz && !section.quiz.governance?.assessmentEligible && (
         <aside className="quiz-governance-notice" role="status">
           <b>本次成绩只用于学习路径解锁</b>
-          <p>这套题的来源支持或题目绑定尚未通过内容治理，因此成绩不会写入概念掌握度或保持证据。</p>
+          <p>这套题的来源支持或题目绑定尚未完成内容治理，因此成绩不会写入概念掌握度或保持证据。</p>
         </aside>
       )}
       {result ? (
