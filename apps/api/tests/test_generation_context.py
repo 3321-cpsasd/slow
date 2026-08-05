@@ -15,7 +15,13 @@ from app.ai.contracts import (
 )
 from app.application.generation_context import GenerationContextBuilder
 from app.core.errors import AppError
-from app.infrastructure.tables import ContentVersion, LearningContractVersion, Shelf, UserProfile
+from app.infrastructure.tables import (
+    ContentVersion,
+    GenerationRun,
+    LearningContractVersion,
+    Shelf,
+    UserProfile,
+)
 from app.main import create_app
 from app.services.source_verifier import AcceptingSourceVerifier
 
@@ -180,6 +186,22 @@ def test_context_pack_propagates_profile_mission_depth_and_attempt():
         }
         assert content_request["teachingBlueprint"]["version"] == "teaching_blueprint_v1"
         assert content_request["teachingBlueprint"]["recurring_example"]
+        with client.app.state.sessions() as db:
+            generation_run = db.scalar(
+                select(GenerationRun).where(
+                    GenerationRun.operation == "lesson",
+                    GenerationRun.status == "succeeded",
+                )
+            )
+            generation_trace = json.loads(generation_run.trace_json)
+            assert (
+                generation_trace["generationVariant"]
+                == "preference_aware_blueprint_v1"
+            )
+            assert (
+                generation_trace["teachingBlueprint"]["version"]
+                == "teaching_blueprint_v1"
+            )
         content_context = content_request["generationContext"]
         assert content_context["operation"] == "lesson_content"
         assert content_context["learner"]["planRole"] == "猎头顾问"
