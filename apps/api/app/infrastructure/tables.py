@@ -193,6 +193,160 @@ class LearningPlan(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class LearningMissionVersion(Base):
+    """Immutable statement of why a plan exists and what success means."""
+
+    __tablename__ = "learning_mission_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "plan_id",
+            "version",
+            name="uq_learning_mission_versions_plan_version",
+        ),
+        UniqueConstraint(
+            "plan_id",
+            "payload_hash",
+            name="uq_learning_mission_versions_plan_payload",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    plan_id: Mapped[str] = mapped_column(ForeignKey("learning_plans.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    why: Mapped[str] = mapped_column(Text)
+    target_capabilities_json: Mapped[str] = mapped_column(Text, default="[]")
+    constraints_json: Mapped[str] = mapped_column(Text, default="{}")
+    out_of_scope_json: Mapped[str] = mapped_column(Text, default="[]")
+    assumptions_json: Mapped[str] = mapped_column(Text, default="[]")
+    learner_context_json: Mapped[str] = mapped_column(Text, default="{}")
+    inferred_fields_json: Mapped[str] = mapped_column(Text, default="[]")
+    provenance_json: Mapped[str] = mapped_column(Text, default="{}")
+    schema_version: Mapped[str] = mapped_column(String(40), default="mission_v1")
+    payload_hash: Mapped[str] = mapped_column(String(64))
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_mission_versions.id"), nullable=True
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class MissionSuccessCriterion(Base):
+    __tablename__ = "mission_success_criteria"
+    __table_args__ = (
+        UniqueConstraint(
+            "plan_id",
+            "stable_key",
+            name="uq_mission_success_criteria_plan_key",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    plan_id: Mapped[str] = mapped_column(ForeignKey("learning_plans.id"), index=True)
+    stable_key: Mapped[str] = mapped_column(String(160))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    retired_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class MissionSuccessCriterionVersion(Base):
+    __tablename__ = "mission_success_criterion_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "mission_version_id",
+            "success_criterion_id",
+            name="uq_mission_criterion_versions_identity",
+        ),
+        UniqueConstraint(
+            "mission_version_id",
+            "position",
+            name="uq_mission_criterion_versions_position",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    mission_version_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_mission_versions.id"), index=True
+    )
+    success_criterion_id: Mapped[str] = mapped_column(
+        ForeignKey("mission_success_criteria.id"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    statement: Mapped[str] = mapped_column(Text)
+    acceptance_json: Mapped[str] = mapped_column(Text, default="{}")
+    provenance_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class Concept(Base):
+    """Stable platform identity for one concept, independent of any book."""
+
+    __tablename__ = "concepts"
+    __table_args__ = (
+        UniqueConstraint("namespace", "concept_key", name="uq_concepts_namespace_key"),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    namespace: Mapped[str] = mapped_column(String(80), index=True)
+    concept_key: Mapped[str] = mapped_column(String(200))
+    canonical_name: Mapped[str] = mapped_column(String(300))
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    origin: Mapped[str] = mapped_column(String(40), default="platform")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ConceptRevision(Base):
+    """Immutable meaning of a concept at one revision."""
+
+    __tablename__ = "concept_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "concept_id", "revision", name="uq_concept_revisions_concept_revision"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    concept_id: Mapped[str] = mapped_column(ForeignKey("concepts.id"), index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    label: Mapped[str] = mapped_column(String(300))
+    definition: Mapped[str] = mapped_column(Text)
+    scope_json: Mapped[str] = mapped_column(Text, default="{}")
+    boundaries_json: Mapped[str] = mapped_column(Text, default="[]")
+    provenance_mode: Mapped[str] = mapped_column(String(40), default="platform")
+    verification_status: Mapped[str] = mapped_column(
+        String(32), default="unverified", index=True
+    )
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("concept_revisions.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class LearningObjective(Base):
+    """Immutable observable outcome used by contracts and assessments."""
+
+    __tablename__ = "learning_objectives"
+    __table_args__ = (
+        UniqueConstraint(
+            "namespace", "objective_key", name="uq_learning_objectives_namespace_key"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    namespace: Mapped[str] = mapped_column(String(80), index=True)
+    objective_key: Mapped[str] = mapped_column(String(200))
+    statement: Mapped[str] = mapped_column(Text)
+    cognitive_verb: Mapped[str] = mapped_column(String(40), default="demonstrate")
+    outcome_type: Mapped[str] = mapped_column(String(40), default="knowledge")
+    provenance_mode: Mapped[str] = mapped_column(String(40), default="platform")
+    verification_status: Mapped[str] = mapped_column(
+        String(32), default="unverified", index=True
+    )
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_objectives.id"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class PlanCreationRequest(Base):
     __tablename__ = "plan_creation_requests"
     idempotency_key: Mapped[str] = mapped_column(String(128), primary_key=True)
@@ -244,6 +398,11 @@ class Series(Base):
     shelf_id: Mapped[str] = mapped_column(ForeignKey("shelves.id"), index=True)
     title: Mapped[str] = mapped_column(String(240))
     rationale: Mapped[str] = mapped_column(Text)
+    # Nullable only during the staged M1 -> M2 rollout. The migration backfills
+    # every existing row and all new writes set it in the creation transaction.
+    initial_mission_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_mission_versions.id"), nullable=True, index=True
+    )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 
@@ -282,11 +441,97 @@ class Section(Base):
     objectives_json: Mapped[str] = mapped_column(Text)
 
 
+class LearningContractVersion(Base):
+    """Immutable semantic contract for one section version."""
+
+    __tablename__ = "learning_contract_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "section_id", "version", name="uq_learning_contract_versions_section_version"
+        ),
+        UniqueConstraint(
+            "section_id",
+            "contract_hash",
+            name="uq_learning_contract_versions_section_hash",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    mission_version_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_mission_versions.id"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    section_question_snapshot: Mapped[str] = mapped_column(Text)
+    target_depth: Mapped[str] = mapped_column(String(32), default="standard")
+    boundaries_json: Mapped[str] = mapped_column(Text, default="[]")
+    generation_context_json: Mapped[str] = mapped_column(Text, default="{}")
+    provenance_mode: Mapped[str] = mapped_column(String(40), default="native_m2")
+    lineage_status: Mapped[str] = mapped_column(String(32), default="verified", index=True)
+    contract_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class LearningContractConcept(Base):
+    __tablename__ = "learning_contract_concepts"
+    __table_args__ = (
+        UniqueConstraint(
+            "contract_version_id",
+            "concept_revision_id",
+            name="uq_learning_contract_concepts_identity",
+        ),
+        UniqueConstraint(
+            "contract_version_id",
+            "position",
+            name="uq_learning_contract_concepts_position",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    contract_version_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), index=True
+    )
+    concept_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("concept_revisions.id"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    role: Mapped[str] = mapped_column(String(24), default="primary")
+    required: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class LearningContractObjective(Base):
+    __tablename__ = "learning_contract_objectives"
+    __table_args__ = (
+        UniqueConstraint(
+            "contract_version_id",
+            "learning_objective_id",
+            name="uq_learning_contract_objectives_identity",
+        ),
+        UniqueConstraint(
+            "contract_version_id",
+            "position",
+            name="uq_learning_contract_objectives_position",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    contract_version_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), index=True
+    )
+    learning_objective_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_objectives.id"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    role: Mapped[str] = mapped_column(String(24), default="primary")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class LearningRun(Base):
     __tablename__ = "learning_runs"
     id: Mapped[str] = mapped_column(String, primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     series_id: Mapped[str] = mapped_column(ForeignKey("series.id"), index=True)
+    initial_mission_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_mission_versions.id"), nullable=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(24), index=True, default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -300,6 +545,80 @@ class LearningRun(Base):
             sqlite_where=(status == "active"),
         ),
     )
+
+
+class LearningRunSectionBinding(Base):
+    """Frozen contract/content choice for a run after real learning activity."""
+
+    __tablename__ = "learning_run_section_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "learning_run_id",
+            "section_id",
+            name="uq_learning_run_section_bindings_run_section",
+        ),
+        ForeignKeyConstraint(
+            ["learning_run_id", "user_id"],
+            ["learning_runs.id", "learning_runs.user_id"],
+            name="fk_learning_run_section_bindings_run_user",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    learning_run_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_runs.id"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    learning_contract_version_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), index=True
+    )
+    content_version_id: Mapped[str] = mapped_column(
+        ForeignKey("content_versions.id"), index=True
+    )
+    initial_quiz_set_id: Mapped[str | None] = mapped_column(
+        ForeignKey("quiz_sets.id"), nullable=True
+    )
+    first_read_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    source: Mapped[str] = mapped_column(String(40))
+    source_fact_id: Mapped[str] = mapped_column(String(160), default="")
+    lineage_audit_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class MissionAdoptionEvent(Base):
+    __tablename__ = "mission_adoption_events"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["learning_run_id", "user_id"],
+            ["learning_runs.id", "learning_runs.user_id"],
+            name="fk_mission_adoption_events_run_user",
+        ),
+        UniqueConstraint(
+            "learning_run_id",
+            "user_id",
+            "idempotency_key",
+            name="uq_mission_adoption_events_idempotency",
+        ),
+    )
+    sequence: Mapped[int] = mapped_column(
+        Integer, primary_key=True, autoincrement=True
+    )
+    id: Mapped[str] = mapped_column(String, unique=True, index=True)
+    learning_run_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_runs.id"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    mission_version_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_mission_versions.id"), index=True
+    )
+    previous_mission_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_mission_versions.id"), nullable=True
+    )
+    event_type: Mapped[str] = mapped_column(String(32), index=True)
+    source: Mapped[str] = mapped_column(String(40))
+    reason: Mapped[str] = mapped_column(Text, default="")
+    idempotency_key: Mapped[str] = mapped_column(String(160))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class BookProgress(Base):
@@ -371,6 +690,9 @@ class ContentVersion(Base):
     )
     id: Mapped[str] = mapped_column(String, primary_key=True)
     section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    learning_contract_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), nullable=True, index=True
+    )
     version: Mapped[int] = mapped_column(Integer)
     blocks_json: Mapped[str] = mapped_column(Text)
     sources_json: Mapped[str] = mapped_column(Text)
@@ -384,6 +706,249 @@ class SourceVerification(Base):
     content_version_id: Mapped[str] = mapped_column(ForeignKey("content_versions.id"), unique=True)
     report_json: Mapped[str] = mapped_column(Text)
     verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class SourceVersion(Base):
+    """Immutable source snapshot used by claim-level support bindings."""
+
+    __tablename__ = "source_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "content_version_id",
+            "position",
+            name="uq_source_versions_content_position",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    content_version_id: Mapped[str] = mapped_column(
+        ForeignKey("content_versions.id"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(Text)
+    url: Mapped[str] = mapped_column(Text)
+    source_kind: Mapped[str] = mapped_column(String(32))
+    version_label: Mapped[str] = mapped_column(String(200), default="")
+    provenance_mode: Mapped[str] = mapped_column(
+        String(40), default="native_m2", index=True
+    )
+    reachability_status: Mapped[str] = mapped_column(
+        String(32), default="unknown", index=True
+    )
+    verification_report_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ContentBlockVersion(Base):
+    """Normalized immutable block; the M1 block id remains its stable anchor."""
+
+    __tablename__ = "content_block_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "content_version_id",
+            "position",
+            name="uq_content_block_versions_content_position",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    content_version_id: Mapped[str] = mapped_column(
+        ForeignKey("content_versions.id"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    block_version: Mapped[int] = mapped_column(Integer, default=1)
+    format_kind: Mapped[str] = mapped_column(String(24))
+    semantic_role: Mapped[str] = mapped_column(String(32), index=True)
+    heading: Mapped[str] = mapped_column(Text, default="")
+    content: Mapped[str] = mapped_column(Text)
+    source_indexes_json: Mapped[str] = mapped_column(Text, default="[]")
+    factuality_class: Mapped[str] = mapped_column(
+        String(40), default="unspecified"
+    )
+    trust_state: Mapped[str] = mapped_column(
+        String(32), default="model_synthesis", index=True
+    )
+    generation_method: Mapped[str] = mapped_column(
+        String(40), default="ai_generated"
+    )
+    assessment_eligible: Mapped[bool] = mapped_column(Boolean, default=False)
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("content_block_versions.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class SourceClaim(Base):
+    """Stable identity for a versioned atomic source claim."""
+
+    __tablename__ = "source_claims"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    stable_key: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class SourceClaimVersion(Base):
+    __tablename__ = "source_claim_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_claim_id",
+            "version",
+            name="uq_source_claim_versions_claim_version",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    source_claim_id: Mapped[str] = mapped_column(
+        ForeignKey("source_claims.id"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    statement: Mapped[str] = mapped_column(Text)
+    claim_kind: Mapped[str] = mapped_column(String(40), index=True)
+    scope_json: Mapped[str] = mapped_column(Text, default="{}")
+    strict: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    trust_state: Mapped[str] = mapped_column(
+        String(32), default="unverified", index=True
+    )
+    generation_method: Mapped[str] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(24), default="candidate", index=True)
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("source_claim_versions.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ContentBlockClaimAnchor(Base):
+    __tablename__ = "content_block_claim_anchors"
+    __table_args__ = (
+        UniqueConstraint(
+            "content_block_version_id",
+            "source_claim_version_id",
+            name="uq_content_block_claim_anchors_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    content_block_version_id: Mapped[str] = mapped_column(
+        ForeignKey("content_block_versions.id"), index=True
+    )
+    source_claim_version_id: Mapped[str] = mapped_column(
+        ForeignKey("source_claim_versions.id"), index=True
+    )
+    anchor_role: Mapped[str] = mapped_column(String(32), default="states")
+    locator_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class SourceClaimBinding(Base):
+    __tablename__ = "source_claim_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_claim_version_id",
+            "source_version_id",
+            "locator_hash",
+            name="uq_source_claim_bindings_claim_source_locator",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    source_claim_version_id: Mapped[str] = mapped_column(
+        ForeignKey("source_claim_versions.id"), index=True
+    )
+    source_version_id: Mapped[str] = mapped_column(
+        ForeignKey("source_versions.id"), index=True
+    )
+    locator_type: Mapped[str] = mapped_column(String(32))
+    locator_json: Mapped[str] = mapped_column(Text)
+    locator_hash: Mapped[str] = mapped_column(String(64))
+    excerpt_text: Mapped[str] = mapped_column(Text, default="")
+    excerpt_hash: Mapped[str] = mapped_column(String(64), default="")
+    support_type: Mapped[str] = mapped_column(String(24))
+    verification_mode: Mapped[str] = mapped_column(String(32))
+    verification_status: Mapped[str] = mapped_column(String(32), index=True)
+    verification_rule_version: Mapped[str] = mapped_column(String(40))
+    report_json: Mapped[str] = mapped_column(Text, default="{}")
+    verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class KnowledgeGap(Base):
+    """Immutable detected gap; lifecycle changes live in append-only events."""
+
+    __tablename__ = "knowledge_gaps"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    gap_type: Mapped[str] = mapped_column(String(40), index=True)
+    severity: Mapped[str] = mapped_column(String(24), index=True)
+    subject_kind: Mapped[str] = mapped_column(String(40))
+    source_claim_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("source_claim_versions.id"), nullable=True, index=True
+    )
+    content_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("content_versions.id"), nullable=True, index=True
+    )
+    content_block_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("content_block_versions.id"), nullable=True, index=True
+    )
+    detector_kind: Mapped[str] = mapped_column(String(32))
+    detector_rule_version: Mapped[str] = mapped_column(String(40))
+    details_json: Mapped[str] = mapped_column(Text, default="{}")
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class KnowledgeGapEvent(Base):
+    __tablename__ = "knowledge_gap_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "knowledge_gap_id",
+            "idempotency_key",
+            name="uq_knowledge_gap_events_idempotency",
+        ),
+    )
+    sequence: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[str] = mapped_column(String, unique=True, index=True)
+    knowledge_gap_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_gaps.id"), index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(32), index=True)
+    actor_kind: Mapped[str] = mapped_column(String(32))
+    actor_id: Mapped[str] = mapped_column(String(160), default="")
+    rationale: Mapped[str] = mapped_column(Text, default="")
+    evidence_json: Mapped[str] = mapped_column(Text, default="{}")
+    rule_version: Mapped[str] = mapped_column(String(40))
+    idempotency_key: Mapped[str] = mapped_column(String(160))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class GovernanceDecisionSnapshot(Base):
+    """Append-only explanation of a content or quiz publication decision."""
+
+    __tablename__ = "governance_decision_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "decision_scope",
+            "idempotency_key",
+            name="uq_governance_decision_scope_idempotency",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    decision_scope: Mapped[str] = mapped_column(String(32), index=True)
+    content_version_id: Mapped[str] = mapped_column(
+        ForeignKey("content_versions.id"), index=True
+    )
+    quiz_set_id: Mapped[str | None] = mapped_column(
+        ForeignKey("quiz_sets.id"), nullable=True, index=True
+    )
+    learning_contract_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), nullable=True, index=True
+    )
+    requested_mode: Mapped[str] = mapped_column(String(24))
+    mode: Mapped[str] = mapped_column(String(24), index=True)
+    allowed: Mapped[bool] = mapped_column(Boolean)
+    assessment_eligible: Mapped[bool] = mapped_column(Boolean, default=False)
+    reasons_json: Mapped[str] = mapped_column(Text, default="[]")
+    rule_version: Mapped[str] = mapped_column(String(40))
+    input_hash: Mapped[str] = mapped_column(String(64))
+    actor_kind: Mapped[str] = mapped_column(String(32))
+    actor_id: Mapped[str] = mapped_column(String(160), default="")
+    idempotency_key: Mapped[str] = mapped_column(String(160))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class GenerationRun(Base):
@@ -474,6 +1039,9 @@ class QuizSet(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True)
     section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
     content_version_id: Mapped[str] = mapped_column(ForeignKey("content_versions.id"), index=True)
+    learning_contract_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), nullable=True, index=True
+    )
     generation: Mapped[int] = mapped_column(Integer)
     questions_json: Mapped[str] = mapped_column(Text)
 
@@ -495,6 +1063,12 @@ class QuizAttempt(Base):
     )
     id: Mapped[str] = mapped_column(String, primary_key=True)
     quiz_set_id: Mapped[str] = mapped_column(ForeignKey("quiz_sets.id"))
+    learning_contract_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), nullable=True, index=True
+    )
+    content_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("content_versions.id"), nullable=True, index=True
+    )
     learning_run_id: Mapped[str] = mapped_column(ForeignKey("learning_runs.id"), index=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -521,10 +1095,21 @@ class AssessmentTarget(Base):
         ),
     )
     id: Mapped[str] = mapped_column(String, primary_key=True)
+    # Nullable during the staged M1 -> M2 rollout. Migration 0030 backfills every
+    # existing target with explicit provisional identities without changing its id.
+    concept_revision_id: Mapped[str | None] = mapped_column(
+        ForeignKey("concept_revisions.id"), nullable=True, index=True
+    )
+    learning_objective_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_objectives.id"), nullable=True, index=True
+    )
     objective_key: Mapped[str] = mapped_column(String(300))
     objective_statement: Mapped[str] = mapped_column(Text)
     dimension: Mapped[str] = mapped_column(String(32), default="recognition")
     target_depth: Mapped[str] = mapped_column(String(32), default="standard")
+    identity_status: Mapped[str] = mapped_column(
+        String(32), default="legacy_provisional", index=True
+    )
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
@@ -555,6 +1140,41 @@ class SectionAssessmentTarget(Base):
     verification_policy: Mapped[str] = mapped_column(
         String(40), default="choice_quiz_v1"
     )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class LearningContractAssessmentTarget(Base):
+    """Contract-local gate policy for a stable assessment identity."""
+
+    __tablename__ = "learning_contract_assessment_targets"
+    __table_args__ = (
+        UniqueConstraint(
+            "contract_version_id",
+            "position",
+            name="uq_learning_contract_assessment_targets_position",
+        ),
+        UniqueConstraint(
+            "contract_version_id",
+            "assessment_target_id",
+            name="uq_learning_contract_assessment_targets_target",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    contract_version_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), index=True
+    )
+    assessment_target_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_targets.id"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    required: Mapped[bool] = mapped_column(Boolean, default=False)
+    verification_policy: Mapped[str] = mapped_column(
+        String(40), default="choice_quiz_v1"
+    )
+    evidence_policy: Mapped[str] = mapped_column(
+        String(40), default="assessment_evidence_v1"
+    )
+    diagnostic_only: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -600,6 +1220,15 @@ class AssessmentObservation(Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
     attempt_id: Mapped[str] = mapped_column(ForeignKey("quiz_attempts.id"), index=True)
+    quiz_set_id: Mapped[str | None] = mapped_column(
+        ForeignKey("quiz_sets.id"), nullable=True, index=True
+    )
+    learning_contract_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), nullable=True, index=True
+    )
+    content_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("content_versions.id"), nullable=True, index=True
+    )
     scoring_result_id: Mapped[str] = mapped_column(
         ForeignKey("scoring_results.id"), index=True
     )
@@ -682,6 +1311,51 @@ class AssessmentGateState(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class LearningDecisionSnapshot(Base):
+    """Append-only audit fact for a server-owned learning decision.
+
+    Projection rows may be rebuilt or replaced.  This row instead freezes the
+    exact rule input and output that justified a gate or progression mutation.
+    A rule upgrade is a new snapshot, never an in-place rewrite.
+    """
+
+    __tablename__ = "learning_decision_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "decision_kind",
+            "idempotency_key",
+            name="uq_learning_decision_kind_idempotency",
+        ),
+        ForeignKeyConstraint(
+            ["learning_run_id", "user_id"],
+            ["learning_runs.id", "learning_runs.user_id"],
+            name="fk_learning_decision_snapshots_run_user",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    learning_run_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_runs.id"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    attempt_id: Mapped[str] = mapped_column(ForeignKey("quiz_attempts.id"), index=True)
+    learning_contract_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), nullable=True, index=True
+    )
+    content_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("content_versions.id"), nullable=True, index=True
+    )
+    decision_kind: Mapped[str] = mapped_column(String(32), index=True)
+    trigger_kind: Mapped[str] = mapped_column(String(32), index=True)
+    rule_version: Mapped[str] = mapped_column(String(40))
+    input_snapshot_json: Mapped[str] = mapped_column(Text)
+    output_decision_json: Mapped[str] = mapped_column(Text)
+    source_observation_watermark: Mapped[int] = mapped_column(Integer, default=0)
+    input_hash: Mapped[str] = mapped_column(String(64))
+    idempotency_key: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class KnowledgeStateProjection(Base):
     __tablename__ = "knowledge_state_projections"
     __table_args__ = (
@@ -735,6 +1409,112 @@ class ReviewState(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class ReviewSelectionRun(Base):
+    """Immutable daily selection input/output boundary for review assignments."""
+
+    __tablename__ = "review_selection_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "selection_date",
+            "rule_version",
+            name="uq_review_selection_runs_user_day_rule",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    selection_date: Mapped[str] = mapped_column(String(10), index=True)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    daily_budget: Mapped[int] = mapped_column(Integer)
+    due_count: Mapped[int] = mapped_column(Integer)
+    rule_version: Mapped[str] = mapped_column(String(40), index=True)
+    input_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ReviewAssignment(Base):
+    """Server-owned delayed-review authorization and lifecycle state."""
+
+    __tablename__ = "review_assignments"
+    __table_args__ = (
+        UniqueConstraint(
+            "selection_run_id",
+            "assessment_target_id",
+            name="uq_review_assignments_selection_target",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    selection_run_id: Mapped[str] = mapped_column(
+        ForeignKey("review_selection_runs.id"), index=True
+    )
+    review_state_id: Mapped[str] = mapped_column(
+        ForeignKey("review_states.id"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    assessment_target_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_targets.id"), index=True
+    )
+    source_learning_run_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_runs.id"), index=True
+    )
+    source_section_id: Mapped[str] = mapped_column(
+        ForeignKey("sections.id"), index=True
+    )
+    learning_contract_version_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), index=True
+    )
+    content_version_id: Mapped[str] = mapped_column(
+        ForeignKey("content_versions.id"), index=True
+    )
+    prior_quiz_set_id: Mapped[str] = mapped_column(
+        ForeignKey("quiz_sets.id"), index=True
+    )
+    review_quiz_set_id: Mapped[str | None] = mapped_column(
+        ForeignKey("quiz_sets.id"), nullable=True, unique=True
+    )
+    submitted_attempt_id: Mapped[str | None] = mapped_column(
+        ForeignKey("quiz_attempts.id"), nullable=True, unique=True
+    )
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    rank: Mapped[int] = mapped_column(Integer)
+    base_priority: Mapped[int] = mapped_column(Integer)
+    effective_priority: Mapped[int] = mapped_column(Integer)
+    selection_rule_version: Mapped[str] = mapped_column(String(40))
+    qualification_rule_version: Mapped[str] = mapped_column(String(40))
+    prior_item_signatures_json: Mapped[str] = mapped_column(Text, default="[]")
+    item_signatures_json: Mapped[str] = mapped_column(Text, default="[]")
+    response_json: Mapped[str] = mapped_column(Text, default="")
+    last_event_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ReviewAssignmentEventRecord(Base):
+    """Append-only audit event for a review assignment transition."""
+
+    __tablename__ = "review_assignment_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "assignment_id",
+            "event_type",
+            name="uq_review_assignment_events_type",
+        ),
+    )
+    sequence: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[str] = mapped_column(String, unique=True, index=True)
+    assignment_id: Mapped[str] = mapped_column(
+        ForeignKey("review_assignments.id"), index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(24), index=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    rule_version: Mapped[str] = mapped_column(String(40))
+    idempotency_key: Mapped[str] = mapped_column(String(160), default="")
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class Remediation(Base):
     __tablename__ = "remediations"
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -769,6 +1549,12 @@ class QaSession(Base):
     learning_run_id: Mapped[str] = mapped_column(ForeignKey("learning_runs.id"), index=True)
     section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    learning_contract_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), nullable=True, index=True
+    )
+    content_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("content_versions.id"), nullable=True, index=True
+    )
     memory_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
@@ -815,6 +1601,12 @@ class LearningNote(Base):
     learning_run_id: Mapped[str] = mapped_column(ForeignKey("learning_runs.id"), index=True)
     section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"))
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    learning_contract_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), nullable=True, index=True
+    )
+    content_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("content_versions.id"), nullable=True, index=True
+    )
     ai_content_json: Mapped[str] = mapped_column(Text)
     user_content_json: Mapped[str] = mapped_column(Text, default="{}")
     version: Mapped[int] = mapped_column(Integer, default=1)
@@ -838,6 +1630,9 @@ class LearningNoteSummary(Base):
     content_json: Mapped[str] = mapped_column(Text)
     source_content_version_id: Mapped[str | None] = mapped_column(
         ForeignKey("content_versions.id"), nullable=True
+    )
+    learning_contract_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), nullable=True, index=True
     )
     source_contract_version: Mapped[str] = mapped_column(
         String(40), default="generated_note_v1"
@@ -995,6 +1790,12 @@ class AskMeSession(Base):
     learning_run_id: Mapped[str] = mapped_column(ForeignKey("learning_runs.id"), index=True)
     section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    learning_contract_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), nullable=True, index=True
+    )
+    content_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("content_versions.id"), nullable=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(24), default="active")
     round_index: Mapped[int] = mapped_column(Integer, default=0)
     entries_json: Mapped[str] = mapped_column(Text, default="[]")
@@ -1101,6 +1902,12 @@ class LearningResumePosition(Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     learning_run_id: Mapped[str] = mapped_column(ForeignKey("learning_runs.id"), index=True)
     section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    learning_contract_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), nullable=True, index=True
+    )
+    content_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("content_versions.id"), nullable=True, index=True
+    )
     block_id: Mapped[str] = mapped_column(String(200), default="")
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
 

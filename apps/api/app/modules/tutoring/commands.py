@@ -9,6 +9,7 @@ from ...infrastructure.tables import (
     AssessmentObservation,
     LearningNote,
     LearningNoteSummary,
+    LearningRunSectionBinding,
     QaMessage,
     QaSession,
     QuizAttempt,
@@ -53,6 +54,18 @@ class GenerateLearningNote:
         self.uow = SqlAlchemyUnitOfWork(db)
 
     async def execute(self, section: Section) -> None:
+        binding = self.db.scalar(
+            select(LearningRunSectionBinding).where(
+                LearningRunSectionBinding.learning_run_id
+                == self.learning_run_id,
+                LearningRunSectionBinding.user_id == self.user_id,
+                LearningRunSectionBinding.section_id == section.id,
+            )
+        )
+        if not binding:
+            raise RuntimeError(
+                "note generation requires a frozen run-section binding"
+            )
         existing = self.db.scalar(
             select(LearningNote).where(
                 LearningNote.section_id == section.id,
@@ -73,6 +86,10 @@ class GenerateLearningNote:
                         note_id=existing.id,
                         version=1,
                         content_json=existing.ai_content_json,
+                        source_content_version_id=binding.content_version_id,
+                        learning_contract_version_id=(
+                            binding.learning_contract_version_id
+                        ),
                         source_contract_version="legacy_learning_note_v1",
                         source_observation_watermark=0,
                         generation_rule_version="legacy_note_import_v1",
@@ -88,6 +105,8 @@ class GenerateLearningNote:
                 QaSession.section_id == section.id,
                 QaSession.user_id == self.user_id,
                 QaSession.learning_run_id == self.learning_run_id,
+                QaSession.learning_contract_version_id
+                == binding.learning_contract_version_id,
             )
             .order_by(QaMessage.created_at)
         ).all()
@@ -98,6 +117,8 @@ class GenerateLearningNote:
                 QuizSet.section_id == section.id,
                 QuizAttempt.user_id == self.user_id,
                 QuizAttempt.learning_run_id == self.learning_run_id,
+                QuizAttempt.learning_contract_version_id
+                == binding.learning_contract_version_id,
             )
             .order_by(QuizAttempt.created_at)
         ).all()
@@ -146,6 +167,8 @@ class GenerateLearningNote:
             learning_run_id=self.learning_run_id,
             section_id=section.id,
             user_id=self.user_id,
+            learning_contract_version_id=binding.learning_contract_version_id,
+            content_version_id=binding.content_version_id,
             ai_content_json=_dump(content),
             user_content_json="{}",
         )
@@ -161,6 +184,9 @@ class GenerateLearningNote:
                 version=1,
                 content_json=_dump(content),
                 source_content_version_id=content_version_id,
+                learning_contract_version_id=(
+                    binding.learning_contract_version_id
+                ),
                 source_contract_version="generated_note_v1",
                 source_observation_watermark=source_observation_watermark,
                 generation_rule_version="note_summary_v2",

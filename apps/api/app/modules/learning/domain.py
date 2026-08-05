@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 
 
+PROGRESSION_RULE_VERSION = "progression_v1"
+
+
 @dataclass(frozen=True)
 class ProgressionSnapshot:
     section_id: str

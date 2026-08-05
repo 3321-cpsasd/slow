@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
-from sqlalchemy import delete, event, select
+from sqlalchemy import delete, event, func, select
 from app.ai.contracts import AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedChapter, GeneratedContent, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedQuiz, GeneratedSectionOutline, PlanBook, PlanChapter, PlanMilestone, PlanMilestoneCriterion, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
 from app.application.service import (
     apply_source_repair_scope,
@@ -38,11 +38,16 @@ from app.infrastructure.tables import (
     AssessmentTarget,
     Book,
     ChapterRevision,
+    ContentBlockVersion,
     ContentVersion,
     EvidenceQualificationEvent,
     GenerationRun,
+    GovernanceDecisionSnapshot,
+    KnowledgeGap,
     KnowledgeStateProjection,
     LearningEvidence,
+    LearningContractAssessmentTarget,
+    LearningDecisionSnapshot,
     LearningNote,
     LearningNoteReviewSupplement,
     LearningNoteSummary,
@@ -50,6 +55,7 @@ from app.infrastructure.tables import (
     LearningTask,
     LearningPlan,
     LearningRun,
+    LearningRunSectionBinding,
     MilestonePath,
     MilestonePathRevision,
     QuizAttempt,
@@ -61,11 +67,19 @@ from app.infrastructure.tables import (
     SectionAssessmentTarget,
     SectionProgress,
     Series,
+    SourceClaimBinding,
+    SourceClaimVersion,
+    SourceVersion,
     now,
 )
 from app.modules.learning.assessment import (
     bind_questions_to_targets,
     rebuild_assessment_projections,
+)
+from app.modules.learning.contracts import ensure_learning_contract
+from app.modules.learning.content_governance_store import (
+    record_verified_claim_binding,
+    reevaluate_generated_governance,
 )
 from app.modules.learning.rebuild import rebuild_user_projections
 
@@ -282,6 +296,13 @@ class RecordingVerifier(AcceptingSourceVerifier):
     async def verify(self, sources):
         self.events.append("verify")
         return await super().verify(sources)
+
+
+class ReachabilityOnlyVerifier:
+    """Production-shaped verifier: URL checks, but no claim-verification writer."""
+
+    async def verify(self, sources):
+        return await AcceptingSourceVerifier().verify(sources)
 
 
 MISSING_SOURCE_URL = "https://docs.missing.example/2025/removed"
@@ -890,12 +911,48 @@ def test_legacy_four_of_five_attempt_can_be_reassessed(client):
         task["triggerId"] == "attempt_legacy_four_of_five"
         for task in promoted.json()["workflowTasks"]
     )
+    replayed = client.post(
+        f"/api/sections/{section['id']}/quiz-attempts/attempt_legacy_four_of_five/reassess"
+    )
+    assert replayed.status_code == 200
+    with client.app.state.sessions() as db:
+        snapshots = db.scalars(
+            select(LearningDecisionSnapshot)
+            .where(
+                LearningDecisionSnapshot.attempt_id
+                == "attempt_legacy_four_of_five"
+            )
+            .order_by(LearningDecisionSnapshot.decision_kind)
+        ).all()
+        assert [item.decision_kind for item in snapshots] == [
+            "assessment_gate",
+            "progression",
+        ]
+        gate_snapshot = snapshots[0]
+        assert gate_snapshot.rule_version == "legacy_score_gate_v1"
+        assert gate_snapshot.trigger_kind == "quiz_reassess"
+        assert gate_snapshot.source_observation_watermark == 0
+        assert json.loads(gate_snapshot.input_snapshot_json)[
+            "decisionBasis"
+        ] == "legacy_score_reassessment"
+        assert json.loads(gate_snapshot.output_decision_json)["score"] == {
+            "adjusted": 4,
+            "fixedTotal": 5,
+            "initial": 4,
+        }
 
     rejected = client.post(
         f"/api/sections/{section['id']}/quiz-attempts/attempt_legacy_three_of_five/reassess"
     )
     assert rejected.status_code == 409
     assert rejected.json()["code"] == "QUIZ_PASS_THRESHOLD_NOT_MET"
+    with client.app.state.sessions() as db:
+        assert db.scalar(
+            select(func.count(LearningDecisionSnapshot.id)).where(
+                LearningDecisionSnapshot.attempt_id
+                == "attempt_legacy_three_of_five"
+            )
+        ) == 0
 
 
 def test_staged_generation_verifies_sources_before_generating_quiz(tmp_path):
@@ -1148,11 +1205,34 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
                 )
             )
         ).all()
+        decisions = db.scalars(
+            select(LearningDecisionSnapshot)
+            .where(LearningDecisionSnapshot.attempt_id == attempts[0].id)
+            .order_by(LearningDecisionSnapshot.decision_kind)
+        ).all()
         assert len(attempts) == 1
         assert len(evidence) == len(section["quiz"]["questions"])
         assert len(scoring) == 1
         assert len(observations) == len(section["quiz"]["questions"])
         assert len(qualification) == len(observations) * 3
+        assert [item.decision_kind for item in decisions] == [
+            "assessment_gate",
+            "progression",
+        ]
+        gate = decisions[0]
+        gate_input = json.loads(gate.input_snapshot_json)
+        gate_output = json.loads(gate.output_decision_json)
+        assert gate.rule_version == "gate_v2"
+        assert gate.source_observation_watermark == max(
+            item.sequence for item in observations
+        )
+        assert gate_input["requiredTargetIds"]
+        assert gate_output["passed"] is True
+        assert gate_output["unresolvedRequiredTargetIds"] == []
+        progression = decisions[1]
+        assert progression.rule_version == "progression_v1"
+        assert json.loads(progression.input_snapshot_json)["section_id"] == section["id"]
+        assert json.loads(progression.output_decision_json)["completed_section_id"] == section["id"]
 
     conflict = client.post(
         f"/api/sections/{section['id']}/quiz",
@@ -1161,6 +1241,12 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
     )
     assert conflict.status_code == 409
     assert conflict.json()["code"] == "IDEMPOTENCY_KEY_REUSED"
+    with client.app.state.sessions() as db:
+        assert len(db.scalars(
+            select(LearningDecisionSnapshot).where(
+                LearningDecisionSnapshot.attempt_id == first.json()["attemptId"]
+            )
+        ).all()) == 2
 
 
 def test_assessment_gate_remediates_only_failed_target_and_rebuilds(client):
@@ -1169,7 +1255,7 @@ def test_assessment_gate_remediates_only_failed_target_and_rebuilds(client):
         f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
     ).json()
     section_id = chapter["sections"][0]["id"]
-    client.post(f"/api/sections/{section_id}/generate")
+    generated = client.get(f"/api/sections/{section_id}").json()
     with client.app.state.sessions() as db:
         stored = db.get(Section, section_id)
         stored.objectives_json = json.dumps(["核心目标", "辅助目标"], ensure_ascii=False)
@@ -1178,18 +1264,28 @@ def test_assessment_gate_remediates_only_failed_target_and_rebuilds(client):
                 SectionAssessmentTarget.section_id == section_id
             )
         )
-        quiz = db.scalar(
-            select(QuizSet)
-            .where(QuizSet.section_id == section_id)
-            .order_by(QuizSet.generation.desc())
+        db.commit()
+    with client.app.state.sessions() as db:
+        stored = db.get(Section, section_id)
+        contract = ensure_learning_contract(db, stored)
+        quiz = db.get(QuizSet, generated["quiz"]["id"])
+        content = db.get(ContentVersion, quiz.content_version_id)
+        quiz.learning_contract_version_id = contract.id
+        content.learning_contract_version_id = contract.id
+        binding = db.scalar(
+            select(LearningRunSectionBinding).where(
+                LearningRunSectionBinding.section_id == section_id
+            )
         )
+        if binding:
+            binding.learning_contract_version_id = contract.id
         questions = json.loads(quiz.questions_json)
         for index, question in enumerate(questions):
             question["objective"] = "核心目标" if index < 4 else "辅助目标"
             question.pop("assessmentTargetId", None)
             question.pop("equivalenceGroupId", None)
         quiz.questions_json = json.dumps(
-            bind_questions_to_targets(db, stored, questions),
+            bind_questions_to_targets(db, stored, questions, contract),
             ensure_ascii=False,
         )
         db.commit()
@@ -1327,6 +1423,9 @@ def test_retention_discounts_same_source_and_counts_delayed_novel_review(client)
                 AssessmentObservation.attempt_id == duplicate["attemptId"]
             )
         ).all()
+        assert {item.assistance_mode for item in duplicate_rows} == {
+            "unassisted_repeat"
+        }
         initial_at = min(item.created_at for item in initial_rows)
         for item in duplicate_rows:
             item.created_at = initial_at + timedelta(days=4)
@@ -1349,10 +1448,25 @@ def test_retention_discounts_same_source_and_counts_delayed_novel_review(client)
             id="quiz_delayed_novel_review",
             section_id=section["id"],
             content_version_id=original_quiz.content_version_id,
+            learning_contract_version_id=(
+                original_quiz.learning_contract_version_id
+            ),
             generation=original_quiz.generation + 1,
             questions_json=json.dumps(novel_questions, ensure_ascii=False),
         )
         db.add(novel_quiz)
+        db.flush()
+        db.add(
+            Remediation(
+                id="remediation_simulated_review_assignment",
+                section_id=section["id"],
+                attempt_id=initial["attemptId"],
+                replacement_quiz_id=novel_quiz.id,
+                blocks_json="[]",
+                objectives_json="[]",
+                strategy="simulated_review_assignment",
+            )
+        )
         db.commit()
 
     novel = client.post(
@@ -1365,6 +1479,20 @@ def test_retention_discounts_same_source_and_counts_delayed_novel_review(client)
                 AssessmentObservation.attempt_id == novel["attemptId"]
             )
         ).all()
+        # Simulate the future ReviewAssignment authorization. A normal repeat
+        # is deliberately never classified as delayed review by SubmitQuiz.
+        for item in novel_rows:
+            item.assistance_mode = "unassisted_review"
+            item.learning_episode_id = "review:simulated-assignment"
+            qualification = db.scalar(
+                select(EvidenceQualificationEvent).where(
+                    EvidenceQualificationEvent.observation_id == item.id,
+                    EvidenceQualificationEvent.projection_family == "retention",
+                    EvidenceQualificationEvent.rule_version == "evidence_v2",
+                )
+            )
+            qualification.status = "candidate"
+            qualification.reason = "simulated review assignment authorization"
         # This fact has a later sequence but an earlier event time than the
         # already-inserted duplicate review. Rebuild must replay event time.
         for item in novel_rows:
@@ -1381,8 +1509,24 @@ def test_retention_discounts_same_source_and_counts_delayed_novel_review(client)
 
 
 def test_due_review_api_enforces_daily_budget_without_creating_task_debt(client):
+    series = create_series(client)
+    assert wait_for_task(
+        client,
+        series["initializationTask"]["taskId"],
+    )["status"] == "succeeded"
+    series_view = client.get(f"/api/series/{series['id']}").json()
+    section_id = series_view["books"][0]["chapters"][0]["sections"][0]["id"]
     current = now()
     with client.app.state.sessions() as db:
+        content = db.scalar(
+            select(ContentVersion)
+            .where(ContentVersion.section_id == section_id)
+            .order_by(ContentVersion.version.desc())
+        )
+        contract_id = content.learning_contract_version_id
+        run = db.scalar(
+            select(LearningRun).where(LearningRun.series_id == series["id"])
+        )
         targets = []
         for index, priority in enumerate((20, 90, 50)):
             target = AssessmentTarget(
@@ -1395,6 +1539,103 @@ def test_due_review_api_enforces_daily_budget_without_creating_task_debt(client)
             )
             targets.append(target)
             db.add(target)
+            db.flush()
+            db.add(LearningContractAssessmentTarget(
+                id=f"contract_target_budget_{index}",
+                contract_version_id=contract_id,
+                assessment_target_id=target.id,
+                position=100 + index,
+                required=False,
+                verification_policy="choice_quiz_v1",
+                evidence_policy="assessment_evidence_v1",
+                diagnostic_only=False,
+            ))
+            question = {
+                "prompt": f"预算目标 {index} 的延迟判断题",
+                "options": ["错误 A", "正确 B", "错误 C"],
+                "correct": [1],
+                "core": False,
+                "objective": target.objective_statement,
+                "explanation": "B 与原教材机制一致。",
+                "difficulty": "standard",
+                "assessmentTargetId": target.id,
+                "equivalenceGroupId": f"{target.id}:initial",
+            }
+            quiz = QuizSet(
+                id=f"quiz_budget_{index}",
+                section_id=section_id,
+                content_version_id=content.id,
+                learning_contract_version_id=contract_id,
+                generation=100 + index,
+                questions_json=json.dumps([question], ensure_ascii=False),
+            )
+            attempt = QuizAttempt(
+                id=f"attempt_budget_{index}",
+                quiz_set_id=quiz.id,
+                learning_contract_version_id=contract_id,
+                content_version_id=content.id,
+                learning_run_id=run.id,
+                user_id="user_demo",
+                idempotency_key=f"budget-attempt-{index}",
+                request_hash=hashlib.sha256(str(index).encode()).hexdigest(),
+                answers_json="[[1]]",
+                results_json=json.dumps([{
+                    "correct": True,
+                    "explanation": question["explanation"],
+                    "objective": target.objective_statement,
+                    "selectedOptions": [1],
+                    "correctOptions": [1],
+                    "missedOptions": [],
+                    "incorrectOptions": [],
+                }], ensure_ascii=False),
+                passed=True,
+                workflow_status="succeeded",
+            )
+            scoring = ScoringResult(
+                id=f"scoring_budget_{index}",
+                attempt_id=attempt.id,
+                score=1,
+                total=1,
+                passed=True,
+                results_json=attempt.results_json,
+            )
+            # These models deliberately expose no ORM relationships; flush the
+            # immutable fact chain in foreign-key order.
+            db.add(quiz)
+            db.flush()
+            db.add(attempt)
+            db.flush()
+            db.add(scoring)
+            db.flush()
+            db.add(AssessmentObservation(
+                id=f"observation_budget_{index}",
+                learning_run_id=run.id,
+                user_id="user_demo",
+                section_id=section_id,
+                attempt_id=attempt.id,
+                quiz_set_id=quiz.id,
+                learning_contract_version_id=contract_id,
+                content_version_id=content.id,
+                scoring_result_id=scoring.id,
+                assessment_target_id=target.id,
+                question_index=0,
+                correct=True,
+                assistance_mode="unassisted_initial",
+                learning_episode_id=f"quiz:{attempt.id}",
+                equivalence_group_id=question["equivalenceGroupId"],
+                qualification_at_creation="eligible_grouped",
+                qualification_rule_version="evidence_v2",
+                payload_json=json.dumps({
+                    "questionFingerprint": hashlib.sha256(
+                        json.dumps({
+                            "prompt": question["prompt"],
+                            "options": question["options"],
+                            "correct": question["correct"],
+                        }, ensure_ascii=False, sort_keys=True).encode()
+                    ).hexdigest(),
+                }),
+                created_at=current - timedelta(days=index + 2),
+            ))
             db.add(ReviewState(
                 id=f"review_budget_{index}",
                 user_id="user_demo",
@@ -1912,6 +2153,143 @@ def test_deleting_available_book_unlocks_next_and_last_book_hides_series(client)
 
 def create_series(client):
     return client.post("/api/plans", json={"shelfId":"shelf_technology","topic":"Kubernetes","role":"技术人员","experience":"会 Docker","depth":"deep"}).json()
+
+
+def test_plan_creation_persists_and_exposes_immutable_mission(client):
+    series = create_series(client)
+
+    response = client.get(f"/api/series/{series['id']}/mission")
+    assert response.status_code == 200
+    mission = response.json()
+
+    assert mission["seriesId"] == series["id"]
+    assert mission["version"] == 1
+    assert mission["status"] == "confirmed"
+    assert "Kubernetes" in mission["why"]
+    assert mission["inferredFields"] == ["why"]
+    assert mission["provenance"]["mode"] == "plan_creation"
+    assert mission["adoption"]["source"] == "plan_creation"
+    assert len(mission["successCriteria"]) == len(series["books"])
+    assert all(
+        item["acceptance"]["evidenceRule"] == "book_capstone_completed"
+        for item in mission["successCriteria"]
+    )
+
+    with client.app.state.sessions() as db:
+        stored_series = db.get(Series, series["id"])
+        run = db.scalar(
+            select(LearningRun).where(LearningRun.series_id == series["id"])
+        )
+        assert stored_series.initial_mission_version_id == mission["id"]
+        assert run.initial_mission_version_id == mission["id"]
+
+
+def test_mission_read_hides_unknown_or_unowned_series(client):
+    response = client.get("/api/series/series_not_owned/mission")
+    assert response.status_code == 404
+    assert response.json()["code"] == "MISSION_NOT_FOUND"
+
+
+def test_mission_revision_requires_confirmation_and_explicit_adoption(client):
+    series = create_series(client)
+    current = client.get(f"/api/series/{series['id']}/mission").json()
+    payload = {
+        "expectedCurrentMissionVersionId": current["id"],
+        "why": "能够独立解释并排查 Kubernetes 工作负载异常",
+        "targetCapabilities": current["targetCapabilities"],
+        "constraints": current["constraints"],
+        "outOfScope": ["集群供应商私有控制面实现"],
+        "assumptions": current["assumptions"],
+        "learnerContext": current["learnerContext"],
+        "inferredFields": [],
+        "successCriteria": [
+            {
+                "key": item["key"],
+                "statement": item["statement"],
+                "acceptance": item["acceptance"],
+            }
+            for item in current["successCriteria"]
+        ],
+    }
+    draft_response = client.post(
+        f"/api/series/{series['id']}/mission-versions", json=payload
+    )
+    assert draft_response.status_code == 201
+    draft = draft_response.json()
+    assert draft["status"] == "draft"
+    assert client.get(f"/api/series/{series['id']}/mission").json()["id"] == current["id"]
+
+    rejected = client.post(
+        f"/api/series/{series['id']}/mission-adoptions",
+        headers={"Idempotency-Key": "adopt-draft-001"},
+        json={
+            "missionVersionId": draft["id"],
+            "expectedCurrentMissionVersionId": current["id"],
+            "reason": "采用更明确的排障目标",
+        },
+    )
+    assert rejected.status_code == 409
+    assert rejected.json()["code"] == "MISSION_VERSION_NOT_CONFIRMED"
+
+    confirmed = client.post(
+        f"/api/series/{series['id']}/mission-versions/{draft['id']}/confirm"
+    )
+    assert confirmed.status_code == 200
+    adopted = client.post(
+        f"/api/series/{series['id']}/mission-adoptions",
+        headers={"Idempotency-Key": "adopt-confirmed-001"},
+        json={
+            "missionVersionId": draft["id"],
+            "expectedCurrentMissionVersionId": current["id"],
+            "reason": "采用更明确的排障目标",
+        },
+    )
+    assert adopted.status_code == 200
+    assert adopted.json()["id"] == draft["id"]
+    assert adopted.json()["adoption"]["source"] == "user"
+
+    replay = client.post(
+        f"/api/series/{series['id']}/mission-adoptions",
+        headers={"Idempotency-Key": "adopt-confirmed-001"},
+        json={
+            "missionVersionId": draft["id"],
+            "expectedCurrentMissionVersionId": current["id"],
+            "reason": "采用更明确的排障目标",
+        },
+    )
+    assert replay.status_code == 200
+    assert replay.json()["id"] == draft["id"]
+
+
+def test_preload_creates_candidate_but_only_user_open_freezes_version(client):
+    series = create_series(client)
+    assert wait_for_task(
+        client, series["initializationTask"]["taskId"]
+    )["status"] == "succeeded"
+    refreshed = client.get(f"/api/series/{series['id']}").json()
+    section_id = refreshed["books"][0]["chapters"][0]["sections"][0]["id"]
+
+    with client.app.state.sessions() as db:
+        assert db.scalar(
+            select(func.count()).select_from(LearningRunSectionBinding)
+        ) == 0
+
+    candidate = client.get(f"/api/sections/{section_id}").json()
+    assert candidate["content"] is not None
+    assert candidate["versionBinding"] is None
+
+    opened = client.post(f"/api/sections/{section_id}/open")
+    assert opened.status_code == 200
+    binding = opened.json()["versionBinding"]
+    assert binding["contentVersionId"] == candidate["content"]["id"]
+    assert binding["initialQuizSetId"] == candidate["quiz"]["id"]
+
+    reopened = client.post(f"/api/sections/{section_id}/open").json()
+    assert reopened["versionBinding"]["id"] == binding["id"]
+    with client.app.state.sessions() as db:
+        assert db.scalar(
+            select(func.count()).select_from(LearningRunSectionBinding)
+        ) == 1
 
 
 def test_milestone_path_is_proposed_confirmed_and_reconciled_with_goal_version(client):
@@ -2452,6 +2830,144 @@ def test_source_code_requires_immutable_matching_github_ref():
         Source(title="mismatch", url="https://github.com/kubernetes/kubernetes/blob/v1.30.0/pkg/api.go", kind="source_code", version="v1.29.0")
     source = Source(title="pinned", url="https://github.com/kubernetes/kubernetes/blob/v1.30.0/pkg/api.go", kind="source_code", version="v1.30.0")
     assert source.version == "v1.30.0"
+
+
+def test_generated_content_records_governance_gap_without_promoting_reachability(client):
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    section = client.post(
+        f"/api/sections/{chapter['sections'][0]['id']}/generate"
+    ).json()
+
+    governance = section["quiz"]["governance"]
+    assert governance["allowed"] is True
+    assert governance["assessmentEligible"] is True
+    assert governance["mode"] == "formal"
+
+    with client.app.state.sessions() as db:
+        assert db.scalars(
+            select(ContentBlockVersion).where(
+                ContentBlockVersion.content_version_id == section["content"]["id"]
+            )
+        ).all()
+        assert db.scalars(
+            select(KnowledgeGap).where(
+                KnowledgeGap.content_version_id == section["content"]["id"]
+            )
+        ).all()
+        bindings = db.scalars(select(SourceClaimBinding)).all()
+        assert bindings
+        reachability_bindings = [
+            item for item in bindings
+            if item.verification_mode == "reachability_only"
+        ]
+        assert reachability_bindings
+        assert {item.verification_status for item in reachability_bindings} == {
+            "unverified"
+        }
+        assert not any(item.verified_at for item in reachability_bindings)
+        decisions = db.scalars(
+            select(GovernanceDecisionSnapshot).where(
+                GovernanceDecisionSnapshot.quiz_set_id == section["quiz"]["id"]
+            )
+        ).all()
+        assert any(not item.allowed for item in decisions)
+        assert any(item.allowed and item.assessment_eligible for item in decisions)
+
+        source = db.scalar(
+            select(SourceVersion).where(
+                SourceVersion.content_version_id == section["content"]["id"]
+            )
+        )
+        claims = db.scalars(
+            select(SourceClaimVersion).where(
+                SourceClaimVersion.id.in_(
+                    [item.source_claim_version_id for item in bindings]
+                )
+            )
+        ).all()
+        for claim in claims:
+            record_verified_claim_binding(
+                db,
+                source_claim_version_id=claim.id,
+                source_version_id=source.id,
+                locator_type="official_section",
+                locator={"heading": claim.claim_kind},
+                excerpt_text=claim.statement,
+                support_type="supports",
+                verification_mode="exact_excerpt_and_entailment",
+                verification_rule_version="claim_support_v1",
+                report={"entails": True, "reviewedBy": "test_verifier"},
+                actor_id="test_claim_verifier",
+            )
+        replay = reevaluate_generated_governance(
+            db,
+            quiz_id=section["quiz"]["id"],
+            actor_id="test_claim_verifier",
+        )
+        assert replay["allowed"] is True
+        assert replay["assessmentEligible"] is True
+        assert replay["mode"] == "formal"
+
+
+def test_unverified_governance_allows_compatibility_gate_but_not_mastery():
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            FakeAi(),
+            ReachabilityOnlyVerifier(),
+        )
+    ) as compatibility:
+        series = create_series(compatibility)
+        chapter = compatibility.post(
+            f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+        ).json()
+        section = compatibility.post(
+            f"/api/sections/{chapter['sections'][0]['id']}/generate"
+        ).json()
+        assert section["quiz"]["governance"]["allowed"] is False
+        submitted = compatibility.post(
+            f"/api/sections/{section['id']}/quiz",
+            json={
+                "quizSetId": section["quiz"]["id"],
+                "answers": [[1] for _ in section["quiz"]["questions"]],
+            },
+        )
+        assert submitted.status_code == 200
+        assert submitted.json()["passed"] is True
+        with compatibility.app.state.sessions() as db:
+            attempts = db.scalars(
+                select(QuizAttempt).where(
+                    QuizAttempt.quiz_set_id == section["quiz"]["id"]
+                )
+            ).all()
+            observations = db.scalars(
+                select(AssessmentObservation).where(
+                    AssessmentObservation.attempt_id == attempts[-1].id
+                )
+            ).all()
+            statuses = {
+                (item.observation_id, item.projection_family): item.status
+                for item in db.scalars(
+                    select(EvidenceQualificationEvent).where(
+                        EvidenceQualificationEvent.observation_id.in_(
+                            [item.id for item in observations]
+                        )
+                    )
+                ).all()
+            }
+            assert {
+                status
+                for (observation_id, family), status in statuses.items()
+                if family == "gate"
+            } == {"eligible"}
+            assert {
+                status
+                for (observation_id, family), status in statuses.items()
+                if family in {"mastery", "retention"}
+            } == {"ineligible"}
 
 
 def test_runner_persists_failure_report_and_evidence_snapshot(tmp_path, monkeypatch):

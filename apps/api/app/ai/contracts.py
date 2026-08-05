@@ -118,9 +118,16 @@ class GeneratedContent(StrictModel):
 
     @model_validator(mode="after")
     def valid_source_coverage(self):
+        # Sources are mandatory for the small set of blocks that state a core
+        # conclusion or a boundary. Explanations, examples, practice prompts,
+        # and transitions may be pedagogical synthesis and must not be forced
+        # to pretend that a URL supports every sentence.
+        strict_source_roles = {"conclusion", "boundary"}
         for block in self.blocks:
-            if block.role != "transition" and not block.source_indexes:
-                raise ValueError("every substantive content block needs a source")
+            if block.role in strict_source_roles and not block.source_indexes:
+                raise ValueError(
+                    "conclusion and boundary blocks need an explicit source"
+                )
             if any(index < 0 or index >= len(self.sources) for index in block.source_indexes):
                 raise ValueError("content block source index out of range")
         return self

@@ -23,7 +23,7 @@ from .ai.anthropic_adapter import AnthropicAdapter
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AiRuntimeUpdate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PlanCreate, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ShelfCreate
+from .api.schemas import AiRuntimeUpdate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PlanCreate, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ReviewSubmit, ShelfCreate
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -930,6 +930,37 @@ def create_app(
     @app.get("/api/series/{series_id}")
     def series(series_id: str, s: SlowService = Depends(service)): return s.series(series_id)
 
+    @app.get("/api/series/{series_id}/mission")
+    def mission(series_id: str, s: SlowService = Depends(service)):
+        return s.mission(series_id)
+
+    @app.post("/api/series/{series_id}/mission-versions", status_code=201)
+    def create_mission_version(
+        series_id: str,
+        body: MissionVersionCreate,
+        s: SlowService = Depends(service),
+    ):
+        return s.create_mission_version(series_id, body)
+
+    @app.post(
+        "/api/series/{series_id}/mission-versions/{mission_version_id}/confirm"
+    )
+    def confirm_mission_version(
+        series_id: str,
+        mission_version_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return s.confirm_mission_version(series_id, mission_version_id)
+
+    @app.post("/api/series/{series_id}/mission-adoptions")
+    def adopt_mission_version(
+        series_id: str,
+        body: MissionAdoptionCreate,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return s.adopt_mission_version(series_id, body, idempotency_key)
+
     @app.post("/api/series/{series_id}/milestone-path/confirm")
     def confirm_milestone_path(
         series_id: str,
@@ -970,6 +1001,10 @@ def create_app(
     @app.get("/api/sections/{section_id}")
     def section(section_id: str, s: SlowService = Depends(service)): return s.section(section_id)
 
+    @app.post("/api/sections/{section_id}/open")
+    def open_section(section_id: str, s: SlowService = Depends(service)):
+        return s.open_section(section_id)
+
     @app.post("/api/sections/{section_id}/generate")
     async def generate_section(section_id: str, s: SlowService = Depends(service)): return await s.generate_section(section_id)
 
@@ -1006,6 +1041,36 @@ def create_app(
         s: SlowService = Depends(service),
     ):
         return s.due_reviews(daily_budget)
+
+    @app.post("/api/reviews/{assignment_id}/start")
+    async def start_review(
+        assignment_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return await s.start_review(assignment_id)
+
+    @app.post("/api/reviews/{assignment_id}/submit")
+    def submit_review(
+        assignment_id: str,
+        body: ReviewSubmit,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return s.submit_review(assignment_id, body, idempotency_key)
+
+    @app.post("/api/reviews/{assignment_id}/skip")
+    def skip_review(
+        assignment_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return s.skip_review(assignment_id)
+
+    @app.post("/api/reviews/{assignment_id}/expire")
+    def expire_review(
+        assignment_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return s.expire_review(assignment_id)
 
     @app.post("/api/sections/{section_id}/ask")
     async def ask(section_id: str, body: AskRequest, s: SlowService = Depends(service)): return await s.ask(section_id, body)

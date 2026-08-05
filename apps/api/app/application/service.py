@@ -32,14 +32,17 @@ from ..infrastructure.tables import (
     ContentVersion,
     GenerationRun,
     LearningEvidence,
+    LearningContractVersion,
     LearningMemory,
     LearningNote,
     LearningNoteReviewSupplement,
     LearningNoteSummary,
     LearningNoteUserRevision,
     LearningRun,
+    LearningRunSectionBinding,
     LearningTask,
     LearningPlan,
+    LearningMissionVersion,
     LearningResumePosition,
     KnowledgeStateProjection,
     PlanCreationRequest,
@@ -63,7 +66,6 @@ from ..modules.learning.commands import SubmitQuiz
 from ..modules.learning.assessment import (
     assessment_contract_view,
     bind_questions_to_targets,
-    due_review_queue,
     failed_target_ids_for_attempt,
 )
 from ..modules.learning.generation_leases import (
@@ -72,6 +74,19 @@ from ..modules.learning.generation_leases import (
     renew_generation_lease,
 )
 from ..modules.learning.milestones import MilestoneService
+from ..modules.learning.missions import MissionService
+from ..modules.learning.reviews import ReviewAssignmentService
+from ..modules.learning.contracts import (
+    ensure_learning_contract,
+    open_run_section,
+)
+from ..modules.learning.content_governance_store import (
+    claim_verification_candidates,
+    governance_view_for_quiz,
+    persist_generated_governance,
+    record_verified_claim_binding,
+    reevaluate_generated_governance,
+)
 from ..modules.learning.progress import ProgressStore
 from ..modules.learning.tasks import (
     complete_task,
@@ -253,6 +268,7 @@ class SlowService:
         self.artifacts = ArtifactProgressStore(db, user_id=self.user_id)
         self.library_reads = LibraryReadModel(db, user_id=self.user_id)
         self.milestones = MilestoneService(db, user_id=self.user_id, uid=uid)
+        self.missions = MissionService(db, user_id=self.user_id, uid=uid)
         if isinstance(scope, WorkerExecutionContext):
             self._install_worker_fence(scope)
 
@@ -388,6 +404,34 @@ class SlowService:
             section_id=section_id,
         )
         learning_run = self.progress.active_run(context.series.id)
+        binding = self.db.scalar(
+            select(LearningRunSectionBinding).where(
+                LearningRunSectionBinding.learning_run_id == learning_run.id,
+                LearningRunSectionBinding.user_id == self.user_id,
+                LearningRunSectionBinding.section_id == section_id,
+            )
+        )
+        if not binding:
+            mission = self.missions.current_version(context.series.id)
+            binding = open_run_section(
+                self.db,
+                run=learning_run,
+                section=context.section,
+                mission_version_id=mission.id,
+                source="resume_block_recovery",
+                uid=uid,
+                preferred_block_id=block_id or None,
+            )
+        bound_content = self.db.get(ContentVersion, binding.content_version_id)
+        valid_blocks = {
+            item.get("id") for item in load(bound_content.blocks_json, [])
+        }
+        if block_id and block_id not in valid_blocks:
+            raise AppError(
+                "阅读位置不属于当前正文版本",
+                code="RESUME_BLOCK_INVALID",
+                status=409,
+            )
         row = self.db.scalar(
             select(LearningResumePosition).where(
                 LearningResumePosition.user_id == self.user_id,
@@ -400,11 +444,17 @@ class SlowService:
                 user_id=self.user_id,
                 learning_run_id=learning_run.id,
                 section_id=section_id,
+                learning_contract_version_id=(
+                    binding.learning_contract_version_id
+                ),
+                content_version_id=binding.content_version_id,
                 block_id=block_id,
             )
             self.db.add(row)
         else:
             row.section_id = section_id
+            row.learning_contract_version_id = binding.learning_contract_version_id
+            row.content_version_id = binding.content_version_id
             row.block_id = block_id
             row.updated_at = now()
         self.db.commit()
@@ -494,22 +544,32 @@ class SlowService:
             confidence=generated.confidence,
             status="active",
         )
+        self.db.add(plan)
+        self.db.flush()
+        mission = self.missions.create_for_plan(plan=plan, generated=generated)
         series = Series(
             id=uid("series"),
             plan_id=plan.id,
             shelf_id=body.shelf_id,
             title=generated.series_title,
             rationale=generated.rationale,
+            initial_mission_version_id=mission.id,
         )
-        self.db.add(plan)
-        self.db.flush()
         self.db.add(series)
         self.db.flush()
         reservation.status = "completed"
         reservation.series_id = series.id
         reservation.updated_at = now()
-        learning_run = self.progress.create_run(series.id)
+        learning_run = self.progress.create_run(
+            series.id,
+            initial_mission_version_id=mission.id,
+        )
         self.db.flush()
+        self.missions.record_initial_adoption(
+            run=learning_run,
+            mission=mission,
+            source="plan_creation",
+        )
         initial_chapter_id = None
         milestone_chapters = {}
         for book_position, item in enumerate(generated.books, 1):
@@ -607,6 +667,28 @@ class SlowService:
         )
         view["initializationTask"] = task_view(task) if task else None
         return view
+
+    def mission(self, series_id: str):
+        return self.missions.view(series_id)
+
+    def create_mission_version(self, series_id: str, body):
+        result = self.missions.create_draft(series_id, body)
+        self.db.commit()
+        return result
+
+    def confirm_mission_version(self, series_id: str, mission_version_id: str):
+        result = self.missions.confirm(series_id, mission_version_id)
+        self.db.commit()
+        return result
+
+    def adopt_mission_version(self, series_id: str, body, idempotency_key: str | None):
+        result = self.missions.adopt(
+            series_id,
+            body,
+            idempotency_key=idempotency_key,
+        )
+        self.db.commit()
+        return result
 
     def delete_series(self, series_id):
         series = self.contexts.resolve_series(user_id=self.user_id, series_id=series_id).series
@@ -1078,6 +1160,35 @@ class SlowService:
             section_id=section_id,
         )
         section = section_context.section
+        learning_run = self.progress.active_run(section_context.series.id)
+        mission_version = self.missions.current_version(section_context.series.id)
+        contract = None
+        if retry and retry_attempt_id:
+            failed_attempt_for_contract = self.db.get(
+                QuizAttempt, retry_attempt_id
+            )
+            failed_quiz_for_contract = (
+                self.db.get(QuizSet, failed_attempt_for_contract.quiz_set_id)
+                if failed_attempt_for_contract
+                else None
+            )
+            if (
+                failed_quiz_for_contract
+                and failed_quiz_for_contract.learning_contract_version_id
+            ):
+                contract = self.db.get(
+                    LearningContractVersion,
+                    failed_quiz_for_contract.learning_contract_version_id,
+                )
+                mission_version = self.db.get(
+                    LearningMissionVersion, contract.mission_version_id
+                )
+        contract = contract or ensure_learning_contract(
+            self.db,
+            section,
+            mission_version_id=mission_version.id,
+            provenance_mode="native_m2",
+        )
         superseded_remediation = None
         if supersede_remediation_id:
             if not retry or not retry_attempt_id:
@@ -1126,8 +1237,22 @@ class SlowService:
                 code="SECTION_PREPARING",
                 status=409,
             )
-        existing = self.db.scalar(select(ContentVersion).where(ContentVersion.section_id == section.id).order_by(ContentVersion.version.desc()))
-        latest_quiz = self.db.scalar(select(QuizSet).where(QuizSet.section_id == section.id).order_by(QuizSet.generation.desc()))
+        existing = self.db.scalar(
+            select(ContentVersion)
+            .where(
+                ContentVersion.section_id == section.id,
+                ContentVersion.learning_contract_version_id == contract.id,
+            )
+            .order_by(ContentVersion.version.desc())
+        )
+        latest_quiz = self.db.scalar(
+            select(QuizSet)
+            .where(
+                QuizSet.section_id == section.id,
+                QuizSet.learning_contract_version_id == contract.id,
+            )
+            .order_by(QuizSet.generation.desc())
+        )
         if existing and not retry and not regenerate:
             return self.section(section.id)
         if regenerate:
@@ -1301,7 +1426,11 @@ class SlowService:
             }
             lesson_request = {
                 **self._section_summary(section),
-                "assessmentTargets": assessment_contract_view(self.db, section),
+                "learningContractVersionId": contract.id,
+                "missionVersionId": mission_version.id,
+                "assessmentTargets": assessment_contract_view(
+                    self.db, section, contract
+                ),
                 "rejectedSourceUrls": list(carried_rejected_urls),
                 "rejectedSourceHosts": list(carried_rejected_hosts),
             }
@@ -1603,6 +1732,7 @@ class SlowService:
                 content = ContentVersion(
                     id=uid("content"),
                     section_id=section.id,
+                    learning_contract_version_id=contract.id,
                     version=(existing.version + 1 if existing else 1),
                     blocks_json="[]",
                     sources_json=dump([item.model_dump() for item in lesson.sources]),
@@ -1622,16 +1752,61 @@ class SlowService:
                 self.db,
                 section,
                 [item.model_dump() for item in lesson.questions],
+                contract,
             )
             quiz = QuizSet(
                 id=uid("quiz"),
                 section_id=section.id,
                 content_version_id=content.id,
+                learning_contract_version_id=contract.id,
                 generation=(latest_quiz.generation + 1 if latest_quiz else 1),
                 questions_json=dump(question_payloads),
             )
             self.db.add(quiz)
             self.db.flush()
+            if not retry:
+                governance = persist_generated_governance(
+                    self.db,
+                    content=content,
+                    quiz=quiz,
+                    source_verification=verification,
+                    actor_id=run.id,
+                )
+                verify_claims = getattr(
+                    self.source_verifier,
+                    "verify_claims",
+                    None,
+                )
+                if callable(verify_claims):
+                    candidates = claim_verification_candidates(
+                        self.db,
+                        content_version_id=content.id,
+                    )
+                    reports = await verify_claims(candidates)
+                    for report in reports:
+                        record_verified_claim_binding(
+                            self.db,
+                            source_claim_version_id=report[
+                                "sourceClaimVersionId"
+                            ],
+                            source_version_id=report["sourceVersionId"],
+                            locator_type=report["locatorType"],
+                            locator=report["locator"],
+                            excerpt_text=report["excerptText"],
+                            support_type=report["supportType"],
+                            verification_mode=report["verificationMode"],
+                            verification_rule_version=report[
+                                "verificationRuleVersion"
+                            ],
+                            report=report.get("report", {}),
+                            actor_id=run.id,
+                        )
+                    governance = reevaluate_generated_governance(
+                        self.db,
+                        quiz_id=quiz.id,
+                        actor_id=run.id,
+                    )
+                regeneration_trace["governanceDecision"] = governance
             if retry:
                 if not retry_attempt_id:
                     raise AppError("补救教学必须绑定失败答题", code="REMEDIATION_ATTEMPT_REQUIRED")
@@ -1678,6 +1853,17 @@ class SlowService:
                 **memory_trace,
             })
             self.db.commit()
+            if not isinstance(self.scope, WorkerExecutionContext) and not retry:
+                open_run_section(
+                    self.db,
+                    run=learning_run,
+                    section=section,
+                    mission_version_id=mission_version.id,
+                    source="interactive_generate",
+                    uid=uid,
+                    preferred_quiz_id=quiz.id,
+                )
+                self.db.commit()
             return self.section(section.id)
         except BaseException as error:
             failure_finished_at = now()
@@ -1751,6 +1937,37 @@ class SlowService:
                 return "difficulty_mismatch"
         return None
 
+    def open_section(self, section_id: str):
+        context = self.contexts.resolve_section(
+            user_id=self.user_id,
+            section_id=section_id,
+        )
+        progress = self.progress.for_section(
+            context.section,
+            context.chapter,
+            context.book,
+        )
+        if progress.status == "locked":
+            raise AppError("小节未解锁", code="SECTION_LOCKED", status=403)
+        if progress.status == "preparing":
+            raise AppError(
+                "下一节正文和验证题仍在准备中",
+                code="SECTION_PREPARING",
+                status=409,
+            )
+        run = self.progress.active_run(context.series.id)
+        mission = self.missions.current_version(context.series.id)
+        open_run_section(
+            self.db,
+            run=run,
+            section=context.section,
+            mission_version_id=mission.id,
+            source="interactive_open",
+            uid=uid,
+        )
+        self.db.commit()
+        return self.section(section_id)
+
     def section(self, section_id):
         section_context = self.contexts.resolve_section(
             user_id=self.user_id,
@@ -1772,8 +1989,31 @@ class SlowService:
                 status=409,
             )
         learning_run = self.progress.active_run(section_context.series.id)
-        content = self.db.scalar(select(ContentVersion).where(ContentVersion.section_id == section.id).order_by(ContentVersion.version.desc()))
-        quiz = self.db.scalar(select(QuizSet).where(QuizSet.section_id == section.id).order_by(QuizSet.generation.desc()))
+        binding = self.db.scalar(
+            select(LearningRunSectionBinding).where(
+                LearningRunSectionBinding.learning_run_id == learning_run.id,
+                LearningRunSectionBinding.user_id == self.user_id,
+                LearningRunSectionBinding.section_id == section.id,
+            )
+        )
+        content = (
+            self.db.get(ContentVersion, binding.content_version_id)
+            if binding
+            else self.db.scalar(
+                select(ContentVersion)
+                .where(ContentVersion.section_id == section.id)
+                .order_by(ContentVersion.version.desc())
+            )
+        )
+        quiz = (
+            self.db.get(QuizSet, binding.initial_quiz_set_id)
+            if binding and binding.initial_quiz_set_id
+            else self.db.scalar(
+                select(QuizSet)
+                .where(QuizSet.section_id == section.id)
+                .order_by(QuizSet.generation.desc())
+            )
+        )
         note = self.db.scalar(
             select(LearningNote).where(
                 LearningNote.section_id == section.id,
@@ -1795,6 +2035,25 @@ class SlowService:
             item.attempt_id: item for item in remediation_revisions
         }
         remediations = list(latest_remediation_by_attempt.values())
+        if binding and remediations:
+            bound_remediation = next(
+                (
+                    item
+                    for item in reversed(remediations)
+                    if (
+                        replacement := self.db.get(
+                            QuizSet, item.replacement_quiz_id
+                        )
+                    )
+                    and replacement.learning_contract_version_id
+                    == binding.learning_contract_version_id
+                ),
+                None,
+            )
+            if bound_remediation:
+                quiz = self.db.get(
+                    QuizSet, bound_remediation.replacement_quiz_id
+                )
         remediation_runs = self.db.scalars(
             select(GenerationRun)
             .where(
@@ -1838,6 +2097,10 @@ class SlowService:
             ]
 
         public = public_questions(questions)
+        governance = governance_view_for_quiz(
+            self.db,
+            quiz.id if quiz else None,
+        )
         latest_attempt = self.db.scalar(
             select(QuizAttempt)
             .join(QuizSet, QuizSet.id == QuizAttempt.quiz_set_id)
@@ -1867,6 +2130,20 @@ class SlowService:
         )
         return {
             **self._section_summary(section),
+            "versionBinding": (
+                {
+                    "id": binding.id,
+                    "learningContractVersionId": (
+                        binding.learning_contract_version_id
+                    ),
+                    "contentVersionId": binding.content_version_id,
+                    "initialQuizSetId": binding.initial_quiz_set_id,
+                    "firstReadAt": timestamp(binding.first_read_at),
+                    "source": binding.source,
+                }
+                if binding
+                else None
+            ),
             "generation": self._generation(run) if run else None,
             "content": {
                 "id": content.id,
@@ -1878,7 +2155,12 @@ class SlowService:
             }
             if content
             else None,
-            "quiz": {"id": quiz.id, "generation": quiz.generation, "questions": public} if quiz else None,
+            "quiz": {
+                "id": quiz.id,
+                "generation": quiz.generation,
+                "questions": public,
+                "governance": governance,
+            } if quiz else None,
             "latestAttemptReview": (
                 {
                     "attemptId": latest_attempt.id,
@@ -2355,11 +2637,43 @@ class SlowService:
         return {item.id: self._memory(item.id, 200) for item in shelves}
 
     def due_reviews(self, daily_budget=10):
-        return due_review_queue(
+        return ReviewAssignmentService(
             self.db,
             user_id=self.user_id,
-            daily_budget=daily_budget,
+            ai=self.ai,
+        ).due(daily_budget=daily_budget)
+
+    async def start_review(self, assignment_id: str):
+        return await ReviewAssignmentService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+        ).start(assignment_id)
+
+    def submit_review(self, assignment_id: str, body, idempotency_key=None):
+        return ReviewAssignmentService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+        ).submit(
+            assignment_id,
+            body.answers,
+            idempotency_key=idempotency_key,
         )
+
+    def skip_review(self, assignment_id: str):
+        return ReviewAssignmentService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+        ).skip(assignment_id)
+
+    def expire_review(self, assignment_id: str):
+        return ReviewAssignmentService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+        ).expire(assignment_id)
 
     async def _ensure_note(self, section):
         context = self.contexts.resolve_section(
@@ -2627,6 +2941,25 @@ class SlowService:
             section_id=section_id,
         )
         learning_run = self.progress.active_run(section_context.series.id)
+        binding = self.db.scalar(
+            select(LearningRunSectionBinding).where(
+                LearningRunSectionBinding.learning_run_id == learning_run.id,
+                LearningRunSectionBinding.user_id == self.user_id,
+                LearningRunSectionBinding.section_id == section_id,
+            )
+        )
+        if not binding:
+            mission = self.missions.current_version(section_context.series.id)
+            binding = open_run_section(
+                self.db,
+                run=learning_run,
+                section=section_context.section,
+                mission_version_id=mission.id,
+                source="ask_ai_block_recovery",
+                uid=uid,
+                preferred_block_id=body.block_id,
+            )
+            self.db.commit()
         section_view = self.section(section_id)
         if not section_view["content"]:
             raise AppError("请先生成本节", code="SECTION_NOT_GENERATED")
@@ -2646,6 +2979,10 @@ class SlowService:
                 learning_run_id=learning_run.id,
                 section_id=section_id,
                 user_id=self.user_id,
+                learning_contract_version_id=(
+                    binding.learning_contract_version_id
+                ),
+                content_version_id=binding.content_version_id,
             )
             self.db.add(session)
             self.db.commit()
@@ -2783,6 +3120,24 @@ class SlowService:
             section_context.book,
         ).ask_me_unlocked:
             raise AppError("小节满分后才解锁深入讨论", code="ASK_ME_LOCKED", status=403)
+        binding = self.db.scalar(
+            select(LearningRunSectionBinding).where(
+                LearningRunSectionBinding.learning_run_id == learning_run.id,
+                LearningRunSectionBinding.user_id == self.user_id,
+                LearningRunSectionBinding.section_id == section.id,
+            )
+        )
+        if not binding:
+            mission = self.missions.current_version(section_context.series.id)
+            binding = open_run_section(
+                self.db,
+                run=learning_run,
+                section=section,
+                mission_version_id=mission.id,
+                source="ask_me_start_recovery",
+                uid=uid,
+            )
+            self.db.commit()
         session = self.db.scalar(
             select(AskMeSession).where(
                 AskMeSession.section_id == section.id,
@@ -2806,7 +3161,24 @@ class SlowService:
                     break
             if turn is None or turn.dimension != "mechanism" or turn.evaluation != "not_evaluated":
                 raise AiError("Ask Me 首轮结构无效")
-            session = AskMeSession(id=uid("askme"), learning_run_id=learning_run.id, section_id=section.id, user_id=self.user_id, round_index=0, entries_json=dump([{"dimension": "mechanism", "prompt": turn.prompt, "answer": None, "evaluation": "not_evaluated", "rationale": ""}]))
+            session = AskMeSession(
+                id=uid("askme"),
+                learning_run_id=learning_run.id,
+                section_id=section.id,
+                user_id=self.user_id,
+                learning_contract_version_id=(
+                    binding.learning_contract_version_id
+                ),
+                content_version_id=binding.content_version_id,
+                round_index=0,
+                entries_json=dump([{
+                    "dimension": "mechanism",
+                    "prompt": turn.prompt,
+                    "answer": None,
+                    "evaluation": "not_evaluated",
+                    "rationale": "",
+                }]),
+            )
             self.db.add(session)
             self.db.commit()
             return self._ask_me(session)

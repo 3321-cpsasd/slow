@@ -11,7 +11,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0028_trustworthy_assessment_notes"
+HEAD_REVISION = "0034_learning_decision_snapshots"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -134,6 +134,21 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
             row[1]
             for row in connection.execute("PRAGMA table_info(review_states)")
         }
+        series_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(series)")
+        }
+        run_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(learning_runs)")
+        }
+        content_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(content_versions)")
+        }
+        quiz_binding_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(quiz_sets)")
+        }
 
     assert revision == HEAD_REVISION
     assert "uq_quiz_attempts_run_user_idempotency" in attempt_schema
@@ -202,11 +217,45 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
         "learning_note_summaries",
         "learning_note_review_supplements",
         "learning_note_user_revisions",
+        "learning_mission_versions",
+        "mission_success_criteria",
+        "mission_success_criterion_versions",
+        "mission_adoption_events",
+        "concepts",
+        "concept_revisions",
+        "learning_objectives",
+        "learning_contract_versions",
+        "learning_contract_concepts",
+        "learning_contract_objectives",
+        "learning_contract_assessment_targets",
+        "learning_run_section_bindings",
+        "source_versions",
+        "content_block_versions",
+        "source_claims",
+        "source_claim_versions",
+        "content_block_claim_anchors",
+        "source_claim_bindings",
+        "knowledge_gaps",
+        "knowledge_gap_events",
+        "governance_decision_snapshots",
+        "review_selection_runs",
+        "review_assignments",
+        "review_assignment_events",
+        "learning_decision_snapshots",
     }.issubset(trustworthy_tables)
     assert "section_id" not in assessment_target_columns
+    assert {
+        "concept_revision_id",
+        "learning_objective_id",
+        "identity_status",
+    }.issubset(assessment_target_columns)
     assert "projection_version" in gate_columns
     assert "projection_version" in knowledge_columns
     assert "projection_version" in review_columns
+    assert "initial_mission_version_id" in series_columns
+    assert "initial_mission_version_id" in run_columns
+    assert "learning_contract_version_id" in content_columns
+    assert "learning_contract_version_id" in quiz_binding_columns
     assert any(
         row[1] == "sqlite_autoindex_milestone_path_revisions_2" or row[2] == 1
         for row in milestone_revision_indexes
@@ -379,6 +428,26 @@ def test_layered_note_migration_preserves_legacy_ai_and_user_content(tmp_path):
                 "2026-08-01 07:30:00",
             ),
         )
+        connection.execute(
+            """
+            INSERT INTO section_progress (
+                id, learning_run_id, user_id, section_id, status,
+                best_score, total_score, ask_me_unlocked, version, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy_section_progress",
+                "legacy_run",
+                "legacy_user",
+                "legacy_section",
+                "completed",
+                5,
+                5,
+                1,
+                3,
+                "2026-08-01 08:00:00",
+            ),
+        )
         connection.executemany(
             """
             INSERT INTO learning_notes (
@@ -429,6 +498,31 @@ def test_layered_note_migration_preserves_legacy_ai_and_user_content(tmp_path):
             ORDER BY note_id
             """
         ).fetchall()
+        mission = connection.execute(
+            """
+            SELECT mission.id, mission.status, mission.why,
+                   series.initial_mission_version_id,
+                   run.initial_mission_version_id
+            FROM learning_mission_versions AS mission
+            JOIN series ON series.plan_id = mission.plan_id
+            JOIN learning_runs AS run ON run.series_id = series.id
+            WHERE series.id = 'legacy_series'
+            """
+        ).fetchone()
+        adoption = connection.execute(
+            """
+            SELECT source, event_type
+            FROM mission_adoption_events
+            WHERE learning_run_id = 'legacy_run'
+            """
+        ).fetchone()
+        progress = connection.execute(
+            """
+            SELECT id, status, best_score, total_score, ask_me_unlocked, version
+            FROM section_progress
+            WHERE id = 'legacy_section_progress'
+            """
+        ).fetchone()
 
     assert [row[0] for row in summaries] == [
         "legacy_note_with_user",
@@ -441,6 +535,21 @@ def test_layered_note_migration_preserves_legacy_ai_and_user_content(tmp_path):
     assert revisions[0][0] == "legacy_note_with_user"
     assert json.loads(revisions[0][1]) == user_content
     assert revisions[0][2] == "legacy_user_import_v1"
+    assert mission[1:] == (
+        "grandfathered_m1",
+        "建立系统认知与基础实践准备",
+        mission[0],
+        mission[0],
+    )
+    assert adoption == ("system_migration", "initialized")
+    assert progress == (
+        "legacy_section_progress",
+        "completed",
+        5,
+        5,
+        1,
+        3,
+    )
 
 
 def test_migrations_recover_when_orm_precreated_future_tables(tmp_path):

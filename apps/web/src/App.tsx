@@ -69,9 +69,14 @@ export default function App() {
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [showAiSettings, setShowAiSettings] = useState(false);
+  const [showUserMenu, setShowUserMenu] = useState(false);
+  const [profileSection, setProfileSection] = useState<'profile' | 'account'>(() => (
+    new URLSearchParams(window.location.search).get('section') === 'account' ? 'account' : 'profile'
+  ));
   const [preparingInitialSection, setPreparingInitialSection] = useState(false);
   const [generatingChapterId, setGeneratingChapterId] = useState('');
   const chapterGenerationRequests = useRef(new Set<string>());
+  const userMenuRef = useRef<HTMLDivElement | null>(null);
 
   const loadAuthenticatedState = async () => {
     const value = await api.authMe();
@@ -114,6 +119,7 @@ export default function App() {
       setSeries(null);
       setSection(null);
       setView('home');
+      setShowUserMenu(false);
       window.history.replaceState({}, '', '/');
       setAuthChecked(true);
     };
@@ -122,6 +128,8 @@ export default function App() {
     const handleHistory = () => {
       const nextView: View = window.location.pathname === '/profile' ? 'profile' : 'home';
       setView(nextView);
+      setProfileSection(new URLSearchParams(window.location.search).get('section') === 'account' ? 'account' : 'profile');
+      setShowUserMenu(false);
       setShelf(null);
       setSeries(null);
       setSection(null);
@@ -129,6 +137,22 @@ export default function App() {
     window.addEventListener('popstate', handleHistory);
     return () => window.removeEventListener('popstate', handleHistory);
   }, []);
+
+  useEffect(() => {
+    if (!showUserMenu) return;
+    const closeMenu = (event: MouseEvent) => {
+      if (!userMenuRef.current?.contains(event.target as Node)) setShowUserMenu(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setShowUserMenu(false);
+    };
+    document.addEventListener('mousedown', closeMenu);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', closeMenu);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [showUserMenu]);
 
   const run = async <T,>(label: string, action: () => Promise<T>) => {
     setBusy(label);
@@ -177,12 +201,14 @@ export default function App() {
       setSeries(null);
       setSection(null);
       setView('home');
+      setShowUserMenu(false);
       window.history.replaceState({}, '', '/');
     }
   };
 
   const goHome = () => {
     if (window.location.pathname !== '/') window.history.pushState({}, '', '/');
+    setShowUserMenu(false);
     setView('home');
     setSeries(null);
     setSection(null);
@@ -191,12 +217,21 @@ export default function App() {
       .catch((reason) => setError(reason instanceof Error ? reason.message : '主页刷新失败'));
   };
 
-  const openProfileCenter = () => {
-    if (window.location.pathname !== '/profile') window.history.pushState({}, '', '/profile');
+  const openProfileCenter = (nextSection: 'profile' | 'account' = 'profile') => {
+    const nextUrl = nextSection === 'account' ? '/profile?section=account' : '/profile';
+    if (`${window.location.pathname}${window.location.search}` !== nextUrl) window.history.pushState({}, '', nextUrl);
+    setProfileSection(nextSection);
+    setShowUserMenu(false);
     setShelf(null);
     setSeries(null);
     setSection(null);
     setView('profile');
+  };
+
+  const changeProfileSection = (nextSection: 'profile' | 'account') => {
+    const nextUrl = nextSection === 'account' ? '/profile?section=account' : '/profile';
+    window.history.replaceState({}, '', nextUrl);
+    setProfileSection(nextSection);
   };
 
   const loadSection = async (sectionId: string) => {
@@ -555,16 +590,42 @@ export default function App() {
           {view === 'learn' && (
             <button className="quiet-button" onClick={goHome}>返回书架</button>
           )}
-          <button
-            className={`user-center-trigger ${view === 'profile' ? 'is-active' : ''}`}
-            aria-label={`打开${auth.user.name}的个人中心`}
-            aria-current={view === 'profile' ? 'page' : undefined}
-            onClick={openProfileCenter}
-          >
-            <span aria-hidden="true">{auth.user.name.trim().slice(0, 1).toUpperCase() || '我'}</span>
-            <b>{auth.user.name}</b>
-            <i aria-hidden="true">⌄</i>
-          </button>
+          <div className="user-menu-shell" ref={userMenuRef}>
+            <button
+              className={`user-avatar-trigger ${view === 'profile' ? 'is-active' : ''}`}
+              aria-label={`${auth.user.name}的账号菜单`}
+              aria-haspopup="menu"
+              aria-expanded={showUserMenu}
+              onClick={() => setShowUserMenu((visible) => !visible)}
+            >
+              <span aria-hidden="true">{auth.user.name.trim().slice(0, 1).toUpperCase() || '我'}</span>
+            </button>
+            {showUserMenu && (
+              <div className="user-account-menu" role="menu" aria-label="账号菜单">
+                <header>
+                  <span aria-hidden="true">{auth.user.name.trim().slice(0, 1).toUpperCase() || '我'}</span>
+                  <div>
+                    <b>{auth.user.name}</b>
+                    <small>{{
+                      demo: '固定体验账号',
+                      local: '本地独立账号',
+                      password: '受邀学习账号',
+                      oidc: '统一身份账号',
+                    }[auth.mode]}</small>
+                  </div>
+                </header>
+                <button role="menuitem" onClick={() => openProfileCenter('profile')}>
+                  <span><b>个人中心</b><small>学习画像与学习节奏</small></span><i aria-hidden="true">→</i>
+                </button>
+                <button role="menuitem" onClick={() => openProfileCenter('account')}>
+                  <span><b>账号与数据</b><small>身份、数据归属与安全</small></span><i aria-hidden="true">→</i>
+                </button>
+                <button className="user-menu-logout" role="menuitem" onClick={() => { setShowUserMenu(false); void logout(); }}>
+                  退出登录
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
@@ -617,6 +678,8 @@ export default function App() {
               shelves: data.shelves.length,
               series: data.shelves.reduce((total, item) => total + item.series.length, 0),
             }}
+            section={profileSection}
+            onSectionChange={changeProfileSection}
             onBack={goHome}
             onSave={async (body) => {
               await run('正在更新学习画像…', () => api.updateProfile(body));
@@ -1125,6 +1188,8 @@ function ProfileCenterPage({
   mode,
   profile,
   stats,
+  section,
+  onSectionChange,
   onBack,
   onSave,
   onLogout,
@@ -1133,11 +1198,12 @@ function ProfileCenterPage({
   mode: AuthState['mode'];
   profile: LearningProfile;
   stats: { shelves: number; series: number };
+  section: 'profile' | 'account';
+  onSectionChange: (section: 'profile' | 'account') => void;
   onBack: () => void;
   onSave: (body: object) => Promise<void>;
   onLogout: () => Promise<void>;
 }) {
-  const [section, setSection] = useState<'profile' | 'account'>('profile');
   const [profession, setProfession] = useState(profile.profession);
   const [stage, setStage] = useState<LearningProfile['stage']>(profile.stage);
   const [purpose, setPurpose] = useState(profile.purpose);
@@ -1195,10 +1261,10 @@ function ProfileCenterPage({
         </div>
 
         <nav aria-label="个人中心导航">
-          <button className={section === 'profile' ? 'active' : ''} aria-current={section === 'profile' ? 'page' : undefined} onClick={() => setSection('profile')}>
+          <button className={section === 'profile' ? 'active' : ''} aria-current={section === 'profile' ? 'page' : undefined} onClick={() => onSectionChange('profile')}>
             <span>学习画像</span><small>目标、背景与节奏</small>
           </button>
-          <button className={section === 'account' ? 'active' : ''} aria-current={section === 'account' ? 'page' : undefined} onClick={() => setSection('account')}>
+          <button className={section === 'account' ? 'active' : ''} aria-current={section === 'account' ? 'page' : undefined} onClick={() => onSectionChange('account')}>
             <span>账号与数据</span><small>身份、归属与退出</small>
           </button>
         </nav>

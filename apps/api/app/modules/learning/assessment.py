@@ -14,13 +14,17 @@ from ...infrastructure.tables import (
     AssessmentObservation,
     AssessmentTarget,
     EvidenceQualificationEvent,
+    GovernanceDecisionSnapshot,
     KnowledgeStateProjection,
+    LearningContractAssessmentTarget,
+    LearningContractVersion,
     ReviewState,
     ScoringResult,
     Section,
     SectionAssessmentTarget,
     now,
 )
+from .contracts import ensure_learning_contract
 
 
 SCORING_RULE_VERSION = "choice_exact_v2"
@@ -30,6 +34,11 @@ BKT_PARAMETER_VERSION = "bkt_v1"
 MASTERY_RULE_VERSION = "mastery_v2"
 REVIEW_RULE_VERSION = "review_v2"
 RETENTION_WINDOW = timedelta(days=1)
+QUALIFIED_STATUSES_BY_FAMILY = {
+    "gate": frozenset({"eligible"}),
+    "mastery": frozenset({"eligible", "eligible_grouped"}),
+    "retention": frozenset({"eligible", "candidate"}),
+}
 
 
 @dataclass(frozen=True)
@@ -149,16 +158,23 @@ def ensure_section_targets(
     return targets
 
 
-def assessment_contract_view(db: Session, section: Section) -> list[dict]:
-    ensure_section_targets(db, section)
+def assessment_contract_view(
+    db: Session,
+    section: Section,
+    contract: LearningContractVersion | None = None,
+) -> list[dict]:
+    contract = contract or ensure_learning_contract(db, section)
     rows = db.execute(
-        select(SectionAssessmentTarget, AssessmentTarget)
+        select(LearningContractAssessmentTarget, AssessmentTarget)
         .join(
             AssessmentTarget,
-            AssessmentTarget.id == SectionAssessmentTarget.assessment_target_id,
+            AssessmentTarget.id
+            == LearningContractAssessmentTarget.assessment_target_id,
         )
-        .where(SectionAssessmentTarget.section_id == section.id)
-        .order_by(SectionAssessmentTarget.position)
+        .where(
+            LearningContractAssessmentTarget.contract_version_id == contract.id
+        )
+        .order_by(LearningContractAssessmentTarget.position)
     ).all()
     return [
         {
@@ -176,20 +192,29 @@ def bind_questions_to_targets(
     db: Session,
     section: Section,
     questions: list[dict],
+    contract: LearningContractVersion | None = None,
 ) -> list[dict]:
-    targets = ensure_section_targets(db, section)
-    target_by_id = {target.id: target for target in targets.values()}
+    contract = contract or ensure_learning_contract(db, section)
+    contract_rows = db.execute(
+        select(LearningContractAssessmentTarget, AssessmentTarget)
+        .join(
+            AssessmentTarget,
+            AssessmentTarget.id
+            == LearningContractAssessmentTarget.assessment_target_id,
+        )
+        .where(
+            LearningContractAssessmentTarget.contract_version_id == contract.id
+        )
+        .order_by(LearningContractAssessmentTarget.position)
+    ).all()
+    target_by_id = {target.id: target for _binding, target in contract_rows}
     normalized_targets = {
         _normalized(target.objective_statement): target
-        for target in targets.values()
+        for target in target_by_id.values()
     }
     bindings = {
-        item.assessment_target_id: item
-        for item in db.scalars(
-            select(SectionAssessmentTarget).where(
-                SectionAssessmentTarget.section_id == section.id
-            )
-        ).all()
+        binding.assessment_target_id: binding
+        for binding, _target in contract_rows
     }
     bound = []
     for index, question in enumerate(questions):
@@ -302,6 +327,7 @@ def _sync_knowledge_and_review(
     *,
     target_id: str,
     observations: list[AssessmentObservation],
+    retention_observation_ids: set[str],
     required: bool,
     state: KnowledgeStateProjection | None,
     review: ReviewState | None,
@@ -338,6 +364,7 @@ def _sync_knowledge_and_review(
         independent_review = (
             correct
             and unassisted_review
+            and all(item.id in retention_observation_ids for item in items)
             and previous_episode_at is not None
             and event_at - previous_episode_at >= RETENTION_WINDOW
             and not signatures.intersection(seen_signatures)
@@ -411,7 +438,12 @@ def _sync_knowledge_and_review(
     return state, review
 
 
-def rebuild_assessment_projections(db: Session, *, user_id: str) -> dict:
+def rebuild_assessment_projections(
+    db: Session,
+    *,
+    user_id: str,
+    qualification_rule_version: str = QUALIFICATION_RULE_VERSION,
+) -> dict:
     """Replay assessment facts in event-time order; safe for late and duplicate delivery."""
 
     observations = db.scalars(
@@ -419,6 +451,41 @@ def rebuild_assessment_projections(db: Session, *, user_id: str) -> dict:
         .where(AssessmentObservation.user_id == user_id)
         .order_by(AssessmentObservation.created_at, AssessmentObservation.sequence)
     ).all()
+    observation_ids = [item.id for item in observations]
+    qualification_by_observation_family: dict[
+        tuple[str, str], EvidenceQualificationEvent
+    ] = {}
+    if observation_ids:
+        qualification_events = db.scalars(
+            select(EvidenceQualificationEvent)
+            .where(
+                EvidenceQualificationEvent.observation_id.in_(observation_ids),
+                EvidenceQualificationEvent.rule_version
+                == qualification_rule_version,
+            )
+            .order_by(
+                EvidenceQualificationEvent.created_at,
+                EvidenceQualificationEvent.id,
+            )
+        ).all()
+        # The current schema normally permits one event per observation, family,
+        # and rule. Reducing in event-time order also keeps replay correct if a
+        # later schema allows append-only requalification events.
+        for event in qualification_events:
+            qualification_by_observation_family[
+                (event.observation_id, event.projection_family)
+            ] = event
+
+    def qualified(observation: AssessmentObservation, family: str) -> bool:
+        event = qualification_by_observation_family.get((observation.id, family))
+        return bool(
+            event
+            and event.status in QUALIFIED_STATUSES_BY_FAMILY.get(
+                family,
+                frozenset(),
+            )
+        )
+
     bindings = {
         (item.section_id, item.assessment_target_id): item
         for item in db.scalars(select(SectionAssessmentTarget)).all()
@@ -445,17 +512,28 @@ def rebuild_assessment_projections(db: Session, *, user_id: str) -> dict:
     }
 
     by_gate: dict[tuple[str, str, str], list[AssessmentObservation]] = defaultdict(list)
-    by_target: dict[str, list[AssessmentObservation]] = defaultdict(list)
+    by_target_mastery: dict[str, list[AssessmentObservation]] = defaultdict(list)
+    retention_observation_ids: set[str] = set()
     for observation in observations:
-        by_gate[(observation.learning_run_id, observation.section_id, observation.assessment_target_id)].append(observation)
-        by_target[observation.assessment_target_id].append(observation)
+        if qualified(observation, "gate"):
+            by_gate[
+                (
+                    observation.learning_run_id,
+                    observation.section_id,
+                    observation.assessment_target_id,
+                )
+            ].append(observation)
+        if qualified(observation, "mastery"):
+            by_target_mastery[observation.assessment_target_id].append(observation)
+        if qualified(observation, "retention"):
+            retention_observation_ids.add(observation.id)
 
     for key, items in by_gate.items():
         _sync_gate(db, key=key, observations=items, existing=existing_gates.pop(key, None))
     for stale in existing_gates.values():
         db.delete(stale)
 
-    for target_id, items in by_target.items():
+    for target_id, items in by_target_mastery.items():
         required = any(
             bindings.get((item.section_id, target_id))
             and bindings[(item.section_id, target_id)].required
@@ -465,6 +543,7 @@ def rebuild_assessment_projections(db: Session, *, user_id: str) -> dict:
             db,
             target_id=target_id,
             observations=items,
+            retention_observation_ids=retention_observation_ids,
             required=required,
             state=existing_states.pop(target_id, None),
             review=existing_reviews.pop(target_id, None),
@@ -476,9 +555,15 @@ def rebuild_assessment_projections(db: Session, *, user_id: str) -> dict:
     db.flush()
     return {
         "observations": len(observations),
+        "qualifiedGateObservations": sum(len(items) for items in by_gate.values()),
+        "qualifiedMasteryObservations": sum(
+            len(items) for items in by_target_mastery.values()
+        ),
+        "qualifiedRetentionObservations": len(retention_observation_ids),
+        "qualificationRuleVersion": qualification_rule_version,
         "gates": len(by_gate),
-        "knowledgeStates": len(by_target),
-        "reviewStates": len(by_target),
+        "knowledgeStates": len(by_target_mastery),
+        "reviewStates": len(by_target_mastery),
     }
 
 
@@ -510,11 +595,20 @@ def section_gate_decision(
             )
         ).all()
     }
-    bindings = db.scalars(
-        select(SectionAssessmentTarget).where(
-            SectionAssessmentTarget.section_id == section_id
-        )
-    ).all()
+    contract_version_id = baseline[0].learning_contract_version_id
+    if contract_version_id:
+        bindings = db.scalars(
+            select(LearningContractAssessmentTarget).where(
+                LearningContractAssessmentTarget.contract_version_id
+                == contract_version_id
+            )
+        ).all()
+    else:
+        bindings = db.scalars(
+            select(SectionAssessmentTarget).where(
+                SectionAssessmentTarget.section_id == section_id
+            )
+        ).all()
     resolved = {
         target_id
         for target_id, gate in gate_by_target.items()
@@ -606,16 +700,51 @@ def due_review_queue(
     }
 
 
-def _record_qualification_events(db: Session, observation: AssessmentObservation) -> None:
-    statuses = {
-        "gate": ("eligible", "attempt target outcome is aggregated"),
-        "mastery": ("eligible_grouped", "one BKT update per learning episode and target"),
-        "retention": (
-            ("candidate", "requires a delayed unassisted novel review")
-            if observation.assistance_mode == "unassisted_review"
-            else ("ineligible", "not an unassisted review")
-        ),
-    }
+def _record_qualification_events(
+    db: Session,
+    observation: AssessmentObservation,
+    *,
+    qualification_profile: str = "standard",
+) -> None:
+    governance = (
+        db.scalar(
+            select(GovernanceDecisionSnapshot)
+            .where(
+                GovernanceDecisionSnapshot.decision_scope
+                == "quiz_publication",
+                GovernanceDecisionSnapshot.quiz_set_id
+                == observation.quiz_set_id,
+            )
+            .order_by(GovernanceDecisionSnapshot.created_at.desc())
+        )
+        if observation.quiz_set_id
+        else None
+    )
+    statuses = (
+        {
+            "gate": ("ineligible", "delayed review cannot rewrite the section gate"),
+            "mastery": ("eligible_grouped", "assignment-bound review updates mastery once"),
+            "retention": ("candidate", "server-qualified delayed unassisted novel review"),
+        }
+        if qualification_profile == "review_assignment"
+        else {
+            # Compatibility keeps the reading/unlock loop usable, but an
+            # unverified M2 publication must not become mastery or retention.
+            "gate": ("eligible", "compatibility gate only; content governance is unresolved"),
+            "mastery": ("ineligible", "quiz is not governance-qualified for mastery"),
+            "retention": ("ineligible", "quiz is not governance-qualified for retention"),
+        }
+        if governance and not governance.assessment_eligible
+        else {
+            "gate": ("eligible", "attempt target outcome is aggregated"),
+            "mastery": ("eligible_grouped", "one BKT update per learning episode and target"),
+            "retention": (
+                ("candidate", "requires a delayed unassisted novel review")
+                if observation.assistance_mode == "unassisted_review"
+                else ("ineligible", "not an unassisted review")
+            ),
+        }
+    )
     for family, (status, reason) in statuses.items():
         db.add(EvidenceQualificationEvent(
             id=_uid("qualification"),
@@ -639,6 +768,7 @@ def record_scoring_facts(
     passed: bool,
     assistance_mode: str,
     learning_episode_id: str | None = None,
+    qualification_profile: str = "standard",
 ) -> ScoringResult:
     existing = db.scalar(
         select(ScoringResult).where(ScoringResult.attempt_id == attempt.id)
@@ -656,14 +786,20 @@ def record_scoring_facts(
     )
     db.add(scoring)
     db.flush()
-    bindings = {
-        item.assessment_target_id: item
-        for item in db.scalars(
+    if getattr(attempt, "learning_contract_version_id", None):
+        binding_rows = db.scalars(
+            select(LearningContractAssessmentTarget).where(
+                LearningContractAssessmentTarget.contract_version_id
+                == attempt.learning_contract_version_id
+            )
+        ).all()
+    else:
+        binding_rows = db.scalars(
             select(SectionAssessmentTarget).where(
                 SectionAssessmentTarget.section_id == section.id
             )
         ).all()
-    }
+    bindings = {item.assessment_target_id: item for item in binding_rows}
     episode_id = learning_episode_id or f"quiz:{attempt.id}"
     for index, (question, result) in enumerate(zip(questions, results, strict=True)):
         target_id = str(question.get("assessmentTargetId", ""))
@@ -684,6 +820,11 @@ def record_scoring_facts(
             user_id=attempt.user_id,
             section_id=section.id,
             attempt_id=attempt.id,
+            quiz_set_id=attempt.quiz_set_id,
+            learning_contract_version_id=getattr(
+                attempt, "learning_contract_version_id", None
+            ),
+            content_version_id=getattr(attempt, "content_version_id", None),
             scoring_result_id=scoring.id,
             assessment_target_id=target_id,
             question_index=index,
@@ -701,6 +842,10 @@ def record_scoring_facts(
         )
         db.add(observation)
         db.flush()
-        _record_qualification_events(db, observation)
+        _record_qualification_events(
+            db,
+            observation,
+            qualification_profile=qualification_profile,
+        )
     rebuild_assessment_projections(db, user_id=attempt.user_id)
     return scoring

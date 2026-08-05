@@ -32,6 +32,30 @@ class PlanCreate(ApiModel):
     details: str = Field(default="", max_length=3000)
 
 
+class MissionCriterionInput(ApiModel):
+    key: str = Field(min_length=1, max_length=160)
+    statement: str = Field(min_length=1, max_length=2000)
+    acceptance: dict = Field(default_factory=dict)
+
+
+class MissionVersionCreate(ApiModel):
+    expected_current_mission_version_id: str
+    why: str = Field(min_length=1, max_length=3000)
+    target_capabilities: list[dict] = Field(min_length=1, max_length=30)
+    constraints: dict = Field(default_factory=dict)
+    out_of_scope: list[str] = Field(default_factory=list, max_length=30)
+    assumptions: list[str] = Field(default_factory=list, max_length=30)
+    learner_context: dict = Field(default_factory=dict)
+    inferred_fields: list[str] = Field(default_factory=list, max_length=30)
+    success_criteria: list[MissionCriterionInput] = Field(min_length=1, max_length=30)
+
+
+class MissionAdoptionCreate(ApiModel):
+    mission_version_id: str
+    expected_current_mission_version_id: str
+    reason: str = Field(min_length=1, max_length=2000)
+
+
 class AiRuntimeUpdate(ApiModel):
     mode: Literal["provider", "demo"] = "provider"
     provider_protocol: Literal["openai", "anthropic"] = "openai"
@@ -78,6 +102,10 @@ class ProfileComplete(ApiModel):
 class QuizSubmit(ApiModel):
     quiz_set_id: str
     answers: list[list[int]]
+
+
+class ReviewSubmit(ApiModel):
+    answers: list[list[int]] = Field(min_length=1, max_length=5)
 
 
 class AskRequest(ApiModel):

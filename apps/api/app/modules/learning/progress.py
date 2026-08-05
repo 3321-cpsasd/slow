@@ -27,11 +27,17 @@ class ProgressStore:
         self.db = db
         self.user_id = user_id
 
-    def create_run(self, series_id: str) -> LearningRun:
+    def create_run(
+        self,
+        series_id: str,
+        *,
+        initial_mission_version_id: str | None = None,
+    ) -> LearningRun:
         run = LearningRun(
             id=_uid("learning_run"),
             user_id=self.user_id,
             series_id=series_id,
+            initial_mission_version_id=initial_mission_version_id,
             status="active",
         )
         self.db.add(run)

@@ -137,3 +137,31 @@ class AcceptingSourceVerifier:
             ).as_dict()
             for source in sources
         ]
+
+    async def verify_claims(self, candidates: list[dict]) -> list[dict]:
+        """Explicit fixture-only claim verification, separate from reachability.
+
+        Production ``HttpSourceVerifier`` deliberately does not implement this
+        method: URL reachability must never become semantic claim support.
+        """
+
+        return [
+            {
+                "sourceClaimVersionId": item["sourceClaimVersionId"],
+                "sourceVersionId": item["sourceVersionId"],
+                "locatorType": "deterministic_fixture",
+                "locator": {
+                    "contentBlockVersionId": item["contentBlockVersionId"],
+                    "sourceUrl": item["sourceUrl"],
+                },
+                "excerptText": item["statement"],
+                "supportType": "supports",
+                "verificationMode": "deterministic_claim_fixture",
+                "verificationRuleVersion": "claim_fixture_v1",
+                "report": {
+                    "fixture": True,
+                    "semanticSupport": "explicitly_accepted_for_demo_or_contract_test",
+                },
+            }
+            for item in candidates
+        ]
