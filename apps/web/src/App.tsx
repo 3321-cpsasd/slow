@@ -12,12 +12,15 @@ import type {
   Book,
   Bootstrap,
   Chapter,
+  DueReviews,
   LearningTask,
   LearningProfile,
   LearningPreferences,
   Note as NoteType,
   NoteContent,
   QuizResult,
+  ReviewResult,
+  ReviewSession,
   Section,
   SectionSummary,
   Series,
@@ -1238,6 +1241,117 @@ function Home({
     (total, item) => total + item.series.reduce((count, itemSeries) => count + itemSeries.books.length, 0),
     0,
   ) || 0;
+  const [dueReviews, setDueReviews] = useState<DueReviews | null>(null);
+  const [reviewSession, setReviewSession] = useState<ReviewSession | null>(null);
+  const [reviewResult, setReviewResult] = useState<ReviewResult | null>(null);
+  const [reviewAnswers, setReviewAnswers] = useState<number[][]>([]);
+  const [reviewBusy, setReviewBusy] = useState('正在读取到期复习…');
+  const [reviewError, setReviewError] = useState('');
+  const pendingReviews = dueReviews?.items.filter(
+    (item) => item.status === 'presented' || item.status === 'started',
+  ) || [];
+  const currentReview = pendingReviews[0] || null;
+
+  const loadDueReviews = async () => {
+    setReviewBusy('正在读取到期复习…');
+    setReviewError('');
+    try {
+      setDueReviews(await api.dueReviews());
+    } catch (reason) {
+      setReviewError(reason instanceof Error ? reason.message : '无法读取到期复习。');
+    } finally {
+      setReviewBusy('');
+    }
+  };
+
+  useEffect(() => {
+    void loadDueReviews();
+  }, []);
+
+  const startDueReview = async () => {
+    if (!currentReview) return;
+    setReviewBusy('正在准备一道新的复习题…');
+    setReviewError('');
+    try {
+      const value = await api.startReview(currentReview.assignmentId);
+      setReviewSession(value);
+      setReviewAnswers(value.quiz.questions.map(() => []));
+      setReviewResult(null);
+      setDueReviews((current) => current ? {
+        ...current,
+        items: current.items.map((item) => item.assignmentId === value.assignmentId
+          ? {...item, status: 'started', quizSetId: value.quiz.id}
+          : item),
+      } : current);
+    } catch (reason) {
+      setReviewError(reason instanceof Error ? reason.message : '复习题准备失败。');
+    } finally {
+      setReviewBusy('');
+    }
+  };
+
+  const chooseReviewAnswer = (
+    questionIndex: number,
+    optionIndex: number,
+    mode: 'single' | 'multiple',
+  ) => {
+    setReviewAnswers((current) => current.map((answer, index) => {
+      if (index !== questionIndex) return answer;
+      if (mode === 'single') return [optionIndex];
+      return answer.includes(optionIndex)
+        ? answer.filter((item) => item !== optionIndex)
+        : [...answer, optionIndex].sort((left, right) => left - right);
+    }));
+  };
+
+  const submitDueReview = async () => {
+    if (!reviewSession || reviewAnswers.some((answer) => answer.length === 0)) return;
+    setReviewBusy('正在保存复习结果…');
+    setReviewError('');
+    try {
+      const value = await api.submitReview(
+        reviewSession.assignmentId,
+        reviewAnswers,
+        `review-${reviewSession.assignmentId}`,
+      );
+      setReviewResult(value);
+      setDueReviews((current) => current ? {
+        ...current,
+        items: current.items.map((item) => item.assignmentId === value.assignmentId
+          ? {...item, status: 'submitted'}
+          : item),
+      } : current);
+    } catch (reason) {
+      setReviewError(reason instanceof Error ? reason.message : '复习结果保存失败。');
+    } finally {
+      setReviewBusy('');
+    }
+  };
+
+  const skipDueReview = async () => {
+    if (!currentReview) return;
+    setReviewBusy('正在移出今日复习…');
+    setReviewError('');
+    try {
+      await api.skipReview(currentReview.assignmentId);
+      setDueReviews((current) => current ? {
+        ...current,
+        items: current.items.map((item) => item.assignmentId === currentReview.assignmentId
+          ? {...item, status: 'skipped'}
+          : item),
+      } : current);
+    } catch (reason) {
+      setReviewError(reason instanceof Error ? reason.message : '无法跳过这项复习。');
+    } finally {
+      setReviewBusy('');
+    }
+  };
+
+  const continueReviewQueue = () => {
+    setReviewSession(null);
+    setReviewResult(null);
+    setReviewAnswers([]);
+  };
 
   return (
     <section className="library-dashboard">
@@ -1294,11 +1408,81 @@ function Home({
             <span className="focus-card-label">待复习</span>
             <small>跨书架</small>
           </header>
-          <div className="review-empty-state">
-            <span>今日已清空</span>
-            <h2>没有到期的复习</h2>
-            <p>完成测验后，薄弱概念会按间隔自动回到这里。到期时可直接开始，不需要先打开队列。</p>
-          </div>
+          {reviewBusy ? (
+            <div className="review-empty-state" aria-live="polite">
+              <span>正在同步</span>
+              <h2>{reviewBusy}</h2>
+              <p>复习分配与学习画像都由服务端确认。</p>
+            </div>
+          ) : reviewError ? (
+            <div className="review-empty-state review-error-state" role="alert">
+              <span>读取失败</span>
+              <h2>暂时无法打开复习</h2>
+              <p>{reviewError}</p>
+              <button onClick={() => void loadDueReviews()}>重新读取</button>
+            </div>
+          ) : reviewResult ? (
+            <div className="review-result-state" aria-live="polite">
+              <span>{reviewResult.passed ? '保持验证完成' : '已记录本次表现'}</span>
+              <h2>{reviewResult.score} / {reviewResult.total}</h2>
+              <p>这次结果已作为延迟复习证据候选保存，不会覆盖原小节测验。</p>
+              <button onClick={continueReviewQueue}>
+                {pendingReviews.length ? '继续下一项' : '完成今日复习'} <span aria-hidden="true">→</span>
+              </button>
+            </div>
+          ) : reviewSession ? (
+            <div className="review-session-state">
+              <div className="review-objective-label">到期概念</div>
+              <p>{currentReview?.objective || reviewSession.quiz.questions[0]?.objective}</p>
+              {reviewSession.quiz.questions.map((question, questionIndex) => (
+                <fieldset key={`${reviewSession.quiz.id}-${questionIndex}`}>
+                  <legend>{question.prompt}</legend>
+                  {question.options.map((option, optionIndex) => (
+                    <label key={optionIndex}>
+                      <input
+                        type={question.selectionMode === 'multiple' ? 'checkbox' : 'radio'}
+                        name={`review-${reviewSession.quiz.id}-${questionIndex}`}
+                        checked={reviewAnswers[questionIndex]?.includes(optionIndex) || false}
+                        onChange={() => chooseReviewAnswer(
+                          questionIndex,
+                          optionIndex,
+                          question.selectionMode,
+                        )}
+                      />
+                      <span>{option}</span>
+                    </label>
+                  ))}
+                </fieldset>
+              ))}
+              <button
+                className="review-submit-button"
+                disabled={reviewAnswers.some((answer) => answer.length === 0)}
+                onClick={() => void submitDueReview()}
+              >
+                保存复习结果 <span aria-hidden="true">→</span>
+              </button>
+            </div>
+          ) : currentReview ? (
+            <div className="review-ready-state">
+              <span>{pendingReviews.length} 项到期</span>
+              <h2>{currentReview.objective}</h2>
+              <p>系统会生成一道与原题实质不同的题，检查间隔一段时间后是否仍能独立判断。</p>
+              <div className="review-ready-actions">
+                <button onClick={() => void startDueReview()}>
+                  {currentReview.status === 'started' ? '继续复习' : '开始复习'} <span aria-hidden="true">→</span>
+                </button>
+                {currentReview.status !== 'started' && (
+                  <button onClick={() => void skipDueReview()}>今天跳过</button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="review-empty-state">
+              <span>今日已清空</span>
+              <h2>没有到期的复习</h2>
+              <p>完成测验后，薄弱概念会按间隔自动回到这里。到期时可直接开始，不需要先打开队列。</p>
+            </div>
+          )}
           <div className="review-cadence" aria-label="复习间隔">
             <span>复习节奏</span>
             <ol>
@@ -3314,6 +3498,12 @@ function Quiz({
       <h2>小节验证</h2>
       <p className="quiz-rule">答对至少 60% 即可继续；错题仍会进入重点巩固与学习画像。</p>
       <p className="quiz-draft-note">单选题只能选择一个答案，多选题可选择多个；切回正文查阅时，当前作答会自动保留。</p>
+      {section.quiz?.governance && !section.quiz.governance.assessmentEligible && (
+        <aside className="quiz-governance-notice" role="status">
+          <b>本次成绩只用于学习路径解锁</b>
+          <p>这套题的来源支持或题目绑定尚未通过内容治理，因此成绩不会写入概念掌握度或保持证据。</p>
+        </aside>
+      )}
       {result ? (
         <QuizReview
           section={section}

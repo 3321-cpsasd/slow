@@ -121,6 +121,7 @@ class ContentBlock(StrictModel):
     heading: str
     content: str
     source_indexes: list[int] = Field(default_factory=list)
+    assessment_objectives: list[str] = Field(default_factory=list)
 
 
 CONTENT_SENTENCE_ENDINGS = tuple("。！？.!?；;：:）)]】」』”’\"'|")
@@ -134,11 +135,17 @@ class ChoiceQuestion(StrictModel):
     objective: str
     explanation: str
     difficulty: Literal["standard"] = "standard"
+    claim_block_indexes: list[int] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def valid_indexes(self):
         if any(index < 0 or index >= len(self.options) for index in self.correct):
             raise ValueError("correct index out of range")
+        if (
+            any(index < 0 for index in self.claim_block_indexes)
+            or len(set(self.claim_block_indexes)) != len(self.claim_block_indexes)
+        ):
+            raise ValueError("claim block indexes must be unique and non-negative")
         return self
 
 

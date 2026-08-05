@@ -141,7 +141,57 @@ export type AiRuntime = {
 export type Source = { title:string; url:string; kind:string; version:string };
 export type Block = { id:string; version:number; kind:string; role:string; heading:string; content:string; source_indexes:number[] };
 export type FeedbackReceipt = { id:string; status:'received'; scope:'global'|'content_block'; createdAt:string };
-export type Question = { prompt:string; options:string[]; core:boolean; objective:string; selectionMode:'single'|'multiple' };
+export type Question = { prompt:string; options:string[]; core:boolean; objective:string; assessmentTargetId?:string; selectionMode:'single'|'multiple' };
+export type QuizGovernance = {
+  decisionId:string;
+  scope:string;
+  requestedMode:'formal'|'experimental';
+  mode:'formal'|'experimental'|'rejected';
+  allowed:boolean;
+  assessmentEligible:boolean;
+  reasons:{code:string;message:string;severity:'blocking'|'warning';subjectIds:string[]}[];
+  ruleVersion:string;
+};
+export type ReviewAssignmentItem = {
+  assignmentId:string;
+  assessmentTargetId:string;
+  objective:string;
+  status:'scheduled'|'presented'|'started'|'submitted'|'skipped'|'expired';
+  dueAt:string;
+  expiresAt:string;
+  rank:number;
+  basePriority:number;
+  effectivePriority:number;
+  quizSetId:string|null;
+};
+export type DueReviews = {
+  selectionRunId:string;
+  asOf:string;
+  dailyBudget:number;
+  dueCount:number;
+  selectedCount:number;
+  ruleVersion:string;
+  items:ReviewAssignmentItem[];
+};
+export type ReviewSession = {
+  assignmentId:string;
+  status:'started';
+  assessmentTargetId:string;
+  dueAt:string;
+  expiresAt:string;
+  quiz:{id:string;questions:Question[]};
+  attemptId:string|null;
+};
+export type ReviewResult = {
+  assignmentId:string;
+  status:'submitted';
+  attemptId:string;
+  score:number;
+  total:number;
+  passed:boolean;
+  results:QuizResult['results'];
+  retentionQualification:{status:string;ruleVersion:string;reasons:string[]};
+};
 export type Generation = {id:string;operation:string;attempt:number;status:string;model:string;trace:Record<string,unknown>;errorCode?:string;error?:string;startedAt:string;finishedAt?:string;durationMs:number};
 export type SourceVerification = {url:string;reachable:boolean;statusCode:number;pinned:boolean;verificationStatus?:'verified'|'server_unverifiable'|'failed'};
 export type Remediation = {id:string;attemptId:string;replacementQuizId:string;blocks:Block[];objectives:string[];strategy:string;sourceVerification:SourceVerification[];sourceLineage:{mode:"generation_trace"|"missing";generationRunId:string|null}};
@@ -201,7 +251,7 @@ export type Note = {
   verificationAnnotations:NoteVerificationAnnotation[];
 };
 export type AskMe = {id:string;status:string;round:number;dimension:string;prompt:string|null;entries:{dimension:string;prompt:string;answer:string|null;evaluation:string;rationale:string}[]};
-export type Section = SectionSummary & { generation:null|Generation; content:null|{id:string;version:number;blocks:Block[];sources:Source[];sourceVerification:SourceVerification[];confidence:string}; quiz:null|{id:string;generation:number;questions:Question[]}; latestAttemptReview:QuizResult|null; remediations:Remediation[]; note:null|Note; workflowTasks:LearningTask[] };
+export type Section = SectionSummary & { generation:null|Generation; content:null|{id:string;version:number;blocks:Block[];sources:Source[];sourceVerification:SourceVerification[];confidence:string}; quiz:null|{id:string;generation:number;questions:Question[];governance:QuizGovernance|null}; latestAttemptReview:QuizResult|null; remediations:Remediation[]; note:null|Note; workflowTasks:LearningTask[] };
 export type LearningTask = {
   taskId:string;
   type:'initial_book_preload'|'note_generation'|'remediation_generation'|'next_section_preload';

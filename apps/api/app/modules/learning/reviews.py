@@ -380,9 +380,20 @@ class ReviewAssignmentService:
                 "id": quiz.id,
                 "questions": [
                     {
-                        key: value
-                        for key, value in item.items()
-                        if key not in {"correct", "explanation"}
+                        **{
+                            key: value
+                            for key, value in item.items()
+                            if key not in {
+                                "correct",
+                                "explanation",
+                                "claim_block_indexes",
+                            }
+                        },
+                        "selectionMode": (
+                            "multiple"
+                            if len(set(item.get("correct", []))) > 1
+                            else "single"
+                        ),
                     }
                     for item in questions
                 ],

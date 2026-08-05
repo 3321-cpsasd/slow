@@ -82,7 +82,8 @@ from ..modules.learning.contracts import (
     open_run_section,
 )
 from ..modules.learning.content_governance_store import (
-    claim_verification_candidates,
+    bind_remediation_questions_to_source_claims,
+    generated_claim_verification_candidates,
     governance_view_for_quiz,
     persist_generated_governance,
     record_verified_claim_binding,
@@ -1873,7 +1874,6 @@ class SlowService:
                         status=502,
                         retryable=True,
                     )
-            update_generation_stage("persistence", **memory_trace)
             content = existing
             if not retry:
                 content = ContentVersion(
@@ -1892,15 +1892,19 @@ class SlowService:
                     payload["version"] = content.version
                     blocks.append(payload)
                 content.blocks_json = dump(blocks)
-                self.db.add(content)
-                self.db.flush()
-                self.db.add(SourceVerification(id=uid("verification"), content_version_id=content.id, report_json=dump(verification)))
             question_payloads = bind_questions_to_targets(
                 self.db,
                 section,
                 [item.model_dump() for item in lesson.questions],
                 contract,
             )
+            if retry:
+                question_payloads = bind_remediation_questions_to_source_claims(
+                    self.db,
+                    content=content,
+                    questions=question_payloads,
+                    prior_questions=prior,
+                )
             quiz = QuizSet(
                 id=uid("quiz"),
                 section_id=section.id,
@@ -1909,6 +1913,40 @@ class SlowService:
                 generation=(latest_quiz.generation + 1 if latest_quiz else 1),
                 questions_json=dump(question_payloads),
             )
+            claim_reports = []
+            if not retry:
+                verify_claims = getattr(
+                    self.source_verifier,
+                    "verify_claims",
+                    None,
+                )
+                if callable(verify_claims):
+                    candidates = generated_claim_verification_candidates(
+                        content,
+                        quiz,
+                    )
+                    update_generation_stage(
+                        "semantic_claim_verification",
+                        claimCandidateCount=len(candidates),
+                        **memory_trace,
+                    )
+                    claim_reports = await verify_claims(candidates)
+                    self._renew_generation_lease(resource_key, owner_id)
+
+            # No external I/O is allowed after this point. SQLite has one
+            # database-wide writer; keep publication as one short transaction
+            # so the same boundary remains valid after a PostgreSQL migration.
+            update_generation_stage("persistence", **memory_trace)
+            if not retry:
+                self.db.add(content)
+                self.db.flush()
+                self.db.add(
+                    SourceVerification(
+                        id=uid("verification"),
+                        content_version_id=content.id,
+                        report_json=dump(verification),
+                    )
+                )
             self.db.add(quiz)
             self.db.flush()
             if not retry:
@@ -1919,18 +1957,8 @@ class SlowService:
                     source_verification=verification,
                     actor_id=run.id,
                 )
-                verify_claims = getattr(
-                    self.source_verifier,
-                    "verify_claims",
-                    None,
-                )
-                if callable(verify_claims):
-                    candidates = claim_verification_candidates(
-                        self.db,
-                        content_version_id=content.id,
-                    )
-                    reports = await verify_claims(candidates)
-                    for report in reports:
+                if claim_reports:
+                    for report in claim_reports:
                         record_verified_claim_binding(
                             self.db,
                             source_claim_version_id=report[
@@ -2243,7 +2271,11 @@ class SlowService:
                     **{
                         key: value
                         for key, value in question.items()
-                        if key not in {"correct", "explanation"}
+                        if key not in {
+                            "correct",
+                            "explanation",
+                            "claim_block_indexes",
+                        }
                     },
                     "selectionMode": (
                         "multiple"
@@ -2259,15 +2291,18 @@ class SlowService:
             self.db,
             quiz.id if quiz else None,
         )
-        latest_attempt = self.db.scalar(
-            select(QuizAttempt)
-            .join(QuizSet, QuizSet.id == QuizAttempt.quiz_set_id)
-            .where(
-                QuizAttempt.learning_run_id == learning_run.id,
-                QuizAttempt.user_id == self.user_id,
-                QuizSet.section_id == section.id,
+        latest_attempt = (
+            self.db.scalar(
+                select(QuizAttempt)
+                .where(
+                    QuizAttempt.learning_run_id == learning_run.id,
+                    QuizAttempt.user_id == self.user_id,
+                    QuizAttempt.quiz_set_id == quiz.id,
+                )
+                .order_by(QuizAttempt.created_at.desc())
             )
-            .order_by(QuizAttempt.created_at.desc())
+            if quiz
+            else None
         )
         latest_attempt_results = (
             load(latest_attempt.results_json, []) if latest_attempt else []

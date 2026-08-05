@@ -169,6 +169,7 @@ class LocalDemoAdapter:
                     "学习者可以据此复述机制、检查反例，并通过后续选择题验证自己是否真正理解。"
                 ),
                 source_indexes=[0],
+                assessment_objectives=list(request.get("objectives") or [request["question"]]),
             )
             for item in planned_blocks
         ]
@@ -213,6 +214,7 @@ class LocalDemoAdapter:
                     else objectives[index % len(objectives)]
                 ),
                 explanation="正确项与本地演示正文中的机制描述一致。",
+                claim_block_indexes=[] if prior_questions else [0],
             )
             for index in range(question_count)
         ]

@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from ...core.errors import AppError
 from ...infrastructure.tables import (
+    AssessmentTarget,
     ContentBlockClaimAnchor,
     ContentBlockVersion,
     ContentVersion,
@@ -67,15 +68,208 @@ def _id(prefix: str, *parts) -> str:
     return f"{prefix}_{_hash(*parts)[:32]}"
 
 
-def _claim_kind(block: dict) -> str | None:
+def _claim_kind(block: dict, *, question_dependency: bool = False) -> str | None:
     role = str(block.get("role", ""))
     if role == "conclusion":
         return "core_conclusion"
     if role == "boundary":
         return "boundary"
+    if role == "mechanism":
+        return "mechanism"
     if block.get("assessmentEligible") or block.get("assessment_eligible"):
         return "assessable_fact"
+    if question_dependency:
+        return "question_dependency"
     return None
+
+
+def _normalized_objective(value: str) -> str:
+    return " ".join(str(value).casefold().split())
+
+
+def _contract_target_maps(
+    db: Session,
+    contract_version_id: str | None,
+) -> tuple[tuple[str, ...], dict[str, str]]:
+    if not contract_version_id:
+        return (), {}
+    targets = db.scalars(
+        select(AssessmentTarget)
+        .join(
+            LearningContractAssessmentTarget,
+            LearningContractAssessmentTarget.assessment_target_id
+            == AssessmentTarget.id,
+        )
+        .where(
+            LearningContractAssessmentTarget.contract_version_id
+            == contract_version_id
+        )
+        .order_by(LearningContractAssessmentTarget.position)
+    ).all()
+    return (
+        tuple(item.id for item in targets),
+        {
+            _normalized_objective(item.objective_statement): item.id
+            for item in targets
+        },
+    )
+
+
+def _declared_target_ids(
+    block: dict,
+    target_by_objective: dict[str, str],
+) -> tuple[str, ...]:
+    result = []
+    for objective in block.get("assessment_objectives", []):
+        target_id = target_by_objective.get(_normalized_objective(objective))
+        if target_id and target_id not in result:
+            result.append(target_id)
+    return tuple(result)
+
+
+def generated_claim_verification_candidates(
+    content: ContentVersion,
+    quiz: QuizSet,
+) -> list[dict]:
+    """Build verifier inputs without requiring uncommitted governance rows.
+
+    All referenced identifiers use the same deterministic rules as
+    ``persist_generated_governance``.  External source and model I/O can
+    therefore finish before the short publication transaction begins.
+    """
+
+    sources = _load(content.sources_json, [])
+    blocks = _load(content.blocks_json, [])
+    questions = _load(quiz.questions_json, [])
+    dependency_positions = {
+        index
+        for question in questions
+        if isinstance(question, dict)
+        for index in question.get("claim_block_indexes", [])
+        if isinstance(index, int) and not isinstance(index, bool)
+    }
+    result: list[dict] = []
+    for block_position, block in enumerate(blocks):
+        if not isinstance(block, dict):
+            continue
+        block_id = str(
+            block.get("id")
+            or _id("block", content.id, block_position)
+        )
+        claim_kind = _claim_kind(
+            block,
+            question_dependency=block_position in dependency_positions,
+        )
+        if not claim_kind:
+            continue
+        stable_key = _hash(
+            "generated_block_claim",
+            content.id,
+            block_id,
+            claim_kind,
+        )
+        claim_id = _id("source_claim", stable_key)
+        claim_version_id = _id("source_claim_version", claim_id, 1)
+        for source_index in block.get("source_indexes", []):
+            if (
+                not isinstance(source_index, int)
+                or isinstance(source_index, bool)
+                or source_index < 0
+                or source_index >= len(sources)
+            ):
+                continue
+            source = sources[source_index]
+            if not isinstance(source, dict):
+                continue
+            result.append(
+                {
+                    "sourceClaimVersionId": claim_version_id,
+                    "sourceVersionId": _id(
+                        "source_version",
+                        content.id,
+                        source_index,
+                    ),
+                    "statement": str(
+                        block.get("content")
+                        or block.get("heading")
+                        or block_id
+                    ),
+                    "claimKind": claim_kind,
+                    "contentBlockVersionId": block_id,
+                    "sourceTitle": str(source.get("title", "")),
+                    "sourceUrl": str(source.get("url", "")),
+                }
+            )
+    return result
+
+
+def bind_remediation_questions_to_source_claims(
+    db: Session,
+    *,
+    content: ContentVersion,
+    questions: list[dict],
+    prior_questions: list[dict],
+) -> list[dict]:
+    """Bind replacement questions to claims in the frozen source content.
+
+    A remediation model sees temporary remediation blocks, so its block
+    indexes cannot be interpreted as positions in ``content.blocks_json``.
+    A replacement question inherits only the explicit dependencies of the
+    prior question it replaces. The server verifies that those indexes still
+    point to anchored source blocks which explicitly teach the same objective.
+    Missing or inconsistent mappings remain empty and fail governance closed.
+    """
+
+    blocks = _load(content.blocks_json, [])
+    block_rows = db.scalars(
+        select(ContentBlockVersion)
+        .where(ContentBlockVersion.content_version_id == content.id)
+        .order_by(ContentBlockVersion.position)
+    ).all()
+    anchored_block_ids = set(db.scalars(
+        select(ContentBlockClaimAnchor.content_block_version_id).where(
+            ContentBlockClaimAnchor.content_block_version_id.in_(
+                [item.id for item in block_rows]
+            )
+        )
+    ).all()) if block_rows else set()
+    anchored_positions = {
+        item.position
+        for item in block_rows
+        if item.id in anchored_block_ids
+    }
+
+    result = []
+    for position, question in enumerate(questions):
+        payload = dict(question)
+        objective = _normalized_objective(payload.get("objective", ""))
+        prior = prior_questions[position] if position < len(prior_questions) else {}
+        prior_objective = _normalized_objective(prior.get("objective", ""))
+        prior_indexes = prior.get("claim_block_indexes", [])
+        valid_indexes = [
+            index
+            for index in prior_indexes
+            if (
+                isinstance(index, int)
+                and not isinstance(index, bool)
+                and index in anchored_positions
+                and index < len(blocks)
+                and isinstance(blocks[index], dict)
+                and objective
+                and objective == prior_objective
+                and objective in {
+                    _normalized_objective(item)
+                    for item in blocks[index].get("assessment_objectives", [])
+                }
+            )
+        ]
+        payload["claim_block_indexes"] = (
+            valid_indexes
+            if len(valid_indexes) == len(prior_indexes) and valid_indexes
+            else []
+        )
+        result.append(payload)
+    return result
 
 
 def persist_generated_governance(
@@ -131,19 +325,22 @@ def persist_generated_governance(
         source_rows[position] = row
     db.flush()
 
-    target_ids = tuple(
-        db.scalars(
-            select(LearningContractAssessmentTarget.assessment_target_id).where(
-                LearningContractAssessmentTarget.contract_version_id
-                == quiz.learning_contract_version_id
-            )
-        ).all()
+    target_ids, target_by_objective = _contract_target_maps(
+        db,
+        quiz.learning_contract_version_id,
     )
     block_inputs: list[ContentBlockInput] = []
     claim_inputs: list[SourceClaimInput] = []
     binding_inputs: list[SourceClaimBindingInput] = []
     gap_inputs: list[KnowledgeGapInput] = []
-    claim_ids: list[str] = []
+    claim_id_by_block_position: dict[int, str] = {}
+    dependency_positions = {
+        index
+        for question in questions
+        if isinstance(question, dict)
+        for index in question.get("claim_block_indexes", [])
+        if isinstance(index, int) and not isinstance(index, bool)
+    }
 
     for position, block in enumerate(blocks):
         if not isinstance(block, dict):
@@ -166,9 +363,7 @@ def persist_generated_governance(
             assessment_eligible=False,
         )
         db.add(block_row)
-        # The legacy-compatible paragraph schema has no objective-local anchor.
-        # Record the contract-wide inference transparently; do not invent proof.
-        taught_targets = target_ids if role in {"conclusion", "mechanism", "boundary"} else ()
+        taught_targets = _declared_target_ids(block, target_by_objective)
         block_inputs.append(
             ContentBlockInput(
                 id=block_id,
@@ -177,7 +372,10 @@ def persist_generated_governance(
                 assessment_eligible=False,
             )
         )
-        kind = _claim_kind(block)
+        kind = _claim_kind(
+            block,
+            question_dependency=position in dependency_positions,
+        )
         if not kind:
             continue
         stable_key = _hash("generated_block_claim", content.id, block_id, kind)
@@ -196,7 +394,8 @@ def persist_generated_governance(
                 {
                     "contentVersionId": content.id,
                     "contentBlockVersionId": block_id,
-                    "targetMapping": "contract_wide_inference",
+                    "targetMapping": "generated_schema_explicit",
+                    "assessmentTargetIds": list(taught_targets),
                 }
             ),
             strict=True,
@@ -215,7 +414,7 @@ def persist_generated_governance(
                 locator_json=_dump({"kind": "whole_block"}),
             )
         )
-        claim_ids.append(claim_version.id)
+        claim_id_by_block_position[position] = claim_version.id
         claim_inputs.append(
             SourceClaimInput(
                 id=claim_version.id,
@@ -310,18 +509,21 @@ def persist_generated_governance(
         requested_mode="formal",
     )
     content_decision = evaluate_content_publication(content_input)
-    dependency_claims = tuple(
-        claim.id
-        for claim in claim_inputs
-        if claim.kind == "core_conclusion"
-    ) or tuple(claim_ids)
     quiz_input = QuizGovernanceInput(
         content=content_input,
         questions=tuple(
             QuestionDependencyInput(
                 id=f"{quiz.id}:{index}",
                 primary_assessment_target_id=str(question.get("assessmentTargetId", "")),
-                claim_ids=dependency_claims,
+                claim_ids=tuple(
+                    claim_id_by_block_position[index]
+                    for index in question.get("claim_block_indexes", [])
+                    if (
+                        isinstance(index, int)
+                        and not isinstance(index, bool)
+                        and index in claim_id_by_block_position
+                    )
+                ),
             )
             for index, question in enumerate(questions)
             if isinstance(question, dict)
@@ -675,22 +877,22 @@ def reevaluate_generated_governance(
     latest_gap_event = {}
     for event in gap_events:
         latest_gap_event[event.knowledge_gap_id] = event.event_type
-    target_ids = tuple(
-        db.scalars(
-            select(LearningContractAssessmentTarget.assessment_target_id).where(
-                LearningContractAssessmentTarget.contract_version_id
-                == quiz.learning_contract_version_id
-            )
-        ).all()
+    target_ids, target_by_objective = _contract_target_maps(
+        db,
+        quiz.learning_contract_version_id,
     )
+    block_payloads = {
+        str(item.get("id", "")): item
+        for item in _load(content.blocks_json, [])
+        if isinstance(item, dict)
+    }
     block_inputs = tuple(
         ContentBlockInput(
             id=item.id,
             role=item.semantic_role,
-            assessment_target_ids=(
-                target_ids
-                if item.semantic_role in {"conclusion", "mechanism", "boundary"}
-                else ()
+            assessment_target_ids=_declared_target_ids(
+                block_payloads.get(item.id, {}),
+                target_by_objective,
             ),
             assessment_eligible=item.assessment_eligible,
         )
@@ -744,16 +946,27 @@ def reevaluate_generated_governance(
         knowledge_gaps=gap_inputs,
         requested_mode="formal",
     )
-    conclusion_claims = tuple(
-        item.id for item in claim_inputs if item.kind == "core_conclusion"
-    ) or tuple(item.id for item in claim_inputs)
+    claim_id_by_block_position = {
+        block.position: claim.id
+        for block in block_rows
+        for claim in claim_inputs
+        if claim.block_id == block.id
+    }
     quiz_input = QuizGovernanceInput(
         content=content_input,
         questions=tuple(
             QuestionDependencyInput(
                 id=f"{quiz.id}:{index}",
                 primary_assessment_target_id=str(question.get("assessmentTargetId", "")),
-                claim_ids=conclusion_claims,
+                claim_ids=tuple(
+                    claim_id_by_block_position[index]
+                    for index in question.get("claim_block_indexes", [])
+                    if (
+                        isinstance(index, int)
+                        and not isinstance(index, bool)
+                        and index in claim_id_by_block_position
+                    )
+                ),
             )
             for index, question in enumerate(_load(quiz.questions_json, []))
         ),

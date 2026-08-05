@@ -86,7 +86,7 @@ def _complete_initial_quiz_and_make_due(client):
 
 def test_review_assignment_materializes_once_and_submits_candidate(tmp_path):
     with _review_client(tmp_path) as client:
-        _complete_initial_quiz_and_make_due(client)
+        section_id = _complete_initial_quiz_and_make_due(client)
 
         first = client.get("/api/reviews/due?daily_budget=1")
         assert first.status_code == 200, first.json()
@@ -107,6 +107,8 @@ def test_review_assignment_materializes_once_and_submits_candidate(tmp_path):
         assert len(started_body["quiz"]["questions"]) == 1
         assert "correct" not in started_body["quiz"]["questions"][0]
         assert "explanation" not in started_body["quiz"]["questions"][0]
+        assert "claim_block_indexes" not in started_body["quiz"]["questions"][0]
+        assert started_body["quiz"]["questions"][0]["selectionMode"] == "single"
 
         submitted = client.post(
             f"/api/reviews/{assignment_id}/submit",
@@ -117,6 +119,11 @@ def test_review_assignment_materializes_once_and_submits_candidate(tmp_path):
         result = submitted.json()
         assert result["status"] == "submitted"
         assert result["retentionQualification"]["status"] == "candidate"
+
+        section = client.get(f"/api/sections/{section_id}").json()
+        assert section["latestAttemptReview"]["total"] == 5
+        assert len(section["latestAttemptReview"]["questions"]) == 5
+        assert section["latestAttemptReview"]["attemptId"] != result["attemptId"]
 
         replay = client.post(
             f"/api/reviews/{assignment_id}/submit",

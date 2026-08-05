@@ -194,7 +194,9 @@ def test_m2_twenty_section_engineering_loop_is_complete():
             assert db.scalar(
                 select(func.count()).select_from(GovernanceDecisionSnapshot)
             ) == 60
-            assert db.scalar(select(func.count()).select_from(KnowledgeGap)) == 40
+            # conclusion, mechanism and boundary each carry an explicit
+            # claim-level gap per generated section.
+            assert db.scalar(select(func.count()).select_from(KnowledgeGap)) == 60
             assert db.scalar(
                 select(func.count()).select_from(LearningDecisionSnapshot).where(
                     LearningDecisionSnapshot.decision_kind == "assessment_gate"

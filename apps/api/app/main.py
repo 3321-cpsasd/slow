@@ -93,6 +93,8 @@ def managed_source_verifier(adapter):
     return HttpSourceVerifier(
         claim_reviewer=getattr(adapter, "review_source_claim", None),
         claim_reviewer_model=getattr(adapter, "model", ""),
+        claim_fetch_concurrency=settings.source_claim_fetch_concurrency,
+        claim_review_concurrency=settings.source_claim_review_concurrency,
     )
 
 

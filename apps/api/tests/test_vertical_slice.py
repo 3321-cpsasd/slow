@@ -166,7 +166,46 @@ class FakeAi:
         roles = ["conclusion","mechanism","example","boundary","practice"]
         objectives = request.get("objectives") or [request["question"]]
         question_count = len(prior_questions) if prior_questions else 5
-        return GeneratedLesson(confidence="high", sources=[Source(title="Kubernetes Docs", url="https://kubernetes.io/docs/", kind="official", version="v1.30")], blocks=[ContentBlock(kind="text", role=role, heading=f"{role} 完整说明", content=f"{role} 内容用于解释当前目标的核心机制、观察依据和适用边界。学习者需要把对象之间的关系说清楚，并能用一个反例检查结论是否仍然成立。完成阅读后，再通过选择题验证自己是否真正掌握这一判断方法。", source_indexes=[0]) for role in roles], questions=[ChoiceQuestion(prompt=f"第{generation}套题{i}", options=[f"A{generation}",f"B{generation}",f"C{generation}"], correct=[1], core=i==0, objective=objectives[i % len(objectives)], explanation=f"因为 B{generation}") for i in range(question_count)])
+        return GeneratedLesson(
+            confidence="high",
+            sources=[Source(
+                title="Kubernetes Docs",
+                url="https://kubernetes.io/docs/",
+                kind="official",
+                version="v1.30",
+            )],
+            blocks=[
+                ContentBlock(
+                    kind="text",
+                    role=role,
+                    heading=f"{role} 完整说明",
+                    content=(
+                        f"{role} 内容用于解释当前目标的核心机制、观察依据和适用边界。"
+                        "学习者需要把对象之间的关系说清楚，并能用一个反例检查结论是否仍然成立。"
+                        "完成阅读后，再通过选择题验证自己是否真正掌握这一判断方法。"
+                    ),
+                    source_indexes=[0],
+                    assessment_objectives=objectives,
+                )
+                for role in roles
+            ],
+            questions=[
+                ChoiceQuestion(
+                    prompt=f"第{generation}套题{i}",
+                    options=[
+                        f"A{generation}",
+                        f"B{generation}",
+                        f"C{generation}",
+                    ],
+                    correct=[1],
+                    core=i == 0,
+                    objective=objectives[i % len(objectives)],
+                    explanation=f"因为 B{generation}",
+                    claim_block_indexes=[] if prior_questions else [0],
+                )
+                for i in range(question_count)
+            ],
+        )
     async def answer(self, request):
         requested = request.get("requestedThreadId")
         return ClassifiedAnswer(relation="follow_up" if requested else "new_question", thread_id=request.get("newThreadId") or requested, answer="基于当前段落回答", thread_summary="已澄清机制")
@@ -200,6 +239,16 @@ class ParallelWorkflowAi(FakeAi):
             await asyncio.to_thread(self.release_next_section.wait, 3)
             self.events.append("next_section_end")
         return await super().lesson(request, memory, prior_questions)
+
+
+class MissingLineageAi(FakeAi):
+    async def lesson(self, request, memory, prior_questions=None):
+        lesson = await super().lesson(request, memory, prior_questions)
+        for block in lesson.blocks:
+            block.assessment_objectives = []
+        for question in lesson.questions:
+            question.claim_block_indexes = []
+        return lesson
 
 
 def test_quiz_grade_explains_missed_and_incorrect_multiselect_options():
@@ -303,6 +352,34 @@ class ReachabilityOnlyVerifier:
 
     async def verify(self, sources):
         return await AcceptingSourceVerifier().verify(sources)
+
+
+class WriteProbeVerifier(AcceptingSourceVerifier):
+    """Proves claim I/O starts without an outer SQLite write transaction."""
+
+    def __init__(self, database_path):
+        self.database_path = database_path
+        self.probed = False
+
+    async def verify_claims(self, candidates):
+        with sqlite3.connect(self.database_path, timeout=0.1) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "UPDATE users SET updated_at = updated_at WHERE id = ?",
+                ("user_demo",),
+            )
+            connection.commit()
+        self.probed = True
+        return await super().verify_claims(candidates)
+
+
+class FailingClaimVerifier(AcceptingSourceVerifier):
+    async def verify_claims(self, _candidates):
+        raise AiError(
+            "来源语义核验失败",
+            code="SOURCE_CLAIM_REVIEW_FAILED",
+            retryable=False,
+        )
 
 
 MISSING_SOURCE_URL = "https://docs.missing.example/2025/removed"
@@ -547,6 +624,52 @@ def test_unreachable_source_degrades_after_repair_budget_is_exhausted():
         stage["stage"]
         for stage in body["generation"]["trace"]["stageHistory"]
     ]
+
+
+def test_claim_verification_does_not_hold_the_sqlite_write_lock(tmp_path):
+    database = tmp_path / "claim-verification-lock.db"
+    verifier = WriteProbeVerifier(database)
+    with TestClient(
+        create_app(
+            f"sqlite+pysqlite:///{database}",
+            FakeAi(),
+            verifier,
+        )
+    ) as source_client:
+        series = create_series(source_client)
+        task = wait_for_task(
+            source_client,
+            series["initializationTask"]["taskId"],
+        )
+
+        assert task["status"] == "succeeded"
+        assert verifier.probed is True
+        with source_client.app.state.sessions() as db:
+            assert db.scalar(select(func.count()).select_from(ContentVersion)) == 1
+            assert db.scalar(select(func.count()).select_from(QuizSet)) == 1
+
+
+def test_claim_verification_failure_publishes_no_content_or_quiz(tmp_path):
+    database = tmp_path / "claim-verification-failure.db"
+    with TestClient(
+        create_app(
+            f"sqlite+pysqlite:///{database}",
+            FakeAi(),
+            FailingClaimVerifier(),
+        ),
+        raise_server_exceptions=False,
+    ) as source_client:
+        series = create_series(source_client)
+        task = wait_for_task(
+            source_client,
+            series["initializationTask"]["taskId"],
+        )
+
+        assert task["status"] == "failed"
+        assert task["errorCode"] == "SOURCE_CLAIM_REVIEW_FAILED"
+        with source_client.app.state.sessions() as db:
+            assert db.scalar(select(func.count()).select_from(ContentVersion)) == 0
+            assert db.scalar(select(func.count()).select_from(QuizSet)) == 0
 
 
 @pytest.fixture
@@ -1288,6 +1411,15 @@ def test_assessment_gate_remediates_only_failed_target_and_rebuilds(client):
             bind_questions_to_targets(db, stored, questions, contract),
             ensure_ascii=False,
         )
+        blocks = json.loads(content.blocks_json)
+        for block in blocks:
+            block["assessment_objectives"] = ["核心目标", "辅助目标"]
+        content.blocks_json = json.dumps(blocks, ensure_ascii=False)
+        reevaluate_generated_governance(
+            db,
+            quiz_id=quiz.id,
+            actor_id="test_contract_rebind",
+        )
         db.commit()
 
     section = client.get(f"/api/sections/{section_id}").json()
@@ -1328,6 +1460,12 @@ def test_assessment_gate_remediates_only_failed_target_and_rebuilds(client):
     assert remediation_result["status"] == "succeeded", remediation_result
     remediated = client.get(f"/api/sections/{section_id}").json()
     replacement = remediated["quiz"]
+    with client.app.state.sessions() as db:
+        stored_replacement = db.get(QuizSet, replacement["id"])
+        assert {
+            tuple(question["claim_block_indexes"])
+            for question in json.loads(stored_replacement.questions_json)
+        } == {(0,)}
     assert {
         question["assessmentTargetId"] for question in replacement["questions"]
     } == {original_targets["核心目标"]}
@@ -2915,6 +3053,32 @@ def test_generated_content_records_governance_gap_without_promoting_reachability
         assert replay["allowed"] is True
         assert replay["assessmentEligible"] is True
         assert replay["mode"] == "formal"
+
+
+def test_missing_generated_lineage_cannot_be_inferred_into_formal_evidence(tmp_path):
+    with TestClient(create_app(
+        "sqlite+pysqlite:///:memory:",
+        MissingLineageAi(),
+        AcceptingSourceVerifier(),
+        LocalAttachmentStorage(tmp_path / "missing-lineage-attachments"),
+    )) as lineage_client:
+        series = create_series(lineage_client)
+        assert wait_for_task(
+            lineage_client,
+            series["initializationTask"]["taskId"],
+        )["status"] == "succeeded"
+        view = lineage_client.get(f"/api/series/{series['id']}").json()
+        section_id = view["books"][0]["chapters"][0]["sections"][0]["id"]
+        governance = lineage_client.get(
+            f"/api/sections/{section_id}"
+        ).json()["quiz"]["governance"]
+
+        assert governance["allowed"] is False
+        assert governance["assessmentEligible"] is False
+        assert any(
+            reason["code"] in {"QUESTION_TARGET_NOT_TAUGHT", "QUESTION_CLAIM_REQUIRED"}
+            for reason in governance["reasons"]
+        )
 
 
 def test_unverified_governance_allows_compatibility_gate_but_not_mastery():
