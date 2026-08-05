@@ -20,6 +20,8 @@ from ...infrastructure.tables import (
     AssessmentObservation,
     AssessmentTarget,
     ContentVersion,
+    LearningContractVersion,
+    LearningMissionVersion,
     QuizAttempt,
     QuizSet,
     ReviewAssignment,
@@ -94,10 +96,22 @@ def _questions_are_substantively_different(previous: dict, candidate: dict) -> b
 
 
 class ReviewAssignmentService:
-    def __init__(self, db: Session, *, user_id: str, ai):
+    def __init__(
+        self,
+        db: Session,
+        *,
+        user_id: str,
+        ai,
+        context_builder=None,
+        context_resolver=None,
+        memory_loader=None,
+    ):
         self.db = db
         self.user_id = user_id
         self.ai = ai
+        self.context_builder = context_builder
+        self.context_resolver = context_resolver
+        self.memory_loader = memory_loader
 
     def _state(self, assignment: ReviewAssignment) -> ReviewAssignmentState:
         return ReviewAssignmentState(
@@ -382,8 +396,7 @@ class ReviewAssignmentService:
             "sources": _load(content.sources_json, []),
             "blocks": _load(content.blocks_json, []),
         })
-        result = await self.ai.lesson_quiz(
-            {
+        request = {
                 "id": section.id,
                 "title": section.title,
                 "question": section.question,
@@ -391,7 +404,39 @@ class ReviewAssignmentService:
                 "reviewMode": "delayed_assignment",
                 "reviewAssignmentId": assignment.id,
                 "assessmentTargetId": target.id,
-            },
+            }
+        if self.context_builder and self.context_resolver and self.memory_loader:
+            section_context = self.context_resolver.resolve_section(
+                user_id=self.user_id,
+                section_id=section.id,
+            )
+            contract = self.db.get(
+                LearningContractVersion,
+                assignment.learning_contract_version_id,
+            )
+            mission = (
+                self.db.get(LearningMissionVersion, contract.mission_version_id)
+                if contract
+                else None
+            )
+            context_pack = self.context_builder.build(
+                "review_quiz",
+                shelf=section_context.shelf,
+                series=section_context.series,
+                book=section_context.book,
+                chapter=section_context.chapter,
+                section=section,
+                mission=mission,
+                contract=contract,
+                memory=self.memory_loader(section_context.book.shelf_id, 30),
+                interaction={
+                    "reviewAssignmentId": assignment.id,
+                    "priorQuestion": prior,
+                },
+            )
+            request = self.context_builder.attach(request, context_pack)
+        result = await self.ai.lesson_quiz(
+            request,
             generated_content,
             [prior],
         )

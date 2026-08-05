@@ -45,12 +45,14 @@ class GenerateLearningNote:
         learning_run_id: str,
         tutor,
         section_reader: Callable[[str], dict],
+        generation_context: dict | None = None,
     ):
         self.db = db
         self.user_id = user_id
         self.learning_run_id = learning_run_id
         self.tutor = tutor
         self.section_reader = section_reader
+        self.generation_context = generation_context
         self.uow = SqlAlchemyUnitOfWork(db)
 
     async def execute(self, section: Section) -> None:
@@ -149,6 +151,8 @@ class GenerateLearningNote:
             "quizEvidence": quiz_evidence,
             "wrongConcepts": wrong_concepts,
         }
+        if self.generation_context:
+            request["generationContext"] = self.generation_context
         # SELECTs autobegin in SQLAlchemy. End that transaction before network I/O.
         self.uow.commit()
         generated = await self.tutor.note(request)

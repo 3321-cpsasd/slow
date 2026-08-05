@@ -13,8 +13,9 @@ from sqlalchemy.orm import Session
 from ..auth.context import UserScope, WorkerExecutionContext
 from ..auth.profile import ProfileService
 
-from ..ai.contracts import GeneratedLesson, GeneratedRemediationLesson
+from ..ai.contracts import GeneratedLesson, GeneratedQuiz, GeneratedRemediationLesson
 from ..ai.port import AiPort
+from .generation_context import GenerationContextBuilder
 from ..core.errors import AiError, AppError, safe_error_code
 from ..demo_personas import LOCAL_DEMO_PERSONAS_BY_USER_ID
 from ..infrastructure.tables import (
@@ -269,6 +270,10 @@ class SlowService:
         self.library_reads = LibraryReadModel(db, user_id=self.user_id)
         self.milestones = MilestoneService(db, user_id=self.user_id, uid=uid)
         self.missions = MissionService(db, user_id=self.user_id, uid=uid)
+        self.generation_contexts = GenerationContextBuilder(
+            db,
+            user_id=self.user_id,
+        )
         if isinstance(scope, WorkerExecutionContext):
             self._install_worker_fence(scope)
 
@@ -487,13 +492,21 @@ class SlowService:
         return self._shelf(row)
 
     async def create_plan(self, body, idempotency_key: str | None = None):
-        self.shelf(body.shelf_id)
+        shelf = self.shelf(body.shelf_id)
         request = body.model_dump(by_alias=False)
+        memory = self._memory(body.shelf_id)
+        context_pack = self.generation_contexts.build(
+            "plan",
+            shelf=shelf,
+            memory=memory,
+            plan_input=request,
+        )
+        ai_request = self.generation_contexts.attach(request, context_pack)
         request_key = (idempotency_key or uid("plan_request")).strip()
         if len(request_key) < 8 or len(request_key) > 128:
             raise AppError("创建请求标识无效", code="IDEMPOTENCY_KEY_INVALID", status=400)
         request_hash = hashlib.sha256(
-            json.dumps(request, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+            json.dumps(ai_request, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
         reservation_key = (request_key, self.user_id)
         reservation = self.db.get(PlanCreationRequest, reservation_key)
@@ -525,9 +538,8 @@ class SlowService:
         elif not owns_reservation:
             raise AppError("相同学习计划正在生成，请勿重复提交", code="PLAN_CREATION_IN_PROGRESS", status=409)
         try:
-            memory = self._memory(body.shelf_id)
             self.db.commit()
-            generated = await self.ai.plan(request, memory)
+            generated = await self.ai.plan(ai_request, memory)
         except Exception as error:
             self.db.rollback()
             failed = self.db.get(PlanCreationRequest, reservation_key)
@@ -546,7 +558,11 @@ class SlowService:
         )
         self.db.add(plan)
         self.db.flush()
-        mission = self.missions.create_for_plan(plan=plan, generated=generated)
+        mission = self.missions.create_for_plan(
+            plan=plan,
+            generated=generated,
+            learner_context=context_pack.learner.snapshot(),
+        )
         series = Series(
             id=uid("series"),
             plan_id=plan.id,
@@ -928,7 +944,11 @@ class SlowService:
         return self.book(book_id)
 
     async def replan_chapters(self, book_id):
-        book = self.contexts.resolve_book(user_id=self.user_id, book_id=book_id).book
+        book_context = self.contexts.resolve_book(
+            user_id=self.user_id,
+            book_id=book_id,
+        )
+        book = book_context.book
         chapters = self.db.scalars(select(Chapter).where(Chapter.book_id == book.id).order_by(Chapter.position)).all()
         started, future = [], []
         for item in chapters:
@@ -943,6 +963,16 @@ class SlowService:
             "future_chapters": [{"title": item.title, "objective": item.objective} for item in future],
         }
         memory = self._memory(book.shelf_id)
+        mission = self.missions.current_version(book_context.series.id)
+        context_pack = self.generation_contexts.build(
+            "book_replan",
+            shelf=book_context.shelf,
+            series=book_context.series,
+            book=book,
+            mission=mission,
+            memory=memory,
+        )
+        request = self.generation_contexts.attach(request, context_pack)
         self.db.commit()
         generated = await self.ai.replan_book(request, memory)
         proposal = ChapterRevision(
@@ -1056,6 +1086,17 @@ class SlowService:
             book = chapter_context.book
             request = {"title": chapter.title, "objective": chapter.objective}
             memory = self._memory(book.shelf_id)
+            mission = self.missions.current_version(chapter_context.series.id)
+            context_pack = self.generation_contexts.build(
+                "chapter",
+                shelf=chapter_context.shelf,
+                series=chapter_context.series,
+                book=book,
+                chapter=chapter,
+                mission=mission,
+                memory=memory,
+            )
+            request = self.generation_contexts.attach(request, context_pack)
             self.db.commit()
             generated = await self.ai.chapter(request, memory)
             self._renew_generation_lease(resource_key, owner_id)
@@ -1424,7 +1465,24 @@ class SlowService:
                 "memoryApplied": bool(memory),
                 "memoryConceptCount": len(memory),
             }
-            lesson_request = {
+            failed_attempt_context = (
+                self.db.get(QuizAttempt, retry_attempt_id)
+                if retry and retry_attempt_id
+                else None
+            )
+            context_pack = self.generation_contexts.build(
+                "remediation" if retry else "lesson_content",
+                shelf=section_context.shelf,
+                series=section_context.series,
+                book=section_context.book,
+                chapter=section_context.chapter,
+                section=section,
+                mission=mission_version,
+                contract=contract,
+                memory=memory,
+                attempt=failed_attempt_context,
+            )
+            lesson_request = self.generation_contexts.attach({
                 **self._section_summary(section),
                 "learningContractVersionId": contract.id,
                 "missionVersionId": mission_version.id,
@@ -1433,7 +1491,8 @@ class SlowService:
                 ),
                 "rejectedSourceUrls": list(carried_rejected_urls),
                 "rejectedSourceHosts": list(carried_rejected_hosts),
-            }
+            }, context_pack)
+            regeneration_trace["contextManifest"] = context_pack.manifest()
             if retry:
                 lesson_request["remediationStrategy"] = remediation_strategy
                 if remediation_targets:
@@ -1557,9 +1616,33 @@ class SlowService:
                         )
                         previous_content = content_result
                         try:
+                            source_repair_context = self.generation_contexts.build(
+                                "source_repair",
+                                shelf=section_context.shelf,
+                                series=section_context.series,
+                                book=section_context.book,
+                                chapter=section_context.chapter,
+                                section=section,
+                                mission=mission_version,
+                                contract=contract,
+                                memory=memory,
+                                attempt=failed_attempt_context,
+                                interaction={
+                                    "failedSources": failed_sources,
+                                    "sourceAttempt": source_attempt,
+                                },
+                            )
+                            source_repair_request = self.generation_contexts.attach(
+                                {
+                                    key: value
+                                    for key, value in lesson_request.items()
+                                    if key != "generationContext"
+                                },
+                                source_repair_context,
+                            )
                             content_result = (
                                 await self.ai.repair_lesson_sources(
-                                    lesson_request,
+                                    source_repair_request,
                                     memory,
                                     content_result,
                                     failed_sources,
@@ -1601,6 +1684,26 @@ class SlowService:
 
                 quiz_result = None
                 previous_quiz_rejection = None
+                quiz_context_pack = self.generation_contexts.build(
+                    "lesson_quiz",
+                    shelf=section_context.shelf,
+                    series=section_context.series,
+                    book=section_context.book,
+                    chapter=section_context.chapter,
+                    section=section,
+                    mission=mission_version,
+                    contract=contract,
+                    memory=memory,
+                    attempt=failed_attempt_context,
+                )
+                quiz_request = self.generation_contexts.attach(
+                    {
+                        key: value
+                        for key, value in lesson_request.items()
+                        if key != "generationContext"
+                    },
+                    quiz_context_pack,
+                )
                 for quiz_attempt in range(1, max_generation_attempts + 1):
                     update_generation_stage(
                         "quiz_generation",
@@ -1614,7 +1717,7 @@ class SlowService:
                         **memory_trace,
                     )
                     quiz_result = await self.ai.lesson_quiz(
-                        lesson_request,
+                        quiz_request,
                         content_result,
                         prior,
                     )
@@ -1726,6 +1829,36 @@ class SlowService:
                     lesson = None
             if lesson is None:
                 raise AppError("模型连续返回与旧题实质相同的题集", code="QUIZ_NOT_NOVEL", status=502)
+            alignment_reviewer = getattr(
+                self.ai,
+                "review_lesson_alignment",
+                None,
+            )
+            if callable(alignment_reviewer):
+                update_generation_stage(
+                    "semantic_alignment_review",
+                    **memory_trace,
+                )
+                alignment = await alignment_reviewer(
+                    lesson_request,
+                    lesson,
+                    GeneratedQuiz(questions=lesson.questions),
+                )
+                self._renew_generation_lease(resource_key, owner_id)
+                ai_harness_trace.extend(self._ai_harness_trace())
+                regeneration_trace["semanticAlignment"] = alignment.model_dump()
+                if not alignment.allowed:
+                    update_generation_stage(
+                        "semantic_alignment_rejected",
+                        semanticAlignment=alignment.model_dump(),
+                        **memory_trace,
+                    )
+                    raise AppError(
+                        "正文、学习目标与测验未形成语义闭环；内容未保存",
+                        code="LESSON_SEMANTIC_ALIGNMENT_FAILED",
+                        status=502,
+                        retryable=True,
+                    )
             update_generation_stage("persistence", **memory_trace)
             content = existing
             if not retry:
@@ -2641,6 +2774,9 @@ class SlowService:
             self.db,
             user_id=self.user_id,
             ai=self.ai,
+            context_builder=self.generation_contexts,
+            context_resolver=self.contexts,
+            memory_loader=self._memory,
         ).due(daily_budget=daily_budget)
 
     async def start_review(self, assignment_id: str):
@@ -2648,6 +2784,9 @@ class SlowService:
             self.db,
             user_id=self.user_id,
             ai=self.ai,
+            context_builder=self.generation_contexts,
+            context_resolver=self.contexts,
+            memory_loader=self._memory,
         ).start(assignment_id)
 
     def submit_review(self, assignment_id: str, body, idempotency_key=None):
@@ -2655,6 +2794,9 @@ class SlowService:
             self.db,
             user_id=self.user_id,
             ai=self.ai,
+            context_builder=self.generation_contexts,
+            context_resolver=self.contexts,
+            memory_loader=self._memory,
         ).submit(
             assignment_id,
             body.answers,
@@ -2666,6 +2808,9 @@ class SlowService:
             self.db,
             user_id=self.user_id,
             ai=self.ai,
+            context_builder=self.generation_contexts,
+            context_resolver=self.contexts,
+            memory_loader=self._memory,
         ).skip(assignment_id)
 
     def expire_review(self, assignment_id: str):
@@ -2673,6 +2818,9 @@ class SlowService:
             self.db,
             user_id=self.user_id,
             ai=self.ai,
+            context_builder=self.generation_contexts,
+            context_resolver=self.contexts,
+            memory_loader=self._memory,
         ).expire(assignment_id)
 
     async def _ensure_note(self, section):
@@ -2680,12 +2828,45 @@ class SlowService:
             user_id=self.user_id,
             section_id=section.id,
         )
+        learning_run = self.progress.active_run(context.series.id)
+        binding = self.db.scalar(
+            select(LearningRunSectionBinding).where(
+                LearningRunSectionBinding.learning_run_id == learning_run.id,
+                LearningRunSectionBinding.user_id == self.user_id,
+                LearningRunSectionBinding.section_id == section.id,
+            )
+        )
+        contract = (
+            self.db.get(
+                LearningContractVersion,
+                binding.learning_contract_version_id,
+            )
+            if binding
+            else None
+        )
+        mission = (
+            self.db.get(LearningMissionVersion, contract.mission_version_id)
+            if contract
+            else None
+        )
+        context_pack = self.generation_contexts.build(
+            "learning_note",
+            shelf=context.shelf,
+            series=context.series,
+            book=context.book,
+            chapter=context.chapter,
+            section=section,
+            mission=mission,
+            contract=contract,
+            memory=self._memory(context.book.shelf_id, 30),
+        )
         await GenerateLearningNote(
             self.db,
             user_id=self.user_id,
-            learning_run_id=self.progress.active_run(context.series.id).id,
+            learning_run_id=learning_run.id,
             tutor=self.ai,
             section_reader=self.section,
+            generation_context=context_pack.payload(),
         ).execute(section)
 
     def _note(self, note):
@@ -2999,10 +3180,41 @@ class SlowService:
             if item.thread_id != body.thread_id and item.summary
         ][:5]
         suggested = uid("thread")
+        contract = self.db.get(
+            LearningContractVersion,
+            binding.learning_contract_version_id,
+        )
+        mission = (
+            self.db.get(LearningMissionVersion, contract.mission_version_id)
+            if contract
+            else None
+        )
+        cross_section_memory = self._memory(
+            section_context.book.shelf_id,
+            10,
+        )
+        interaction = {
+            "anchorBlockId": body.block_id,
+            "question": body.question,
+            "currentThreadFullHistory": current_history,
+            "relatedThreadSummaries": related_summaries,
+        }
+        context_pack = self.generation_contexts.build(
+            "ask_ai",
+            shelf=section_context.shelf,
+            series=section_context.series,
+            book=section_context.book,
+            chapter=section_context.chapter,
+            section=section_context.section,
+            mission=mission,
+            contract=contract,
+            memory=cross_section_memory,
+            interaction=interaction,
+        )
         return {
             "session": session,
             "suggestedThreadId": suggested,
-            "request": {
+            "request": self.generation_contexts.attach({
                 "section": section_view,
                 "anchorBlockId": body.block_id,
                 "question": body.question,
@@ -3012,9 +3224,9 @@ class SlowService:
                 "weightedContext": {
                     "currentThreadFullHistory": current_history,
                     "relatedThreadSummaries": related_summaries,
-                    "crossSectionMemory": self._memory(section_context.book.shelf_id, 10),
+                    "crossSectionMemory": cross_section_memory,
                 },
-            },
+            }, context_pack),
         }
 
     def _save_qa_answer(self, context, body, answer, suggested_relation, thread_summary=""):
@@ -3153,10 +3365,43 @@ class SlowService:
             if answer:
                 raise AppError("请先开始深入讨论再作答", code="ASK_ME_NOT_STARTED")
             section_view = self.section(section_id)
+            contract = self.db.get(
+                LearningContractVersion,
+                binding.learning_contract_version_id,
+            )
+            mission = (
+                self.db.get(LearningMissionVersion, contract.mission_version_id)
+                if contract
+                else None
+            )
+            context_pack = self.generation_contexts.build(
+                "ask_me",
+                shelf=section_context.shelf,
+                series=section_context.series,
+                book=section_context.book,
+                chapter=section_context.chapter,
+                section=section,
+                mission=mission,
+                contract=contract,
+                memory=self._memory(section_context.book.shelf_id, 10),
+                interaction={"dimension": "mechanism", "priorRounds": []},
+            )
             self.db.commit()
             turn = None
             for validation_attempt in range(1, 4):
-                turn = await self.ai.ask_me({"section": section_view, "dimension": "mechanism", "previousAnswer": None, "finalize": False, "validationAttempt": validation_attempt, "requiredEvaluation": "not_evaluated"})
+                turn = await self.ai.ask_me(
+                    self.generation_contexts.attach(
+                        {
+                            "section": section_view,
+                            "dimension": "mechanism",
+                            "previousAnswer": None,
+                            "finalize": False,
+                            "validationAttempt": validation_attempt,
+                            "requiredEvaluation": "not_evaluated",
+                        },
+                        context_pack,
+                    )
+                )
                 if turn.dimension == "mechanism" and turn.evaluation == "not_evaluated":
                     break
             if turn is None or turn.dimension != "mechanism" or turn.evaluation != "not_evaluated":
@@ -3189,11 +3434,38 @@ class SlowService:
         finalize = current == 2
         requested_dimension = current_dimension if finalize else dimensions[current + 1]
         section_view = self.section(section_id)
+        contract = self.db.get(
+            LearningContractVersion,
+            binding.learning_contract_version_id,
+        )
+        mission = (
+            self.db.get(LearningMissionVersion, contract.mission_version_id)
+            if contract
+            else None
+        )
+        context_pack = self.generation_contexts.build(
+            "ask_me",
+            shelf=section_context.shelf,
+            series=section_context.series,
+            book=section_context.book,
+            chapter=section_context.chapter,
+            section=section,
+            mission=mission,
+            contract=contract,
+            memory=self._memory(section_context.book.shelf_id, 10),
+            interaction={
+                "dimension": requested_dimension,
+                "evaluatesDimension": current_dimension,
+                "previousPrompt": entries[current]["prompt"],
+                "previousAnswer": answer,
+                "priorRounds": entries,
+            },
+        )
         self.db.commit()
         turn = None
         for validation_attempt in range(1, 4):
             turn = await self.ai.ask_me(
-                {
+                self.generation_contexts.attach({
                     "section": section_view,
                     "dimension": requested_dimension,
                     "evaluatesDimension": current_dimension,
@@ -3203,7 +3475,7 @@ class SlowService:
                     "finalize": finalize,
                     "validationAttempt": validation_attempt,
                     "requiredEvaluation": ["strong", "partial", "weak"],
-                }
+                }, context_pack)
             )
             if turn.dimension == requested_dimension and turn.evaluation != "not_evaluated":
                 break

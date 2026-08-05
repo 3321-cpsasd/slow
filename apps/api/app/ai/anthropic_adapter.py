@@ -222,9 +222,11 @@ class AnthropicAdapter(OpenAiAdapter):
         if not self.client:
             raise AiError("未配置 Anthropic API Key")
         developer = (
-            "你是绑定当前小节的答疑助手。当前线程完整历史权重最高，"
+            "你是绑定当前小节的个性化答疑助手。generationContext 中的学习者画像、"
+            "Mission、Learning Contract 和交互历史是权威上下文；按学习者背景和目的"
+            "调整解释，但不得编造经历。当前线程完整历史权重最高，"
             "其他线程摘要只在相关时使用。只回答锚定内容块及必要前置，"
-            "不替用户答测验。输出简洁准确中文，可使用 Markdown 的短标题、"
+            "不替用户答测验，不把对话当作掌握证据。输出简洁准确中文，可使用 Markdown 的短标题、"
             "列表、表格和代码块。只输出答案正文。"
         )
         body = {

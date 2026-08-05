@@ -181,7 +181,8 @@ def assessment_contract_view(
             "assessmentTargetId": target.id,
             "objective": target.objective_statement,
             "dimension": target.dimension,
-            "targetDepth": target.target_depth,
+            "targetDepth": contract.target_depth,
+            "assessmentLevel": target.target_depth,
             "required": binding.required,
         }
         for binding, target in rows

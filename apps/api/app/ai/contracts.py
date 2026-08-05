@@ -143,6 +143,33 @@ class GeneratedLesson(GeneratedContent):
     questions: list[ChoiceQuestion] = Field(min_length=4, max_length=5)
 
 
+class LessonAlignmentIssue(StrictModel):
+    code: Literal[
+        "question_not_answered",
+        "objective_not_taught",
+        "quiz_not_grounded",
+        "learner_context_mismatch",
+        "block_inconsistency",
+    ]
+    severity: Literal["blocking", "warning"]
+    message: str
+    block_indexes: list[int] = Field(default_factory=list, max_length=12)
+    question_indexes: list[int] = Field(default_factory=list, max_length=5)
+
+
+class LessonAlignmentReview(StrictModel):
+    allowed: bool
+    issues: list[LessonAlignmentIssue] = Field(default_factory=list, max_length=20)
+    covered_objectives: list[str] = Field(default_factory=list, max_length=12)
+
+    @model_validator(mode="after")
+    def blocking_issues_match_decision(self):
+        blocking = any(item.severity == "blocking" for item in self.issues)
+        if self.allowed == blocking:
+            raise ValueError("alignment decision must match blocking issues")
+        return self
+
+
 class GeneratedRemediationContent(GeneratedContent):
     blocks: list[ContentBlock] = Field(min_length=1, max_length=5)
 

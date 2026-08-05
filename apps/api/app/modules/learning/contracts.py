@@ -16,6 +16,7 @@ from ...infrastructure.tables import (
     LearningContractConcept,
     LearningContractObjective,
     LearningContractVersion,
+    LearningMissionVersion,
     LearningObjective,
     LearningRun,
     LearningRunSectionBinding,
@@ -227,12 +228,18 @@ def ensure_learning_contract(
     """Create an immutable contract without changing an existing section instance."""
 
     mission_id = mission_version_id or mission_version_for_section(db, section.id)
+    mission = db.get(LearningMissionVersion, mission_id)
+    mission_constraints = _load(mission.constraints_json, {}) if mission else {}
+    delivery_depth = str(mission_constraints.get("depth") or "deep")
+    if delivery_depth not in {"overview", "deep", "mastery"}:
+        delivery_depth = "deep"
     target_rows = _ensure_section_targets(db, section)
     payload = {
         "schemaVersion": M1_CONTRACT_SCHEMA_VERSION,
         "sectionId": section.id,
         "missionVersionId": mission_id,
         "question": section.question,
+        "targetDepth": delivery_depth,
         "targets": [
             {
                 "assessmentTargetId": target.id,
@@ -270,12 +277,14 @@ def ensure_learning_contract(
         mission_version_id=mission_id,
         version=next_version,
         section_question_snapshot=section.question,
-        target_depth="standard",
+        target_depth=delivery_depth,
         boundaries_json="[]",
         generation_context_json=_dump(
             {
                 "mode": provenance_mode,
                 "sourceObjectives": _load(section.objectives_json, []),
+                "targetDepth": delivery_depth,
+                "contextPolicyVersion": "lesson_content_context_v1",
             }
         ),
         provenance_mode=provenance_mode,

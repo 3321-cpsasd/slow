@@ -44,7 +44,13 @@ class MissionService:
         self.user_id = user_id
         self.uid = uid
 
-    def create_for_plan(self, *, plan: LearningPlan, generated) -> LearningMissionVersion:
+    def create_for_plan(
+        self,
+        *,
+        plan: LearningPlan,
+        generated,
+        learner_context: dict | None = None,
+    ) -> LearningMissionVersion:
         inferred_fields = []
         why = plan.purpose.strip()
         if not why:
@@ -60,6 +66,11 @@ class MissionService:
             }
             for position, book in enumerate(generated.books, 1)
         ]
+        adopted_learner_context = {
+            **(learner_context or {}),
+            "role": plan.role,
+            "experience": plan.experience,
+        }
         payload = {
             "why": why,
             "targetCapabilities": capabilities,
@@ -69,10 +80,7 @@ class MissionService:
             },
             "outOfScope": [],
             "assumptions": list(generated.assumptions),
-            "learnerContext": {
-                "role": plan.role,
-                "experience": plan.experience,
-            },
+            "learnerContext": adopted_learner_context,
             "inferredFields": inferred_fields,
             "schemaVersion": SCHEMA_VERSION,
         }
@@ -93,6 +101,7 @@ class MissionService:
                 "mode": "plan_creation",
                 "sourcePlanId": plan.id,
                 "purposeSource": "user_input" if not inferred_fields else "system_default",
+                "profileVersion": adopted_learner_context.get("profileVersion", 0),
             }),
             schema_version=SCHEMA_VERSION,
             payload_hash=_payload_hash(payload),

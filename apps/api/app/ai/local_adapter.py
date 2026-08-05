@@ -14,6 +14,7 @@ from .contracts import (
     GeneratedRemediationContent,
     GeneratedRemediationLesson,
     GeneratedSectionOutline,
+    LessonAlignmentReview,
     PlanBook,
     PlanChapter,
     PlanMilestone,
@@ -195,6 +196,13 @@ class LocalDemoAdapter:
         return schema(
             **content.model_dump(),
             questions=quiz.questions,
+        )
+
+    async def review_lesson_alignment(self, request, content, quiz):
+        return LessonAlignmentReview(
+            allowed=True,
+            issues=[],
+            covered_objectives=request.get("objectives") or [request["question"]],
         )
 
     async def answer(self, request):
