@@ -584,6 +584,98 @@ def test_migrations_recover_when_orm_precreated_future_tables(tmp_path):
     assert foreign_key_errors == []
 
 
+def test_layered_note_migration_repairs_intermediate_summary_schema(tmp_path):
+    database = tmp_path / "intermediate-note-summary.db"
+    run_alembic(database, "upgrade", "0027_milestone_paths")
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE learning_note_summaries (
+                id VARCHAR NOT NULL PRIMARY KEY,
+                note_id VARCHAR NOT NULL,
+                version INTEGER NOT NULL,
+                content_json TEXT NOT NULL,
+                source_content_version_id VARCHAR,
+                source_observation_watermark INTEGER NOT NULL DEFAULT 0,
+                generation_rule_version VARCHAR(40) NOT NULL
+                    DEFAULT 'note_summary_v1',
+                created_at DATETIME NOT NULL,
+                UNIQUE (note_id, version),
+                FOREIGN KEY(note_id) REFERENCES learning_notes (id),
+                FOREIGN KEY(source_content_version_id)
+                    REFERENCES content_versions (id)
+            )
+            """
+        )
+
+    run_alembic(database, "upgrade", "head")
+
+    with sqlite3.connect(database) as connection:
+        revision = connection.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone()[0]
+        summary_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(learning_note_summaries)"
+            )
+        }
+
+    assert revision == HEAD_REVISION
+    assert "source_contract_version" in summary_columns
+
+
+def test_assessment_migration_repairs_section_scoped_target_schema(tmp_path):
+    database = tmp_path / "section-scoped-targets.db"
+    run_alembic(database, "upgrade", "0027_milestone_paths")
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE assessment_targets (
+                id VARCHAR NOT NULL PRIMARY KEY,
+                section_id VARCHAR NOT NULL,
+                objective_key VARCHAR(300) NOT NULL,
+                objective_statement TEXT NOT NULL,
+                dimension VARCHAR(32) NOT NULL,
+                target_depth VARCHAR(32) NOT NULL,
+                status VARCHAR(24) NOT NULL,
+                created_at DATETIME NOT NULL,
+                CONSTRAINT uq_assessment_targets_section_semantics
+                    UNIQUE (
+                        section_id, objective_key, dimension, target_depth
+                    ),
+                FOREIGN KEY(section_id) REFERENCES sections (id)
+            )
+            """
+        )
+        connection.execute(
+            "CREATE INDEX ix_assessment_targets_section_id "
+            "ON assessment_targets (section_id)"
+        )
+        connection.execute(
+            "CREATE INDEX ix_assessment_targets_status "
+            "ON assessment_targets (status)"
+        )
+
+    run_alembic(database, "upgrade", "head")
+
+    with sqlite3.connect(database) as connection:
+        revision = connection.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone()[0]
+        target_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(assessment_targets)"
+            )
+        }
+
+    assert revision == HEAD_REVISION
+    assert "section_id" not in target_columns
+
+
 def test_shelf_origin_migration_removes_only_empty_non_demo_defaults(tmp_path):
     database = tmp_path / "default-shelf-cleanup.db"
     run_alembic(database, "upgrade", "0025_profile_onboarding")

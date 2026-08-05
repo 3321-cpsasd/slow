@@ -18,6 +18,13 @@ def _tables():
     return set(sa.inspect(op.get_bind()).get_table_names())
 
 
+def _columns(table_name):
+    return {
+        column["name"]
+        for column in sa.inspect(op.get_bind()).get_columns(table_name)
+    }
+
+
 def upgrade():
     if "assessment_targets" not in _tables():
         op.create_table(
@@ -36,6 +43,20 @@ def upgrade():
             ),
         )
         op.create_index("ix_assessment_targets_status", "assessment_targets", ["status"])
+    elif "section_id" in _columns("assessment_targets"):
+        # An intermediate ORM schema scoped targets directly to sections.
+        # Rebuild that provisional shape into the global target identity used
+        # by the authoritative section_assessment_targets binding table.
+        with op.batch_alter_table(
+            "assessment_targets",
+            recreate="always",
+        ) as batch_op:
+            batch_op.drop_index("ix_assessment_targets_section_id")
+            batch_op.drop_column("section_id")
+            batch_op.create_unique_constraint(
+                "uq_assessment_targets_semantics",
+                ["objective_key", "dimension", "target_depth"],
+            )
 
     if "section_assessment_targets" not in _tables():
         op.create_table(
@@ -215,6 +236,19 @@ def upgrade():
             sa.UniqueConstraint("note_id", "version", name="uq_learning_note_summaries_note_version"),
         )
         op.create_index("ix_learning_note_summaries_note_id", "learning_note_summaries", ["note_id"])
+    elif "source_contract_version" not in _columns("learning_note_summaries"):
+        # Some development databases were created from an intermediate ORM
+        # schema before this migration was stamped. Repair that known shape so
+        # the legacy-note backfill below remains repeatable and non-destructive.
+        op.add_column(
+            "learning_note_summaries",
+            sa.Column(
+                "source_contract_version",
+                sa.String(40),
+                nullable=False,
+                server_default="generated_note_v1",
+            ),
+        )
 
     if "learning_note_review_supplements" not in _tables():
         op.create_table(

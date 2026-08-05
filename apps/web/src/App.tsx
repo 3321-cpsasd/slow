@@ -28,7 +28,7 @@ type View = 'home' | 'shelf' | 'learn' | 'profile';
 type ReaderTab = 'content' | 'quiz' | 'note';
 type TextQuote = { text: string; blockId: string };
 type SelectionPopup = TextQuote & { top: number; left: number };
-const AI_RUNTIME_SETTINGS_ENABLED = import.meta.env.DEV;
+const AI_RUNTIME_SETTINGS_ENABLED = import.meta.env.VITE_INTERNAL_AI_SETTINGS === 'true';
 const GENERATION_STAGE_LABELS: Record<string, string> = {
   queued: '正在排队',
   content_generation: '正在生成正文',
