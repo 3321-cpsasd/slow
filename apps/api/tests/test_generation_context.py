@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
@@ -8,10 +10,12 @@ from app.ai.contracts import (
     GeneratedRemediationContent,
     LessonAlignmentIssue,
     LessonAlignmentReview,
+    TeachingBlueprint,
+    TeachingBlueprintBlock,
 )
 from app.application.generation_context import GenerationContextBuilder
 from app.core.errors import AppError
-from app.infrastructure.tables import ContentVersion, LearningContractVersion, Shelf
+from app.infrastructure.tables import ContentVersion, LearningContractVersion, Shelf, UserProfile
 from app.main import create_app
 from app.services.source_verifier import AcceptingSourceVerifier
 
@@ -25,6 +29,7 @@ class ContextRecordingAi(FakeAi):
         self.requests: dict[str, list[dict]] = {
             "plan": [],
             "chapter": [],
+            "blueprint": [],
             "content": [],
             "quiz": [],
             "alignment": [],
@@ -37,6 +42,24 @@ class ContextRecordingAi(FakeAi):
     async def chapter(self, request, memory):
         self.requests["chapter"].append(request)
         return await super().chapter(request, memory)
+
+    async def teaching_blueprint(self, request, memory):
+        self.requests["blueprint"].append(request)
+        return TeachingBlueprint(
+            narrative_thread="从招聘判断问题出发，沿同一候选人案例解释机制与边界。",
+            opening_move="先判断一位候选人能否解决给定业务问题。",
+            recurring_example="同一位候选人的项目经历与业务约束。",
+            core_model="用任务证据、作用机制和适用边界共同判断能力，而不是只看术语。",
+            recap_prompt="复述判断所需的三类证据和一个失效边界。",
+            preference_applications=["采用问题先行；图解仅在关系复杂时使用"],
+            blocks=[
+                TeachingBlueprintBlock(kind="text", role="conclusion", purpose="建立判断方向", heading_intent="先判断这份经历说明了什么"),
+                TeachingBlueprintBlock(kind="text", role="mechanism", purpose="解释能力证据链", heading_intent="从任务走到能力的证据链"),
+                TeachingBlueprintBlock(kind="text", role="example", purpose="推进候选人案例", heading_intent="把证据链放进候选人案例"),
+                TeachingBlueprintBlock(kind="text", role="boundary", purpose="识别判断失效边界", heading_intent="哪些经历还不能证明能力"),
+                TeachingBlueprintBlock(kind="text", role="practice", purpose="复述并迁移判断模型", heading_intent="换一份简历再做判断"),
+            ],
+        )
 
     async def lesson_content(self, request, memory, prior_questions=None):
         self.requests["content"].append(request)
@@ -119,6 +142,18 @@ def test_context_pack_propagates_profile_mission_depth_and_attempt():
             AcceptingSourceVerifier(),
         )
     ) as client:
+        with client.app.state.sessions() as db:
+            profile = db.get(UserProfile, "user_demo")
+            profile.preferences_json = json.dumps(
+                {
+                    "openingStyle": "problem_first",
+                    "explanationDensity": "thorough",
+                    "formatPreferences": ["worked_example", "diagram"],
+                    "interactionRhythm": "balanced",
+                },
+                ensure_ascii=False,
+            )
+            db.commit()
         series = _create(client)
         task = wait_for_task(client, series["initializationTask"]["taskId"])
         assert task["status"] == "succeeded"
@@ -136,6 +171,15 @@ def test_context_pack_propagates_profile_mission_depth_and_attempt():
         assert chapter_context["curriculum"]["book"]["title"]
 
         content_request = ai.requests["content"][0]
+        blueprint_request = ai.requests["blueprint"][0]
+        assert blueprint_request["generationContext"]["learner"]["preferences"] == {
+            "openingStyle": "problem_first",
+            "explanationDensity": "thorough",
+            "formatPreferences": ["worked_example", "diagram"],
+            "interactionRhythm": "balanced",
+        }
+        assert content_request["teachingBlueprint"]["version"] == "teaching_blueprint_v1"
+        assert content_request["teachingBlueprint"]["recurring_example"]
         content_context = content_request["generationContext"]
         assert content_context["operation"] == "lesson_content"
         assert content_context["learner"]["planRole"] == "猎头顾问"

@@ -721,6 +721,9 @@ def _record_qualification_events(
         if observation.quiz_set_id
         else None
     )
+    m2_governance_missing = bool(
+        observation.learning_contract_version_id and governance is None
+    )
     statuses = (
         {
             "gate": ("ineligible", "delayed review cannot rewrite the section gate"),
@@ -735,7 +738,9 @@ def _record_qualification_events(
             "mastery": ("ineligible", "quiz is not governance-qualified for mastery"),
             "retention": ("ineligible", "quiz is not governance-qualified for retention"),
         }
-        if governance and not governance.assessment_eligible
+        if m2_governance_missing or (
+            governance and not governance.assessment_eligible
+        )
         else {
             "gate": ("eligible", "attempt target outcome is aggregated"),
             "mastery": ("eligible_grouped", "one BKT update per learning episode and target"),

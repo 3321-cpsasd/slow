@@ -33,6 +33,7 @@ class LearnerContext(ContextModel):
     experience: str = ""
     weekly_minutes: int = Field(default=0, alias="weeklyMinutes")
     target_date: str = Field(default="", alias="targetDate")
+    preferences: dict[str, Any] = Field(default_factory=dict)
     plan_role: str = Field(default="", alias="planRole")
     plan_experience: str = Field(default="", alias="planExperience")
     provenance: str = "confirmed_profile"
@@ -195,8 +196,16 @@ CONTEXT_POLICIES: dict[ContextOperation, dict[str, Any]] = {
     },
     "lesson_content": {
         "required": ["learner", "mission", "curriculum", "learningState", "contract"],
-        "allowed": ["adapt examples, terminology and explanation depth"],
-        "forbidden": ["change assessment targets", "claim mastery", "invent learner experience"],
+        "allowed": [
+            "adapt examples, terminology and explanation depth",
+            "use explicit presentation preferences to rank pedagogically valid formats",
+        ],
+        "forbidden": [
+            "change assessment targets",
+            "claim mastery",
+            "invent learner experience",
+            "treat a presentation preference as evidence of learning effectiveness",
+        ],
     },
     "lesson_quiz": {
         "required": ["mission", "curriculum", "contract"],

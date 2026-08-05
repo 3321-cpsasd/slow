@@ -988,7 +988,7 @@ def test_source_repair_scope_discards_unaffected_block_rewrite():
         confidence="high",
         sources=[source_a, source_b],
         blocks=[
-            ContentBlock(kind="text", role=role, heading=role, content=f"原文 {index}", source_indexes=[index % 2])
+            ContentBlock(kind="text", role=role, heading=role, content=f"原文 {index}。", source_indexes=[index % 2])
             for index, role in enumerate(["conclusion", "mechanism", "example", "boundary", "practice"])
         ],
     )
@@ -1456,6 +1456,11 @@ def test_retention_discounts_same_source_and_counts_delayed_novel_review(client)
         )
         db.add(novel_quiz)
         db.flush()
+        reevaluate_generated_governance(
+            db,
+            quiz_id=novel_quiz.id,
+            actor_id="simulated_review_assignment",
+        )
         db.add(
             Remediation(
                 id="remediation_simulated_review_assignment",
@@ -2968,6 +2973,77 @@ def test_unverified_governance_allows_compatibility_gate_but_not_mastery():
                 for (observation_id, family), status in statuses.items()
                 if family in {"mastery", "retention"}
             } == {"ineligible"}
+            rebuild_user_projections(db, user_id="user_demo")
+        assert compatibility.get(
+            "/api/learning-memory?shelf_id=shelf_technology"
+        ).json() == []
+
+
+def test_unverified_remediation_cannot_bypass_quiz_governance():
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            FakeAi(),
+            ReachabilityOnlyVerifier(),
+        )
+    ) as compatibility:
+        series = create_series(compatibility)
+        chapter = compatibility.post(
+            f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+        ).json()
+        section = compatibility.post(
+            f"/api/sections/{chapter['sections'][0]['id']}/generate"
+        ).json()
+        answers = [[1] for _ in section["quiz"]["questions"]]
+        answers[0] = [0]
+        answers[1] = [0]
+        failed = compatibility.post(
+            f"/api/sections/{section['id']}/quiz",
+            json={"quizSetId": section["quiz"]["id"], "answers": answers},
+        ).json()
+        remediation_task = next(
+            item
+            for item in failed["workflowTasks"]
+            if item["type"] == "remediation_generation"
+        )
+        assert wait_for_task(
+            compatibility,
+            remediation_task["taskId"],
+        )["status"] == "succeeded"
+
+        replacement = compatibility.get(
+            f"/api/sections/{section['id']}"
+        ).json()["quiz"]
+        assert replacement["governance"]["assessmentEligible"] is False
+        resolved = compatibility.post(
+            f"/api/sections/{section['id']}/quiz",
+            json={
+                "quizSetId": replacement["id"],
+                "answers": [[1] for _ in replacement["questions"]],
+            },
+        )
+        assert resolved.status_code == 200
+        assert resolved.json()["passed"] is True
+
+        with compatibility.app.state.sessions() as db:
+            observations = db.scalars(
+                select(AssessmentObservation).where(
+                    AssessmentObservation.quiz_set_id == replacement["id"]
+                )
+            ).all()
+            mastery_statuses = {
+                item.status
+                for item in db.scalars(
+                    select(EvidenceQualificationEvent).where(
+                        EvidenceQualificationEvent.observation_id.in_(
+                            [item.id for item in observations]
+                        ),
+                        EvidenceQualificationEvent.projection_family == "mastery",
+                    )
+                ).all()
+            }
+            assert mastery_statuses == {"ineligible"}
+            assert db.scalars(select(KnowledgeStateProjection)).all() == []
 
 
 def test_runner_persists_failure_report_and_evidence_snapshot(tmp_path, monkeypatch):

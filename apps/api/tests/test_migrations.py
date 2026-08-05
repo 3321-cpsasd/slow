@@ -11,7 +11,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0034_learning_decision_snapshots"
+HEAD_REVISION = "0036_learning_preferences"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -149,6 +149,14 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
             row[1]
             for row in connection.execute("PRAGMA table_info(quiz_sets)")
         }
+        feedback_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(user_feedback)")
+        }
+        feedback_schema = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'user_feedback'"
+        ).fetchone()[0]
 
     assert revision == HEAD_REVISION
     assert "uq_quiz_attempts_run_user_idempotency" in attempt_schema
@@ -198,6 +206,8 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
     )
     assert shelf_columns["origin"][3] == 1
     assert {"weekly_minutes", "target_date"}.issubset(profile_columns)
+    assert "preferences_json" in profile_columns
+    assert profile_columns["preferences_json"][3] == 1
     assert {
         "user_id",
         "series_id",
@@ -242,6 +252,7 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
         "review_assignments",
         "review_assignment_events",
         "learning_decision_snapshots",
+        "user_feedback",
     }.issubset(trustworthy_tables)
     assert "section_id" not in assessment_target_columns
     assert {
@@ -256,6 +267,8 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
     assert "initial_mission_version_id" in run_columns
     assert "learning_contract_version_id" in content_columns
     assert "learning_contract_version_id" in quiz_binding_columns
+    assert {"idempotency_key", "request_hash"}.issubset(feedback_columns)
+    assert "uq_user_feedback_user_idempotency" in feedback_schema
     assert any(
         row[1] == "sqlite_autoindex_milestone_path_revisions_2" or row[2] == 1
         for row in milestone_revision_indexes

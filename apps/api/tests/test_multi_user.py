@@ -1,5 +1,6 @@
 from datetime import timedelta
 import asyncio
+import json
 import time
 from urllib.parse import parse_qs, urlparse
 
@@ -271,7 +272,27 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
     assert saved.json()["currentStep"] == "direction"
     resumed = client.get("/api/onboarding")
     assert resumed.json()["profile"]["profession"] == "产品设计师"
+    assert resumed.json()["profile"]["preferences"] == {
+        "openingStyle": "auto",
+        "explanationDensity": "auto",
+        "formatPreferences": [],
+        "interactionRhythm": "auto",
+    }
     assert resumed.json()["required"] is True
+
+    invalid_preferences = client.post(
+        "/api/onboarding/profile/complete",
+        headers={"X-CSRF-Token": me["csrfToken"]},
+        json={
+            "profession": "产品设计师",
+            "stage": "foundation",
+            "purpose": "系统学习信息可视化并用于作品集",
+            "domains": ["信息可视化"],
+            "preferences": {"openingStyle": "visual_learner"},
+        },
+    )
+    assert invalid_preferences.status_code == 400
+    assert invalid_preferences.json()["code"] == "INVALID_REQUEST"
 
     completed = client.post(
         "/api/onboarding/profile/complete",
@@ -282,10 +303,22 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
             "purpose": "系统学习信息可视化并用于作品集",
             "domains": ["信息可视化", "交互设计"],
             "experience": "有产品设计基础",
+            "preferences": {
+                "openingStyle": "problem_first",
+                "explanationDensity": "thorough",
+                "formatPreferences": ["worked_example", "diagram"],
+                "interactionRhythm": "balanced",
+            },
         },
     )
     assert completed.status_code == 200
     assert completed.json()["required"] is False
+    assert completed.json()["profile"]["preferences"] == {
+        "openingStyle": "problem_first",
+        "explanationDensity": "thorough",
+        "formatPreferences": ["worked_example", "diagram"],
+        "interactionRhythm": "balanced",
+    }
     with client.app.state.sessions() as db:
         profile = db.get(UserProfile, me["user"]["id"])
         revision = db.scalar(
@@ -299,7 +332,12 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
             )
         )
         assert profile.version == 1
+        assert json.loads(profile.preferences_json)["openingStyle"] == "problem_first"
         assert revision.source == "self_report"
+        assert json.loads(revision.snapshot_json)["preferences"]["formatPreferences"] == [
+            "worked_example",
+            "diagram",
+        ]
         assert flow.status == "completed"
 
     bootstrap = client.get("/api/bootstrap")

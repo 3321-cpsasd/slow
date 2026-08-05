@@ -163,6 +163,29 @@ def test_review_assignment_materializes_once_and_submits_candidate(tmp_path):
             ) == 3
 
 
+def test_review_selection_does_not_duplicate_an_unfinished_assignment_next_day(tmp_path):
+    with _review_client(tmp_path) as client:
+        _complete_initial_quiz_and_make_due(client)
+        first = client.get("/api/reviews/due?daily_budget=1").json()
+        assignment_id = first["items"][0]["assignmentId"]
+
+        with client.app.state.sessions() as db:
+            next_day = ReviewAssignmentService(
+                db,
+                user_id="user_demo",
+                ai=client.app.state.ai,
+            ).due(
+                daily_budget=1,
+                as_of=now() + timedelta(days=1),
+            )
+            assignments = db.scalars(select(ReviewAssignment)).all()
+
+        assert next_day["selectedCount"] == 0
+        assert len(assignments) == 1
+        assert assignments[0].id == assignment_id
+        assert assignments[0].status == "presented"
+
+
 def test_review_skip_is_terminal_and_creates_no_observation(tmp_path):
     with _review_client(tmp_path) as client:
         _complete_initial_quiz_and_make_due(client)

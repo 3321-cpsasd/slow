@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import ClassVar, Literal
 from urllib.parse import urlparse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -62,6 +62,34 @@ class GeneratedChapter(StrictModel):
     sections: list[GeneratedSectionOutline] = Field(min_length=3, max_length=5)
 
 
+class TeachingBlueprintBlock(StrictModel):
+    kind: Literal["text", "code", "formula", "table", "diagram"]
+    role: Literal[
+        "conclusion", "mechanism", "example", "boundary", "practice", "transition"
+    ]
+    purpose: str = Field(min_length=4, max_length=500)
+    heading_intent: str = Field(min_length=2, max_length=120)
+
+
+class TeachingBlueprint(StrictModel):
+    version: Literal["teaching_blueprint_v1"] = "teaching_blueprint_v1"
+    narrative_thread: str = Field(min_length=8, max_length=1000)
+    opening_move: str = Field(min_length=4, max_length=500)
+    recurring_example: str = Field(default="", max_length=800)
+    core_model: str = Field(min_length=8, max_length=1000)
+    recap_prompt: str = Field(min_length=4, max_length=500)
+    preference_applications: list[str] = Field(default_factory=list, max_length=8)
+    blocks: list[TeachingBlueprintBlock] = Field(min_length=5, max_length=9)
+
+    @model_validator(mode="after")
+    def covers_required_teaching_roles(self):
+        roles = {item.role for item in self.blocks}
+        required = {"conclusion", "mechanism", "example", "boundary", "practice"}
+        if not required.issubset(roles):
+            raise ValueError("teaching blueprint must cover all required roles")
+        return self
+
+
 class Source(StrictModel):
     title: str
     url: str
@@ -95,6 +123,9 @@ class ContentBlock(StrictModel):
     source_indexes: list[int] = Field(default_factory=list)
 
 
+CONTENT_SENTENCE_ENDINGS = tuple("。！？.!?；;：:）)]】」』”’\"'|")
+
+
 class ChoiceQuestion(StrictModel):
     prompt: str
     options: list[str] = Field(min_length=3, max_length=6)
@@ -112,6 +143,7 @@ class ChoiceQuestion(StrictModel):
 
 
 class GeneratedContent(StrictModel):
+    enforce_standard_sentence_endings: ClassVar[bool] = True
     confidence: Literal["high", "medium", "low"]
     sources: list[Source] = Field(min_length=1, max_length=12)
     blocks: list[ContentBlock] = Field(min_length=5, max_length=12)
@@ -130,6 +162,12 @@ class GeneratedContent(StrictModel):
                 )
             if any(index < 0 or index >= len(self.sources) for index in block.source_indexes):
                 raise ValueError("content block source index out of range")
+            if self.enforce_standard_sentence_endings:
+                content = block.content.strip()
+                if block.kind not in {"code", "formula"} and not content.endswith(
+                    CONTENT_SENTENCE_ENDINGS
+                ):
+                    raise ValueError("content block ends mid-sentence")
         return self
 
 
@@ -150,6 +188,12 @@ class LessonAlignmentIssue(StrictModel):
         "quiz_not_grounded",
         "learner_context_mismatch",
         "block_inconsistency",
+        "narrative_thread_missing",
+        "progression_broken",
+        "repetitive_or_templated",
+        "format_mismatch",
+        "example_disconnected",
+        "core_model_not_recapable",
     ]
     severity: Literal["blocking", "warning"]
     message: str
@@ -170,12 +214,29 @@ class LessonAlignmentReview(StrictModel):
         return self
 
 
+class ClaimSupportReview(StrictModel):
+    supported: bool
+    excerpt_id: str = ""
+    exact_quote: str = Field(default="", max_length=3000)
+    rationale: str = Field(default="", max_length=2000)
+
+    @model_validator(mode="after")
+    def supported_claim_requires_exact_evidence(self):
+        if self.supported and (
+            not self.excerpt_id.strip() or not self.exact_quote.strip()
+        ):
+            raise ValueError("supported claims require an excerpt id and exact quote")
+        if not self.supported and (self.excerpt_id or self.exact_quote):
+            raise ValueError("unsupported claims cannot carry support evidence")
+        return self
+
+
 class GeneratedRemediationContent(GeneratedContent):
+    enforce_standard_sentence_endings: ClassVar[bool] = False
     blocks: list[ContentBlock] = Field(min_length=1, max_length=5)
 
     @model_validator(mode="after")
     def valid_remediation_completeness(self):
-        sentence_endings = tuple("。！？.!?；;：:）)]】」』”’\"'|")
         for block in self.blocks:
             heading = block.heading.strip()
             content = block.content.strip()
@@ -193,7 +254,7 @@ class GeneratedRemediationContent(GeneratedContent):
             if content == heading:
                 raise ValueError("remediation block repeats its heading")
             if block.kind not in {"code", "formula"} and not content.endswith(
-                sentence_endings
+                CONTENT_SENTENCE_ENDINGS
             ):
                 raise ValueError("remediation block ends mid-sentence")
         return self

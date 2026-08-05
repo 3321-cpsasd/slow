@@ -315,7 +315,21 @@ def rebuild_user_projections(db: Session, *, user_id: str) -> dict:
         .where(LearningEvidence.user_id == user_id)
         .order_by(LearningEvidence.created_at, LearningEvidence.id)
     ).all()
+    m2_attempt_ids = set(
+        db.scalars(
+            select(QuizAttempt.id).where(
+                QuizAttempt.user_id == user_id,
+                QuizAttempt.learning_contract_version_id.is_not(None),
+            )
+        ).all()
+    )
     for evidence in evidence_rows:
+        evidence_payload = _load(evidence.result_json, {})
+        if (
+            evidence.evidence_type == "quiz"
+            and evidence_payload.get("attemptId") in m2_attempt_ids
+        ):
+            continue
         key = (evidence.shelf_id, evidence.concept)
         memory = memories.get(key)
         if not memory:

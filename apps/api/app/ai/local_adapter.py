@@ -3,6 +3,7 @@ import asyncio
 from .contracts import (
     AskMeTurn,
     ChoiceQuestion,
+    ClaimSupportReview,
     ClassifiedAnswer,
     ContentBlock,
     GeneratedChapter,
@@ -22,6 +23,8 @@ from .contracts import (
     ReplannedBook,
     ReplannedChapter,
     Source,
+    TeachingBlueprint,
+    TeachingBlueprintBlock,
 )
 from .port import ProviderCapabilities
 
@@ -122,22 +125,52 @@ class LocalDemoAdapter:
             ]
         )
 
+    async def teaching_blueprint(self, request, memory):
+        preferences = (
+            request.get("generationContext", {})
+            .get("learner", {})
+            .get("preferences", {})
+        )
+        formats = preferences.get("formatPreferences") or []
+        return TeachingBlueprint(
+            narrative_thread="从一个可观察的问题出发，建立判断机制，再用同一场景检查边界与迁移。",
+            opening_move="先给出一个需要判断的真实问题，让学习者带着问题进入机制。",
+            recurring_example="持续使用同一个最小场景，对照输入、机制、结果和失败边界。",
+            core_model="对象在约束下经过机制产生可观察结果，边界条件决定结论何时不成立。",
+            recap_prompt="不用术语，复述对象、机制、结果和一个失败边界。",
+            preference_applications=[
+                f"已记录表现形式偏好 {item}；本地演示内容仍使用文字以避免伪造该形式。"
+                for item in formats
+            ],
+            blocks=[
+                TeachingBlueprintBlock(kind="text", role="conclusion", purpose="建立问题与答案的方向感", heading_intent="先解决眼前的问题"),
+                TeachingBlueprintBlock(kind="text", role="mechanism", purpose="解释结果为何发生", heading_intent="沿着因果链向前走"),
+                TeachingBlueprintBlock(kind="text", role="example", purpose="用贯穿场景观察机制", heading_intent="把机制放进一个场景"),
+                TeachingBlueprintBlock(kind="text", role="boundary", purpose="识别结论失效条件", heading_intent="什么时候不能这样判断"),
+                TeachingBlueprintBlock(kind="text", role="practice", purpose="复述并迁移核心模型", heading_intent="换一个场景再判断一次"),
+            ],
+        )
+
     async def lesson_content(self, request, memory, prior_questions=None):
         source = Source(title="Python 官方教程（本地流程示例引用）", url="https://docs.python.org/3/tutorial/", kind="official", version="3.12")
-        roles = ["conclusion", "mechanism", "example", "boundary", "practice"]
+        blueprint = request.get("teachingBlueprint", {})
+        planned_blocks = blueprint.get("blocks") or [
+            {"kind": "text", "role": role, "heading_intent": f"{role}：{request['title']}"}
+            for role in ["conclusion", "mechanism", "example", "boundary", "practice"]
+        ]
         blocks = [
             ContentBlock(
-                kind="text",
-                role=role,
-                heading=f"{role}：{request['title']}",
+                kind=item.get("kind", "text"),
+                role=item["role"],
+                heading=item.get("heading_intent") or f"理解 {request['title']}",
                 content=(
-                    f"这是 {request['title']} 的{role}演示内容。它会先说明本节概念与问题之间的关系，"
+                    f"这是 {request['title']} 围绕贯穿场景展开的演示内容。它会先说明本节概念与问题之间的关系，"
                     "再用一个可观察的例子解释判断依据，并指出容易混淆的边界。"
                     "学习者可以据此复述机制、检查反例，并通过后续选择题验证自己是否真正理解。"
                 ),
                 source_indexes=[0],
             )
-            for role in roles
+            for item in planned_blocks
         ]
         schema = (
             GeneratedRemediationContent
@@ -204,6 +237,9 @@ class LocalDemoAdapter:
             issues=[],
             covered_objectives=request.get("objectives") or [request["question"]],
         )
+
+    async def review_source_claim(self, request):
+        return ClaimSupportReview(supported=False)
 
     async def answer(self, request):
         requested = request.get("requestedThreadId")

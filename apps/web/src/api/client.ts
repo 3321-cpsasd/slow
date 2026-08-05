@@ -161,6 +161,11 @@ export const api = {
     body:JSON.stringify(body),
   }),
   bootstrap:()=>call<import('../model/types').Bootstrap>('/api/bootstrap'),
+  submitFeedback:(body:object,idempotencyKey:string)=>call<import('../model/types').FeedbackReceipt>('/api/feedback',{
+    method:'POST',
+    headers:{'Idempotency-Key':idempotencyKey},
+    body:JSON.stringify(body),
+  }),
   createShelf:(body:import('../model/types').ShelfCreateInput)=>call<import('../model/types').Shelf>('/api/shelves',{method:'POST',body:JSON.stringify(body)}),
   updateResume:(sectionId:string,blockId='')=>call<import('../model/types').ResumePosition>(`/api/sections/${sectionId}/resume`,{method:'PUT',body:JSON.stringify({blockId})}),
   aiRuntime:()=>call<import('../model/types').AiRuntime>('/api/runtime/ai'),
@@ -172,6 +177,7 @@ export const api = {
   deleteBook:(id:string)=>call<void>(`/api/books/${id}`,{method:'DELETE'}),
   chapter:(id:string)=>call<import('../model/types').Chapter>(`/api/chapters/${id}/generate`,{method:'POST'}),
   section:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}`),
+  openSection:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}/open`,{method:'POST'}),
   generateSection:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}/generate`,{method:'POST'}),
   regenerateSection:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}/regenerate`,{method:'POST'}),
   quiz:(id:string,quizSetId:string,answers:number[][],idempotencyKey:string)=>call<import('../model/types').QuizResult>(`/api/sections/${id}/quiz`,{

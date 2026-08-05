@@ -13,6 +13,7 @@ from app.ai.contracts import (
     GeneratedQuiz,
     GeneratedRemediationContent,
     GeneratedSourceRepair,
+    TeachingBlueprint,
 )
 from app.ai.metering import AiUsageRecorder
 from app.ai.openai_adapter import OpenAiAdapter
@@ -37,6 +38,25 @@ class FakeProviderError(RuntimeError):
         super().__init__("provider failure")
         self.status_code = status_code
         self.code = code
+
+
+def test_teaching_blueprint_requires_every_learning_role():
+    with pytest.raises(ValidationError):
+        TeachingBlueprint.model_validate(
+            {
+                "narrative_thread": "围绕同一个问题逐步建立判断模型。",
+                "opening_move": "先给出一个问题。",
+                "core_model": "对象经过机制产生结果，并受到边界条件约束。",
+                "recap_prompt": "请复述这个模型。",
+                "blocks": [
+                    {"kind": "text", "role": "conclusion", "purpose": "回答问题", "heading_intent": "先作判断"},
+                    {"kind": "text", "role": "mechanism", "purpose": "解释机制", "heading_intent": "为何如此"},
+                    {"kind": "text", "role": "example", "purpose": "推进例子", "heading_intent": "放进场景"},
+                    {"kind": "text", "role": "boundary", "purpose": "说明边界", "heading_intent": "何时失效"},
+                    {"kind": "text", "role": "transition", "purpose": "连接段落", "heading_intent": "继续追问"},
+                ],
+            }
+        )
 
 
 class FakeChatCompletions:
@@ -314,7 +334,7 @@ def test_regeneration_with_prior_questions_uses_full_lesson_contract():
                             "kind": "text",
                             "role": role,
                             "heading": f"标题 {index}",
-                            "content": f"正文 {index}",
+                            "content": f"正文 {index}。",
                             "source_indexes": [0],
                         }
                         for index, role in enumerate(
@@ -381,7 +401,7 @@ def test_source_repair_uses_indexed_patch_and_preserves_other_blocks():
                     "kind": "text",
                     "role": role,
                     "heading": f"标题 {index}",
-                    "content": f"正文 {index}",
+                    "content": f"正文 {index}。",
                     "source_indexes": [index % 2],
                 }
                 for index, role in enumerate(
@@ -405,7 +425,7 @@ def test_source_repair_uses_indexed_patch_and_preserves_other_blocks():
                     "blocks": [{
                         "block_index": 1,
                         "heading": "修正标题",
-                        "content": "修正正文",
+                        "content": "修正正文。",
                     }],
                 }],
             })
@@ -430,7 +450,7 @@ def test_source_repair_uses_indexed_patch_and_preserves_other_blocks():
     assert repaired.sources[0] == original.sources[0]
     assert repaired.sources[1].url == "https://replacement.example.org/b2"
     assert repaired.blocks[0] == original.blocks[0]
-    assert repaired.blocks[1].content == "修正正文"
+    assert repaired.blocks[1].content == "修正正文。"
     assert repaired.blocks[3] == original.blocks[3]
 
 
@@ -449,7 +469,7 @@ def test_source_repair_rejects_a_new_path_on_a_failed_host():
                 "kind": "text",
                 "role": role,
                 "heading": role,
-                "content": role,
+                "content": f"{role}。",
                 "source_indexes": [0],
             } for role in ["conclusion", "mechanism", "example", "boundary", "practice"]],
         })

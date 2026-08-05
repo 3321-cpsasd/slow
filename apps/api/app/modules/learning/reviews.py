@@ -217,6 +217,18 @@ class ReviewAssignmentService:
             )
         )
         if not selection_run:
+            active_assignments = self.db.scalars(
+                select(ReviewAssignment).where(
+                    ReviewAssignment.user_id == self.user_id,
+                    ReviewAssignment.status.in_({"scheduled", "presented", "started"}),
+                )
+            ).all()
+            active_target_ids: set[str] = set()
+            for assignment in active_assignments:
+                if _utc(assignment.expires_at) < moment:
+                    self._apply_transition(assignment, "expired", moment)
+                else:
+                    active_target_ids.add(assignment.assessment_target_id)
             states = self.db.scalars(
                 select(ReviewState).where(
                     ReviewState.user_id == self.user_id,
@@ -232,6 +244,7 @@ class ReviewAssignmentService:
                     status=item.status,
                 )
                 for item in states
+                if item.assessment_target_id not in active_target_ids
             ]
             try:
                 selection = select_daily_reviews(

@@ -1512,6 +1512,20 @@ class SlowService:
             ai_harness_trace: list[dict] = []
             max_generation_attempts = 4
             if getattr(self.ai, "staged_lesson_generation", False):
+                blueprint_builder = getattr(self.ai, "teaching_blueprint", None)
+                if not retry and callable(blueprint_builder):
+                    update_generation_stage(
+                        "teaching_blueprint",
+                        **memory_trace,
+                    )
+                    blueprint = await blueprint_builder(lesson_request, memory)
+                    self._renew_generation_lease(resource_key, owner_id)
+                    blueprint_payload = blueprint.model_dump()
+                    lesson_request["teachingBlueprint"] = blueprint_payload
+                    regeneration_trace["teachingBlueprint"] = blueprint_payload
+                    regeneration_trace["generationVariant"] = (
+                        "preference_aware_blueprint_v1"
+                    )
                 update_generation_stage(
                     "content_generation",
                     sourceAttempt=1,
@@ -1939,6 +1953,17 @@ class SlowService:
                         quiz_id=quiz.id,
                         actor_id=run.id,
                     )
+                regeneration_trace["governanceDecision"] = governance
+            else:
+                # A remediation quiz still measures against the frozen source
+                # content.  Re-evaluate that content's existing claim/gap facts
+                # for the replacement quiz instead of treating a missing
+                # governance snapshot as implicit approval.
+                governance = reevaluate_generated_governance(
+                    self.db,
+                    quiz_id=quiz.id,
+                    actor_id=run.id,
+                )
                 regeneration_trace["governanceDecision"] = governance
             if retry:
                 if not retry_attempt_id:
@@ -2670,7 +2695,7 @@ class SlowService:
         memory.summary = f"{memory.evidence_count} 条证据，当前掌握度 {memory.mastery_score}/100；最近证据：{evidence_type}"
         memory.updated_at = now()
 
-    def _memory(self, shelf_id, limit=30):
+    def _memory(self, shelf_id, limit=30, *, include_legacy=False):
         target_scope = (
             select(SectionAssessmentTarget.assessment_target_id)
             .join(Section, Section.id == SectionAssessmentTarget.section_id)
@@ -2737,7 +2762,7 @@ class SlowService:
             " ".join(item["concept"].strip().casefold().split())
             for item in result
         }
-        if len(result) < limit:
+        if include_legacy and len(result) < limit:
             legacy_rows = self.db.scalars(
                 select(LearningMemory)
                 .where(
@@ -2765,9 +2790,12 @@ class SlowService:
     def learning_memory(self, shelf_id=None):
         if shelf_id:
             self.shelf(shelf_id)
-            return self._memory(shelf_id, 200)
+            return self._memory(shelf_id, 200, include_legacy=True)
         shelves = self.db.scalars(select(Shelf).where(Shelf.user_id == self.user_id)).all()
-        return {item.id: self._memory(item.id, 200) for item in shelves}
+        return {
+            item.id: self._memory(item.id, 200, include_legacy=True)
+            for item in shelves
+        }
 
     def due_reviews(self, daily_budget=10):
         return ReviewAssignmentService(

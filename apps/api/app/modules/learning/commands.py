@@ -392,7 +392,17 @@ class SubmitQuiz:
                 section_progress.status = "completed"
         if not completion_passed and not was_completed:
             section_progress.status = "available"
-        self._record_evidence(context, questions, grade.results, attempt.id)
+        self._record_evidence(
+            context,
+            questions,
+            grade.results,
+            attempt.id,
+            # Keep the append-only compatibility fact for audit/rebuild, but
+            # M2 mastery is projected exclusively from qualified observations.
+            # Mirroring it into linear memory would let governance-ineligible
+            # evidence re-enter generation context.
+            update_legacy_memory=not bool(quiz.learning_contract_version_id),
+        )
 
         workflow_tasks: list[LearningTask] = []
         if first_completion:
@@ -659,6 +669,8 @@ class SubmitQuiz:
         questions: list[dict],
         results: list[dict],
         attempt_id: str,
+        *,
+        update_legacy_memory: bool = True,
     ) -> None:
         for question, result in zip(questions, results, strict=True):
             concept = question["objective"][:300]
@@ -684,6 +696,8 @@ class SubmitQuiz:
                 mastery_delta=delta,
             )
             self.db.add(evidence)
+            if not update_legacy_memory:
+                continue
             memory = self.db.scalar(
                 select(LearningMemory).where(
                     LearningMemory.user_id == self.user_id,

@@ -153,6 +153,7 @@ class GenerationContextBuilder:
             "experience": profile.experience if profile else "",
             "weeklyMinutes": profile.weekly_minutes if profile else 0,
             "targetDate": profile.target_date if profile else "",
+            "preferences": _load(profile.preferences_json, {}) if profile else {},
         }
         adopted = _load(mission.learner_context_json, {}) if mission else {}
         submitted = plan_input or {}
@@ -175,6 +176,7 @@ class GenerationContextBuilder:
             ("experience", "experience"),
             ("weeklyMinutes", "weeklyMinutes"),
             ("targetDate", "targetDate"),
+            ("preferences", "preferences"),
         ):
             if adopted.get(key) not in (None, "", []):
                 baseline[alias] = adopted[key]

@@ -30,6 +30,42 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class UserFeedback(Base):
+    """Immutable feedback fact submitted by an authenticated user."""
+
+    __tablename__ = "user_feedback"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "idempotency_key",
+            name="uq_user_feedback_user_idempotency",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    scope: Mapped[str] = mapped_column(String(24), index=True)
+    feedback_type: Mapped[str] = mapped_column(String(32), index=True)
+    message: Mapped[str] = mapped_column(Text, default="")
+    page_path: Mapped[str] = mapped_column(String(500), default="/")
+    view: Mapped[str] = mapped_column(String(40), default="")
+    section_id: Mapped[str | None] = mapped_column(
+        ForeignKey("sections.id"), nullable=True, index=True
+    )
+    content_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("content_versions.id"), nullable=True, index=True
+    )
+    block_id: Mapped[str | None] = mapped_column(String(160), nullable=True, index=True)
+    block_snapshot_hash: Mapped[str] = mapped_column(String(64), default="")
+    source_mode: Mapped[str] = mapped_column(String(40))
+    schema_version: Mapped[str] = mapped_column(String(40), default="feedback_v1")
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    context_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
 class UserProfile(Base):
     __tablename__ = "user_profiles"
     user_id: Mapped[str] = mapped_column(
@@ -42,6 +78,7 @@ class UserProfile(Base):
     experience: Mapped[str] = mapped_column(Text, default="")
     weekly_minutes: Mapped[int] = mapped_column(Integer, default=0)
     target_date: Mapped[str] = mapped_column(String(10), default="")
+    preferences_json: Mapped[str] = mapped_column(Text, default="{}")
     version: Mapped[int] = mapped_column(Integer, default=0)
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

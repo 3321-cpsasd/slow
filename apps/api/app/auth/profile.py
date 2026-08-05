@@ -33,6 +33,18 @@ PROFILE_STEPS = (
     },
 )
 PROFILE_STEP_IDS = {item["id"] for item in PROFILE_STEPS}
+DEFAULT_LEARNING_PREFERENCES = {
+    "openingStyle": "auto",
+    "explanationDensity": "auto",
+    "formatPreferences": [],
+    "interactionRhythm": "auto",
+}
+PREFERENCE_VALUES = {
+    "openingStyle": {"auto", "problem_first", "example_first", "concept_first"},
+    "explanationDensity": {"auto", "concise", "balanced", "thorough"},
+    "formatPreferences": {"diagram", "worked_example", "code", "table", "analogy"},
+    "interactionRhythm": {"auto", "low_interruption", "balanced", "frequent_checkins"},
+}
 
 
 def _dump(value) -> str:
@@ -214,7 +226,41 @@ class ProfileService:
             profile.domains_json = _dump(
                 self._normalized_domains(_dump(values["domains"]))
             )
+        if values.get("preferences") is not None:
+            profile.preferences_json = _dump(
+                self._normalized_preferences(values["preferences"])
+            )
         profile.updated_at = now()
+
+    @staticmethod
+    def _normalized_preferences(value) -> dict:
+        if isinstance(value, str):
+            value = _load(value, {})
+        value = value if isinstance(value, dict) else {}
+        result = dict(DEFAULT_LEARNING_PREFERENCES)
+        aliases = {
+            "openingStyle": ("openingStyle", "opening_style"),
+            "explanationDensity": ("explanationDensity", "explanation_density"),
+            "formatPreferences": ("formatPreferences", "format_preferences"),
+            "interactionRhythm": ("interactionRhythm", "interaction_rhythm"),
+        }
+        for key in ("openingStyle", "explanationDensity", "interactionRhythm"):
+            candidate = next(
+                (value.get(alias) for alias in aliases[key] if value.get(alias)),
+                "auto",
+            )
+            if candidate in PREFERENCE_VALUES[key]:
+                result[key] = candidate
+        formats = next(
+            (value.get(alias) for alias in aliases["formatPreferences"] if value.get(alias) is not None),
+            [],
+        )
+        result["formatPreferences"] = [
+            item
+            for item in dict.fromkeys(formats if isinstance(formats, list) else [])
+            if item in PREFERENCE_VALUES["formatPreferences"]
+        ][:5]
+        return result
 
     def _profile_view(self, profile: UserProfile | None) -> dict:
         if not profile:
@@ -226,6 +272,7 @@ class ProfileService:
                 "experience": "",
                 "weeklyMinutes": 0,
                 "targetDate": "",
+                "preferences": dict(DEFAULT_LEARNING_PREFERENCES),
                 "version": 0,
                 "completedAt": None,
             }
@@ -237,6 +284,7 @@ class ProfileService:
             "experience": profile.experience,
             "weeklyMinutes": profile.weekly_minutes,
             "targetDate": profile.target_date,
+            "preferences": self._normalized_preferences(profile.preferences_json),
             "version": profile.version,
             "completedAt": (
                 profile.completed_at.isoformat()

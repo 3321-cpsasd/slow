@@ -14,6 +14,7 @@ import type {
   Chapter,
   LearningTask,
   LearningProfile,
+  LearningPreferences,
   Note as NoteType,
   NoteContent,
   QuizResult,
@@ -28,6 +29,14 @@ type View = 'home' | 'shelf' | 'learn' | 'profile';
 type ReaderTab = 'content' | 'quiz' | 'note';
 type TextQuote = { text: string; blockId: string };
 type SelectionPopup = TextQuote & { top: number; left: number };
+type FeedbackTarget =
+  | { scope: 'global' }
+  | {
+      scope: 'content_block';
+      sectionId: string;
+      contentVersionId: string;
+      block: Block;
+    };
 const AI_RUNTIME_SETTINGS_ENABLED = import.meta.env.VITE_INTERNAL_AI_SETTINGS === 'true';
 const GENERATION_STAGE_LABELS: Record<string, string> = {
   queued: '正在排队',
@@ -69,6 +78,7 @@ export default function App() {
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [showAiSettings, setShowAiSettings] = useState(false);
+  const [feedbackTarget, setFeedbackTarget] = useState<FeedbackTarget | null>(null);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [profileSection, setProfileSection] = useState<'profile' | 'account'>(() => (
     new URLSearchParams(window.location.search).get('section') === 'account' ? 'account' : 'profile'
@@ -234,10 +244,18 @@ export default function App() {
     setProfileSection(nextSection);
   };
 
-  const loadSection = async (sectionId: string) => {
-    const value = await run('正在读取小节…', () => api.section(sectionId));
-    setSection(value);
+  const openAndTrackSection = async (sectionId: string) => {
+    const value = await api.openSection(sectionId);
     void api.updateResume(sectionId).catch(() => undefined);
+    return value;
+  };
+
+  const loadSection = async (sectionId: string) => {
+    const value = await run(
+      '正在读取小节…',
+      () => openAndTrackSection(sectionId),
+    );
+    setSection(value);
     return value;
   };
 
@@ -275,14 +293,18 @@ export default function App() {
           const targetSectionId = typeof task.result?.targetSectionId === 'string'
             ? task.result.targetSectionId
             : firstUsableSection(refreshed);
-          if (targetSectionId) setSection(await api.section(targetSectionId));
+          if (targetSectionId) {
+            setSection(await openAndTrackSection(targetSectionId));
+          }
           return true;
         }
         if (task.status === 'failed') {
           const refreshed = await api.series(value.id);
           setSeries(refreshed);
           const fallbackSectionId = firstUsableSection(refreshed);
-          if (fallbackSectionId) setSection(await api.section(fallbackSectionId));
+          if (fallbackSectionId) {
+            setSection(await openAndTrackSection(fallbackSectionId));
+          }
           setError('第一节后台准备失败。目录已经保存，可以从第一章安全重试。');
           return true;
         }
@@ -787,6 +809,15 @@ export default function App() {
                 }
               });
               }}
+              onFeedbackBlock={(block) => {
+                if (!section?.content) return;
+                setFeedbackTarget({
+                  scope: 'content_block',
+                  sectionId: section.id,
+                  contentVersionId: section.content.id,
+                  block,
+                });
+              }}
             />
           </>
         )}
@@ -794,6 +825,205 @@ export default function App() {
       {AI_RUNTIME_SETTINGS_ENABLED && showAiSettings && (
         <AiSettingsDialog onClose={() => setShowAiSettings(false)} />
       )}
+      <button
+        className="global-feedback-tab"
+        aria-label="反馈产品问题或建议"
+        onClick={() => setFeedbackTarget({ scope: 'global' })}
+      >
+        <span aria-hidden="true">✦</span> 反馈
+      </button>
+      {feedbackTarget && (
+        <FeedbackDialog
+          target={feedbackTarget}
+          view={view}
+          onClose={() => setFeedbackTarget(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function FeedbackDialog({
+  target,
+  view,
+  onClose,
+}: {
+  target: FeedbackTarget;
+  view: View;
+  onClose: () => void;
+}) {
+  const options = target.scope === 'content_block'
+    ? [
+        ['inaccurate', '内容不准确'],
+        ['unclear', '没有讲清楚'],
+        ['poor_example', '例子不合适'],
+        ['typo', '错别字'],
+        ['layout', '排版有问题'],
+        ['other', '其他'],
+      ]
+    : [
+        ['bug', '遇到问题'],
+        ['feature', '功能建议'],
+        ['experience', '体验感受'],
+        ['other', '其他'],
+      ];
+  const [feedbackType, setFeedbackType] = useState(options[0][0]);
+  const [message, setMessage] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [status, setStatus] = useState('');
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const returnFocusRef = useRef<HTMLElement | null>(null);
+  const submittingRef = useRef(submitting);
+  const onCloseRef = useRef(onClose);
+  const closeTimerRef = useRef<number | undefined>(undefined);
+  const submissionRef = useRef({ payload: '', key: '' });
+  submittingRef.current = submitting;
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    const activeElement = document.activeElement;
+    returnFocusRef.current = activeElement instanceof HTMLElement ? activeElement : null;
+    const initialFocus = target.scope === 'global'
+      ? dialog?.querySelector<HTMLElement>('textarea')
+      : dialog?.querySelector<HTMLElement>('input[type="radio"]:checked');
+    (initialFocus || dialog)?.focus();
+
+    const handleDialogKeys = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        if (!submittingRef.current) onCloseRef.current();
+        return;
+      }
+      if (event.key !== 'Tab' || !dialog) return;
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
+        'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])',
+      )).filter((element) => !element.hasAttribute('hidden'));
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      } else if (!dialog.contains(document.activeElement)) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', handleDialogKeys);
+    return () => {
+      document.removeEventListener('keydown', handleDialogKeys);
+      if (closeTimerRef.current !== undefined) window.clearTimeout(closeTimerRef.current);
+      if (returnFocusRef.current?.isConnected) returnFocusRef.current.focus();
+    };
+  }, [target.scope]);
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setStatus('');
+    try {
+      const payload = {
+        scope: target.scope,
+        feedbackType,
+        message,
+        pagePath: window.location.pathname,
+        view,
+        ...(target.scope === 'content_block' ? {
+          sectionId: target.sectionId,
+          contentVersionId: target.contentVersionId,
+          blockId: target.block.id,
+        } : {}),
+      };
+      const serializedPayload = JSON.stringify(payload);
+      if (submissionRef.current.payload !== serializedPayload) {
+        submissionRef.current = {
+          payload: serializedPayload,
+          key: crypto.randomUUID(),
+        };
+      }
+      await api.submitFeedback(payload, submissionRef.current.key);
+      setStatus('已收到。我们会把它放进下一次反馈整理。');
+      closeTimerRef.current = window.setTimeout(() => onCloseRef.current(), 900);
+    } catch (reason) {
+      setStatus(reason instanceof Error ? reason.message : '反馈没有提交成功，请稍后重试。');
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      className="confirm-backdrop feedback-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !submitting) onClose();
+      }}
+    >
+      <section
+        className="feedback-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="feedback-title"
+        ref={dialogRef}
+        tabIndex={-1}
+      >
+        <header>
+          <div>
+            <p className="eyebrow">{target.scope === 'content_block' ? '正文页边批注' : '告诉我们你的感受'}</p>
+            <h2 id="feedback-title">{target.scope === 'content_block' ? '反馈这一段' : '全局反馈'}</h2>
+          </div>
+          <button className="dialog-close" type="button" aria-label="关闭反馈" disabled={submitting} onClick={onClose}>×</button>
+        </header>
+        {target.scope === 'content_block' && (
+          <div className="feedback-block-preview">
+            <span>{target.block.heading}</span>
+            <p>{target.block.content.replace(/[#*_`>|]/g, '').slice(0, 150)}</p>
+          </div>
+        )}
+        <form onSubmit={submit}>
+          <fieldset disabled={submitting}>
+            <legend>这次想反馈什么？</legend>
+            <div className="feedback-type-grid">
+              {options.map(([value, label]) => (
+                <label className={feedbackType === value ? 'selected' : ''} key={value}>
+                  <input
+                    type="radio"
+                    name="feedback-type"
+                    value={value}
+                    checked={feedbackType === value}
+                    onChange={() => setFeedbackType(value)}
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+          </fieldset>
+          <label className="feedback-message-label">
+            {target.scope === 'content_block' ? '补充说明（可选）' : '具体说说'}
+            <textarea
+              value={message}
+              maxLength={4000}
+              required={target.scope === 'global' || feedbackType === 'other'}
+              placeholder={target.scope === 'content_block' ? '哪里不对，或者怎样会更容易理解？' : '遇到了什么，或者希望我们改进什么？'}
+              onChange={(event) => setMessage(event.target.value)}
+              disabled={submitting}
+            />
+            <small>请勿填写密码、API Key 或其他敏感信息 · {message.length}/4000</small>
+          </label>
+          {status && <p className="feedback-status" role="status">{status}</p>}
+          <div className="dialog-actions">
+            <button type="button" className="quiet-button" disabled={submitting} onClick={onClose}>取消</button>
+            <button className="primary-button" disabled={submitting || ((target.scope === 'global' || feedbackType === 'other') && message.trim().length < 2)}>
+              {submitting ? '正在送出…' : '发送反馈'}
+            </button>
+          </div>
+        </form>
+      </section>
     </div>
   );
 }
@@ -1174,6 +1404,42 @@ const PROFILE_STAGE_OPTIONS: { value: LearningProfile['stage']; label: string }[
   { value: 'advanced', label: '系统进阶' },
 ];
 
+const DEFAULT_LEARNING_PREFERENCES: LearningPreferences = {
+  openingStyle: 'auto',
+  explanationDensity: 'auto',
+  formatPreferences: [],
+  interactionRhythm: 'auto',
+};
+
+const PROFILE_PREFERENCE_OPTIONS = {
+  openingStyle: [
+    ['auto', '由内容决定', '根据本节问题自动选择'],
+    ['problem_first', '问题先行', '先抛出需要解决的问题'],
+    ['example_first', '例子先行', '先从一个具体场景进入'],
+    ['concept_first', '概念先行', '先建立准确的定义与框架'],
+  ],
+  explanationDensity: [
+    ['auto', '由内容决定', '按知识难度自动调整'],
+    ['concise', '更精炼', '减少铺垫，保留关键推理'],
+    ['balanced', '适中', '解释与节奏保持平衡'],
+    ['thorough', '更充分', '多展开机制、边界与反例'],
+  ],
+  interactionRhythm: [
+    ['auto', '由内容决定', '按学习任务自动安排'],
+    ['low_interruption', '连续阅读', '少打断，集中到段尾练习'],
+    ['balanced', '适度停顿', '在关键转折处确认理解'],
+    ['frequent_checkins', '频繁确认', '用更多短问题检查跟进'],
+  ],
+} as const;
+
+const PROFILE_FORMAT_OPTIONS: { value: LearningPreferences['formatPreferences'][number]; label: string; note: string }[] = [
+  { value: 'worked_example', label: '推演例题', note: '一步步展示判断过程' },
+  { value: 'diagram', label: '关系图解', note: '适合结构、流程和关系' },
+  { value: 'table', label: '对照表', note: '适合稳定维度的比较' },
+  { value: 'code', label: '代码演示', note: '适合可执行的机制' },
+  { value: 'analogy', label: '类比', note: '用熟悉对象搭桥' },
+];
+
 function parseProfileDomains(value: string) {
   return Array.from(new Set(
     value
@@ -1211,6 +1477,11 @@ function ProfileCenterPage({
   const [experience, setExperience] = useState(profile.experience);
   const [weeklyMinutes, setWeeklyMinutes] = useState(profile.weeklyMinutes || 0);
   const [targetDate, setTargetDate] = useState(profile.targetDate || '');
+  const initialPreferences = profile.preferences || DEFAULT_LEARNING_PREFERENCES;
+  const [openingStyle, setOpeningStyle] = useState(initialPreferences.openingStyle);
+  const [explanationDensity, setExplanationDensity] = useState(initialPreferences.explanationDensity);
+  const [formatPreferences, setFormatPreferences] = useState(initialPreferences.formatPreferences);
+  const [interactionRhythm, setInteractionRhythm] = useState(initialPreferences.interactionRhythm);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
@@ -1235,6 +1506,12 @@ function ProfileCenterPage({
         experience: experience.trim(),
         weeklyMinutes,
         targetDate,
+        preferences: {
+          openingStyle,
+          explanationDensity,
+          formatPreferences,
+          interactionRhythm,
+        },
       });
       setMessage(`已保存为学习画像 V${profile.version + 1}。已有测验与掌握证据保持不变。`);
     } catch (reason) {
@@ -1310,6 +1587,68 @@ function ProfileCenterPage({
             <label>相关经验 <em>可选</em>
               <textarea className="profile-experience-field" maxLength={1000} value={experience} onChange={(event) => setExperience(event.target.value)} />
             </label>
+          </fieldset>
+
+          <fieldset className="profile-field-group">
+            <legend>教材表达偏好</legend>
+            <p className="profile-preference-intro">这些选项只在多个正确、有效的教学方案之间排序。若图表或类比并不适合当前知识，教材仍会选择更清楚的文字或其他形式。</p>
+
+            <div className="profile-preference-section">
+              <span className="profile-preference-label">怎样进入一个新问题</span>
+              <div className="profile-choice-grid">
+                {PROFILE_PREFERENCE_OPTIONS.openingStyle.map(([value, label, note]) => (
+                  <label className={openingStyle === value ? 'selected' : ''} key={value}>
+                    <input type="radio" name="opening-style" value={value} checked={openingStyle === value} onChange={() => setOpeningStyle(value)} />
+                    <span><b>{label}</b><small>{note}</small></span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="profile-preference-section">
+              <span className="profile-preference-label">解释展开程度</span>
+              <div className="profile-choice-grid">
+                {PROFILE_PREFERENCE_OPTIONS.explanationDensity.map(([value, label, note]) => (
+                  <label className={explanationDensity === value ? 'selected' : ''} key={value}>
+                    <input type="radio" name="explanation-density" value={value} checked={explanationDensity === value} onChange={() => setExplanationDensity(value)} />
+                    <span><b>{label}</b><small>{note}</small></span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="profile-preference-section">
+              <span className="profile-preference-label">优先考虑的表现形式 <em>可多选</em></span>
+              <div className="profile-format-grid">
+                {PROFILE_FORMAT_OPTIONS.map((item) => {
+                  const selected = formatPreferences.includes(item.value);
+                  return (
+                    <label className={selected ? 'selected' : ''} key={item.value}>
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={() => setFormatPreferences((current) => selected
+                          ? current.filter((value) => value !== item.value)
+                          : [...current, item.value])}
+                      />
+                      <span><b>{item.label}</b><small>{item.note}</small></span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="profile-preference-section">
+              <span className="profile-preference-label">阅读中的确认节奏</span>
+              <div className="profile-choice-grid">
+                {PROFILE_PREFERENCE_OPTIONS.interactionRhythm.map(([value, label, note]) => (
+                  <label className={interactionRhythm === value ? 'selected' : ''} key={value}>
+                    <input type="radio" name="interaction-rhythm" value={value} checked={interactionRhythm === value} onChange={() => setInteractionRhythm(value)} />
+                    <span><b>{label}</b><small>{note}</small></span>
+                  </label>
+                ))}
+              </div>
+            </div>
           </fieldset>
 
           <fieldset className="profile-field-group">
@@ -1740,6 +2079,7 @@ function LearningWorkspace({
   onSectionChange,
   onRefreshSeries,
   onDeleteBook,
+  onFeedbackBlock,
 }: {
   series: Series;
   section: Section | null;
@@ -1753,6 +2093,7 @@ function LearningWorkspace({
   onSectionChange: (section: Section) => void;
   onRefreshSeries: () => Promise<void>;
   onDeleteBook: (bookId: string) => Promise<void>;
+  onFeedbackBlock: (block: Block) => void;
 }) {
   const [selectedBlockId, setSelectedBlockId] = useState('');
   const [selectedQuote, setSelectedQuote] = useState<TextQuote | null>(null);
@@ -1833,6 +2174,7 @@ function LearningWorkspace({
         onSelectSection={onSelectSection}
         onSectionChange={onSectionChange}
         onRefreshSeries={onRefreshSeries}
+        onFeedbackBlock={onFeedbackBlock}
       />
       <QaPanel
         key={section?.id || 'empty'}
@@ -2058,7 +2400,12 @@ function BookTree({
           return (
             <div className="chapter-node" key={chapter.id}>
               {chapter.generated || chapterLocked ? (
-                <div className={`chapter-title ${chapterLocked ? 'locked' : ''}`}>
+                <div
+                  className={`chapter-title ${chapterLocked ? 'locked' : ''}`}
+                  aria-label={chapterLocked
+                    ? `${chapter.title}，未解锁；完成上一章后生成 3 到 5 节`
+                    : chapter.title}
+                >
                   <span>{book.position}.{chapter.position}</span>
                   <b>{chapter.title}</b>
                   {chapterLocked && <LockIcon size={13} />}
@@ -2066,7 +2413,7 @@ function BookTree({
               ) : (
                 <button
                   className="chapter-title chapter-entry"
-                  aria-label={`生成并进入 ${chapter.title}`}
+                  aria-label={`生成 ${chapter.title} 的 3 到 5 节并进入`}
                   disabled={chapterGenerationDisabled || generatingChapterId === chapter.id}
                   onClick={() => onGenerateChapter(chapter)}
                 >
@@ -2091,6 +2438,18 @@ function BookTree({
                 ))}
               </div>
             ) : null}
+            {!chapter.generated && (
+              <div className={`chapter-plan-placeholder ${chapterLocked ? 'locked' : 'ready'}`}>
+                <span aria-hidden="true">
+                  {chapterLocked ? <LockIcon size={10} /> : <GenerateIcon />}
+                </span>
+                <small>
+                  {chapterLocked
+                    ? '完成上一章后解锁，并生成 3–5 节'
+                    : '点击章名，生成本章 3–5 节'}
+                </small>
+              </div>
+            )}
             {chapter.practice && (
               <ArtifactSubmission
                 kind="practice"
@@ -2159,6 +2518,7 @@ function ReaderPanel({
   onSelectSection,
   onSectionChange,
   onRefreshSeries,
+  onFeedbackBlock,
 }: {
   section: Section | null;
   directoryHidden: boolean;
@@ -2173,6 +2533,7 @@ function ReaderPanel({
   onSelectSection: (id: string) => Promise<Section>;
   onSectionChange: (section: Section) => void;
   onRefreshSeries: () => Promise<void>;
+  onFeedbackBlock: (block: Block) => void;
 }) {
   const [tab, setTab] = useState<ReaderTab>('content');
   const [selectionPopup, setSelectionPopup] = useState<SelectionPopup | null>(null);
@@ -2334,6 +2695,7 @@ function ReaderPanel({
             selectedBlockId={selectedBlockId}
             onGenerate={onGenerate}
             onStartQuiz={() => switchTab('quiz')}
+            onFeedbackBlock={onFeedbackBlock}
           />
         )}
         {tab === 'quiz' && section.quiz && (
@@ -2464,11 +2826,13 @@ function LessonContent({
   selectedBlockId,
   onGenerate,
   onStartQuiz,
+  onFeedbackBlock,
 }: {
   section: Section;
   selectedBlockId: string;
   onGenerate: () => void;
   onStartQuiz: () => void;
+  onFeedbackBlock: (block: Block) => void;
 }) {
   if (!section.content) {
     return (
@@ -2509,6 +2873,7 @@ function LessonContent({
           block={block}
           index={index}
           selected={block.id === selectedBlockId}
+          onFeedback={() => onFeedbackBlock(block)}
         />
       ))}
       {visibleSources.length > 0 && <details className="source-list">
@@ -2535,24 +2900,34 @@ function ContentBlock({
   block,
   index,
   selected,
+  onFeedback,
 }: {
   block: Block;
   index: number;
   selected: boolean;
+  onFeedback: () => void;
 }) {
   const labels: Record<string, string> = {
-    conclusion: '先说结论',
-    mechanism: '理解机制',
-    example: '看一个例子',
-    boundary: '边界与反例',
-    practice: '连接实践',
+    text: '阅读',
+    diagram: '图解',
+    table: '对照',
+    code: '演练',
+    formula: '推导',
   };
   return (
     <section
       className={`content-block role-${block.role} ${selected ? 'selected' : ''}`}
       data-block-id={block.id}
     >
-      <div className="block-meta"><span>{String(index + 1).padStart(2, '0')}</span><b>{labels[block.role] || block.role}</b></div>
+      <div className="block-meta"><span>{String(index + 1).padStart(2, '0')}</span><b>{labels[block.kind] || '阅读'}</b></div>
+      <button
+        className="block-feedback-button"
+        type="button"
+        aria-label={`反馈“${block.heading}”这一段`}
+        onClick={onFeedback}
+      >
+        <span aria-hidden="true">↳</span> 反馈这段
+      </button>
       <h2>{block.heading}</h2>
       <BlockBody block={block} />
     </section>

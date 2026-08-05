@@ -23,7 +23,7 @@ from .ai.anthropic_adapter import AnthropicAdapter
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AiRuntimeUpdate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PlanCreate, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ReviewSubmit, ShelfCreate
+from .api.schemas import AiRuntimeUpdate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, FeedbackCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PlanCreate, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ReviewSubmit, ShelfCreate
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -31,6 +31,7 @@ from .demo_personas import LOCAL_DEMO_PERSONAS
 from .infrastructure.database import build_database
 from .infrastructure.tables import Base, LearningTask, QuizAttempt, Remediation, User
 from .modules.learning.tasks import claim_task, heartbeat_task, recoverable_task_ids
+from .modules.feedback.service import FeedbackService
 from .services.source_verifier import AcceptingSourceVerifier, HttpSourceVerifier
 from .services.attachment_storage import LocalAttachmentStorage
 from .services.runtime_settings import RuntimeSettingsStore
@@ -83,6 +84,15 @@ def build_provider_adapter(
         model,
         base_url,
         capabilities=capabilities,
+    )
+
+
+def managed_source_verifier(adapter):
+    if not adapter.configured:
+        return AcceptingSourceVerifier()
+    return HttpSourceVerifier(
+        claim_reviewer=getattr(adapter, "review_source_claim", None),
+        claim_reviewer_model=getattr(adapter, "model", ""),
     )
 
 
@@ -165,7 +175,7 @@ def create_app(
         }
     if hasattr(adapter, "set_usage_recorder"):
         adapter.set_usage_recorder(usage_recorder)
-    verifier = source_verifier or (HttpSourceVerifier() if adapter.configured else AcceptingSourceVerifier())
+    verifier = source_verifier or managed_source_verifier(adapter)
     storage = attachment_storage or LocalAttachmentStorage(settings.attachment_storage_dir, settings.attachment_max_bytes)
     configured_oidc = oidc_client
     if effective_auth_mode == "oidc" and configured_oidc is None:
@@ -343,6 +353,11 @@ def create_app(
         for item in error.errors():
             sanitized = dict(item)
             sanitized.pop("input", None)
+            if "ctx" in sanitized:
+                sanitized["ctx"] = {
+                    key: str(value)
+                    for key, value in sanitized["ctx"].items()
+                }
             details.append(sanitized)
         return JSONResponse(
             status_code=400,
@@ -853,7 +868,7 @@ def create_app(
         request.app.state.ai_runtime = next_runtime
         request.app.state.retired_ai.append(previous)
         if request.app.state.runtime_verifier_managed:
-            request.app.state.source_verifier = HttpSourceVerifier() if candidate.configured else AcceptingSourceVerifier()
+            request.app.state.source_verifier = managed_source_verifier(candidate)
         return runtime_status(request)
 
     @app.post("/api/runtime/remediations/{remediation_id}/regenerate")
@@ -904,6 +919,20 @@ def create_app(
 
     @app.get("/api/bootstrap")
     def bootstrap(s: SlowService = Depends(service)): return s.bootstrap()
+
+    @app.post("/api/feedback", status_code=201)
+    def submit_feedback(
+        request: Request,
+        body: FeedbackCreate,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+        session: Session = Depends(db),
+        scope: UserScope = Depends(current_scope),
+    ):
+        return FeedbackService(
+            session,
+            scope,
+            source_mode=request.app.state.app_mode,
+        ).submit(body, idempotency_key)
 
     @app.put("/api/sections/{section_id}/resume")
     def update_resume(
