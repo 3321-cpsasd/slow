@@ -251,6 +251,15 @@ class GeneratedLessonQuestion(StrictModel):
         return self
 
 
+class GeneratedLessonFeedbackReplacement(StrictModel):
+    """Explicit identity mapping for a feedback-driven full regeneration."""
+
+    source_block_id: str = Field(min_length=1, max_length=240)
+    replacement_block_key: str = Field(
+        pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+    )
+
+
 class GeneratedLessonCandidate(StrictModel):
     """The single-call v2 candidate; it has no publication authority."""
 
@@ -260,6 +269,7 @@ class GeneratedLessonCandidate(StrictModel):
     confidence: Literal["high", "medium", "low"] = "medium"
     blocks: list[GeneratedLessonBlock] = Field(default_factory=list, max_length=12)
     questions: list[GeneratedLessonQuestion] = Field(default_factory=list, max_length=5)
+    feedback_replacement: GeneratedLessonFeedbackReplacement | None = None
 
     @model_validator(mode="after")
     def valid_decision_shape(self):
@@ -270,6 +280,8 @@ class GeneratedLessonCandidate(StrictModel):
                 raise ValueError("replan decision requires a reason")
             if self.blocks or self.questions:
                 raise ValueError("replan decision cannot contain publishable content")
+            if self.feedback_replacement is not None:
+                raise ValueError("replan decision cannot carry a feedback replacement")
             return self
         if self.replan_code or self.replan_reason:
             raise ValueError("candidate decision cannot carry replan fields")

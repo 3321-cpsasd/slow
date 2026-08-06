@@ -17,6 +17,7 @@ from app.ai.contracts import (
 )
 from app.ai.metering import AiUsageRecorder
 from app.ai.context import policy_for
+from app.ai.local_adapter import LocalDemoAdapter
 from app.ai.openai_adapter import OpenAiAdapter
 from app.ai.port import ProviderCapabilities
 from app.auth.context import Principal
@@ -101,6 +102,30 @@ def test_teaching_blueprint_requires_every_learning_role():
                 ],
             }
         )
+
+
+def test_local_demo_teaching_blueprint_returns_a_complete_blueprint():
+    blueprint = asyncio.run(
+        LocalDemoAdapter().teaching_blueprint(
+            {
+                "generationContext": {
+                    "learner": {
+                        "preferences": {"formatPreferences": ["diagram"]}
+                    }
+                }
+            },
+            [],
+        )
+    )
+
+    assert isinstance(blueprint, TeachingBlueprint)
+    assert {block.role for block in blueprint.blocks} >= {
+        "conclusion",
+        "mechanism",
+        "example",
+        "boundary",
+        "practice",
+    }
 
 
 class FakeChatCompletions:

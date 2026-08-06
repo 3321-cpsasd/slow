@@ -31,9 +31,9 @@ from ..infrastructure.tables import (
 
 
 LESSON_GENERATION_PIPELINE_VERSION = "lesson_generation_v2"
-LESSON_GENERATION_SCHEMA_VERSION = "generated_lesson_candidate_v2"
-LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_prompt_v2"
-LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v2"
+LESSON_GENERATION_SCHEMA_VERSION = "generated_lesson_candidate_v3"
+LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_prompt_v3"
+LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v3"
 LESSON_CONTEXT_POLICY_VERSION = "lesson_generation_context_v2"
 AI_CONTENT_LABEL_SCHEMA_VERSION = "ai_content_label_v2"
 
@@ -74,11 +74,11 @@ class LessonGenerationSpec(LessonSpecModel):
         default=LESSON_GENERATION_PIPELINE_VERSION,
         alias="pipelineVersion",
     )
-    schema_version: Literal["generated_lesson_candidate_v2"] = Field(
+    schema_version: Literal["generated_lesson_candidate_v3"] = Field(
         default=LESSON_GENERATION_SCHEMA_VERSION,
         alias="schemaVersion",
     )
-    prompt_version: Literal["lesson_generation_prompt_v2"] = Field(
+    prompt_version: Literal["lesson_generation_prompt_v3"] = Field(
         default=LESSON_GENERATION_PROMPT_VERSION,
         alias="promptVersion",
     )
@@ -185,6 +185,42 @@ def validate_lesson_candidate(
                     contractVersion=spec.learning_contract_version,
                 )
 
+    feedback_block_id = str(spec.feedback.get("blockId") or "").strip()
+    feedback_replacement = candidate.feedback_replacement
+    if spec.feedback and not feedback_block_id:
+        _reject(
+            "FEEDBACK_REPLACEMENT_SOURCE_MISSING",
+            "反馈重生成规格缺少原正文块稳定 ID",
+        )
+    if feedback_block_id:
+        if feedback_replacement is None:
+            _reject(
+                "FEEDBACK_REPLACEMENT_MAPPING_REQUIRED",
+                "反馈重生成候选缺少原正文块到新正文块的显式映射",
+                sourceBlockId=feedback_block_id,
+            )
+        if feedback_replacement.source_block_id != feedback_block_id:
+            _reject(
+                "FEEDBACK_REPLACEMENT_SOURCE_MISMATCH",
+                "反馈重生成映射没有引用本次反馈的原正文块",
+                expectedSourceBlockId=feedback_block_id,
+                actualSourceBlockId=feedback_replacement.source_block_id,
+            )
+        if feedback_replacement.replacement_block_key not in block_by_key:
+            _reject(
+                "FEEDBACK_REPLACEMENT_BLOCK_UNBOUND",
+                "反馈重生成映射引用了不存在的新正文块",
+                sourceBlockId=feedback_block_id,
+                replacementBlockKey=feedback_replacement.replacement_block_key,
+            )
+    elif feedback_replacement is not None:
+        _reject(
+            "FEEDBACK_REPLACEMENT_UNEXPECTED",
+            "非反馈生成候选不能声明段落替换映射",
+            sourceBlockId=feedback_replacement.source_block_id,
+            replacementBlockKey=feedback_replacement.replacement_block_key,
+        )
+
     item_keys: set[str] = set()
     assessed_target_ids: set[str] = set()
     for question in candidate.questions:
@@ -253,6 +289,7 @@ def validate_lesson_candidate(
 class PublishedLesson:
     content: ContentVersion
     quiz: QuizSet
+    feedback_replacement_block_id: str | None = None
 
 
 def publish_lesson_candidate(
@@ -461,6 +498,16 @@ def publish_lesson_candidate(
             }
             for item in candidate.questions
         ],
+        "feedbackReplacement": (
+            {
+                "sourceBlockId": candidate.feedback_replacement.source_block_id,
+                "replacementBlockKey": (
+                    candidate.feedback_replacement.replacement_block_key
+                ),
+            }
+            if candidate.feedback_replacement
+            else None
+        ),
     }
     for scope, quiz_id in (("content_publication", None), ("quiz_publication", quiz.id)):
         db.add(
@@ -488,4 +535,13 @@ def publish_lesson_candidate(
         )
 
     db.flush()
-    return PublishedLesson(content=content, quiz=quiz)
+    replacement_block_id = (
+        block_id_by_key[candidate.feedback_replacement.replacement_block_key]
+        if candidate.feedback_replacement
+        else None
+    )
+    return PublishedLesson(
+        content=content,
+        quiz=quiz,
+        feedback_replacement_block_id=replacement_block_id,
+    )

@@ -732,6 +732,16 @@ class SectionGenerationCoordinator:
                     generation_run=run,
                     regeneration_feedback=regeneration_feedback,
                 )
+            if not isinstance(self.scope, WorkerExecutionContext):
+                open_run_section(
+                    self.db,
+                    run=learning_run,
+                    section=section,
+                    mission_version_id=mission_version.id,
+                    source="interactive_generate",
+                    uid=uid,
+                    preferred_quiz_id=published.quiz.id,
+                )
             finished_at = now()
             run.status = "succeeded"
             run.finished_at = finished_at
@@ -743,21 +753,26 @@ class SectionGenerationCoordinator:
                     "contentVersionId": published.content.id,
                     "quizSetId": published.quiz.id,
                     "publicationStatus": "published",
+                    **(
+                        {
+                            "feedbackReplacement": {
+                                "sourceBlockId": (
+                                    candidate.feedback_replacement.source_block_id
+                                ),
+                                "replacementBlockKey": (
+                                    candidate.feedback_replacement.replacement_block_key
+                                ),
+                                "replacementBlockId": (
+                                    published.feedback_replacement_block_id
+                                ),
+                            }
+                        }
+                        if candidate.feedback_replacement
+                        else {}
+                    ),
                 }
             )
             self.db.commit()
-            if not isinstance(self.scope, WorkerExecutionContext):
-                open_run_section(
-                    self.db,
-                    run=learning_run,
-                    section=section,
-                    mission_version_id=mission_version.id,
-                    source="interactive_generate",
-                    uid=uid,
-                    preferred_quiz_id=published.quiz.id,
-                )
-                self.db.commit()
-            return self.section(section.id)
         except BaseException as error:
             failure_finished_at = now()
             self.db.rollback()
@@ -794,6 +809,9 @@ class SectionGenerationCoordinator:
                 "小节生成失败；失败状态已保存，可安全重试",
                 operation_id=operation_id,
             ) from error
+        # Publication is already committed and authoritative at this point.
+        # Read-model failures must not rewrite the successful generation audit.
+        return self.section(section.id)
 
     async def _generate_legacy_section(
         self,

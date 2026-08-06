@@ -8,8 +8,11 @@ from sqlalchemy.orm import Session
 from app.ai.contracts import (
     GeneratedLessonBlock,
     GeneratedLessonCandidate,
+    GeneratedLessonFeedbackReplacement,
     GeneratedLessonQuestion,
 )
+from app.application import section_generation
+from app.application.service import SlowService
 from app.application.lesson_generation import (
     CandidateValidationFailure,
     LessonGenerationSpec,
@@ -28,11 +31,12 @@ from app.infrastructure.tables import (
     Section,
 )
 from app.main import create_app
+from app.core.errors import AppError
 from app.services.source_verifier import AcceptingSourceVerifier
 from test_vertical_slice import FakeAi, create_series, sse_events, wait_for_task
 
 
-def spec(*, second_required=False):
+def spec(*, second_required=False, feedback=None):
     return LessonGenerationSpec.model_validate(
         {
             "generationMode": "model_only",
@@ -66,6 +70,7 @@ def spec(*, second_required=False):
             "neighborBoundaries": [],
             "relevantMastery": [],
             "depthPolicy": {"scope": "机制与边界"},
+            "feedback": feedback or {},
         }
     )
 
@@ -144,6 +149,22 @@ def test_required_target_must_be_taught_and_assessed():
     with pytest.raises(CandidateValidationFailure) as raised:
         validate_lesson_candidate(spec(second_required=True), candidate())
     assert raised.value.code == "REQUIRED_TARGET_NOT_ASSESSED"
+
+
+def test_feedback_candidate_requires_an_explicit_stable_block_mapping():
+    feedback = {"blockId": "block_original_1"}
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(spec(feedback=feedback), candidate())
+    assert raised.value.code == "FEEDBACK_REPLACEMENT_MAPPING_REQUIRED"
+
+    value = candidate()
+    value.feedback_replacement = GeneratedLessonFeedbackReplacement(
+        source_block_id="block_original_1",
+        replacement_block_key="missing",
+    )
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(spec(feedback=feedback), value)
+    assert raised.value.code == "FEEDBACK_REPLACEMENT_BLOCK_UNBOUND"
 
 
 def test_replan_candidate_never_enters_publication_gate():
@@ -267,7 +288,21 @@ class V2FakeAi(FakeAi):
                     explanation="正文要求依据机制和边界判断。",
                 )
             )
-        return GeneratedLessonCandidate(blocks=blocks, questions=questions)
+        feedback = lesson_spec.get("feedback") or {}
+        return GeneratedLessonCandidate(
+            blocks=blocks,
+            questions=questions,
+            feedback_replacement=(
+                GeneratedLessonFeedbackReplacement(
+                    source_block_id=feedback["blockId"],
+                    # Deliberately map the first old block to the last new block
+                    # so the integration test proves identity is not positional.
+                    replacement_block_key="b5",
+                )
+                if feedback
+                else None
+            ),
+        )
 
 
 def test_default_v2_route_uses_one_model_call_and_publishes_both_artifacts():
@@ -288,6 +323,7 @@ def test_default_v2_route_uses_one_model_call_and_publishes_both_artifacts():
         assert task["status"] == "succeeded"
         assert ai.lesson_generation_calls == 1
         assert lesson["content"]["publicationStatus"] == "published"
+        assert lesson["content"]["boundaryValidation"]["status"] == "passed"
         assert lesson["quiz"]["publicationStatus"] == "published"
         assert lesson["generation"]["trace"]["physicalCallBudget"] == 1
         with client.app.state.sessions() as db:
@@ -311,6 +347,126 @@ def test_v2_route_rejects_unbound_content_before_formal_persistence():
             assert run.error_code == "CONTENT_ASSESSMENT_TARGET_UNBOUND"
             assert db.scalar(select(func.count()).select_from(ContentVersion)) == 0
             assert db.scalar(select(func.count()).select_from(QuizSet)) == 0
+
+
+def test_legacy_content_never_claims_current_boundary_validation():
+    ai = V2FakeAi()
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            ai,
+            AcceptingSourceVerifier(),
+        )
+    ) as client:
+        series = create_series(client)
+        assert wait_for_task(
+            client, series["initializationTask"]["taskId"]
+        )["status"] == "succeeded"
+        refreshed = client.get(f"/api/series/{series['id']}").json()
+        section_id = refreshed["books"][0]["chapters"][0]["sections"][0]["id"]
+        lesson = client.get(f"/api/sections/{section_id}").json()
+        with client.app.state.sessions() as db:
+            content = db.get(ContentVersion, lesson["content"]["id"])
+            content.schema_version = "legacy"
+            content.prompt_version = "legacy"
+            db.commit()
+
+        legacy = client.get(f"/api/sections/{section_id}").json()
+        assert legacy["content"]["boundaryValidation"] == {
+            "status": "legacy",
+            "ruleVersion": "lesson_candidate_gate_v3",
+        }
+
+
+def test_required_binding_failure_rolls_back_publication(monkeypatch):
+    ai = V2FakeAi()
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            ai,
+            AcceptingSourceVerifier(),
+        )
+    ) as client:
+        series = create_series(client)
+        assert wait_for_task(
+            client, series["initializationTask"]["taskId"]
+        )["status"] == "succeeded"
+        refreshed = client.get(f"/api/series/{series['id']}").json()
+        section_id = refreshed["books"][0]["chapters"][0]["sections"][0]["id"]
+        original = client.post(f"/api/sections/{section_id}/open").json()
+
+        def fail_binding(*_args, **_kwargs):
+            raise AppError(
+                "注入绑定失败",
+                code="TEST_BINDING_FAILURE",
+                status=500,
+            )
+
+        monkeypatch.setattr(section_generation, "open_run_section", fail_binding)
+        response = client.post(f"/api/sections/{section_id}/regenerate")
+        assert response.status_code == 500
+        assert response.json()["code"] == "TEST_BINDING_FAILURE"
+        with client.app.state.sessions() as db:
+            assert db.scalar(
+                select(func.count())
+                .select_from(ContentVersion)
+                .where(ContentVersion.section_id == section_id)
+            ) == 1
+            latest_run = db.scalar(
+                select(GenerationRun)
+                .where(GenerationRun.section_id == section_id)
+                .order_by(GenerationRun.attempt.desc())
+            )
+            assert latest_run.status == "failed"
+            assert db.get(
+                ContentVersion,
+                original["content"]["id"],
+            ).publication_status == "published"
+
+
+def test_post_commit_read_failure_does_not_rewrite_successful_run(monkeypatch):
+    ai = V2FakeAi()
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            ai,
+            AcceptingSourceVerifier(),
+        )
+    ) as client:
+        series = create_series(client)
+        assert wait_for_task(
+            client, series["initializationTask"]["taskId"]
+        )["status"] == "succeeded"
+        refreshed = client.get(f"/api/series/{series['id']}").json()
+        section_id = refreshed["books"][0]["chapters"][0]["sections"][0]["id"]
+        client.post(f"/api/sections/{section_id}/open")
+
+        def fail_read(self, requested_section_id):
+            raise AppError(
+                "注入发布后读取失败",
+                code="TEST_READ_FAILURE",
+                status=500,
+            )
+
+        monkeypatch.setattr(SlowService, "section", fail_read)
+        response = client.post(f"/api/sections/{section_id}/regenerate")
+        assert response.status_code == 500
+        assert response.json()["code"] == "TEST_READ_FAILURE"
+        with client.app.state.sessions() as db:
+            latest_run = db.scalar(
+                select(GenerationRun)
+                .where(GenerationRun.section_id == section_id)
+                .order_by(GenerationRun.attempt.desc())
+            )
+            assert latest_run.status == "succeeded"
+            assert db.scalar(
+                select(func.count())
+                .select_from(ContentVersion)
+                .where(
+                    ContentVersion.section_id == section_id,
+                    ContentVersion.publication_status == "published",
+                )
+            ) == 1
 
 
 def test_v2_feedback_creates_a_new_atomic_content_and_quiz_version():
@@ -346,8 +502,17 @@ def test_v2_feedback_creates_a_new_atomic_content_and_quiz_version():
         streamed = client.post(
             f"/api/feedback/{submitted.json()['id']}/repair/stream"
         )
-        assert any(event[0] == "done" for event in sse_events(streamed))
+        events = sse_events(streamed)
+        done = next(payload for event, payload in events if event == "done")
         replacement = client.get(f"/api/sections/{section_id}").json()
+        assert done["contentBlockId"] == replacement["content"]["blocks"][4]["id"]
+        assert done["contentBlockId"] != replacement["content"]["blocks"][0]["id"]
+        replay = sse_events(
+            client.post(f"/api/feedback/{submitted.json()['id']}/repair/stream")
+        )
+        replay_done = next(payload for event, payload in replay if event == "done")
+        assert replay_done["replayed"] is True
+        assert replay_done["contentBlockId"] == done["contentBlockId"]
         assert ai.lesson_generation_calls == 2
         assert replacement["content"]["version"] == 2
         assert replacement["content"]["id"] != original["content"]["id"]

@@ -3145,7 +3145,11 @@ function LessonContent({
       <p className="content-trust-note">
         {section.content.generationMode === 'demo'
           ? '演示内容 · 不代表真实 AI 生成或事实核验'
-          : `${section.content.aiGenerated ? 'AI 生成' : '授权内容'} · 已通过结构、契约和证据边界校验 · 未经逐项事实核验`}
+          : section.content.boundaryValidation.status === 'passed'
+            ? `${section.content.aiGenerated ? 'AI 生成' : '授权内容'} · 已通过结构、契约和证据边界校验 · 未经逐项事实核验`
+            : section.content.boundaryValidation.status === 'legacy'
+              ? '历史内容 · 未确认通过当前结构、契约和证据边界校验 · 未经逐项事实核验'
+              : `${section.content.aiGenerated ? 'AI 生成' : '授权内容'} · 未确认通过结构、契约和证据边界校验 · 未经逐项事实核验`}
       </p>
       {section.content.blocks.map((block) => (
         <ContentBlock

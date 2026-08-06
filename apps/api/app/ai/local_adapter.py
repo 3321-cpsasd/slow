@@ -11,6 +11,7 @@ from .contracts import (
     GeneratedLesson,
     GeneratedLessonBlock,
     GeneratedLessonCandidate,
+    GeneratedLessonFeedbackReplacement,
     GeneratedLessonQuestion,
     GeneratedNote,
     GeneratedPlan,
@@ -134,6 +135,25 @@ class LocalDemoAdapter:
             .get("learner", {})
             .get("preferences", {})
         )
+        formats = preferences.get("formatPreferences") or []
+        return TeachingBlueprint(
+            narrative_thread="从一个可观察的问题出发，建立判断机制，再用同一场景检查边界与迁移。",
+            opening_move="先给出一个需要判断的真实问题，让学习者带着问题进入机制。",
+            recurring_example="持续使用同一个最小场景，对照输入、机制、结果和失败边界。",
+            core_model="对象在约束下经过机制产生可观察结果，边界条件决定结论何时不成立。",
+            recap_prompt="不用术语，复述对象、机制、结果和一个失败边界。",
+            preference_applications=[
+                f"已记录表现形式偏好 {item}；本地演示内容仍使用文字以避免伪造该形式。"
+                for item in formats
+            ],
+            blocks=[
+                TeachingBlueprintBlock(kind="text", role="conclusion", purpose="建立问题与答案的方向感", heading_intent="先解决眼前的问题"),
+                TeachingBlueprintBlock(kind="text", role="mechanism", purpose="解释结果为何发生", heading_intent="沿着因果链向前走"),
+                TeachingBlueprintBlock(kind="text", role="example", purpose="用贯穿场景观察机制", heading_intent="把机制放进一个场景"),
+                TeachingBlueprintBlock(kind="text", role="boundary", purpose="识别结论失效条件", heading_intent="什么时候不能这样判断"),
+                TeachingBlueprintBlock(kind="text", role="practice", purpose="复述并迁移核心模型", heading_intent="换一个场景再判断一次"),
+            ],
+        )
 
     async def generate_lesson(self, spec):
         targets = spec["targets"]
@@ -187,25 +207,14 @@ class LocalDemoAdapter:
             confidence="medium",
             blocks=blocks,
             questions=questions,
-        )
-        formats = preferences.get("formatPreferences") or []
-        return TeachingBlueprint(
-            narrative_thread="从一个可观察的问题出发，建立判断机制，再用同一场景检查边界与迁移。",
-            opening_move="先给出一个需要判断的真实问题，让学习者带着问题进入机制。",
-            recurring_example="持续使用同一个最小场景，对照输入、机制、结果和失败边界。",
-            core_model="对象在约束下经过机制产生可观察结果，边界条件决定结论何时不成立。",
-            recap_prompt="不用术语，复述对象、机制、结果和一个失败边界。",
-            preference_applications=[
-                f"已记录表现形式偏好 {item}；本地演示内容仍使用文字以避免伪造该形式。"
-                for item in formats
-            ],
-            blocks=[
-                TeachingBlueprintBlock(kind="text", role="conclusion", purpose="建立问题与答案的方向感", heading_intent="先解决眼前的问题"),
-                TeachingBlueprintBlock(kind="text", role="mechanism", purpose="解释结果为何发生", heading_intent="沿着因果链向前走"),
-                TeachingBlueprintBlock(kind="text", role="example", purpose="用贯穿场景观察机制", heading_intent="把机制放进一个场景"),
-                TeachingBlueprintBlock(kind="text", role="boundary", purpose="识别结论失效条件", heading_intent="什么时候不能这样判断"),
-                TeachingBlueprintBlock(kind="text", role="practice", purpose="复述并迁移核心模型", heading_intent="换一个场景再判断一次"),
-            ],
+            feedback_replacement=(
+                GeneratedLessonFeedbackReplacement(
+                    source_block_id=spec["feedback"]["blockId"],
+                    replacement_block_key="b1",
+                )
+                if spec.get("feedback")
+                else None
+            ),
         )
 
     async def lesson_content(self, request, memory, prior_questions=None):

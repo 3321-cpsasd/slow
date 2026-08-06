@@ -182,7 +182,11 @@ Learning Contract 必须在正文生成之前冻结。生成器不能创建目�
       "correct": [1],
       "explanation": "……"
     }
-  ]
+  ],
+  "feedback_replacement": {
+    "source_block_id": "block_content_v1_3",
+    "replacement_block_key": "b1"
+  }
 }
 ```
 
@@ -194,6 +198,7 @@ Learning Contract 必须在正文生成之前冻结。生成器不能创建目�
 - `assessment_eligible`、目标规范文案、必需性和 `core` 等权威字段由服务端根据冻结契约派生，不信任模型布尔值；
 - 支撑性关联块的 `assessment_target_ids` 必须为空；
 - 模型输出中的绑定只能被验证或拒绝，不能被服务端猜测、替换或静默删除。
+- 反馈触发完整重生成时，必须返回旧正文稳定 `source_block_id` 到本次候选 `replacement_block_key` 的显式映射；完整重排、增删内容块时禁止按数组位置推断替代关系；非反馈生成不得返回该映射。
 
 内容块角色和锚点关系是节内教学属性，不是目录层级。具体枚举由 Schema 固定并版本化；至少覆盖核心教学、前置脚手架、机制、对比、边界、应用、迁移、练习、总结和过渡所需的最小集合。
 
@@ -213,6 +218,7 @@ Learning Contract 必须在正文生成之前冻结。生成器不能创建目�
 | 每个必需目标至少被一道题测量 | 整批失败 | `REQUIRED_TARGET_NOT_ASSESSED` |
 | 选项、正确答案索引和题数结构合法 | 整批失败 | `ASSESSMENT_ITEM_INVALID` |
 | 大型前置缺口不被塞进当前小节 | 进入显式重规划 | `PREREQUISITE_GAP_REQUIRES_REPLAN` |
+| 反馈重生成缺少、错配或悬空的块替换映射 | 整批失败 | `FEEDBACK_REPLACEMENT_MAPPING_REQUIRED` / `FEEDBACK_REPLACEMENT_SOURCE_MISMATCH` / `FEEDBACK_REPLACEMENT_BLOCK_UNBOUND` |
 
 错误响应必须包含机器可读定位，例如局部 Key、非法目标 ID 和契约版本。任何门禁失败都发生在正式内容持久化之前。
 
@@ -251,6 +257,9 @@ generating → validating → succeeded
 - 正文块到契约目标的绑定；
 - 测验题到契约目标和正文块的绑定；
 - 当前发布版本指针或等价权威状态。
+- 首次进入阅读和后续证据链所必需的学习实例版本绑定。
+
+上述必要记录以及 `GenerationAttempt=succeeded` 必须由同一次提交完成。提交成功即形成不可否认的发布事实；提交后的读模型组装、响应序列化或其他展示失败不得再把该运行改写为 `failed`。
 
 正式内容版本的生命周期独立于生成尝试：
 

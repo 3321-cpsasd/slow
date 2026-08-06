@@ -34,6 +34,7 @@ from ..infrastructure.tables import (
     ChapterRevision,
     ContentVersion,
     GenerationRun,
+    GovernanceDecisionSnapshot,
     LearningEvidence,
     LearningContractVersion,
     LearningMemory,
@@ -1228,6 +1229,63 @@ class SlowService:
             .order_by(LearningTask.created_at)
         ).all()
         verification = self.db.scalar(select(SourceVerification).where(SourceVerification.content_version_id == content.id)) if content else None
+        boundary_snapshot = (
+            self.db.scalar(
+                select(GovernanceDecisionSnapshot)
+                .where(
+                    GovernanceDecisionSnapshot.content_version_id == content.id,
+                    GovernanceDecisionSnapshot.decision_scope
+                    == "content_publication",
+                    GovernanceDecisionSnapshot.quiz_set_id.is_(None),
+                )
+                .order_by(GovernanceDecisionSnapshot.created_at.desc())
+            )
+            if content
+            else None
+        )
+        origin_run = (
+            self.db.get(GenerationRun, content.generation_run_id)
+            if content and content.generation_run_id
+            else None
+        )
+        labeling_metadata = (
+            load(content.labeling_metadata_json, {}) if content else {}
+        ) or {}
+        boundary_validation_passed = bool(
+            content
+            and content.schema_version != "legacy"
+            and content.prompt_version != "legacy"
+            and origin_run
+            and origin_run.status == "succeeded"
+            and origin_run.id == content.generation_run_id
+            and origin_run.schema_version == content.schema_version
+            and origin_run.prompt_version == content.prompt_version
+            and boundary_snapshot
+            and boundary_snapshot.allowed
+            and boundary_snapshot.assessment_eligible
+            and boundary_snapshot.mode == "contract_boundary"
+            and boundary_snapshot.learning_contract_version_id
+            == content.learning_contract_version_id
+            and boundary_snapshot.actor_kind == "generation_attempt"
+            and boundary_snapshot.actor_id == origin_run.id
+            and labeling_metadata.get("schemaVersionOfCandidate")
+            == content.schema_version
+            and labeling_metadata.get("promptVersion") == content.prompt_version
+            and labeling_metadata.get("ruleVersion")
+            == boundary_snapshot.rule_version
+        )
+        boundary_validation = {
+            "status": (
+                "passed"
+                if boundary_validation_passed
+                else "legacy"
+                if content and content.schema_version == "legacy"
+                else "unverified"
+            ),
+            "ruleVersion": (
+                boundary_snapshot.rule_version if boundary_snapshot else None
+            ),
+        }
         questions = load(quiz.questions_json, []) if quiz else []
         def public_questions(items):
             return [
@@ -1316,6 +1374,7 @@ class SlowService:
                 "aiGenerated": content.ai_generated,
                 "schemaVersion": content.schema_version,
                 "promptVersion": content.prompt_version,
+                "boundaryValidation": boundary_validation,
             }
             if content
             else None,
@@ -2512,6 +2571,20 @@ class SlowService:
         # but it streams the already-published replacement block instead of
         # persisting an independently generated block patch.
         if callable(getattr(self.ai, "generate_lesson", None)):
+            def mapped_replacement_block(content_blocks, trace):
+                mapping = trace.get("feedbackReplacement") or {}
+                if mapping.get("sourceBlockId") != feedback.block_id:
+                    return None
+                replacement_block_id = mapping.get("replacementBlockId")
+                return next(
+                    (
+                        item
+                        for item in content_blocks
+                        if item.get("id") == replacement_block_id
+                    ),
+                    None,
+                )
+
             completed_runs = self.db.scalars(
                 select(GenerationRun)
                 .where(
@@ -2540,19 +2613,21 @@ class SlowService:
                     [],
                 )
                 if replacement and replacement_blocks:
-                    replacement_block = replacement_blocks[
-                        min(target_index, len(replacement_blocks) - 1)
-                    ]
-                    yield {"type": "delta", "delta": replacement_block["content"]}
-                    yield {
-                        "type": "done",
-                        "feedbackId": feedback.id,
-                        "contentVersionId": replacement.id,
-                        "contentVersion": replacement.version,
-                        "contentBlockId": replacement_block["id"],
-                        "replayed": True,
-                    }
-                    return
+                    replacement_block = mapped_replacement_block(
+                        replacement_blocks,
+                        completed_trace,
+                    )
+                    if replacement_block:
+                        yield {"type": "delta", "delta": replacement_block["content"]}
+                        yield {
+                            "type": "done",
+                            "feedbackId": feedback.id,
+                            "contentVersionId": replacement.id,
+                            "contentVersion": replacement.version,
+                            "contentBlockId": replacement_block["id"],
+                            "replayed": True,
+                        }
+                        return
             instructions = {
                 "inaccurate": "核查并纠正这一段的不准确内容",
                 "unclear": "重新解释这一段，使机制与因果关系更清楚",
@@ -2586,9 +2661,19 @@ class SlowService:
                     code="CONTENT_FEEDBACK_REGENERATION_RESULT_MISSING",
                     status=500,
                 )
-            replacement_block = replacement_blocks[
-                min(target_index, len(replacement_blocks) - 1)
-            ]
+            generation_trace = (
+                (view.get("generation") or {}).get("trace") or {}
+            )
+            replacement_block = mapped_replacement_block(
+                replacement_blocks,
+                generation_trace,
+            )
+            if not replacement_block:
+                raise AppError(
+                    "反馈重生成完成但缺少已校验的段落替换映射",
+                    code="FEEDBACK_REPLACEMENT_MAPPING_MISSING",
+                    status=500,
+                )
             yield {"type": "delta", "delta": replacement_block["content"]}
             yield {
                 "type": "done",
