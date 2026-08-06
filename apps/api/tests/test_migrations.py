@@ -11,7 +11,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0036_learning_preferences"
+HEAD_REVISION = "0038_lesson_generation_v2"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -266,6 +266,15 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
     assert "initial_mission_version_id" in series_columns
     assert "initial_mission_version_id" in run_columns
     assert "learning_contract_version_id" in content_columns
+    assert {
+        "generation_mode",
+        "rights_status",
+        "factual_status",
+        "ai_generated",
+        "generation_run_id",
+        "output_hash",
+        "labeling_metadata_json",
+    }.issubset(content_columns)
     assert "learning_contract_version_id" in quiz_binding_columns
     assert {"idempotency_key", "request_hash"}.issubset(feedback_columns)
     assert "uq_user_feedback_user_idempotency" in feedback_schema

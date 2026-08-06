@@ -184,6 +184,7 @@ def assessment_contract_view(
             "targetDepth": contract.target_depth,
             "assessmentLevel": target.target_depth,
             "required": binding.required,
+            "verificationPolicy": binding.verification_policy,
         }
         for binding, target in rows
     ]
@@ -724,11 +725,20 @@ def _record_qualification_events(
     m2_governance_missing = bool(
         observation.learning_contract_version_id and governance is None
     )
+    governance_ineligible = m2_governance_missing or bool(
+        governance and not governance.assessment_eligible
+    )
     statuses = (
         {
             "gate": ("ineligible", "delayed review cannot rewrite the section gate"),
-            "mastery": ("eligible_grouped", "assignment-bound review updates mastery once"),
-            "retention": ("candidate", "server-qualified delayed unassisted novel review"),
+            "mastery": ("ineligible", "review quiz is not governance-qualified for mastery"),
+            "retention": ("ineligible", "review quiz is not governance-qualified for retention"),
+        }
+        if qualification_profile == "review_assignment" and governance_ineligible
+        else {
+            "gate": ("ineligible", "delayed review cannot rewrite the section gate"),
+            "mastery": ("eligible_grouped", "assignment-bound governed review updates mastery once"),
+            "retention": ("candidate", "server-qualified governed delayed unassisted novel review"),
         }
         if qualification_profile == "review_assignment"
         else {
@@ -738,9 +748,7 @@ def _record_qualification_events(
             "mastery": ("ineligible", "quiz is not governance-qualified for mastery"),
             "retention": ("ineligible", "quiz is not governance-qualified for retention"),
         }
-        if m2_governance_missing or (
-            governance and not governance.assessment_eligible
-        )
+        if governance_ineligible
         else {
             "gate": ("eligible", "attempt target outcome is aggregated"),
             "mastery": ("eligible_grouped", "one BKT update per learning episode and target"),

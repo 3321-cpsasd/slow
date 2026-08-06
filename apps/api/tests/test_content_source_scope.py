@@ -23,7 +23,7 @@ def _block(role: str, *, sourced: bool):
     )
 
 
-def test_pedagogical_synthesis_does_not_require_fake_sentence_level_sources():
+def test_rights_grounded_content_may_bind_only_the_blocks_supported_by_assets():
     content = GeneratedContent(
         confidence="medium",
         sources=[_source()],
@@ -79,20 +79,16 @@ def test_generated_content_allows_code_or_formula_without_sentence_punctuation(k
     assert content.blocks[2].content == "x = y + 1"
 
 
-@pytest.mark.parametrize("role", ["conclusion", "boundary"])
-def test_strict_claim_roles_still_require_explicit_sources(role):
+def test_model_only_content_does_not_require_or_invent_sources():
     blocks = [
-        _block("conclusion", sourced=True),
+        _block("conclusion", sourced=False),
         _block("mechanism", sourced=False),
         _block("example", sourced=False),
-        _block("boundary", sourced=True),
+        _block("boundary", sourced=False),
         _block("practice", sourced=False),
     ]
-    blocks[0 if role == "conclusion" else 3] = _block(role, sourced=False)
 
-    with pytest.raises(ValidationError):
-        GeneratedContent(
-            confidence="low",
-            sources=[_source()],
-            blocks=blocks,
-        )
+    content = GeneratedContent(confidence="high", blocks=blocks)
+
+    assert content.sources == []
+    assert all(block.source_indexes == [] for block in content.blocks)

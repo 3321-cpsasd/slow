@@ -9,6 +9,9 @@ from .contracts import (
     GeneratedChapter,
     GeneratedContent,
     GeneratedLesson,
+    GeneratedLessonBlock,
+    GeneratedLessonCandidate,
+    GeneratedLessonQuestion,
     GeneratedNote,
     GeneratedPlan,
     GeneratedQuiz,
@@ -130,6 +133,60 @@ class LocalDemoAdapter:
             request.get("generationContext", {})
             .get("learner", {})
             .get("preferences", {})
+        )
+
+    async def generate_lesson(self, spec):
+        targets = spec["targets"]
+        roles = [
+            ("core_instruction", "core"),
+            ("mechanism", "mechanism"),
+            ("comparison", "comparison"),
+            ("boundary", "boundary"),
+            ("practice", "practice"),
+        ]
+        blocks = []
+        for index, (role, relation) in enumerate(roles):
+            target = targets[index % len(targets)]
+            blocks.append(
+                GeneratedLessonBlock(
+                    block_key=f"b{index + 1}",
+                    kind="text",
+                    role=role,
+                    relation_to_anchor=relation,
+                    assessment_target_ids=[target["assessmentTargetId"]],
+                    heading=f"{spec['section']['title']}：演示说明 {index + 1}",
+                    content=(
+                        f"这是围绕“{spec['section']['question']}”生成的本地演示教材块。"
+                        f"它用于教授目标“{target['objective']}”，说明判断机制、观察线索和适用边界。"
+                        "学习者应能根据本段复述原因，并在后续题目中识别正确结论。"
+                    ),
+                )
+            )
+        question_count = max(4, min(5, len(targets)))
+        questions = []
+        for index in range(question_count):
+            target_index = index % len(targets)
+            target = targets[target_index]
+            evidence_index = next(
+                block_index
+                for block_index, block in enumerate(blocks)
+                if target["assessmentTargetId"] in block.assessment_target_ids
+            )
+            questions.append(
+                GeneratedLessonQuestion(
+                    item_key=f"q{index + 1}",
+                    assessment_target_id=target["assessmentTargetId"],
+                    evidence_block_keys=[f"b{evidence_index + 1}"],
+                    prompt=f"关于“{target['objective']}”，哪一项符合本节演示正文？",
+                    options=["忽略机制直接猜测", "依据机制和边界进行判断", "把示例当作普遍定律"],
+                    correct=[1],
+                    explanation="正文要求同时依据机制、观察线索和适用边界判断。",
+                )
+            )
+        return GeneratedLessonCandidate(
+            confidence="medium",
+            blocks=blocks,
+            questions=questions,
         )
         formats = preferences.get("formatPreferences") or []
         return TeachingBlueprint(
@@ -254,6 +311,12 @@ class LocalDemoAdapter:
 
     async def answer_stream(self, request):
         for chunk in ["这是本地演示答疑：", "请回到锚定段落，", "对照机制、前提与边界", "逐项检查。"]:
+            await asyncio.sleep(0.03)
+            yield chunk
+
+    async def repair_stream(self, request):
+        content = request.get("targetBlock", {}).get("content", "")
+        for chunk in ["补救后的正文：", content]:
             await asyncio.sleep(0.03)
             yield chunk
 

@@ -7,12 +7,14 @@ class AppError(RuntimeError):
         status: int = 400,
         retryable: bool = False,
         operation_id: str | None = None,
+        details: dict | None = None,
     ):
         super().__init__(message)
         self.code = code
         self.status = status
         self.retryable = retryable
         self.operation_id = operation_id
+        self.details = details or {}
 
 
 class AiError(AppError):

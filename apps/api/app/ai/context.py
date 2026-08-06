@@ -174,37 +174,64 @@ DEPTH_POLICIES: dict[str, dict[str, Any]] = {
 
 CONTEXT_POLICIES: dict[ContextOperation, dict[str, Any]] = {
     "plan": {
+        "version": "plan_context_v2",
         "required": ["learner", "curriculum", "learningState"],
         "allowed": [
             "use confirmed profile and relevant evidence to choose scope and starting point",
             "treat the submitted role and purpose as plan-specific intent",
+            "create one goal-bound series whose ordered books each own a coherent theme",
+            "design every chapter as a cluster of related knowledge points",
         ],
         "forbidden": [
             "treat self-report as verified mastery",
             "silently infer a different learning mission",
+            "use a book as a wrapper or alias for one chapter",
+            "use one atomic 15-20 minute knowledge point as a chapter",
         ],
     },
     "book_replan": {
+        "version": "book_replan_context_v2",
         "required": ["learner", "mission", "curriculum", "learningState"],
-        "allowed": ["change only unstarted future chapters"],
-        "forbidden": ["rewrite started content", "weaken verified success criteria"],
+        "allowed": [
+            "change only unstarted future chapters",
+            "keep every future chapter as a cluster of related knowledge points",
+        ],
+        "forbidden": [
+            "rewrite started content",
+            "weaken verified success criteria",
+            "replace a chapter with one atomic knowledge point",
+        ],
     },
     "chapter": {
+        "version": "chapter_context_v2",
         "required": ["learner", "mission", "curriculum", "learningState"],
-        "allowed": ["adapt explanations and section sequence to the learner"],
-        "forbidden": ["change the adopted mission", "repeat verified targets without need"],
+        "allowed": [
+            "adapt explanations and section sequence to the learner",
+            "give each section one focal knowledge point while preserving necessary concept relations",
+        ],
+        "forbidden": [
+            "change the adopted mission",
+            "repeat verified targets without need",
+            "turn generic exposition stages into navigation sections",
+            "create a sub-section navigation level below the knowledge-point section",
+            "treat the focal knowledge point as isolated from required prerequisites and relations",
+        ],
     },
     "lesson_content": {
+        "version": "lesson_content_context_v2",
         "required": ["learner", "mission", "curriculum", "learningState", "contract"],
         "allowed": [
             "adapt examples, terminology and explanation depth",
             "use explicit presentation preferences to rank pedagogically valid formats",
+            "expand weak prerequisites and related concepts that are necessary to understand the focal point",
+            "compress related concepts already supported by qualified learning evidence",
         ],
         "forbidden": [
             "change assessment targets",
             "claim mastery",
             "invent learner experience",
             "treat a presentation preference as evidence of learning effectiveness",
+            "turn a supporting concept into an undeclared assessment target",
         ],
     },
     "lesson_quiz": {
@@ -251,7 +278,7 @@ CONTEXT_POLICIES: dict[ContextOperation, dict[str, Any]] = {
 def policy_for(operation: ContextOperation, depth: str) -> GenerationPolicy:
     definition = CONTEXT_POLICIES[operation]
     return GenerationPolicy(
-        version=f"{operation}_context_v1",
+        version=definition.get("version", f"{operation}_context_v1"),
         requiredCategories=definition["required"],
         allowedUses=definition["allowed"],
         forbiddenUses=definition["forbidden"],

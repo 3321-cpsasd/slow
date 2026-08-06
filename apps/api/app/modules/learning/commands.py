@@ -2,7 +2,7 @@ import hashlib
 import json
 from uuid import uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -13,6 +13,7 @@ from ...infrastructure.tables import (
     BookCapstone,
     Chapter,
     ChapterPractice,
+    GenerationRun,
     LearningContractVersion,
     LearningEvidence,
     LearningMemory,
@@ -221,6 +222,32 @@ class SubmitQuiz:
         if replay:
             self._validate_replay(replay, request_hash)
             return self._replay_response(replay)
+
+        feedback_regeneration_pending = self.db.scalar(
+            select(func.count())
+            .select_from(LearningTask)
+            .where(
+                LearningTask.user_id == self.user_id,
+                LearningTask.section_id == section_id,
+                LearningTask.task_type == "content_feedback_regeneration",
+                LearningTask.status.in_({"pending", "running"}),
+            )
+        ) or 0
+        regeneration_running = self.db.scalar(
+            select(func.count())
+            .select_from(GenerationRun)
+            .where(
+                GenerationRun.section_id == section_id,
+                GenerationRun.operation.in_({"regeneration", "feedback_repair"}),
+                GenerationRun.status == "running",
+            )
+        ) or 0
+        if feedback_regeneration_pending or regeneration_running:
+            raise AppError(
+                "本节正在根据反馈生成新版本，请完成后再提交验证",
+                code="SECTION_REGENERATION_IN_PROGRESS",
+                status=409,
+            )
 
         section = context.section
         quiz = self.db.get(QuizSet, body.quiz_set_id)

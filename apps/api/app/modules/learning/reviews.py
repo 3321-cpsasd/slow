@@ -13,7 +13,7 @@ from uuid import uuid4
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ...ai.contracts import GeneratedContent
+from ...ai.contracts import GeneratedContent, GeneratedQuiz
 from ...core.errors import AppError
 from ...domain.learning import grade_choice_quiz
 from ...infrastructure.tables import (
@@ -32,6 +32,11 @@ from ...infrastructure.tables import (
     now,
 )
 from .assessment import record_scoring_facts
+from .content_governance_store import (
+    bind_remediation_questions_to_source_claims,
+    governance_view_for_quiz,
+    reevaluate_generated_governance,
+)
 from .review_assignments import (
     RETENTION_QUALIFICATION_RULE_VERSION,
     REVIEW_ASSIGNMENT_RULE_VERSION,
@@ -466,9 +471,30 @@ class ReviewAssignmentService:
         )
         if len(result.questions) != 1:
             raise AppError("复习题数量与目标不一致", code="REVIEW_QUIZ_TARGET_MISMATCH", status=502)
-        question = result.questions[0].model_dump()
-        question["objective"] = prior["objective"]
-        question["core"] = bool(prior.get("core", False))
+        review_question = result.questions[0]
+        review_question.objective = prior["objective"]
+        review_question.core = bool(prior.get("core", False))
+        alignment_reviewer = getattr(self.ai, "review_lesson_alignment", None)
+        if not callable(alignment_reviewer):
+            raise AppError(
+                "当前 AI 不支持复习题语义对齐审查",
+                code="REVIEW_ALIGNMENT_UNAVAILABLE",
+                status=503,
+                retryable=True,
+            )
+        alignment = await alignment_reviewer(
+            request,
+            generated_content,
+            GeneratedQuiz(questions=[review_question]),
+        )
+        if not alignment.allowed:
+            raise AppError(
+                "复习题、正确答案与原正文未形成可验证的语义闭环",
+                code="REVIEW_SEMANTIC_ALIGNMENT_FAILED",
+                status=502,
+                retryable=True,
+            )
+        question = review_question.model_dump()
         question["assessmentTargetId"] = target.id
         question["equivalenceGroupId"] = f"{target.id}:review:{assignment.id}"
         if not _questions_are_substantively_different(prior, question):
@@ -477,6 +503,12 @@ class ReviewAssignmentService:
         prior_signatures = set(_load(assignment.prior_item_signatures_json, []))
         if signature in prior_signatures:
             raise AppError("模型复用了历史题目", code="REVIEW_QUIZ_NOT_NOVEL", status=502)
+        question = bind_remediation_questions_to_source_claims(
+            self.db,
+            content=content,
+            questions=[question],
+            prior_questions=[prior],
+        )[0]
         generation = self.db.scalar(
             select(func.max(QuizSet.generation)).where(QuizSet.section_id == section.id)
         ) or 0
@@ -490,6 +522,18 @@ class ReviewAssignmentService:
         )
         self.db.add(quiz)
         self.db.flush()
+        governance = reevaluate_generated_governance(
+            self.db,
+            quiz_id=quiz.id,
+            actor_id=assignment.id,
+            actor_kind="review_assignment",
+        )
+        if not governance["assessmentEligible"]:
+            raise AppError(
+                "复习题缺少已核验的正文与主张绑定",
+                code="REVIEW_QUIZ_GOVERNANCE_FAILED",
+                status=409,
+            )
         assignment.review_quiz_set_id = quiz.id
         assignment.item_signatures_json = _dump([signature])
         self._apply_transition(
@@ -536,6 +580,13 @@ class ReviewAssignmentService:
         questions = _load(quiz.questions_json, []) if quiz else []
         if not quiz or not questions:
             raise AppError("复习题不存在", code="REVIEW_QUIZ_MISSING", status=409)
+        governance = governance_view_for_quiz(self.db, quiz.id)
+        if not governance or not governance["assessmentEligible"]:
+            raise AppError(
+                "复习题的可信治理决策缺失或已失效",
+                code="REVIEW_QUIZ_GOVERNANCE_REQUIRED",
+                status=409,
+            )
         prior_signatures = frozenset(_load(assignment.prior_item_signatures_json, []))
         item_signatures = frozenset(_load(assignment.item_signatures_json, []))
         qualification = qualify_retention_submission(

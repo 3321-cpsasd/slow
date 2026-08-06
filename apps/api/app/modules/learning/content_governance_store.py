@@ -589,6 +589,7 @@ def _snapshot(
     actor_id,
     input_payload,
     idempotency_key,
+    actor_kind="generation_run",
 ) -> GovernanceDecisionSnapshot:
     return GovernanceDecisionSnapshot(
         id=_id("governance_decision", decision_scope, idempotency_key),
@@ -603,7 +604,7 @@ def _snapshot(
         reasons_json=_dump(decision.as_dict()["reasons"]),
         rule_version=CONTENT_GOVERNANCE_RULE_VERSION,
         input_hash=_hash(_dump(input_payload)),
-        actor_kind="generation_run",
+        actor_kind=actor_kind,
         actor_id=actor_id,
         idempotency_key=idempotency_key,
         created_at=now(),
@@ -831,6 +832,7 @@ def reevaluate_generated_governance(
     *,
     quiz_id: str,
     actor_id: str,
+    actor_kind: str = "generation_run",
 ) -> dict:
     """Replay formal publication after claim-verification or gap events."""
 
@@ -990,6 +992,7 @@ def reevaluate_generated_governance(
         decision_scope="quiz_publication",
         decision=decision,
         actor_id=actor_id,
+        actor_kind=actor_kind,
         input_payload=input_payload,
         idempotency_key=f"quiz:{quiz.id}:replay:{input_hash}",
     )

@@ -32,7 +32,7 @@ from .infrastructure.database import build_database
 from .infrastructure.tables import Base, LearningTask, QuizAttempt, Remediation, User
 from .modules.learning.tasks import claim_task, heartbeat_task, recoverable_task_ids
 from .modules.feedback.service import FeedbackService
-from .services.source_verifier import AcceptingSourceVerifier, HttpSourceVerifier
+from .services.source_verifier import ModelOnlySourcePolicy
 from .services.attachment_storage import LocalAttachmentStorage
 from .services.runtime_settings import RuntimeSettingsStore
 
@@ -88,14 +88,10 @@ def build_provider_adapter(
 
 
 def managed_source_verifier(adapter):
-    if not adapter.configured:
-        return AcceptingSourceVerifier()
-    return HttpSourceVerifier(
-        claim_reviewer=getattr(adapter, "review_source_claim", None),
-        claim_reviewer_model=getattr(adapter, "model", ""),
-        claim_fetch_concurrency=settings.source_claim_fetch_concurrency,
-        claim_review_concurrency=settings.source_claim_review_concurrency,
-    )
+    # The MVP default is deliberately no-network. Rights-grounded material is
+    # a separate reviewed workflow and must be injected explicitly; provider
+    # availability never enables web fetching or claim verification.
+    return ModelOnlySourcePolicy()
 
 
 def create_app(
@@ -333,6 +329,7 @@ def create_app(
                 "error": str(error),
                 "retryable": error.retryable,
                 "operationId": error.operation_id,
+                "details": error.details,
             },
         )
 
@@ -923,18 +920,66 @@ def create_app(
     def bootstrap(s: SlowService = Depends(service)): return s.bootstrap()
 
     @app.post("/api/feedback", status_code=201)
-    def submit_feedback(
+    async def submit_feedback(
         request: Request,
         body: FeedbackCreate,
         idempotency_key: str = Header(alias="Idempotency-Key"),
         session: Session = Depends(db),
         scope: UserScope = Depends(current_scope),
     ):
-        return FeedbackService(
+        result = FeedbackService(
             session,
             scope,
             source_mode=request.app.state.app_mode,
         ).submit(body, idempotency_key)
+        return result
+
+    @app.post("/api/feedback/{feedback_id}/repair/stream")
+    async def stream_feedback_repair(
+        feedback_id: str,
+        s: SlowService = Depends(service),
+    ):
+        async def events():
+            event_id = 0
+            try:
+                async for event in s.feedback_repair_stream(feedback_id):
+                    event_id += 1
+                    event_type = str(event.get("type") or "message")
+                    payload = json.dumps(event, ensure_ascii=False)
+                    yield (
+                        f"id: {event_id}\n"
+                        f"event: {event_type}\n"
+                        f"data: {payload}\n\n"
+                    )
+            except Exception as error:
+                event_id += 1
+                payload = json.dumps(
+                    {
+                        "type": "error",
+                        "code": getattr(error, "code", "FEEDBACK_REPAIR_FAILED"),
+                        "message": (
+                            str(error)
+                            if isinstance(error, AppError)
+                            else "补救内容生成失败，请重试"
+                        ),
+                        "retryable": getattr(error, "retryable", True),
+                    },
+                    ensure_ascii=False,
+                )
+                yield (
+                    f"id: {event_id}\n"
+                    "event: error\n"
+                    f"data: {payload}\n\n"
+                )
+
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     @app.put("/api/sections/{section_id}/resume")
     def update_resume(

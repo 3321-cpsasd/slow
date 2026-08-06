@@ -152,21 +152,14 @@ class ChoiceQuestion(StrictModel):
 class GeneratedContent(StrictModel):
     enforce_standard_sentence_endings: ClassVar[bool] = True
     confidence: Literal["high", "medium", "low"]
-    sources: list[Source] = Field(min_length=1, max_length=12)
+    # model_only content must not invent source URLs. Sources are populated only
+    # by the separate rights_grounded workflow after asset-rights review.
+    sources: list[Source] = Field(default_factory=list, max_length=12)
     blocks: list[ContentBlock] = Field(min_length=5, max_length=12)
 
     @model_validator(mode="after")
     def valid_source_coverage(self):
-        # Sources are mandatory for the small set of blocks that state a core
-        # conclusion or a boundary. Explanations, examples, practice prompts,
-        # and transitions may be pedagogical synthesis and must not be forced
-        # to pretend that a URL supports every sentence.
-        strict_source_roles = {"conclusion", "boundary"}
         for block in self.blocks:
-            if block.role in strict_source_roles and not block.source_indexes:
-                raise ValueError(
-                    "conclusion and boundary blocks need an explicit source"
-                )
             if any(index < 0 or index >= len(self.sources) for index in block.source_indexes):
                 raise ValueError("content block source index out of range")
             if self.enforce_standard_sentence_endings:
@@ -186,6 +179,105 @@ class GeneratedQuiz(StrictModel):
 
 class GeneratedLesson(GeneratedContent):
     questions: list[ChoiceQuestion] = Field(min_length=4, max_length=5)
+
+
+LESSON_BLOCK_ROLES = Literal[
+    "core_instruction",
+    "prerequisite_scaffold",
+    "mechanism",
+    "comparison",
+    "boundary",
+    "application",
+    "transfer",
+    "practice",
+    "summary",
+    "transition",
+]
+
+LESSON_ANCHOR_RELATIONS = Literal[
+    "core",
+    "prerequisite",
+    "mechanism",
+    "comparison",
+    "boundary",
+    "application",
+    "transfer",
+    "practice",
+    "summary",
+    "transition",
+]
+
+
+class GeneratedLessonBlock(StrictModel):
+    """A candidate-local block. Database identity is assigned only at publish."""
+
+    block_key: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+    kind: Literal["text", "code", "formula", "table", "diagram"]
+    role: LESSON_BLOCK_ROLES
+    relation_to_anchor: LESSON_ANCHOR_RELATIONS
+    assessment_target_ids: list[str] = Field(default_factory=list, max_length=8)
+    heading: str = Field(min_length=1, max_length=160)
+    content: str = Field(min_length=40, max_length=16000)
+
+    @model_validator(mode="after")
+    def unique_target_bindings(self):
+        if len(self.assessment_target_ids) != len(set(self.assessment_target_ids)):
+            raise ValueError("assessment target ids must be unique within a block")
+        return self
+
+
+class GeneratedLessonQuestion(StrictModel):
+    """A candidate-local assessment item bound only by stable server IDs."""
+
+    item_key: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+    assessment_target_id: str = Field(min_length=1, max_length=160)
+    evidence_block_keys: list[str] = Field(min_length=1, max_length=8)
+    prompt: str = Field(min_length=4, max_length=2000)
+    options: list[str] = Field(min_length=3, max_length=6)
+    correct: list[int] = Field(min_length=1, max_length=6)
+    explanation: str = Field(min_length=4, max_length=3000)
+    difficulty: Literal["standard"] = "standard"
+
+    @model_validator(mode="after")
+    def valid_local_references(self):
+        if len(self.evidence_block_keys) != len(set(self.evidence_block_keys)):
+            raise ValueError("evidence block keys must be unique")
+        if len(self.options) != len({item.strip() for item in self.options}):
+            raise ValueError("question options must be unique")
+        if len(self.correct) != len(set(self.correct)):
+            raise ValueError("correct indexes must be unique")
+        if any(index < 0 or index >= len(self.options) for index in self.correct):
+            raise ValueError("correct index out of range")
+        return self
+
+
+class GeneratedLessonCandidate(StrictModel):
+    """The single-call v2 candidate; it has no publication authority."""
+
+    decision: Literal["candidate", "replan_required"] = "candidate"
+    replan_code: Literal["", "PREREQUISITE_GAP_REQUIRES_REPLAN"] = ""
+    replan_reason: str = Field(default="", max_length=2000)
+    confidence: Literal["high", "medium", "low"] = "medium"
+    blocks: list[GeneratedLessonBlock] = Field(default_factory=list, max_length=12)
+    questions: list[GeneratedLessonQuestion] = Field(default_factory=list, max_length=5)
+
+    @model_validator(mode="after")
+    def valid_decision_shape(self):
+        if self.decision == "replan_required":
+            if self.replan_code != "PREREQUISITE_GAP_REQUIRES_REPLAN":
+                raise ValueError("replan decision requires the fixed replan code")
+            if not self.replan_reason.strip():
+                raise ValueError("replan decision requires a reason")
+            if self.blocks or self.questions:
+                raise ValueError("replan decision cannot contain publishable content")
+            return self
+        if self.replan_code or self.replan_reason:
+            raise ValueError("candidate decision cannot carry replan fields")
+        if not 5 <= len(self.blocks) <= 12:
+            raise ValueError("candidate requires 5-12 content blocks")
+        if not 4 <= len(self.questions) <= 5:
+            raise ValueError("candidate requires 4-5 questions")
+        return self
 
 
 class LessonAlignmentIssue(StrictModel):

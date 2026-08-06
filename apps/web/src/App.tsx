@@ -43,10 +43,17 @@ type FeedbackTarget =
 const AI_RUNTIME_SETTINGS_ENABLED = import.meta.env.VITE_INTERNAL_AI_SETTINGS === 'true';
 const GENERATION_STAGE_LABELS: Record<string, string> = {
   queued: '正在排队',
+  teaching_blueprint: '正在规划改写方案',
   content_generation: '正在生成正文',
+  combined_generation: '正在生成正文与测验',
   source_verification: '正在核验来源',
+  source_verification_degraded: '正在记录来源核验结果',
   source_repair: '正在替换无法核验的来源',
+  source_repair_rejected: '正在重新检查来源',
   quiz_generation: '正在生成测验',
+  semantic_alignment_review: '正在检查正文与测验是否一致',
+  semantic_alignment_rejected: '正文与测验检查未通过',
+  semantic_claim_verification: '正在核验关键结论',
   persistence: '正在保存新版本',
   persisted: '已经完成',
   failed: '生成未完成',
@@ -839,6 +846,8 @@ export default function App() {
         <FeedbackDialog
           target={feedbackTarget}
           view={view}
+          onSectionChange={setSection}
+          onRefreshSeries={refreshSeries}
           onClose={() => setFeedbackTarget(null)}
         />
       )}
@@ -849,10 +858,14 @@ export default function App() {
 function FeedbackDialog({
   target,
   view,
+  onSectionChange,
+  onRefreshSeries,
   onClose,
 }: {
   target: FeedbackTarget;
   view: View;
+  onSectionChange: (section: Section) => void;
+  onRefreshSeries: () => Promise<void>;
   onClose: () => void;
 }) {
   const options = target.scope === 'content_block'
@@ -873,6 +886,10 @@ function FeedbackDialog({
   const [feedbackType, setFeedbackType] = useState(options[0][0]);
   const [message, setMessage] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [repairText, setRepairText] = useState('');
+  const [repairFeedbackId, setRepairFeedbackId] = useState('');
+  const [repairFailed, setRepairFailed] = useState(false);
   const [status, setStatus] = useState('');
   const dialogRef = useRef<HTMLElement | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
@@ -927,6 +944,31 @@ function FeedbackDialog({
     };
   }, [target.scope]);
 
+  const streamRepair = async (feedbackId: string) => {
+    setSubmitting(true);
+    setSubmitted(true);
+    setRepairFailed(false);
+    setRepairText('');
+    setStatus('');
+    try {
+      const result = await api.streamFeedbackRepair(
+        feedbackId,
+        (delta) => setRepairText((current) => current + delta),
+      );
+      if (target.scope === 'content_block') {
+        const updated = await api.section(target.sectionId);
+        onSectionChange(updated);
+        await onRefreshSeries();
+        setStatus(`已应用为第 ${result.contentVersion} 版正文。`);
+      }
+    } catch (reason) {
+      setRepairFailed(true);
+      setStatus(reason instanceof Error ? reason.message : '补救没有完成，请重试。');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setSubmitting(true);
@@ -951,9 +993,28 @@ function FeedbackDialog({
           key: crypto.randomUUID(),
         };
       }
-      await api.submitFeedback(payload, submissionRef.current.key);
-      setStatus('已收到。我们会把它放进下一次反馈整理。');
-      closeTimerRef.current = window.setTimeout(() => onCloseRef.current(), 900);
+      const receipt = await api.submitFeedback(payload, submissionRef.current.key);
+      setSubmitted(true);
+      if (target.scope === 'global') {
+        setStatus('已收到。我们会把它放进下一次反馈整理。');
+        closeTimerRef.current = window.setTimeout(() => onCloseRef.current(), 900);
+        return;
+      }
+      const regeneration = receipt.regeneration;
+      if (regeneration.status === 'stream_ready') {
+        setRepairFeedbackId(receipt.id);
+        await streamRepair(receipt.id);
+        return;
+      }
+      const blockedMessages: Record<string, string> = {
+        FEEDBACK_CONTENT_VERSION_STALE: '反馈已保存，但当前正文已有更新版本；请刷新后在新版本上再次反馈。',
+        SECTION_CONTENT_MISSING: '反馈已保存，但这段正文已经不可用；请刷新后再试。',
+      };
+      setStatus(
+        blockedMessages[regeneration.reasonCode || '']
+        || '反馈已保存，但这段正文现在无法补救。',
+      );
+      setSubmitting(false);
     } catch (reason) {
       setStatus(reason instanceof Error ? reason.message : '反馈没有提交成功，请稍后重试。');
       setSubmitting(false);
@@ -989,7 +1050,7 @@ function FeedbackDialog({
           </div>
         )}
         <form onSubmit={submit}>
-          <fieldset disabled={submitting}>
+          {!submitted && <fieldset disabled={submitting}>
             <legend>这次想反馈什么？</legend>
             <div className="feedback-type-grid">
               {options.map(([value, label]) => (
@@ -1005,8 +1066,8 @@ function FeedbackDialog({
                 </label>
               ))}
             </div>
-          </fieldset>
-          <label className="feedback-message-label">
+          </fieldset>}
+          {!submitted && <label className="feedback-message-label">
             {target.scope === 'content_block' ? '补充说明（可选）' : '具体说说'}
             <textarea
               value={message}
@@ -1017,13 +1078,29 @@ function FeedbackDialog({
               disabled={submitting}
             />
             <small>请勿填写密码、API Key 或其他敏感信息 · {message.length}/4000</small>
-          </label>
+          </label>}
+          {submitted && target.scope === 'content_block' && (
+            <div className={`feedback-repair-answer ${repairFailed ? 'failed' : ''}`} aria-live="polite">
+              {repairText ? (
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{repairText}</ReactMarkdown>
+              ) : submitting ? (
+                <span className="feedback-repair-listening">正在回应<span aria-hidden="true">…</span></span>
+              ) : null}
+              {submitting && repairText && <i className="stream-caret" aria-hidden="true" />}
+            </div>
+          )}
           {status && <p className="feedback-status" role="status">{status}</p>}
           <div className="dialog-actions">
-            <button type="button" className="quiet-button" disabled={submitting} onClick={onClose}>取消</button>
-            <button className="primary-button" disabled={submitting || ((target.scope === 'global' || feedbackType === 'other') && message.trim().length < 2)}>
-              {submitting ? '正在送出…' : '发送反馈'}
-            </button>
+            <button type="button" className="quiet-button" disabled={submitting} onClick={onClose}>{submitted ? '关闭' : '取消'}</button>
+            {repairFailed && repairFeedbackId ? (
+              <button type="button" className="primary-button" disabled={submitting} onClick={() => streamRepair(repairFeedbackId)}>
+                {submitting ? '正在回应…' : '重试补救'}
+              </button>
+            ) : (
+              <button className="primary-button" disabled={submitting || submitted || ((target.scope === 'global' || feedbackType === 'other') && message.trim().length < 2)}>
+                {submitting ? '正在送出…' : submitted ? '已提交' : '发送反馈'}
+              </button>
+            )}
           </div>
         </form>
       </section>
@@ -2568,7 +2645,7 @@ function BookTree({
         <TrashIcon size={14} />
       </button>
       <summary>
-        <span className="book-number">{book.position}</span>
+        <span className="book-number">书 {book.position}</span>
         <span>
           <b>{book.title}</b>
           <small>
@@ -2587,21 +2664,21 @@ function BookTree({
                 <div
                   className={`chapter-title ${chapterLocked ? 'locked' : ''}`}
                   aria-label={chapterLocked
-                    ? `${chapter.title}，未解锁；完成上一章后生成 3 到 5 节`
-                    : chapter.title}
+                    ? `第 ${chapter.position} 章 ${chapter.title}，未解锁；完成上一章后生成 3 到 5 节`
+                    : `第 ${chapter.position} 章 ${chapter.title}`}
                 >
-                  <span>{book.position}.{chapter.position}</span>
+                  <span>第 {chapter.position} 章</span>
                   <b>{chapter.title}</b>
                   {chapterLocked && <LockIcon size={13} />}
                 </div>
               ) : (
                 <button
                   className="chapter-title chapter-entry"
-                  aria-label={`生成 ${chapter.title} 的 3 到 5 节并进入`}
+                  aria-label={`生成第 ${chapter.position} 章 ${chapter.title} 的 3 到 5 节并进入`}
                   disabled={chapterGenerationDisabled || generatingChapterId === chapter.id}
                   onClick={() => onGenerateChapter(chapter)}
                 >
-                  <span>{book.position}.{chapter.position}</span>
+                  <span>第 {chapter.position} 章</span>
                   <b>
                     {generatingChapterId === chapter.id
                       ? '正在规划本章小节…'
@@ -2616,6 +2693,7 @@ function BookTree({
                   <SectionTreeButton
                     key={item.id}
                     item={item}
+                    chapterPosition={chapter.position}
                     active={item.id === currentSectionId}
                     onClick={() => onSelectSection(item.id)}
                   />
@@ -2666,7 +2744,17 @@ function BookTree({
   );
 }
 
-function SectionTreeButton({ item, active, onClick }: { item: SectionSummary; active: boolean; onClick: () => void }) {
+function SectionTreeButton({
+  item,
+  chapterPosition,
+  active,
+  onClick,
+}: {
+  item: SectionSummary;
+  chapterPosition: number;
+  active: boolean;
+  onClick: () => void;
+}) {
   const preparing = item.status === 'preparing';
   const state = item.status === 'completed'
     ? '✓'
@@ -2674,15 +2762,18 @@ function SectionTreeButton({ item, active, onClick }: { item: SectionSummary; ac
       ? <LockIcon size={11} />
       : preparing
         ? '…'
-        : item.position;
+        : '•';
+  const sectionNumber = `${chapterPosition}.${item.position}`;
   return (
     <button
       className={`section-tree-button ${active ? 'active' : ''} ${item.status}`}
       disabled={item.status === 'locked' || preparing}
       title={preparing ? '正文和验证题准备完成后即可进入' : undefined}
+      aria-label={`${sectionNumber} ${item.title}`}
       onClick={onClick}
     >
       <span>{state}</span>
+      <small className="section-number">{sectionNumber}</small>
       <b>{item.title}{preparing ? ' · 准备中' : ''}</b>
     </button>
   );
@@ -2732,7 +2823,7 @@ function ReaderPanel({
     setSelectionPopup(null);
     setRegenerationConfirmOpen(false);
     if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
-  }, [section?.id, section?.content?.id]);
+  }, [section?.id]);
 
   useEffect(() => {
     if (!regenerating) return undefined;
@@ -2832,9 +2923,9 @@ function ReaderPanel({
           <p className="breadcrumb">
             第 {location?.book.position} 本
             <i>›</i>
-            {location?.chapter.title}
+            第 {location?.chapter.position} 章 · {location?.chapter.title}
             <i>›</i>
-            第 {section.position} 节
+            {location?.chapter.position}.{section.position}
           </p>
           <h1>{section.title}</h1>
         </div>
@@ -3034,7 +3125,7 @@ function LessonContent({
         <button className="primary-button large" onClick={onGenerate}>
           {section.generation?.status === 'failed' ? '安全重试' : '生成正文并开始学习'}
         </button>
-        <small className="generation-note">正文和题目会经过结构校验，引用会尽量优先采用可访问的权威来源。</small>
+        <small className="generation-note">正文与测验将一次生成，并在发布前校验 Learning Contract、目标绑定和证据引用。</small>
       </div>
     );
   }
@@ -3051,11 +3142,15 @@ function LessonContent({
         <span>本节问题</span>
         <h2>{section.question}</h2>
       </div>
-      {section.content.blocks.map((block, index) => (
+      <p className="content-trust-note">
+        {section.content.generationMode === 'demo'
+          ? '演示内容 · 不代表真实 AI 生成或事实核验'
+          : `${section.content.aiGenerated ? 'AI 生成' : '授权内容'} · 已通过结构、契约和证据边界校验 · 未经逐项事实核验`}
+      </p>
+      {section.content.blocks.map((block) => (
         <ContentBlock
           key={block.id}
           block={block}
-          index={index}
           selected={block.id === selectedBlockId}
           onFeedback={() => onFeedbackBlock(block)}
         />
@@ -3082,12 +3177,10 @@ function LessonContent({
 
 function ContentBlock({
   block,
-  index,
   selected,
   onFeedback,
 }: {
   block: Block;
-  index: number;
   selected: boolean;
   onFeedback: () => void;
 }) {
@@ -3103,7 +3196,7 @@ function ContentBlock({
       className={`content-block role-${block.role} ${selected ? 'selected' : ''}`}
       data-block-id={block.id}
     >
-      <div className="block-meta"><span>{String(index + 1).padStart(2, '0')}</span><b>{labels[block.kind] || '阅读'}</b></div>
+      <div className="block-meta"><b>{labels[block.kind] || '阅读'}</b></div>
       <button
         className="block-feedback-button"
         type="button"
@@ -3592,6 +3685,7 @@ function Quiz({
             {workflowTasks.map((task) => (
               <div className={`workflow-task ${task.status}`} key={task.taskId}>
                 <span>{{
+                  content_feedback_regeneration: '反馈修订',
                   initial_book_preload: '第一节准备',
                   note_generation: '个人笔记',
                   remediation_generation: '补充教学与新题',

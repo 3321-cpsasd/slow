@@ -15,11 +15,13 @@ from ...infrastructure.tables import (
     Book,
     Chapter,
     ContentVersion,
+    LearningTask,
     Section,
     Series,
     Shelf,
     UserFeedback,
 )
+from ..learning.tasks import task_view
 
 
 FEEDBACK_PER_MINUTE_LIMIT = 8
@@ -65,6 +67,11 @@ class FeedbackService:
             return self._replay(replay, request_hash)
 
         block_snapshot_hash = ""
+        regeneration = {
+            "status": "not_applicable",
+            "reasonCode": None,
+            "taskId": None,
+        }
         if body.scope == "content_block":
             content = self.db.scalar(
                 select(ContentVersion)
@@ -111,9 +118,12 @@ class FeedbackService:
                 ).encode()
             ).hexdigest()
 
+            regeneration = self._regeneration_decision(body, content)
+
         self._enforce_rate_limit()
+        feedback_id = f"feedback_{uuid4().hex}"
         item = UserFeedback(
-            id=f"feedback_{uuid4().hex}",
+            id=feedback_id,
             user_id=self.scope.user_id,
             scope=body.scope,
             feedback_type=body.feedback_type,
@@ -129,7 +139,11 @@ class FeedbackService:
             idempotency_key=request_key,
             request_hash=request_hash,
             context_json=json.dumps(
-                {"pagePath": page_path, "view": body.view},
+                {
+                    "pagePath": page_path,
+                    "view": body.view,
+                    "regeneration": regeneration,
+                },
                 ensure_ascii=False,
                 separators=(",", ":"),
                 sort_keys=True,
@@ -146,6 +160,32 @@ class FeedbackService:
             raise
         return self._receipt(item)
 
+    def _regeneration_decision(
+        self,
+        body: FeedbackCreate,
+        content: ContentVersion,
+    ) -> dict:
+        latest_content_id = self.db.scalar(
+            select(ContentVersion.id)
+            .where(
+                ContentVersion.section_id == body.section_id,
+                ContentVersion.learning_contract_version_id
+                == content.learning_contract_version_id,
+            )
+            .order_by(ContentVersion.version.desc())
+        )
+        if latest_content_id != content.id:
+            return {
+                "status": "blocked",
+                "reasonCode": "FEEDBACK_CONTENT_VERSION_STALE",
+                "taskId": None,
+            }
+        return {
+            "status": "stream_ready",
+            "reasonCode": None,
+            "taskId": None,
+        }
+
     def _find_replay(self, idempotency_key: str) -> UserFeedback | None:
         return self.db.scalar(
             select(UserFeedback).where(
@@ -154,15 +194,14 @@ class FeedbackService:
             )
         )
 
-    @staticmethod
-    def _replay(item: UserFeedback, request_hash: str) -> dict:
+    def _replay(self, item: UserFeedback, request_hash: str) -> dict:
         if item.request_hash != request_hash:
             raise AppError(
                 "反馈请求标识已用于其他内容",
                 code="FEEDBACK_IDEMPOTENCY_CONFLICT",
                 status=409,
             )
-        return FeedbackService._receipt(item)
+        return self._receipt(item)
 
     def _enforce_rate_limit(self) -> None:
         observed_at = datetime.now(timezone.utc)
@@ -203,11 +242,29 @@ class FeedbackService:
         path = urlsplit(candidate).path or "/"
         return path[:500]
 
-    @staticmethod
-    def _receipt(item: UserFeedback) -> dict:
+    def _receipt(self, item: UserFeedback) -> dict:
+        try:
+            context = json.loads(item.context_json or "{}")
+        except (TypeError, ValueError):
+            context = {}
+        regeneration = context.get("regeneration") or {
+            "status": "not_applicable",
+            "reasonCode": None,
+            "taskId": None,
+        }
+        task = (
+            self.db.get(LearningTask, regeneration.get("taskId"))
+            if regeneration.get("taskId")
+            else None
+        )
         return {
             "id": item.id,
             "status": "received",
             "scope": item.scope,
             "createdAt": item.created_at.isoformat(),
+            "regeneration": {
+                "status": regeneration.get("status", "not_applicable"),
+                "reasonCode": regeneration.get("reasonCode"),
+                "task": task_view(task) if task else None,
+            },
         }

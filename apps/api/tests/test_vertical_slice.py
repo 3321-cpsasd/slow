@@ -47,6 +47,7 @@ from app.infrastructure.tables import (
     KnowledgeStateProjection,
     LearningEvidence,
     LearningContractAssessmentTarget,
+    LearningContractVersion,
     LearningDecisionSnapshot,
     LearningNote,
     LearningNoteReviewSupplement,
@@ -70,6 +71,7 @@ from app.infrastructure.tables import (
     SourceClaimBinding,
     SourceClaimVersion,
     SourceVersion,
+    UserFeedback,
     now,
 )
 from app.modules.learning.assessment import (
@@ -86,6 +88,7 @@ from app.modules.learning.rebuild import rebuild_user_projections
 
 class FakeAi:
     configured, model = True, "fake-structured"
+    allow_legacy_lesson_generation_for_tests = True
     async def close(self): pass
     async def plan(self, request, memory):
         return GeneratedPlan(
@@ -159,6 +162,7 @@ class FakeAi:
     async def chapter(self, request, memory):
         return GeneratedChapter(sections=[GeneratedSectionOutline(title=f"第{i}节", question=f"问题{i}", objectives=[f"目标{i}"]) for i in range(1,4)])
     async def lesson(self, request, memory, prior_questions=None):
+        self.last_lesson_request = request
         generation = 1
         if prior_questions:
             previous_prefix = prior_questions[0]["prompt"].split("套", 1)[0]
@@ -209,6 +213,15 @@ class FakeAi:
     async def answer(self, request):
         requested = request.get("requestedThreadId")
         return ClassifiedAnswer(relation="follow_up" if requested else "new_question", thread_id=request.get("newThreadId") or requested, answer="基于当前段落回答", thread_summary="已澄清机制")
+    async def repair_stream(self, request):
+        self.last_repair_request = request
+        for chunk in [
+            "| 维度 | 数据可视化 | 信息图表 |\n",
+            "| --- | --- | --- |\n",
+            "| 目的 | 探索规律 | 传递结论 |\n\n",
+            "表格之外的说明现在是独立段落。",
+        ]:
+            yield chunk
     async def note(self, request):
         return GeneratedNote(solved_question="解决问题", core_mechanism=["机制"], personal_gaps=[], boundaries=["边界"], practice_checks=["检查"], sources=["Kubernetes Docs"], unresolved=[])
     async def ask_me(self, request):
@@ -249,6 +262,16 @@ class MissingLineageAi(FakeAi):
         for question in lesson.questions:
             question.claim_block_indexes = []
         return lesson
+
+
+class FeedbackRegenerationFailingAi(FakeAi):
+    async def repair_stream(self, request):
+        raise AiError(
+            "反馈修订生成失败",
+            code="FEEDBACK_REPAIR_TEST_FAILURE",
+            retryable=False,
+        )
+        yield  # pragma: no cover
 
 
 def test_quiz_grade_explains_missed_and_incorrect_multiselect_options():
@@ -537,7 +560,7 @@ def test_source_blacklist_carries_only_permanent_not_found_failures():
     assert hosts == ["docs.missing.example"]
 
 
-def test_source_repair_scope_violation_retries_inside_generation():
+def test_default_model_only_route_never_runs_source_repair():
     ai = RecoveringSourceRepairAi()
     with TestClient(
         create_app(
@@ -563,24 +586,13 @@ def test_source_repair_scope_violation_retries_inside_generation():
 
     assert task["status"] == "succeeded"
     assert generated.status_code == 200
-    assert len(ai.repair_requests) == 2
-    assert all(
-        request["urls"] == [MISSING_SOURCE_URL]
-        for request in ai.repair_requests
-    )
-    assert all(
-        request["hosts"] == ["docs.missing.example"]
-        for request in ai.repair_requests
-    )
+    assert ai.repair_requests == []
     body = generated.json()
-    assert body["content"]["sources"][0]["url"] == WORKING_SOURCE_URL
-    assert "source_repair_rejected" in [
-        stage["stage"]
-        for stage in body["generation"]["trace"]["stageHistory"]
-    ]
+    assert body["content"]["sources"] == []
+    assert body["content"]["sourceVerification"] == []
 
 
-def test_unreachable_source_degrades_after_repair_budget_is_exhausted():
+def test_model_only_route_does_not_turn_missing_sources_into_governance():
     ai = RetryBlacklistAi()
     with TestClient(
         create_app(
@@ -608,22 +620,13 @@ def test_unreachable_source_degrades_after_repair_budget_is_exhausted():
     assert recovered.status_code == 200
     assert ai.content_requests == [{"urls": [], "hosts": []}]
     assert ai.quiz_requests == [{
-        "unverifiedSourceIndexes": [0],
-        "contentReliability": "model_generated_unverified",
+        "unverifiedSourceIndexes": [],
+        "contentReliability": None,
     }]
     body = recovered.json()
-    assert body["content"]["confidence"] == "low"
-    assert body["content"]["sourceVerification"] == [{
-        "url": MISSING_SOURCE_URL,
-        "reachable": False,
-        "statusCode": 404,
-        "pinned": True,
-        "verificationStatus": "failed",
-    }]
-    assert "source_verification_degraded" in [
-        stage["stage"]
-        for stage in body["generation"]["trace"]["stageHistory"]
-    ]
+    assert body["content"]["confidence"] == "high"
+    assert body["content"]["sources"] == []
+    assert body["content"]["sourceVerification"] == []
 
 
 def test_claim_verification_does_not_hold_the_sqlite_write_lock(tmp_path):
@@ -2528,6 +2531,23 @@ def wait_for_task_status(client, task_id, expected, timeout=3):
     raise AssertionError(f"task {task_id} did not reach {expected}")
 
 
+def sse_events(response):
+    events = []
+    for frame in response.text.replace("\r\n", "\n").split("\n\n"):
+        if not frame.strip():
+            continue
+        event_type = "message"
+        data_lines = []
+        for line in frame.splitlines():
+            if line.startswith("event:"):
+                event_type = line.removeprefix("event:").strip()
+            elif line.startswith("data:"):
+                data_lines.append(line.removeprefix("data:").lstrip())
+        if data_lines:
+            events.append((event_type, json.loads("\n".join(data_lines))))
+    return events
+
+
 def test_plan_creation_is_idempotent(client):
     body = {"shelfId":"shelf_technology","topic":"并发创建保护","role":"技术人员","experience":"会 Docker","depth":"deep"}
     headers = {"Idempotency-Key": "test-plan-creation-idempotency"}
@@ -2898,6 +2918,294 @@ def test_section_regeneration_appends_versions_and_preserves_audit(client):
     blocked = client.post(f"/api/sections/{original['id']}/regenerate")
     assert blocked.status_code == 409
     assert blocked.json()["code"] == "SECTION_ALREADY_ASSESSED"
+
+
+def test_content_feedback_streams_the_model_repair_and_rebinds_only_content(client):
+    series = create_series(client)
+    assert wait_for_task(
+        client,
+        series["initializationTask"]["taskId"],
+    )["status"] == "succeeded"
+    refreshed = client.get(f"/api/series/{series['id']}").json()
+    section_id = refreshed["books"][0]["chapters"][0]["sections"][0]["id"]
+    original = client.post(f"/api/sections/{section_id}/open").json()
+    block = original["content"]["blocks"][0]
+
+    submitted = client.post(
+        "/api/feedback",
+        headers={"Idempotency-Key": "feedback-auto-regeneration-001"},
+        json={
+            "scope": "content_block",
+            "feedbackType": "unclear",
+            "message": "因果关系跳得太快，请把中间机制讲清楚",
+            "pagePath": "/",
+            "view": "learn",
+            "sectionId": section_id,
+            "contentVersionId": original["content"]["id"],
+            "blockId": block["id"],
+        },
+    )
+
+    assert submitted.status_code == 201, submitted.json()
+    receipt = submitted.json()
+    assert receipt["regeneration"] == {
+        "status": "stream_ready",
+        "reasonCode": None,
+        "task": None,
+    }
+    streamed = client.post(f"/api/feedback/{receipt['id']}/repair/stream")
+    assert streamed.status_code == 200
+    assert streamed.headers["content-type"].startswith("text/event-stream")
+    assert streamed.headers["x-accel-buffering"] == "no"
+    events = sse_events(streamed)
+    deltas = [event[1]["delta"] for event in events if event[0] == "delta"]
+    done = next(event[1] for event in events if event[0] == "done")
+    expected_repair = "".join(deltas)
+    assert len(deltas) == 4
+    assert expected_repair.endswith("表格之外的说明现在是独立段落。")
+    replacement = client.get(f"/api/sections/{section_id}").json()
+    assert replacement["content"]["version"] == 2
+    assert replacement["content"]["id"] != original["content"]["id"]
+    assert replacement["content"]["blocks"][0]["content"] == expected_repair
+    assert replacement["content"]["blocks"][0]["kind"] == "text"
+    assert replacement["quiz"]["id"] == original["quiz"]["id"]
+    assert replacement["versionBinding"]["contentVersionId"] == replacement["content"]["id"]
+    assert replacement["versionBinding"]["initialQuizSetId"] == original["quiz"]["id"]
+    assert done["contentVersionId"] == replacement["content"]["id"]
+    repair_request = client.app.state.ai.last_repair_request
+    assert repair_request["targetBlock"]["id"] == block["id"]
+    assert repair_request["feedback"] == {
+        "type": "unclear",
+        "message": "因果关系跳得太快，请把中间机制讲清楚",
+    }
+    with client.app.state.sessions() as db:
+        versions = db.scalars(
+            select(ContentVersion)
+            .where(ContentVersion.section_id == section_id)
+            .order_by(ContentVersion.version)
+        ).all()
+        generation = db.scalar(
+            select(GenerationRun)
+            .where(
+                GenerationRun.section_id == section_id,
+                GenerationRun.operation == "feedback_repair",
+            )
+        )
+        binding = db.scalar(
+            select(LearningRunSectionBinding).where(
+                LearningRunSectionBinding.section_id == section_id
+            )
+        )
+    assert [item.id for item in versions] == [
+        original["content"]["id"],
+        replacement["content"]["id"],
+    ]
+    assert json.loads(generation.trace_json)["feedbackId"] == receipt["id"]
+    assert json.loads(binding.lineage_audit_json)["feedbackRepairs"][0][
+        "feedbackId"
+    ] == receipt["id"]
+    with client.app.state.sessions() as db:
+        assert db.scalar(
+            select(func.count())
+            .select_from(LearningTask)
+            .where(LearningTask.task_type == "content_feedback_regeneration")
+        ) == 0
+
+    replayed = client.post(f"/api/feedback/{receipt['id']}/repair/stream")
+    replay_events = sse_events(replayed)
+    replay_done = next(event[1] for event in replay_events if event[0] == "done")
+    assert replay_done["replayed"] is True
+    assert replay_done["contentVersionId"] == replacement["content"]["id"]
+    with client.app.state.sessions() as db:
+        assert db.scalar(
+            select(func.count())
+            .select_from(ContentVersion)
+            .where(ContentVersion.section_id == section_id)
+        ) == 2
+
+
+def test_content_feedback_repairs_legacy_contract_bound_content(client):
+    series = create_series(client)
+    assert wait_for_task(
+        client,
+        series["initializationTask"]["taskId"],
+    )["status"] == "succeeded"
+    refreshed = client.get(f"/api/series/{series['id']}").json()
+    section_id = refreshed["books"][0]["chapters"][0]["sections"][0]["id"]
+    original = client.post(f"/api/sections/{section_id}/open").json()
+    with client.app.state.sessions() as db:
+        contract = db.get(
+            LearningContractVersion,
+            original["versionBinding"]["learningContractVersionId"],
+        )
+        contract.provenance_mode = "derived_from_m1"
+        contract.lineage_status = "provisional"
+        contract.contract_hash = "f" * 64
+        db.commit()
+
+    block = original["content"]["blocks"][0]
+    submitted = client.post(
+        "/api/feedback",
+        headers={"Idempotency-Key": "feedback-legacy-contract-001"},
+        json={
+            "scope": "content_block",
+            "feedbackType": "layout",
+            "message": "请修正段落层次和间距",
+            "sectionId": section_id,
+            "contentVersionId": original["content"]["id"],
+            "blockId": block["id"],
+        },
+    )
+
+    assert submitted.status_code == 201, submitted.json()
+    receipt = submitted.json()
+    assert receipt["regeneration"]["status"] == "stream_ready"
+    events = sse_events(
+        client.post(f"/api/feedback/{receipt['id']}/repair/stream")
+    )
+    assert any(event[0] == "done" for event in events)
+    replacement = client.get(f"/api/sections/{section_id}").json()
+    assert replacement["content"]["version"] == 2
+    assert (
+        replacement["versionBinding"]["learningContractVersionId"]
+        == original["versionBinding"]["learningContractVersionId"]
+    )
+
+
+def test_content_feedback_after_assessment_repairs_without_rewriting_evidence(client):
+    series = create_series(client)
+    assert wait_for_task(
+        client,
+        series["initializationTask"]["taskId"],
+    )["status"] == "succeeded"
+    refreshed = client.get(f"/api/series/{series['id']}").json()
+    section_id = refreshed["books"][0]["chapters"][0]["sections"][0]["id"]
+    section = client.post(f"/api/sections/{section_id}/open").json()
+    assessed = client.post(
+        f"/api/sections/{section_id}/quiz",
+        json={
+            "quizSetId": section["quiz"]["id"],
+            "answers": [[1] for _ in section["quiz"]["questions"]],
+        },
+    )
+    assert assessed.status_code == 200
+    attempt_id = assessed.json()["attemptId"]
+    block = section["content"]["blocks"][0]
+
+    submitted = client.post(
+        "/api/feedback",
+        headers={"Idempotency-Key": "feedback-after-assessment-001"},
+        json={
+            "scope": "content_block",
+            "feedbackType": "inaccurate",
+            "message": "这一段需要纠错",
+            "sectionId": section_id,
+            "contentVersionId": section["content"]["id"],
+            "blockId": block["id"],
+        },
+    )
+
+    assert submitted.status_code == 201
+    receipt = submitted.json()
+    assert receipt["regeneration"]["status"] == "stream_ready"
+    events = sse_events(
+        client.post(f"/api/feedback/{receipt['id']}/repair/stream")
+    )
+    assert any(event[0] == "done" for event in events)
+    replacement = client.get(f"/api/sections/{section_id}").json()
+    assert replacement["status"] == "completed"
+    assert replacement["content"]["version"] == 2
+    assert replacement["content"]["id"] != section["content"]["id"]
+    assert replacement["quiz"]["id"] == section["quiz"]["id"]
+    assert replacement["latestAttemptReview"] is not None
+    with client.app.state.sessions() as db:
+        assert db.scalar(
+            select(func.count()).select_from(UserFeedback)
+        ) == 1
+        feedback_task_count = db.scalar(
+            select(func.count()).select_from(LearningTask).where(
+                LearningTask.task_type == "content_feedback_regeneration"
+            )
+        )
+        original_attempt = db.get(QuizAttempt, attempt_id)
+        original_quiz = db.get(QuizSet, section["quiz"]["id"])
+        binding = db.scalar(
+            select(LearningRunSectionBinding).where(
+                LearningRunSectionBinding.section_id == section_id
+            )
+        )
+    assert feedback_task_count == 0
+    assert original_attempt.quiz_set_id == section["quiz"]["id"]
+    assert original_quiz.content_version_id == section["content"]["id"]
+    assert binding.content_version_id == replacement["content"]["id"]
+    assert binding.initial_quiz_set_id == section["quiz"]["id"]
+
+
+def test_failed_content_feedback_repair_stream_preserves_the_visible_version(
+    tmp_path,
+):
+    storage = LocalAttachmentStorage(tmp_path / "feedback-failure-attachments")
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            FeedbackRegenerationFailingAi(),
+            AcceptingSourceVerifier(),
+            storage,
+        )
+    ) as failing_client:
+        series = create_series(failing_client)
+        assert wait_for_task(
+            failing_client,
+            series["initializationTask"]["taskId"],
+        )["status"] == "succeeded"
+        refreshed = failing_client.get(f"/api/series/{series['id']}").json()
+        section_id = (
+            refreshed["books"][0]["chapters"][0]["sections"][0]["id"]
+        )
+        original = failing_client.post(
+            f"/api/sections/{section_id}/open"
+        ).json()
+        block = original["content"]["blocks"][0]
+        submitted = failing_client.post(
+            "/api/feedback",
+            headers={"Idempotency-Key": "feedback-regeneration-failure-001"},
+            json={
+                "scope": "content_block",
+                "feedbackType": "poor_example",
+                "message": "请更换这个例子",
+                "sectionId": section_id,
+                "contentVersionId": original["content"]["id"],
+                "blockId": block["id"],
+            },
+        )
+        receipt = submitted.json()
+        streamed = failing_client.post(
+            f"/api/feedback/{receipt['id']}/repair/stream"
+        )
+        events = sse_events(streamed)
+        error = next(event[1] for event in events if event[0] == "error")
+        assert error["code"] == "FEEDBACK_REPAIR_TEST_FAILURE"
+        assert error["message"] == "反馈修订生成失败"
+        assert error["retryable"] is False
+        current = failing_client.get(f"/api/sections/{section_id}").json()
+        assert current["content"]["id"] == original["content"]["id"]
+        assert current["quiz"]["id"] == original["quiz"]["id"]
+        with failing_client.app.state.sessions() as db:
+            assert db.scalar(
+                select(func.count())
+                .select_from(ContentVersion)
+                .where(ContentVersion.section_id == section_id)
+            ) == 1
+            assert db.scalar(
+                select(func.count()).select_from(UserFeedback)
+            ) == 1
+            failed_run = db.scalar(
+                select(GenerationRun).where(
+                    GenerationRun.operation == "feedback_repair"
+                )
+            )
+            assert failed_run.status == "failed"
+            assert failed_run.error_code == "FEEDBACK_REPAIR_TEST_FAILURE"
 
 
 class GenerationArtifactAi(FakeAi):

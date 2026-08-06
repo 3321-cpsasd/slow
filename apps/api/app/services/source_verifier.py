@@ -93,6 +93,20 @@ class SourceVerificationError(AppError):
         )
 
 
+class ModelOnlySourcePolicy:
+    """No-network source policy for the default MVP generation route.
+
+    Model output is explicitly factual-status ``unreviewed``. This policy does
+    not fetch, repair, approve, or synthesize source records from model URLs.
+    """
+
+    generation_mode = "model_only"
+    allows_external_sources = False
+
+    async def verify(self, sources: list[Source]) -> list[dict]:
+        return []
+
+
 class HttpSourceVerifier:
     """Server-side verifier restricted to public HTTPS destinations."""
 
@@ -457,6 +471,9 @@ class HttpSourceVerifier:
 
 class AcceptingSourceVerifier:
     """Explicit deterministic verifier for local demos and contract tests."""
+
+    generation_mode = "rights_grounded"
+    allows_external_sources = True
 
     async def verify(self, sources: list[Source]) -> list[dict]:
         return [

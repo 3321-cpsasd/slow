@@ -1,0 +1,359 @@
+import itertools
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, func, select
+from sqlalchemy.orm import Session
+
+from app.ai.contracts import (
+    GeneratedLessonBlock,
+    GeneratedLessonCandidate,
+    GeneratedLessonQuestion,
+)
+from app.application.lesson_generation import (
+    CandidateValidationFailure,
+    LessonGenerationSpec,
+    publish_lesson_candidate,
+    validate_lesson_candidate,
+)
+from app.infrastructure.tables import (
+    AssessmentItemEvidenceBlock,
+    AssessmentItemVersion,
+    Base,
+    ContentBlockAssessmentTarget,
+    ContentVersion,
+    GenerationRun,
+    LearningContractVersion,
+    QuizSet,
+    Section,
+)
+from app.main import create_app
+from app.services.source_verifier import AcceptingSourceVerifier
+from test_vertical_slice import FakeAi, create_series, sse_events, wait_for_task
+
+
+def spec(*, second_required=False):
+    return LessonGenerationSpec.model_validate(
+        {
+            "generationMode": "model_only",
+            "mission": {"versionId": "mission_1", "why": "理解机制"},
+            "learner": {"profession": "工程师"},
+            "section": {
+                "id": "section_1",
+                "title": "一次只学一个锚点",
+                "question": "为什么需要稳定绑定？",
+            },
+            "learningContractVersionId": "contract_1",
+            "learningContractVersion": 3,
+            "targets": [
+                {
+                    "assessmentTargetId": "target_core",
+                    "objective": "解释稳定绑定的作用",
+                    "dimension": "mechanism",
+                    "targetDepth": "deep",
+                    "required": True,
+                    "verificationPolicy": "choice_quiz_v1",
+                },
+                {
+                    "assessmentTargetId": "target_boundary",
+                    "objective": "识别绑定失效边界",
+                    "dimension": "boundary",
+                    "targetDepth": "deep",
+                    "required": second_required,
+                    "verificationPolicy": "choice_quiz_v1",
+                },
+            ],
+            "neighborBoundaries": [],
+            "relevantMastery": [],
+            "depthPolicy": {"scope": "机制与边界"},
+        }
+    )
+
+
+def candidate():
+    roles = [
+        ("core_instruction", "core", ["target_core"]),
+        ("mechanism", "mechanism", ["target_core"]),
+        ("comparison", "comparison", ["target_boundary"]),
+        ("boundary", "boundary", ["target_boundary"]),
+        ("practice", "practice", ["target_core"]),
+    ]
+    blocks = [
+        GeneratedLessonBlock(
+            block_key=f"b{index}",
+            kind="text",
+            role=role,
+            relation_to_anchor=relation,
+            assessment_target_ids=target_ids,
+            heading=f"块 {index}",
+            content="这一正文块完整解释当前目标的机制、判断依据与适用边界，并为绑定题目提供直接证据。",
+        )
+        for index, (role, relation, target_ids) in enumerate(roles, 1)
+    ]
+    questions = [
+        GeneratedLessonQuestion(
+            item_key=f"q{index}",
+            assessment_target_id="target_core",
+            evidence_block_keys=["b1"],
+            prompt=f"第 {index} 题：哪项符合正文讲授的稳定绑定机制？",
+            options=["仅匹配标题", "使用稳定目标 ID", "忽略契约"],
+            correct=[1],
+            explanation="正文明确要求使用稳定目标 ID。",
+        )
+        for index in range(1, 5)
+    ]
+    return GeneratedLessonCandidate(blocks=blocks, questions=questions)
+
+
+def test_valid_candidate_passes_without_repair():
+    validated = validate_lesson_candidate(spec(), candidate())
+    assert validated.block_by_key["b1"].assessment_target_ids == ["target_core"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    [
+        (
+            lambda value: value.blocks[0].assessment_target_ids.append("outside"),
+            "CONTENT_ASSESSMENT_TARGET_UNBOUND",
+        ),
+        (
+            lambda value: setattr(value.questions[0], "assessment_target_id", "outside"),
+            "ASSESSMENT_TARGET_UNBOUND",
+        ),
+        (
+            lambda value: setattr(value.questions[0], "evidence_block_keys", ["missing"]),
+            "ASSESSMENT_EVIDENCE_BLOCK_UNBOUND",
+        ),
+        (
+            lambda value: setattr(value.questions[0], "evidence_block_keys", ["b3"]),
+            "ASSESSMENT_EVIDENCE_TARGET_MISMATCH",
+        ),
+    ],
+)
+def test_candidate_gate_fails_closed_with_machine_code(mutation, expected_code):
+    value = candidate()
+    mutation(value)
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(spec(), value)
+    assert raised.value.code == expected_code
+    assert raised.value.location
+
+
+def test_required_target_must_be_taught_and_assessed():
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(spec(second_required=True), candidate())
+    assert raised.value.code == "REQUIRED_TARGET_NOT_ASSESSED"
+
+
+def test_replan_candidate_never_enters_publication_gate():
+    value = GeneratedLessonCandidate(
+        decision="replan_required",
+        replan_code="PREREQUISITE_GAP_REQUIRES_REPLAN",
+        replan_reason="当前小节无法补足大型前置缺口",
+    )
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(spec(), value)
+    assert raised.value.code == "PREREQUISITE_GAP_REQUIRES_REPLAN"
+
+
+def test_atomic_publisher_normalizes_explicit_bindings_and_rolls_back():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    ids = itertools.count(1)
+
+    def uid(prefix):
+        return f"{prefix}_{next(ids)}"
+
+    with Session(engine) as db:
+        section = Section(
+            id="section_1",
+            chapter_id="chapter_1",
+            position=1,
+            title="稳定绑定",
+            question="为什么需要稳定绑定？",
+            objectives_json="[]",
+        )
+        contract = LearningContractVersion(
+            id="contract_1",
+            section_id=section.id,
+            mission_version_id="mission_1",
+            version=3,
+            section_question_snapshot=section.question,
+            target_depth="deep",
+            boundaries_json="[]",
+            generation_context_json="{}",
+            provenance_mode="native_m2",
+            lineage_status="confirmed",
+            contract_hash="hash",
+        )
+        run = GenerationRun(
+            id="run_1",
+            section_id=section.id,
+            operation="lesson",
+            attempt=1,
+            status="validating",
+            model="test-model",
+        )
+        validated = validate_lesson_candidate(spec(), candidate())
+        published = publish_lesson_candidate(
+            db,
+            uid=uid,
+            section=section,
+            contract=contract,
+            generation_run=run,
+            spec=spec(),
+            validated=validated,
+            content_version=1,
+            quiz_generation=1,
+        )
+        assert published.content.publication_status == "published"
+        assert published.quiz.publication_status == "published"
+        assert db.scalar(select(func.count()).select_from(ContentBlockAssessmentTarget)) == 5
+        assert db.scalar(select(func.count()).select_from(AssessmentItemVersion)) == 4
+        assert db.scalar(select(func.count()).select_from(AssessmentItemEvidenceBlock)) == 4
+        db.rollback()
+        assert db.scalar(select(func.count()).select_from(ContentVersion)) == 0
+        assert db.scalar(select(func.count()).select_from(QuizSet)) == 0
+
+
+class V2FakeAi(FakeAi):
+    def __init__(self, *, invalid_target=False):
+        self.lesson_generation_calls = 0
+        self.invalid_target = invalid_target
+
+    async def generate_lesson(self, lesson_spec):
+        self.lesson_generation_calls += 1
+        targets = lesson_spec["targets"]
+        blocks = []
+        roles = [
+            ("core_instruction", "core"),
+            ("mechanism", "mechanism"),
+            ("comparison", "comparison"),
+            ("boundary", "boundary"),
+            ("practice", "practice"),
+        ]
+        for index, (role, relation) in enumerate(roles, 1):
+            target_id = targets[(index - 1) % len(targets)]["assessmentTargetId"]
+            blocks.append(
+                GeneratedLessonBlock(
+                    block_key=f"b{index}",
+                    kind="text",
+                    role=role,
+                    relation_to_anchor=relation,
+                    assessment_target_ids=[
+                        "outside_contract" if self.invalid_target and index == 1 else target_id
+                    ],
+                    heading=f"正文块 {index}",
+                    content="这一正文块完整解释当前目标的机制、判断依据与适用边界，并为绑定题目提供直接证据。",
+                )
+            )
+        questions = []
+        for index in range(4):
+            target = targets[index % len(targets)]
+            block = next(
+                item
+                for item in blocks
+                if target["assessmentTargetId"] in item.assessment_target_ids
+            )
+            questions.append(
+                GeneratedLessonQuestion(
+                    item_key=f"q{index + 1}",
+                    assessment_target_id=target["assessmentTargetId"],
+                    evidence_block_keys=[block.block_key],
+                    prompt=f"第 {index + 1} 题：哪项符合正文教授的机制？",
+                    options=["只看标题", "依据机制判断", "忽略边界"],
+                    correct=[1],
+                    explanation="正文要求依据机制和边界判断。",
+                )
+            )
+        return GeneratedLessonCandidate(blocks=blocks, questions=questions)
+
+
+def test_default_v2_route_uses_one_model_call_and_publishes_both_artifacts():
+    ai = V2FakeAi()
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            ai,
+            AcceptingSourceVerifier(),
+        )
+    ) as client:
+        series = create_series(client)
+        task = wait_for_task(client, series["initializationTask"]["taskId"])
+        refreshed = client.get(f"/api/series/{series['id']}").json()
+        section_id = refreshed["books"][0]["chapters"][0]["sections"][0]["id"]
+        lesson = client.get(f"/api/sections/{section_id}").json()
+
+        assert task["status"] == "succeeded"
+        assert ai.lesson_generation_calls == 1
+        assert lesson["content"]["publicationStatus"] == "published"
+        assert lesson["quiz"]["publicationStatus"] == "published"
+        assert lesson["generation"]["trace"]["physicalCallBudget"] == 1
+        with client.app.state.sessions() as db:
+            assert db.scalar(select(func.count()).select_from(AssessmentItemVersion)) == 4
+
+
+def test_v2_route_rejects_unbound_content_before_formal_persistence():
+    ai = V2FakeAi(invalid_target=True)
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            ai,
+            AcceptingSourceVerifier(),
+        )
+    ) as client:
+        series = create_series(client)
+        task = wait_for_task(client, series["initializationTask"]["taskId"])
+        with client.app.state.sessions() as db:
+            run = db.scalar(select(GenerationRun).order_by(GenerationRun.started_at.desc()))
+            assert task["status"] == "failed"
+            assert run.error_code == "CONTENT_ASSESSMENT_TARGET_UNBOUND"
+            assert db.scalar(select(func.count()).select_from(ContentVersion)) == 0
+            assert db.scalar(select(func.count()).select_from(QuizSet)) == 0
+
+
+def test_v2_feedback_creates_a_new_atomic_content_and_quiz_version():
+    ai = V2FakeAi()
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            ai,
+            AcceptingSourceVerifier(),
+        )
+    ) as client:
+        series = create_series(client)
+        assert wait_for_task(
+            client, series["initializationTask"]["taskId"]
+        )["status"] == "succeeded"
+        refreshed = client.get(f"/api/series/{series['id']}").json()
+        section_id = refreshed["books"][0]["chapters"][0]["sections"][0]["id"]
+        original = client.post(f"/api/sections/{section_id}/open").json()
+        block = original["content"]["blocks"][0]
+        submitted = client.post(
+            "/api/feedback",
+            headers={"Idempotency-Key": "v2-feedback-atomic-001"},
+            json={
+                "scope": "content_block",
+                "feedbackType": "unclear",
+                "message": "请把中间机制讲清楚",
+                "sectionId": section_id,
+                "contentVersionId": original["content"]["id"],
+                "blockId": block["id"],
+            },
+        )
+        assert submitted.status_code == 201
+        streamed = client.post(
+            f"/api/feedback/{submitted.json()['id']}/repair/stream"
+        )
+        assert any(event[0] == "done" for event in sse_events(streamed))
+        replacement = client.get(f"/api/sections/{section_id}").json()
+        assert ai.lesson_generation_calls == 2
+        assert replacement["content"]["version"] == 2
+        assert replacement["content"]["id"] != original["content"]["id"]
+        assert replacement["quiz"]["id"] != original["quiz"]["id"]
+        with client.app.state.sessions() as db:
+            old_content = db.get(ContentVersion, original["content"]["id"])
+            old_quiz = db.get(QuizSet, original["quiz"]["id"])
+            assert old_content.publication_status == "superseded"
+            assert old_quiz.publication_status == "superseded"

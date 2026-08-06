@@ -132,6 +132,11 @@ def test_global_feedback_is_an_immutable_user_scoped_fact():
             assert feedback.page_path == "/profile"
             assert json.loads(feedback.context_json) == {
                 "pagePath": "/profile",
+                "regeneration": {
+                    "reasonCode": None,
+                    "status": "not_applicable",
+                    "taskId": None,
+                },
                 "view": "home",
             }
 
@@ -156,6 +161,11 @@ def test_content_feedback_binds_the_exact_visible_content_block():
         )
 
         assert response.status_code == 201
+        assert response.json()["regeneration"] == {
+            "status": "stream_ready",
+            "reasonCode": None,
+            "task": None,
+        }
         with client.app.state.sessions() as db:
             feedback = db.scalar(select(UserFeedback))
             assert feedback.section_id == section_id

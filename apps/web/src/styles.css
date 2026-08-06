@@ -1383,7 +1383,7 @@ button:disabled { cursor: not-allowed; }
 .book-node > summary {
   list-style: none;
   display: grid;
-  grid-template-columns: 25px 1fr auto;
+  grid-template-columns: 38px 1fr auto;
   gap: 9px;
   align-items: start;
   padding: 14px 64px 14px 10px;
@@ -1391,8 +1391,9 @@ button:disabled { cursor: not-allowed; }
 }
 .book-node > summary::-webkit-details-marker { display: none; }
 .book-node > summary .book-number {
-  width: 23px;
+  min-width: 31px;
   height: 23px;
+  padding: 0 5px;
   border-radius: 7px;
   display: grid;
   place-items: center;
@@ -1479,7 +1480,7 @@ button:disabled { cursor: not-allowed; }
   border: 0;
   background: transparent;
   display: grid;
-  grid-template-columns: 22px 1fr;
+  grid-template-columns: 22px 28px 1fr;
   gap: 6px;
   align-items: start;
   text-align: left;
@@ -1500,6 +1501,14 @@ button:disabled { cursor: not-allowed; }
   font-size: 9px;
   font-weight: 750;
 }
+.section-tree-button .section-number {
+  padding-top: 2px;
+  color: #8d948e;
+  font-size: 9px;
+  font-weight: 750;
+  line-height: 1.45;
+}
+.section-tree-button.active .section-number { color: var(--green-2); }
 .section-tree-button b { font-size: 11px; line-height: 1.45; font-weight: 600; }
 .section-tree-button.locked { opacity: .48; }
 .section-tree-button.preparing { opacity: .72; color: #7d7048; }
@@ -1637,6 +1646,7 @@ button:disabled { cursor: not-allowed; }
 .lesson-question { padding: 26px 30px; background: var(--warm); border-radius: 3px 18px 18px 3px; border-left: 3px solid #b39059; }
 .lesson-question span { color: #8f744a; font-size: 10px; letter-spacing: .12em; font-weight: 750; }
 .lesson-question h2 { margin: 8px 0 0; font-family: Georgia, "Songti SC", serif; font-weight: 500; font-size: 25px; line-height: 1.45; }
+.content-trust-note { margin: 14px 4px 2px; color: #777f78; font-size: 12px; line-height: 1.6; }
 .content-block { padding: 45px 3px 42px; border-bottom: 1px solid var(--soft-line); position: relative; }
 .content-block.selected::before { content: ""; position: absolute; left: -18px; top: 49px; width: 3px; height: 28px; border-radius: 4px; background: #8bad3d; }
 .block-meta { display: flex; gap: 12px; color: var(--green-2); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
@@ -1776,6 +1786,27 @@ button:disabled { cursor: not-allowed; }
 .feedback-message-label textarea:focus { border-color: #6e947e; box-shadow: 0 0 0 3px rgba(63, 112, 83, .1); }
 .feedback-message-label small { margin-top: 6px; display: block; color: #909790; font-size: 9px; font-weight: 500; }
 .feedback-status { margin: 13px 0 0; padding: 10px 12px; border-radius: 7px; background: #eef4ef; color: #35614a; font-size: 11px; line-height: 1.5; }
+.feedback-repair-answer {
+  min-height: 132px;
+  margin-top: 4px;
+  padding: 18px 19px;
+  border: 1px solid #d8e4da;
+  border-radius: 10px;
+  background: #f8faf6;
+  color: #2c3e33;
+  font: 14px/1.85 Georgia, "Songti SC", serif;
+}
+.feedback-repair-answer.failed { border-color: #e4cbc7; }
+.feedback-repair-answer > :first-child { margin-top: 0; }
+.feedback-repair-answer > :last-child { margin-bottom: 0; }
+.feedback-repair-answer p { margin: 0 0 12px; }
+.feedback-repair-answer ul, .feedback-repair-answer ol { margin: 8px 0 12px; padding-left: 22px; }
+.feedback-repair-answer table { width: 100%; margin: 12px 0; border-collapse: collapse; font: 12px/1.55 system-ui, sans-serif; }
+.feedback-repair-answer th, .feedback-repair-answer td { padding: 7px 9px; border: 1px solid #d7ded6; text-align: left; vertical-align: top; }
+.feedback-repair-answer th { background: #edf3eb; }
+.feedback-repair-listening { color: #567060; font: 600 12px/1.6 system-ui, sans-serif; }
+.feedback-repair-listening span { animation: qa-caret .9s infinite; }
+.feedback-repair-answer .stream-caret { display: inline-block; width: 2px; height: 1em; margin-left: 3px; vertical-align: -.12em; background: #72912d; animation: qa-caret .8s infinite; }
 .selection-qa-button {
   position: fixed;
   z-index: 80;

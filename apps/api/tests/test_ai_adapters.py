@@ -16,6 +16,7 @@ from app.ai.contracts import (
     TeachingBlueprint,
 )
 from app.ai.metering import AiUsageRecorder
+from app.ai.context import policy_for
 from app.ai.openai_adapter import OpenAiAdapter
 from app.ai.port import ProviderCapabilities
 from app.auth.context import Principal
@@ -38,6 +39,49 @@ class FakeProviderError(RuntimeError):
         super().__init__("provider failure")
         self.status_code = status_code
         self.code = code
+
+
+def test_curriculum_hierarchy_is_versioned_and_embedded_in_generation_prompts():
+    plan_policy = policy_for("plan", "deep")
+    chapter_policy = policy_for("chapter", "deep")
+    replan_policy = policy_for("book_replan", "deep")
+    lesson_policy = policy_for("lesson_content", "deep")
+    assert plan_policy.version == "plan_context_v2"
+    assert chapter_policy.version == "chapter_context_v2"
+    assert replan_policy.version == "book_replan_context_v2"
+    assert lesson_policy.version == "lesson_content_context_v2"
+    assert any("coherent theme" in item for item in plan_policy.allowed_uses)
+    assert any("focal knowledge point" in item for item in chapter_policy.allowed_uses)
+    assert any("weak prerequisites" in item for item in lesson_policy.allowed_uses)
+
+    async def run():
+        adapter = OpenAiAdapter("", "test-model")
+        calls = []
+
+        async def fake_parse(schema, prompt, payload, tokens):
+            calls.append((schema.__name__, prompt, payload, tokens))
+            return SimpleNamespace()
+
+        adapter._parse = fake_parse
+        await adapter.plan({"topic": "信息可视化"}, [])
+        await adapter.chapter({"title": "视觉编码", "objective": "理解视觉通道"}, [])
+        await adapter.replan_book({"title": "信息可视化基础"}, [])
+        await adapter.teaching_blueprint({"question": "位置编码为什么准确？"}, [])
+        await adapter.lesson_content({"question": "位置编码为什么准确？"}, [])
+        return calls
+
+    calls = asyncio.run(run())
+    prompts = {name: prompt for name, prompt, _payload, _tokens in calls}
+    assert "一个已确认学习目标形成一个系列" in prompts["GeneratedPlan"]
+    assert "每本书围绕一个完整学习主题" in prompts["GeneratedPlan"]
+    assert "每章是一组相关知识点的聚合" in prompts["GeneratedPlan"]
+    assert "每节必须有一个核心知识点和一个主要验证问题" in prompts["GeneratedChapter"]
+    assert "这不意味着把知识点当成孤立节点" in prompts["GeneratedChapter"]
+    assert "不得仅因它们是讲授阶段就生成新的并列小节" in prompts["GeneratedChapter"]
+    assert "每个未来章必须是一组相关知识点的聚合" in prompts["ReplannedBook"]
+    assert "section.question 是本节的核心知识锚点，不是知识孤岛" in prompts["TeachingBlueprint"]
+    assert "对薄弱或缺失的关联补充足够脚手架" in prompts["GeneratedContent"]
+    assert "支撑性关联知识不得静默变成新的 assessmentTargets" in prompts["GeneratedContent"]
 
 
 def test_teaching_blueprint_requires_every_learning_role():
@@ -143,6 +187,82 @@ def test_openai_chat_repairs_invalid_schema_with_validation_feedback():
     assert trace[0]["outcome"] == "succeeded"
     assert len(trace[0]["invalidOutputDigests"]) == 1
     assert trace[0]["lastValidationIssues"][0]["path"] == "value"
+
+
+def _lesson_candidate_json():
+    blocks = [
+        {
+            "block_key": f"b{index}",
+            "kind": "text",
+            "role": role,
+            "relation_to_anchor": relation,
+            "assessment_target_ids": ["target_1"],
+            "heading": f"正文块 {index}",
+            "content": "这一正文块完整解释当前目标的机制、判断依据与适用边界，并为测验提供直接证据。学习者可以据此复述因果链并检查反例。",
+        }
+        for index, (role, relation) in enumerate(
+            [
+                ("core_instruction", "core"),
+                ("mechanism", "mechanism"),
+                ("comparison", "comparison"),
+                ("boundary", "boundary"),
+                ("practice", "practice"),
+            ],
+            1,
+        )
+    ]
+    questions = [
+        {
+            "item_key": f"q{index}",
+            "assessment_target_id": "target_1",
+            "evidence_block_keys": ["b1"],
+            "prompt": f"第 {index} 题：哪项符合正文教授的机制？",
+            "options": ["只看标题", "依据机制判断", "忽略边界"],
+            "correct": [1],
+            "explanation": "正文要求依据机制和边界判断。",
+            "difficulty": "standard",
+        }
+        for index in range(1, 5)
+    ]
+    return json.dumps(
+        {
+            "decision": "candidate",
+            "replan_code": "",
+            "replan_reason": "",
+            "confidence": "high",
+            "blocks": blocks,
+            "questions": questions,
+        },
+        ensure_ascii=False,
+    )
+
+
+def test_openai_chat_lesson_v2_uses_exactly_one_physical_call():
+    async def run():
+        adapter, completions = await chat_adapter([_lesson_candidate_json()])
+        result = await adapter.generate_lesson({"pipelineVersion": "lesson_generation_v2"})
+        return result, completions.calls, adapter.structured_trace()
+
+    result, calls, trace = asyncio.run(run())
+    assert len(result.blocks) == 5
+    assert len(calls) == 1
+    assert trace[0]["schema"] == "GeneratedLessonCandidate"
+    assert trace[0]["attempts"] == 1
+    assert trace[0]["repairAttempts"] == 0
+
+
+def test_openai_chat_lesson_v2_does_not_repair_an_invalid_candidate():
+    async def run():
+        adapter, completions = await chat_adapter(['{"decision":"candidate"}'])
+        with pytest.raises(AiError) as raised:
+            await adapter.generate_lesson({"pipelineVersion": "lesson_generation_v2"})
+        return raised.value, completions.calls, adapter.structured_trace()
+
+    error, calls, trace = asyncio.run(run())
+    assert error.code == "AI_STRUCTURED_OUTPUT_INVALID"
+    assert len(calls) == 1
+    assert trace[0]["attempts"] == 1
+    assert trace[0]["repairAttempts"] == 0
 
 
 def test_openai_chat_rejects_empty_content_without_invoking_repair():

@@ -12,6 +12,7 @@ from ...infrastructure.tables import LearningTask, now
 
 RUNNING_LEASE = timedelta(seconds=90)
 TASK_TYPES = {
+    "content_feedback_regeneration",
     "initial_book_preload",
     "note_generation",
     "remediation_generation",

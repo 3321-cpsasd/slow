@@ -19,7 +19,10 @@ data/runtime-ai.json
 data/backups/
 
 # Private product strategy, internal evidence, and local agent context.
-/docs/
+# Architecture decisions are the only versioned exception under docs/.
+/docs/*
+!/docs/decisions/
+!/docs/decisions/**
 /reports/evaluations/
 /AGENTS.md
 /PROJECT_CONTEXT.md

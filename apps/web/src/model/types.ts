@@ -140,7 +140,24 @@ export type AiRuntime = {
 };
 export type Source = { title:string; url:string; kind:string; version:string };
 export type Block = { id:string; version:number; kind:string; role:string; heading:string; content:string; source_indexes:number[] };
-export type FeedbackReceipt = { id:string; status:'received'; scope:'global'|'content_block'; createdAt:string };
+export type FeedbackReceipt = {
+  id:string;
+  status:'received';
+  scope:'global'|'content_block';
+  createdAt:string;
+  regeneration:{
+    status:'stream_ready'|'queued'|'blocked'|'not_applicable';
+    reasonCode:string|null;
+    task:LearningTask|null;
+  };
+};
+export type FeedbackRepairResult = {
+  feedbackId:string;
+  contentVersionId:string;
+  contentVersion:number;
+  contentBlockId:string;
+  replayed:boolean;
+};
 export type Question = { prompt:string; options:string[]; core:boolean; objective:string; assessmentTargetId?:string; selectionMode:'single'|'multiple' };
 export type QuizGovernance = {
   decisionId:string;
@@ -251,10 +268,10 @@ export type Note = {
   verificationAnnotations:NoteVerificationAnnotation[];
 };
 export type AskMe = {id:string;status:string;round:number;dimension:string;prompt:string|null;entries:{dimension:string;prompt:string;answer:string|null;evaluation:string;rationale:string}[]};
-export type Section = SectionSummary & { generation:null|Generation; content:null|{id:string;version:number;blocks:Block[];sources:Source[];sourceVerification:SourceVerification[];confidence:string}; quiz:null|{id:string;generation:number;questions:Question[];governance:QuizGovernance|null}; latestAttemptReview:QuizResult|null; remediations:Remediation[]; note:null|Note; workflowTasks:LearningTask[] };
+export type Section = SectionSummary & { generation:null|Generation; content:null|{id:string;version:number;blocks:Block[];sources:Source[];sourceVerification:SourceVerification[];confidence:string;publicationStatus:string;generationMode:'model_only'|'rights_grounded'|'demo';rightsStatus:string;factualStatus:string;aiGenerated:boolean;schemaVersion:string;promptVersion:string}; quiz:null|{id:string;generation:number;publicationStatus:string;questions:Question[];governance:QuizGovernance|null}; latestAttemptReview:QuizResult|null; remediations:Remediation[]; note:null|Note; workflowTasks:LearningTask[] };
 export type LearningTask = {
   taskId:string;
-  type:'initial_book_preload'|'note_generation'|'remediation_generation'|'next_section_preload';
+  type:'content_feedback_regeneration'|'initial_book_preload'|'note_generation'|'remediation_generation'|'next_section_preload';
   sectionId:string|null;
   triggerId?:string|null;
   status:'pending'|'running'|'succeeded'|'failed';

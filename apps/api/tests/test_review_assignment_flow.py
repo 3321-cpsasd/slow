@@ -1,14 +1,21 @@
 from datetime import timedelta
+import json
 
 from fastapi.testclient import TestClient
 import pytest
 from sqlalchemy import func, select
 
-from app.ai.contracts import ChoiceQuestion, GeneratedQuiz
+from app.ai.contracts import (
+    ChoiceQuestion,
+    GeneratedQuiz,
+    LessonAlignmentIssue,
+    LessonAlignmentReview,
+)
 from app.core.errors import AppError
 from app.infrastructure.tables import (
     AssessmentObservation,
     EvidenceQualificationEvent,
+    GovernanceDecisionSnapshot,
     QuizSet,
     ReviewAssignment,
     ReviewAssignmentEventRecord,
@@ -36,6 +43,12 @@ class ReviewCapableAi(FakeAi):
             explanation="延迟复习需要把机制迁移到新的边界判断。",
         )])
 
+    async def review_lesson_alignment(self, request, content, quiz):
+        return LessonAlignmentReview(
+            allowed=True,
+            covered_objectives=[quiz.questions[0].objective],
+        )
+
 
 class ReusingReviewAi(ReviewCapableAi):
     async def lesson_quiz(self, request, content, prior_questions=None):
@@ -48,6 +61,26 @@ class ReusingReviewAi(ReviewCapableAi):
             objective=prior["objective"],
             explanation=prior["explanation"],
         )])
+
+
+class RejectingAlignmentReviewAi(ReviewCapableAi):
+    async def review_lesson_alignment(self, request, content, quiz):
+        if request.get("reviewMode") != "delayed_assignment":
+            return await super().review_lesson_alignment(
+                request,
+                content,
+                quiz,
+            )
+        return LessonAlignmentReview(
+            allowed=False,
+            issues=[LessonAlignmentIssue(
+                code="quiz_not_grounded",
+                severity="blocking",
+                message="模型标记的正确答案无法由原正文确定。",
+                question_indexes=[0],
+            )],
+            covered_objectives=[],
+        )
 
 
 def _review_client(tmp_path, ai=None):
@@ -111,6 +144,22 @@ def test_review_assignment_materializes_once_and_submits_candidate(tmp_path):
         assert "explanation" not in started_body["quiz"]["questions"][0]
         assert "claim_block_indexes" not in started_body["quiz"]["questions"][0]
         assert started_body["quiz"]["questions"][0]["selectionMode"] == "single"
+        with client.app.state.sessions() as db:
+            assignment = db.get(ReviewAssignment, assignment_id)
+            governance = db.scalar(
+                select(GovernanceDecisionSnapshot).where(
+                    GovernanceDecisionSnapshot.quiz_set_id
+                    == assignment.review_quiz_set_id
+                )
+            )
+            stored_quiz = db.get(QuizSet, assignment.review_quiz_set_id)
+            stored_question = json.loads(stored_quiz.questions_json)[0]
+            assert governance is not None
+            assert governance.allowed is True
+            assert governance.assessment_eligible is True
+            assert governance.actor_kind == "review_assignment"
+            assert governance.actor_id == assignment.id
+            assert stored_question["claim_block_indexes"] == [0]
 
         submitted = client.post(
             f"/api/reviews/{assignment_id}/submit",
@@ -231,6 +280,61 @@ def test_review_start_rejects_reused_question_without_state_change(tmp_path):
             assert assignment.status == "presented"
             assert assignment.review_quiz_set_id is None
             assert db.scalar(select(func.count(QuizSet.id))) == before_quizzes
+
+
+def test_review_start_rejects_semantically_invalid_answer_without_state_change(tmp_path):
+    with _review_client(tmp_path, RejectingAlignmentReviewAi()) as client:
+        _complete_initial_quiz_and_make_due(client)
+        due = client.get("/api/reviews/due?daily_budget=1").json()
+        assignment_id = due["items"][0]["assignmentId"]
+        with client.app.state.sessions() as db:
+            before_quizzes = db.scalar(select(func.count(QuizSet.id)))
+
+        response = client.post(f"/api/reviews/{assignment_id}/start")
+        assert response.status_code == 502
+        assert response.json()["code"] == "REVIEW_SEMANTIC_ALIGNMENT_FAILED"
+
+        with client.app.state.sessions() as db:
+            assignment = db.get(ReviewAssignment, assignment_id)
+            assert assignment.status == "presented"
+            assert assignment.review_quiz_set_id is None
+            assert db.scalar(select(func.count(QuizSet.id))) == before_quizzes
+
+
+def test_review_submit_requires_current_eligible_governance_snapshot(tmp_path):
+    with _review_client(tmp_path) as client:
+        _complete_initial_quiz_and_make_due(client)
+        assignment_id = client.get(
+            "/api/reviews/due?daily_budget=1"
+        ).json()["items"][0]["assignmentId"]
+        started = client.post(f"/api/reviews/{assignment_id}/start")
+        assert started.status_code == 200
+
+        with client.app.state.sessions() as db:
+            assignment = db.get(ReviewAssignment, assignment_id)
+            snapshots = db.scalars(
+                select(GovernanceDecisionSnapshot).where(
+                    GovernanceDecisionSnapshot.quiz_set_id
+                    == assignment.review_quiz_set_id
+                )
+            ).all()
+            assert snapshots
+            for snapshot in snapshots:
+                db.delete(snapshot)
+            db.commit()
+
+        response = client.post(
+            f"/api/reviews/{assignment_id}/submit",
+            headers={"Idempotency-Key": "review-submit-no-governance"},
+            json={"answers": [[1]]},
+        )
+        assert response.status_code == 409
+        assert response.json()["code"] == "REVIEW_QUIZ_GOVERNANCE_REQUIRED"
+
+        with client.app.state.sessions() as db:
+            assignment = db.get(ReviewAssignment, assignment_id)
+            assert assignment.status == "started"
+            assert assignment.submitted_attempt_id is None
 
 
 def test_review_assignment_is_hidden_from_other_user(tmp_path):

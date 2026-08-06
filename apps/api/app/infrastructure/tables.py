@@ -734,6 +734,26 @@ class ContentVersion(Base):
     blocks_json: Mapped[str] = mapped_column(Text)
     sources_json: Mapped[str] = mapped_column(Text)
     confidence: Mapped[str] = mapped_column(String(16))
+    publication_status: Mapped[str] = mapped_column(
+        String(24), default="published", index=True
+    )
+    schema_version: Mapped[str] = mapped_column(String(48), default="legacy")
+    prompt_version: Mapped[str] = mapped_column(String(48), default="legacy")
+    generation_mode: Mapped[str] = mapped_column(
+        String(32), default="model_only", index=True
+    )
+    rights_status: Mapped[str] = mapped_column(
+        String(32), default="not_applicable", index=True
+    )
+    factual_status: Mapped[str] = mapped_column(
+        String(32), default="unreviewed", index=True
+    )
+    ai_generated: Mapped[bool] = mapped_column(Boolean, default=True)
+    generation_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_runs.id"), nullable=True, index=True
+    )
+    output_hash: Mapped[str] = mapped_column(String(64), default="")
+    labeling_metadata_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -810,6 +830,28 @@ class ContentBlockVersion(Base):
     supersedes_id: Mapped[str | None] = mapped_column(
         ForeignKey("content_block_versions.id"), nullable=True
     )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ContentBlockAssessmentTarget(Base):
+    """Explicit v2 teaching binding; never inferred from block prose."""
+
+    __tablename__ = "content_block_assessment_targets"
+    __table_args__ = (
+        UniqueConstraint(
+            "content_block_version_id",
+            "assessment_target_id",
+            name="uq_content_block_assessment_target_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    content_block_version_id: Mapped[str] = mapped_column(
+        ForeignKey("content_block_versions.id"), index=True
+    )
+    assessment_target_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_targets.id"), index=True
+    )
+    binding_role: Mapped[str] = mapped_column(String(32), default="teaches")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -989,6 +1031,8 @@ class GovernanceDecisionSnapshot(Base):
 
 
 class GenerationRun(Base):
+    """GenerationAttempt audit authority; table name is retained for migration compatibility."""
+
     __tablename__ = "generation_runs"
     id: Mapped[str] = mapped_column(String, primary_key=True)
     section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
@@ -996,6 +1040,11 @@ class GenerationRun(Base):
     attempt: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(24), index=True)
     model: Mapped[str] = mapped_column(String(160), default="")
+    pipeline_version: Mapped[str] = mapped_column(String(48), default="legacy")
+    prompt_version: Mapped[str] = mapped_column(String(48), default="legacy")
+    schema_version: Mapped[str] = mapped_column(String(48), default="legacy")
+    generation_mode: Mapped[str] = mapped_column(String(32), default="model_only")
+    context_hash: Mapped[str] = mapped_column(String(64), default="")
     trace_json: Mapped[str] = mapped_column(Text, default="{}")
     error_code: Mapped[str] = mapped_column(String(80), default="")
     error_message: Mapped[str] = mapped_column(Text, default="")
@@ -1081,6 +1130,58 @@ class QuizSet(Base):
     )
     generation: Mapped[int] = mapped_column(Integer)
     questions_json: Mapped[str] = mapped_column(Text)
+    publication_status: Mapped[str] = mapped_column(
+        String(24), default="published", index=True
+    )
+    schema_version: Mapped[str] = mapped_column(String(48), default="legacy")
+
+
+class AssessmentItemVersion(Base):
+    """Normalized immutable quiz item generated with a lesson candidate."""
+
+    __tablename__ = "assessment_item_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "quiz_set_id",
+            "position",
+            name="uq_assessment_item_versions_quiz_position",
+        ),
+        UniqueConstraint(
+            "quiz_set_id",
+            "item_key",
+            name="uq_assessment_item_versions_quiz_key",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    quiz_set_id: Mapped[str] = mapped_column(ForeignKey("quiz_sets.id"), index=True)
+    assessment_target_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_targets.id"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    item_key: Mapped[str] = mapped_column(String(64))
+    payload_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AssessmentItemEvidenceBlock(Base):
+    """Question-to-taught-block evidence binding validated before publish."""
+
+    __tablename__ = "assessment_item_evidence_blocks"
+    __table_args__ = (
+        UniqueConstraint(
+            "assessment_item_version_id",
+            "content_block_version_id",
+            name="uq_assessment_item_evidence_block_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    assessment_item_version_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_item_versions.id"), index=True
+    )
+    content_block_version_id: Mapped[str] = mapped_column(
+        ForeignKey("content_block_versions.id"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class QuizAttempt(Base):

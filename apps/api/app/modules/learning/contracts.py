@@ -414,6 +414,7 @@ def open_run_section(
             )
             .where(
                 ContentVersion.section_id == section.id,
+                ContentVersion.publication_status == "published",
                 LearningContractVersion.mission_version_id == mission_version_id,
             )
             .order_by(ContentVersion.version)
@@ -437,6 +438,7 @@ def open_run_section(
             )
             .where(
                 ContentVersion.section_id == section.id,
+                ContentVersion.publication_status == "published",
                 LearningContractVersion.mission_version_id == mission_version_id,
             )
             .order_by(ContentVersion.version.desc())
@@ -449,12 +451,15 @@ def open_run_section(
                 QuizSet.content_version_id == content.id,
                 QuizSet.learning_contract_version_id
                 == content.learning_contract_version_id,
+                QuizSet.publication_status == "published",
             )
             .order_by(QuizSet.generation.asc())
         )
     if (
         not content
         or not quiz
+        or content.publication_status != "published"
+        or quiz.publication_status != "published"
         or quiz.section_id != section.id
         or quiz.content_version_id != content.id
         or not content.learning_contract_version_id
