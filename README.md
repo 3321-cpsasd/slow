@@ -60,6 +60,18 @@ PYTHONPATH=apps/api .venv/bin/pytest -q apps/api/tests
 cd apps/web && pnpm build
 ```
 
+生产数据库兼容性使用显式的一次性 PostgreSQL 测试实例验证：
+
+```bash
+docker compose -f deploy/compose.postgres.test.yml down --remove-orphans
+docker compose -f deploy/compose.postgres.test.yml up -d --wait
+POSTGRES_TEST_DATABASE_URL=postgresql+psycopg://slow_test:slow_test_only@127.0.0.1:55432/slow_test \
+  PYTHONPATH=apps/api .venv/bin/pytest -q apps/api/tests/test_postgresql_support.py
+docker compose -f deploy/compose.postgres.test.yml down --remove-orphans
+```
+
+测试数据库使用公开的测试凭据和 `tmpfs`，不得与生产 Compose 合并。
+
 ### 安全说明
 
 - API Key 只存在服务端，不应进入浏览器、日志或 Git。
@@ -83,7 +95,7 @@ docker compose --env-file .release.env -f compose.prod.yml -f compose.https.yml 
 
 `create-demo-user.sh` 必须在 ECS 的 `/opt/slow` 下调用。它会使用生产 HTTPS
 Compose 配置自动创建 `slow-demo` 加五位随机数的账号，并生成一个 24 位强密码。
-账号和 Argon2id 密码哈希随 SQLite 数据库持久化到 `/opt/slow/data`；明文密码只在
+账号和 Argon2id 密码哈希随 PostgreSQL 数据库持久化；明文密码只在
 调用终端显示一次，不会进入密码托管文件。请立即复制并通过私密渠道发送给用户。
 
 创建和重置命令默认生成随机密码；也可使用 `--prompt-password` 安全输入自定密码。

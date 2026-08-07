@@ -37,6 +37,15 @@ def upgrade():
     for table_name in RUN_SCOPED_TABLES:
         if _has_run_foreign_key(connection, table_name):
             continue
+        if connection.dialect.name == "postgresql":
+            op.create_foreign_key(
+                f"fk_{table_name}_learning_run_id",
+                table_name,
+                "learning_runs",
+                ["learning_run_id"],
+                ["id"],
+            )
+            continue
         with op.batch_alter_table(
             table_name,
             recreate="always",
@@ -53,6 +62,13 @@ def downgrade():
     connection = op.get_bind()
     for table_name in reversed(RUN_SCOPED_TABLES):
         if not _has_run_foreign_key(connection, table_name):
+            continue
+        if connection.dialect.name == "postgresql":
+            op.drop_constraint(
+                f"fk_{table_name}_learning_run_id",
+                table_name,
+                type_="foreignkey",
+            )
             continue
         with op.batch_alter_table(
             table_name,

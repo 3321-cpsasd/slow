@@ -1,0 +1,23 @@
+name: slow-postgres-test
+
+# Disposable local/CI database only. It uses a public test credential and a
+# tmpfs volume, and must never be combined with the production deployment.
+services:
+  db:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: slow_test
+      POSTGRES_USER: slow_test
+      POSTGRES_PASSWORD: slow_test_only
+      POSTGRES_INITDB_ARGS: --data-checksums --encoding=UTF8
+    ports:
+      - "127.0.0.1:${POSTGRES_TEST_PORT:-55432}:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U slow_test -d slow_test
+      interval: 2s
+      timeout: 2s
+      retries: 30

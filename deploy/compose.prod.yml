@@ -1,13 +1,44 @@
 name: slow
 
 services:
+  db:
+    image: postgres:17.6-alpine
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-slow}
+      POSTGRES_USER: ${POSTGRES_USER:-slow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_INITDB_ARGS: --data-checksums --encoding=UTF8
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 15s
+    stop_grace_period: 1m
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks:
+      - app
+
   api:
     image: ${REGISTRY}/${IMAGE_NAME}-api:${APP_VERSION}
     restart: unless-stopped
     env_file:
       - .env
     environment:
-      DATABASE_URL: sqlite+pysqlite:////data/slow-v0.db
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-slow}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@db:5432/${POSTGRES_DB:-slow}
       ATTACHMENT_STORAGE_DIR: /data/attachments
       RUNTIME_AI_CONFIG_PATH: /data/runtime-ai.json
       PASSWORD_ESCROW_PATH: /data/password-escrow.json
@@ -16,6 +47,9 @@ services:
       AUTH_MODE: ${AUTH_MODE:-password}
     volumes:
       - ./data:/data
+    depends_on:
+      db:
+        condition: service_healthy
     healthcheck:
       test:
         - CMD

@@ -1,0 +1,106 @@
+from __future__ import annotations
+
+from pathlib import Path
+import os
+import subprocess
+import sys
+
+import pytest
+import sqlalchemy as sa
+from sqlalchemy.engine import make_url
+
+from app.infrastructure.database import build_database
+from app.infrastructure.tables import Base, LearningRun, Shelf, User
+from migrate_sqlite_to_postgres import MigrationRefused, migrate
+
+
+API_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _upgrade(url: str) -> None:
+    environment = os.environ.copy()
+    environment["DATABASE_URL"] = url
+    subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
+        cwd=API_ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_active_learning_run_index_is_partial_on_both_databases():
+    index = next(
+        item
+        for item in LearningRun.__table__.indexes
+        if item.name == "uq_learning_runs_active_user_series"
+    )
+
+    assert index.dialect_options["sqlite"]["where"] is not None
+    assert index.dialect_options["postgresql"]["where"] is not None
+
+
+def test_sqlite_to_postgresql_import_and_nonempty_refusal(tmp_path):
+    target_url = os.environ.get("POSTGRES_TEST_DATABASE_URL", "").strip()
+    if not target_url:
+        pytest.skip("POSTGRES_TEST_DATABASE_URL is not configured")
+    parsed = make_url(target_url)
+    assert parsed.get_backend_name() == "postgresql"
+    assert parsed.database == "slow_test", "integration test requires disposable slow_test"
+
+    _upgrade(target_url)
+    target_engine = sa.create_engine(target_url)
+    try:
+        target_tables = set(sa.inspect(target_engine).get_table_names())
+        assert set(Base.metadata.tables) <= target_tables
+        with target_engine.connect() as connection:
+            populated = [
+                table.name
+                for table in Base.metadata.sorted_tables
+                if connection.execute(
+                    sa.select(sa.literal(1)).select_from(table).limit(1)
+                ).first()
+            ]
+        assert populated == [], f"PostgreSQL test database is not empty: {populated}"
+    finally:
+        target_engine.dispose()
+
+    sqlite_path = tmp_path / "source.db"
+    sqlite_url = f"sqlite+pysqlite:///{sqlite_path}"
+    _upgrade(sqlite_url)
+    source_engine, _ = build_database(sqlite_url)
+    try:
+        with source_engine.begin() as connection:
+            connection.execute(
+                User.__table__.insert().values(id="user_pg_import", name="迁移用户")
+            )
+            connection.execute(
+                Shelf.__table__.insert().values(
+                    id="shelf_pg_import",
+                    user_id="user_pg_import",
+                    name="数据库",
+                    domain="software-engineering",
+                )
+            )
+    finally:
+        source_engine.dispose()
+
+    counts = migrate(sqlite_path, target_url)
+    assert counts["users"] == 1
+    assert counts["shelves"] == 1
+
+    target_engine = sa.create_engine(target_url)
+    try:
+        with target_engine.connect() as connection:
+            assert connection.execute(
+                sa.select(User.name).where(User.id == "user_pg_import")
+            ).scalar_one() == "迁移用户"
+            assert connection.execute(
+                sa.select(Shelf.user_id).where(Shelf.id == "shelf_pg_import")
+            ).scalar_one() == "user_pg_import"
+    finally:
+        target_engine.dispose()
+
+    with pytest.raises(MigrationRefused, match="target is not empty"):
+        migrate(sqlite_path, target_url)

@@ -108,6 +108,7 @@ def upgrade():
             ["user_id", "series_id"],
             unique=True,
             sqlite_where=sa.text("status = 'active'"),
+            postgresql_where=sa.text("status = 'active'"),
         )
 
     if "version" not in _columns(connection, "section_progress"):
@@ -296,12 +297,37 @@ def upgrade():
         uniques = sa.inspect(connection).get_unique_constraints(table_name)
         if any(item["name"] == new_name for item in uniques):
             continue
+        actual_old_name = next(
+            (
+                item["name"]
+                for item in uniques
+                if item["name"]
+                and (
+                    item["name"] == old_name
+                    or tuple(item["column_names"]) == tuple(columns[1:])
+                )
+            ),
+            old_name,
+        )
+        if connection.dialect.name == "postgresql":
+            # Recreating a referenced table would temporarily drop its primary
+            # key, which PostgreSQL correctly rejects. These changes are native
+            # ALTER TABLE operations and do not require a table copy.
+            op.drop_constraint(actual_old_name, table_name, type_="unique")
+            op.alter_column(
+                table_name,
+                "learning_run_id",
+                existing_type=sa.String(),
+                nullable=False,
+            )
+            op.create_unique_constraint(new_name, table_name, columns)
+            continue
         with op.batch_alter_table(
             table_name,
             recreate="always",
             naming_convention=NAMING_CONVENTION,
         ) as batch_op:
-            batch_op.drop_constraint(old_name, type_="unique")
+            batch_op.drop_constraint(actual_old_name, type_="unique")
             batch_op.alter_column(
                 "learning_run_id",
                 existing_type=sa.String(),

@@ -587,6 +587,7 @@ class LearningRun(Base):
             "series_id",
             unique=True,
             sqlite_where=(status == "active"),
+            postgresql_where=(status == "active"),
         ),
     )
 

@@ -17,13 +17,50 @@ NAMING_CONVENTION = {"uq": "uq_%(table_name)s_%(column_0_name)s"}
 
 
 def upgrade():
+    connection = op.get_bind()
+    attempt_unique = next(
+        (
+            item["name"]
+            for item in sa.inspect(connection).get_unique_constraints(
+                "remediations"
+            )
+            if tuple(item["column_names"]) == ("attempt_id",)
+            and item["name"]
+        ),
+        "uq_remediations_attempt_id",
+    )
+    if connection.dialect.name == "postgresql":
+        op.drop_constraint(attempt_unique, "remediations", type_="unique")
+        op.create_index(
+            "ix_remediations_attempt_id",
+            "remediations",
+            ["attempt_id"],
+            unique=False,
+        )
+        op.add_column(
+            "remediations",
+            sa.Column("supersedes_id", sa.String(), nullable=True),
+        )
+        op.create_unique_constraint(
+            "uq_remediations_supersedes_id",
+            "remediations",
+            ["supersedes_id"],
+        )
+        op.create_foreign_key(
+            "fk_remediations_supersedes_id",
+            "remediations",
+            "remediations",
+            ["supersedes_id"],
+            ["id"],
+        )
+        return
     with op.batch_alter_table(
         "remediations",
         recreate="always",
         naming_convention=NAMING_CONVENTION,
     ) as batch_op:
         batch_op.drop_constraint(
-            "uq_remediations_attempt_id",
+            attempt_unique,
             type_="unique",
         )
         batch_op.create_index(

@@ -59,7 +59,9 @@ source_root=$(find "$runtime_root" -mindepth 1 -maxdepth 1 -type d -print -quit)
 if [ -z "$source_root" ] || \
    [ ! -f "$source_root/deploy/compose.prod.yml" ] || \
    [ ! -f "$source_root/deploy/compose.demo.yml" ] || \
+   [ ! -f "$source_root/deploy/compose.sqlite-rollback.yml" ] || \
    [ ! -f "$source_root/deploy/scripts/remote-build-deploy.sh" ] || \
+   [ ! -f "$source_root/deploy/scripts/cutover-sqlite-to-postgres.sh" ] || \
    [ ! -f "$source_root/deploy/scripts/create-demo-user.sh" ]; then
   echo "The verified release is missing required deployment files." >&2
   exit 66
@@ -67,12 +69,18 @@ fi
 
 install -m 600 "$source_root/deploy/compose.prod.yml" "$deploy_root/compose.prod.yml"
 install -m 600 "$source_root/deploy/compose.demo.yml" "$deploy_root/compose.demo.yml"
+install -m 600 \
+  "$source_root/deploy/compose.sqlite-rollback.yml" \
+  "$deploy_root/compose.sqlite-rollback.yml"
 install -m 700 \
   "$source_root/deploy/scripts/remote-build-deploy.sh" \
   "$deploy_root/remote-build-deploy.sh"
 install -m 700 \
   "$source_root/deploy/scripts/create-demo-user.sh" \
   "$deploy_root/create-demo-user.sh"
+install -m 700 \
+  "$source_root/deploy/scripts/cutover-sqlite-to-postgres.sh" \
+  "$deploy_root/cutover-sqlite-to-postgres.sh"
 
 APP_VERSION=$version \
 REGISTRY=ghcr.io \

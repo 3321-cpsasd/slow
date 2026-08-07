@@ -113,6 +113,13 @@ def upgrade():
 
     content_unique = "uq_content_versions_section_version"
     if content_unique not in _unique_names(connection, "content_versions"):
+        if connection.dialect.name == "postgresql":
+            op.create_unique_constraint(
+                content_unique,
+                "content_versions",
+                ["section_id", "version"],
+            )
+            return
         with op.batch_alter_table(
             "content_versions",
             recreate="always",
