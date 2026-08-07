@@ -11,7 +11,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0038_lesson_generation_v2"
+HEAD_REVISION = "0039_book_outline_lifecycle"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -137,6 +137,9 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
         series_columns = {
             row[1] for row in connection.execute("PRAGMA table_info(series)")
         }
+        book_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(books)")
+        }
         run_columns = {
             row[1]
             for row in connection.execute("PRAGMA table_info(learning_runs)")
@@ -159,6 +162,11 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
         ).fetchone()[0]
 
     assert revision == HEAD_REVISION
+    assert {
+        "outline_status",
+        "outline_version",
+        "outline_confirmed_at",
+    }.issubset(book_columns)
     assert "uq_quiz_attempts_run_user_idempotency" in attempt_schema
     assert "uq_quiz_attempts_user_id_idempotency_key" not in attempt_schema
     assert quiz_columns["content_version_id"][3] == 1

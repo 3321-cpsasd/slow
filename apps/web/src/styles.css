@@ -2461,3 +2461,36 @@ button:disabled { cursor: not-allowed; }
   .shelf-card-action i { transition: none; }
   .shelf-create-dialog, .user-account-menu { animation: none; }
 }
+.chapter-workload-hint {
+  display: block;
+  margin: 6px 10px;
+  color: var(--ink-secondary, #675f54);
+  line-height: 1.45;
+}
+
+.chapter-workload-hint.extended {
+  color: var(--warning, #8a5a12);
+}
+
+.book-outline-callout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 8px 10px 4px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--warm);
+}
+
+.book-outline-callout span,
+.book-outline-callout small {
+  display: block;
+}
+
+.book-outline-callout small {
+  margin-top: 3px;
+  color: var(--muted);
+  line-height: 1.4;
+}

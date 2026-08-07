@@ -50,3 +50,19 @@ def test_progression_completes_book_and_unlocks_next_active_book():
     assert decision.unlocked_book_id == "book-3"
     assert decision.unlocked_chapter_id == "chapter-3-1"
     assert decision.unlocked_section_id == "section-3-1-1"
+
+
+def test_progression_keeps_next_book_locked_until_outline_is_confirmed():
+    decision = ProgressionPolicy().after_quiz_passed(
+        ProgressionSnapshot(
+            section_id="section-last",
+            chapter_id="chapter-last",
+            book_id="book-1",
+            next_book_id="book-2",
+            next_book_outline_status="draft",
+            next_book_first_chapter_id="chapter-2-1",
+        )
+    )
+    assert decision.completed_book_id == "book-1"
+    assert decision.unlocked_book_id is None
+    assert decision.unlocked_chapter_id is None

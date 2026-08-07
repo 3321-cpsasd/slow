@@ -59,7 +59,9 @@ class GeneratedSectionOutline(StrictModel):
 
 
 class GeneratedChapter(StrictModel):
-    sections: list[GeneratedSectionOutline] = Field(min_length=3, max_length=5)
+    # 3-5 is a planning target, not a semantic gate. The wider bounds only
+    # reject anomalous structured output and must not force mechanical splits.
+    sections: list[GeneratedSectionOutline] = Field(min_length=2, max_length=12)
 
 
 class TeachingBlueprintBlock(StrictModel):

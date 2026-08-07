@@ -2,8 +2,10 @@ export type SectionSummary = { id:string; position:number; title:string; questio
 export type Attachment = { id:string; filename:string; mediaType:string; byteSize:number; sha256:string; createdAt:string };
 export type Practice = { id:string; title:string; instructions:Record<string,unknown>; submission:Record<string,unknown>; attachments:Attachment[]; evidenceMode:'file_attachment'|'structured_only_legacy'; status:string };
 export type Capstone = { id:string; title:string; brief:Record<string,unknown>; submission:Record<string,unknown>; attachments:Attachment[]; evidenceMode:'file_attachment'|'structured_only_legacy'; status:string };
-export type Chapter = { id:string; position:number; title:string; objective:string; status:string; generated:boolean; sections:SectionSummary[]; practice:null|Practice };
-export type Book = { id:string; position:number; title:string; description:string; estimatedMinutes:number; status:string; progress:number; practiceProgress:number; chapters:Chapter[]; capstone:null|Capstone };
+export type ChapterWorkloadHint = { level:'anomalous'|'light'|'typical'|'extended'; sectionCount:number; typicalRange:[number,number]; technicalRange:[number,number]; message:string };
+export type Chapter = { id:string; position:number; title:string; objective:string; status:string; generated:boolean; workloadHint:ChapterWorkloadHint|null; sections:SectionSummary[]; practice:null|Practice };
+export type Book = { id:string; position:number; title:string; description:string; estimatedMinutes:number; outlineStatus:'draft'|'confirmed'; outlineVersion:number; outlineConfirmedAt:string|null; status:string; progress:number; practiceProgress:number; chapters:Chapter[]; capstone:null|Capstone };
+export type BookReplanProposal = { proposalId:string; rationale:string; chapters:{title:string;objective:string}[]; requiresConfirmation:true };
 export type Series = {
   id:string;
   title:string;

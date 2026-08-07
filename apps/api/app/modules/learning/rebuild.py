@@ -175,6 +175,7 @@ def rebuild_user_projections(db: Session, *, user_id: str) -> dict:
 
         previous_books_complete = True
         for book in books:
+            outline_confirmed = book.outline_status == "confirmed"
             book_progress = _projection(
                 db,
                 BookProgress,
@@ -187,13 +188,15 @@ def rebuild_user_projections(db: Session, *, user_id: str) -> dict:
                 "completed"
                 if book_completed[book.id]
                 else "available"
-                if previous_books_complete
+                if previous_books_complete and outline_confirmed
                 else "locked"
             )
             book_progress.updated_at = now()
             rebuilt["books"] += 1
 
-            previous_chapters_complete = previous_books_complete
+            previous_chapters_complete = (
+                previous_books_complete and outline_confirmed
+            )
             for chapter in chapters_by_book[book.id]:
                 chapter_progress = _projection(
                     db,

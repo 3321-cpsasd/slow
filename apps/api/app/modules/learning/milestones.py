@@ -104,6 +104,68 @@ class MilestoneService:
             "goalProfileVersion": path.goal_profile_version,
         }
 
+    def rebind_book_chapters(
+        self,
+        *,
+        series_id: str,
+        book_id: str,
+        chapter_id_map: dict[str, str],
+        replaced_chapter_ids: set[str],
+        objective_by_chapter_id: dict[str, str],
+    ) -> None:
+        """Version milestone references after a confirmed outline replacement."""
+
+        if not replaced_chapter_ids:
+            return
+        path = self.db.scalar(
+            select(MilestonePath).where(
+                MilestonePath.series_id == series_id,
+                MilestonePath.user_id == self.user_id,
+            )
+        )
+        if not path:
+            return
+        definition = _load(path.definition_json, {"milestones": []})
+        changed = False
+        requires_rebuild = False
+        for milestone in definition.get("milestones", []):
+            for criterion in milestone.get("criteria", []):
+                old_chapter_id = criterion.get("chapterId")
+                if (
+                    criterion.get("bookId") == book_id
+                    and old_chapter_id in replaced_chapter_ids
+                    and old_chapter_id not in chapter_id_map
+                ):
+                    requires_rebuild = True
+                    continue
+                new_chapter_id = chapter_id_map.get(old_chapter_id)
+                if criterion.get("bookId") != book_id or not new_chapter_id:
+                    continue
+                criterion["chapterId"] = new_chapter_id
+                criterion["statement"] = objective_by_chapter_id.get(
+                    new_chapter_id,
+                    criterion.get("statement", ""),
+                )
+                changed = True
+        if requires_rebuild:
+            definition = self._fallback_definition(self._chapter_map(series_id))
+            path.status = "proposed"
+            path.confirmed_at = None
+            changed = True
+        if not changed:
+            return
+        path.definition_json = _dump(definition)
+        path.version += 1
+        path.updated_at = now()
+        self._add_revision(
+            path,
+            source=(
+                "book_outline_milestone_replan"
+                if requires_rebuild
+                else "book_outline_confirmation"
+            ),
+        )
+
     def dashboard(self, *, library: dict, profile: dict, resume: dict | None) -> dict:
         selected = self._select_series(library, resume)
         goal = {

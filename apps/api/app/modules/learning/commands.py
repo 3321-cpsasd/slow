@@ -128,6 +128,9 @@ class ProgressionRepository:
                 next_chapter_first_section.id if next_chapter_first_section else None
             ),
             next_book_id=next_book.id if next_book else None,
+            next_book_outline_status=(
+                next_book.outline_status if next_book else "confirmed"
+            ),
             next_book_first_chapter_id=(
                 next_book_first_chapter.id if next_book_first_chapter else None
             ),

@@ -34,3 +34,5 @@
 | ADR | 状态 | 主题 |
 | --- | --- | --- |
 | [ADR-0001](0001-lesson-generation-v2.md) | Accepted，等待实现 | 小节正文与测验的一次生成、确定性门禁和原子发布 |
+| [ADR-0002](0002-curriculum-planning-boundaries.md) | Accepted，核心切片已实现 | 分层课程规划、书籍目录激活、语义冻结和小节数量软约束 |
+| [ADR-0003](0003-modular-monolith-boundaries.md) | Accepted，第一阶段已实现 | 应用模块化单体、写入权边界和渐进式门面迁移 |

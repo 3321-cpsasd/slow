@@ -454,6 +454,13 @@ class Book(Base):
     topic: Mapped[str] = mapped_column(String(160))
     description: Mapped[str] = mapped_column(Text)
     estimated_minutes: Mapped[int] = mapped_column(Integer)
+    outline_status: Mapped[str] = mapped_column(
+        String(24), default="confirmed", index=True
+    )
+    outline_version: Mapped[int] = mapped_column(Integer, default=1)
+    outline_confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 

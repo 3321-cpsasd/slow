@@ -408,6 +408,25 @@ export default function App() {
     else await openChapter(firstChapter);
   };
 
+  const activateBook = async (book: Book) => {
+    const proposal = await run(
+      '正在依据最新学习证据校准下一本书…',
+      () => api.replanBook(book.id),
+    );
+    const outline = proposal.chapters
+      .map((chapter, index) => `${index + 1}. ${chapter.title}：${chapter.objective}`)
+      .join('\n');
+    const confirmed = window.confirm(
+      `校准说明：${proposal.rationale}\n\n${outline}\n\n确认后将冻结这本书的新章节目录。`,
+    );
+    if (!confirmed) return;
+    await run(
+      '正在确认新章节目录…',
+      () => api.confirmBookReplan(book.id, proposal.proposalId),
+    );
+    await refreshSeries();
+  };
+
   const generateSection = async (sectionId: string) => {
     const value = await run('正在核查来源并生成本节…', () => api.generateSection(sectionId));
     setSection(value);
@@ -785,6 +804,7 @@ export default function App() {
               onRegenerateSection={regenerateSection}
               onGenerateChapter={openChapter}
               onStartNextBook={startNextBook}
+              onActivateBook={activateBook}
               chapterGenerationDisabled={preparingInitialSection}
               generatingChapterId={generatingChapterId}
               onSectionChange={setSection}
@@ -2335,6 +2355,7 @@ function LearningWorkspace({
   onRegenerateSection,
   onGenerateChapter,
   onStartNextBook,
+  onActivateBook,
   chapterGenerationDisabled,
   generatingChapterId,
   onSectionChange,
@@ -2349,6 +2370,7 @@ function LearningWorkspace({
   onRegenerateSection: (id: string) => Promise<void>;
   onGenerateChapter: (chapter: Chapter) => Promise<void>;
   onStartNextBook: () => Promise<void>;
+  onActivateBook: (book: Book) => Promise<void>;
   chapterGenerationDisabled: boolean;
   generatingChapterId: string;
   onSectionChange: (section: Section) => void;
@@ -2413,6 +2435,7 @@ function LearningWorkspace({
         onSelectSection={onSelectSection}
         onGenerateChapter={onGenerateChapter}
         onStartNextBook={onStartNextBook}
+        onActivateBook={onActivateBook}
         chapterGenerationDisabled={chapterGenerationDisabled}
         generatingChapterId={generatingChapterId}
         onRefreshSeries={onRefreshSeries}
@@ -2502,6 +2525,7 @@ function DirectoryPanel({
   onSelectSection,
   onGenerateChapter,
   onStartNextBook,
+  onActivateBook,
   chapterGenerationDisabled,
   generatingChapterId,
   onRefreshSeries,
@@ -2514,6 +2538,7 @@ function DirectoryPanel({
   onSelectSection: (id: string) => Promise<Section>;
   onGenerateChapter: (chapter: Chapter) => Promise<void>;
   onStartNextBook: () => Promise<void>;
+  onActivateBook: (book: Book) => Promise<void>;
   chapterGenerationDisabled: boolean;
   generatingChapterId: string;
   onRefreshSeries: () => Promise<void>;
@@ -2552,13 +2577,18 @@ function DirectoryPanel({
           </div>
       )}
       <nav className="book-tree">
-        {series.books.map((book) => (
+        {series.books.map((book, index) => (
           <BookTree
             key={book.id}
             book={book}
             currentSectionId={currentSectionId}
             onSelectSection={onSelectSection}
             onGenerateChapter={onGenerateChapter}
+            canActivate={
+              book.outlineStatus === 'draft'
+              && (index === 0 || series.books[index - 1].status === 'completed')
+            }
+            onActivate={onActivateBook}
             chapterGenerationDisabled={chapterGenerationDisabled}
             generatingChapterId={generatingChapterId}
             onRefreshSeries={onRefreshSeries}
@@ -2619,6 +2649,8 @@ function BookTree({
   currentSectionId,
   onSelectSection,
   onGenerateChapter,
+  canActivate,
+  onActivate,
   chapterGenerationDisabled,
   generatingChapterId,
   onRefreshSeries,
@@ -2628,6 +2660,8 @@ function BookTree({
   currentSectionId?: string;
   onSelectSection: (id: string) => Promise<Section>;
   onGenerateChapter: (chapter: Chapter) => Promise<void>;
+  canActivate: boolean;
+  onActivate: (book: Book) => Promise<void>;
   chapterGenerationDisabled: boolean;
   generatingChapterId: string;
   onRefreshSeries: () => Promise<void>;
@@ -2649,12 +2683,35 @@ function BookTree({
         <span>
           <b>{book.title}</b>
           <small>
-            {book.status === 'completed' ? '已完成' : book.status === 'locked' ? '未解锁' : '已解锁'}
+            {book.outlineStatus === 'draft'
+              ? '章节草案'
+              : book.status === 'completed'
+                ? '已完成'
+                : book.status === 'locked'
+                  ? '未解锁'
+                  : '已解锁'}
             {' · '}{book.progress}% · {Math.round(book.estimatedMinutes / 60)} 小时
           </small>
         </span>
         <i>{book.status === 'locked' ? <LockIcon /> : <ChevronIcon />}</i>
       </summary>
+      {book.outlineStatus === 'draft' && (
+        <div className="book-outline-callout" role="status">
+          <span>
+            <b>{canActivate ? '可以校准下一本书' : '章节目录为初始草案'}</b>
+            <small>
+              {canActivate
+                ? '将使用刚完成的测验、Ask Me 与复习证据重新规划；确认后才解锁。'
+                : '完成上一本书后，系统会按届时的学习画像重新规划。'}
+            </small>
+          </span>
+          {canActivate && (
+            <button className="secondary-button" onClick={() => onActivate(book)}>
+              校准并确认章节
+            </button>
+          )}
+        </div>
+      )}
       <div className="chapter-tree">
         {book.chapters.map((chapter) => {
           const chapterLocked = chapter.status === 'locked';
@@ -2664,7 +2721,7 @@ function BookTree({
                 <div
                   className={`chapter-title ${chapterLocked ? 'locked' : ''}`}
                   aria-label={chapterLocked
-                    ? `第 ${chapter.position} 章 ${chapter.title}，未解锁；完成上一章后生成 3 到 5 节`
+                    ? `第 ${chapter.position} 章 ${chapter.title}，未解锁；完成上一章后按学习需要生成小节`
                     : `第 ${chapter.position} 章 ${chapter.title}`}
                 >
                   <span>第 {chapter.position} 章</span>
@@ -2674,7 +2731,7 @@ function BookTree({
               ) : (
                 <button
                   className="chapter-title chapter-entry"
-                  aria-label={`生成第 ${chapter.position} 章 ${chapter.title} 的 3 到 5 节并进入`}
+                  aria-label={`生成第 ${chapter.position} 章 ${chapter.title} 的小节并进入`}
                   disabled={chapterGenerationDisabled || generatingChapterId === chapter.id}
                   onClick={() => onGenerateChapter(chapter)}
                 >
@@ -2689,6 +2746,11 @@ function BookTree({
               )}
             {chapter.generated ? (
               <div className="section-tree">
+                {chapter.workloadHint && chapter.workloadHint.level !== 'typical' && (
+                  <small className={`chapter-workload-hint ${chapter.workloadHint.level}`}>
+                    {chapter.workloadHint.message}
+                  </small>
+                )}
                 {chapter.sections.map((item) => (
                   <SectionTreeButton
                     key={item.id}
@@ -2707,8 +2769,8 @@ function BookTree({
                 </span>
                 <small>
                   {chapterLocked
-                    ? '完成上一章后解锁，并生成 3–5 节'
-                    : '点击章名，生成本章 3–5 节'}
+                    ? '完成上一章后解锁，并按学习需要生成小节'
+                    : '点击章名，按学习需要生成本章小节'}
                 </small>
               </div>
             )}

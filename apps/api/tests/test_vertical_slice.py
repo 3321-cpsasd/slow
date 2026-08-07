@@ -1356,7 +1356,7 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
         assert gate_output["passed"] is True
         assert gate_output["unresolvedRequiredTargetIds"] == []
         progression = decisions[1]
-        assert progression.rule_version == "progression_v1"
+        assert progression.rule_version == "progression_v2_book_outline_gate"
         assert json.loads(progression.input_snapshot_json)["section_id"] == section["id"]
         assert json.loads(progression.output_decision_json)["completed_section_id"] == section["id"]
 
@@ -2181,7 +2181,9 @@ def test_interrupted_learning_task_resumes_after_restart(tmp_path):
 def test_locked_boundary(client):
     series = client.post("/api/plans", json={"shelfId":"shelf_technology","topic":"Kubernetes","role":"技术人员","experience":"会 Docker","depth":"deep"}).json()
     locked = series["books"][1]["chapters"][0]["id"]
-    assert client.post(f"/api/chapters/{locked}/generate").status_code == 403
+    blocked = client.post(f"/api/chapters/{locked}/generate")
+    assert blocked.status_code == 409
+    assert blocked.json()["code"] == "BOOK_OUTLINE_CONFIRMATION_REQUIRED"
 
 
 def test_completing_chapter_unlocks_first_pregenerated_section(client):
@@ -2275,7 +2277,7 @@ def test_book_soft_delete_hides_book_and_preserves_audit_history(client):
         assert revision is not None
 
 
-def test_deleting_available_book_unlocks_next_and_last_book_hides_series(client):
+def test_deleting_available_book_requires_next_outline_confirmation(client):
     series = create_series(client)
     first_book, second_book = series["books"]
 
@@ -2283,8 +2285,17 @@ def test_deleting_available_book_unlocks_next_and_last_book_hides_series(client)
     remaining = client.get(f"/api/series/{series['id']}").json()["books"]
     assert len(remaining) == 1
     assert remaining[0]["id"] == second_book["id"]
-    assert remaining[0]["status"] == "available"
-    assert remaining[0]["chapters"][0]["status"] == "available"
+    assert remaining[0]["outlineStatus"] == "draft"
+    assert remaining[0]["status"] == "locked"
+    proposal = client.post(
+        f"/api/books/{second_book['id']}/chapters/replan"
+    ).json()
+    confirmed = client.post(
+        f"/api/books/{second_book['id']}/chapters/replan/"
+        f"{proposal['proposalId']}/confirm"
+    ).json()
+    assert confirmed["status"] == "available"
+    assert confirmed["chapters"][0]["status"] == "available"
 
     assert client.delete(f"/api/books/{second_book['id']}").status_code == 204
     assert client.get(f"/api/series/{series['id']}").status_code == 404
@@ -2710,6 +2721,13 @@ def test_ask_me_retries_invalid_model_evaluation():
 
 def test_future_chapter_edits_and_started_boundary(client):
     series = create_series(client)
+    draft_book = series["books"][1]
+    assert draft_book["outlineStatus"] == "draft"
+    early_activation = client.post(
+        f"/api/books/{draft_book['id']}/chapters/replan"
+    )
+    assert early_activation.status_code == 409
+    assert early_activation.json()["code"] == "PREVIOUS_BOOK_NOT_COMPLETED"
     book = series["books"][0]
     first, second = book["chapters"]
     updated = client.patch(f"/api/chapters/{second['id']}", json={"title":"未来章新标题"})
@@ -2752,12 +2770,44 @@ def test_complete_first_book_attachments_and_enter_second(client):
     assert downloaded.status_code == 200 and downloaded.content == b"capstone evidence"
     final = client.get(f"/api/series/{series['id']}").json()
     assert final["books"][0]["status"] == "completed"
-    assert final["books"][1]["status"] == "available"
+    assert final["books"][0]["outlineStatus"] == "confirmed"
+    assert final["books"][1]["outlineStatus"] == "draft"
+    assert final["books"][1]["status"] == "locked"
     assert 0 < final["progress"] < 100
+    draft_chapter = final["books"][1]["chapters"][0]
+    blocked = client.post(f"/api/chapters/{draft_chapter['id']}/generate")
+    assert blocked.status_code == 409
+    assert blocked.json()["code"] == "BOOK_OUTLINE_CONFIRMATION_REQUIRED"
+    proposal = client.post(
+        f"/api/books/{final['books'][1]['id']}/chapters/replan"
+    )
+    assert proposal.status_code == 200
+    activated = client.post(
+        f"/api/books/{final['books'][1]['id']}/chapters/replan/"
+        f"{proposal.json()['proposalId']}/confirm"
+    )
+    assert activated.status_code == 200
+    assert activated.json()["outlineStatus"] == "confirmed"
+    assert activated.json()["status"] == "available"
+    final = client.get(f"/api/series/{series['id']}").json()
+    dashboard = client.get("/api/bootstrap").json()["milestoneDashboard"]
+    live_chapter_ids = {
+        chapter["id"]
+        for book in final["books"]
+        for chapter in book["chapters"]
+    }
+    assert all(
+        criterion["chapterId"] in live_chapter_ids
+        for milestone in dashboard["path"]["milestones"]
+        for criterion in milestone["criteria"]
+    )
     second_chapter = final["books"][1]["chapters"][0]
-    assert second_chapter["generated"] is True
-    second_section = client.get(
-        f"/api/sections/{second_chapter['sections'][0]['id']}"
+    assert second_chapter["generated"] is False
+    second_chapter = client.post(
+        f"/api/chapters/{second_chapter['id']}/generate"
+    ).json()
+    second_section = client.post(
+        f"/api/sections/{second_chapter['sections'][0]['id']}/generate"
     ).json()
     assert second_section["content"] is not None
     assert second_section["generation"]["trace"]["memoryApplied"] is True
