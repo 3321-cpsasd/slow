@@ -66,6 +66,36 @@ class UserFeedback(Base):
     )
 
 
+class ProductEvent(Base):
+    """Append-only, allowlisted product telemetry from an authenticated web client."""
+
+    __tablename__ = "product_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "event_id",
+            name="uq_product_events_user_event",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    event_id: Mapped[str] = mapped_column(String(80))
+    session_id: Mapped[str] = mapped_column(String(80), index=True)
+    event_name: Mapped[str] = mapped_column(String(64), index=True)
+    page_path: Mapped[str] = mapped_column(String(500), default="/")
+    view: Mapped[str] = mapped_column(String(40), default="")
+    entity_type: Mapped[str] = mapped_column(String(40), default="")
+    entity_id: Mapped[str] = mapped_column(String(160), default="")
+    properties_json: Mapped[str] = mapped_column(Text, default="{}")
+    request_hash: Mapped[str] = mapped_column(String(64))
+    source: Mapped[str] = mapped_column(String(24), default="web")
+    schema_version: Mapped[str] = mapped_column(String(24), default="product_event_v1")
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
 class UserProfile(Base):
     __tablename__ = "user_profiles"
     user_id: Mapped[str] = mapped_column(
@@ -191,6 +221,52 @@ class AuthSession(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PrivacyConsent(Base):
+    """Append-only acceptance of a specific privacy and trial notice version."""
+
+    __tablename__ = "privacy_consents"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "notice_version",
+            "trial_terms_version",
+            name="uq_privacy_consents_user_versions",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    notice_version: Mapped[str] = mapped_column(String(40), index=True)
+    trial_terms_version: Mapped[str] = mapped_column(String(40), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="accepted", index=True)
+    source: Mapped[str] = mapped_column(String(40), default="in_app")
+    accepted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+    withdrawn_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class AccountExitRequest(Base):
+    """Auditable request to close an account and remove personal data."""
+
+    __tablename__ = "account_exit_requests"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="requested", index=True)
+    policy_version: Mapped[str] = mapped_column(String(40), index=True)
+    reason: Mapped[str] = mapped_column(Text, default="")
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+    deletion_due_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class OidcLoginState(Base):

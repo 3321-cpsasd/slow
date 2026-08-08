@@ -31,6 +31,8 @@ Slow 是一个 AI 原生个人学习应用。它把学习目标组织为可阅�
 - 可选的多轮 Ask Me 检查
 - 持久化后台任务、恢复与幂等处理
 - 邀请制账号密码登录、本地开发身份和可选 OIDC 身份边界
+- 版本化隐私同意、可审计的退出与数据删除申请
+- 本机运营快照导出，不开放无权限边界的公网管理接口
 - OpenAI 与 Anthropic 兼容供应商接口
 
 ### 快速开始
@@ -50,6 +52,8 @@ cp .env.example .env
 - Web：`http://127.0.0.1:5173`
 - API：`http://127.0.0.1:8000`
 - OpenAPI：`http://127.0.0.1:8000/docs`
+
+只读运营数据服务见 [`apps/ops/README.md`](apps/ops/README.md)。它运行在运营者本机，通过 SSH 隧道读取生产 PostgreSQL 的受限视图，不占用 ECS 常驻应用资源。
 
 未配置外部模型时，开发环境使用明确标记的本地 Demo 数据。Demo 数据不能被当作真实 AI 内容或正式学习证据。
 
@@ -119,6 +123,14 @@ PYTHONPATH=apps/api .venv/bin/python apps/api/manage_users.py purge-passwords --
 `APP_MODE=production` 检测到密码托管开启时会拒绝启动。清理服务器文件后，还应按
 备份保留策略删除可能含有该文件的历史备份。密码重置只撤销身份 Session，不删除或
 重建用户，因此书架、学习进度、测验记录和掌握画像均保持不变。
+
+内测运营者应遵循 [`deploy/PILOT_OPERATIONS.md`](deploy/PILOT_OPERATIONS.md)。生产环境会在学习画像和业务接口前要求当前版本的隐私与试点同意；运营台账快照只允许在 API 容器内导出：
+
+```bash
+python operations_report.py --include-identifiers
+```
+
+输出包含账号状态和学习漏斗指标，不包含密码、Session、API Key、学习正文、问答或笔记内容。
 
 ### 许可证
 

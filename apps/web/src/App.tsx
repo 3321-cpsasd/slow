@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api } from './api/client';
+import { telemetry } from './telemetry';
 import { ProfileOnboardingFlow } from './ProfileOnboardingFlow';
 import type {
   AskMe,
@@ -11,6 +12,8 @@ import type {
   Block,
   Book,
   Bootstrap,
+  AccountExitReceipt,
+  PrivacyState,
   Chapter,
   DueReviews,
   LearningTask,
@@ -90,6 +93,7 @@ export default function App() {
   const [showAiSettings, setShowAiSettings] = useState(false);
   const [feedbackTarget, setFeedbackTarget] = useState<FeedbackTarget | null>(null);
   const [showUserMenu, setShowUserMenu] = useState(false);
+  const [exitReceipt, setExitReceipt] = useState<AccountExitReceipt | null>(null);
   const [profileSection, setProfileSection] = useState<'profile' | 'account'>(() => (
     new URLSearchParams(window.location.search).get('section') === 'account' ? 'account' : 'profile'
   ));
@@ -97,10 +101,15 @@ export default function App() {
   const [generatingChapterId, setGeneratingChapterId] = useState('');
   const chapterGenerationRequests = useRef(new Set<string>());
   const userMenuRef = useRef<HTMLDivElement | null>(null);
+  const lastViewedSection = useRef('');
 
   const loadAuthenticatedState = async () => {
     const value = await api.authMe();
     setAuth(value);
+    if (value.privacy.required) {
+      setData(null);
+      return;
+    }
     if (value.onboarding.required) {
       setData(null);
       return;
@@ -144,6 +153,7 @@ export default function App() {
       setAuthChecked(true);
     };
     api.setUnauthorizedHandler(clearUserState);
+    telemetry.start();
     void initializeAuth();
     const handleHistory = () => {
       const nextView: View = window.location.pathname === '/profile' ? 'profile' : 'home';
@@ -157,6 +167,76 @@ export default function App() {
     window.addEventListener('popstate', handleHistory);
     return () => window.removeEventListener('popstate', handleHistory);
   }, []);
+
+  useEffect(() => {
+    const enabled = auth?.privacy.status === 'accepted';
+    telemetry.setEnabled(enabled);
+    if (!enabled || !data) return;
+    if (view === 'home') {
+      telemetry.track('home_viewed', { view: 'home' });
+    } else if (view === 'shelf' && shelf) {
+      telemetry.track('shelf_viewed', { view: 'shelf', entityType: 'shelf', entityId: shelf.id });
+    } else if (view === 'learn' && series) {
+      telemetry.track('learning_viewed', { view: 'learn', entityType: 'series', entityId: series.id });
+    } else if (view === 'profile') {
+      telemetry.track('profile_viewed', { view: 'profile' });
+    }
+  }, [auth?.privacy.status, data, view, shelf?.id, series?.id]);
+
+  useEffect(() => {
+    if (view !== 'learn' || !section?.content || auth?.privacy.status !== 'accepted') {
+      if (view !== 'learn') lastViewedSection.current = '';
+      return;
+    }
+    if (lastViewedSection.current === section.id) return;
+    lastViewedSection.current = section.id;
+    telemetry.track('section_viewed', {
+      view: 'learn',
+      entityType: 'section',
+      entityId: section.id,
+    });
+  }, [auth?.privacy.status, view, section?.id, section?.content?.id]);
+
+  useEffect(() => {
+    if (view !== 'learn' || !section?.content || auth?.privacy.status !== 'accepted') return;
+    let activeSeconds = 0;
+    let lastInteractionAt = Date.now();
+    const markInteraction = () => { lastInteractionAt = Date.now(); };
+    const timer = window.setInterval(() => {
+      const active = document.visibilityState === 'visible'
+        && document.hasFocus()
+        && Date.now() - lastInteractionAt <= 30_000;
+      if (!active) return;
+      activeSeconds += 1;
+      if (activeSeconds % 60 === 0) {
+        telemetry.track('active_reading_60s', {
+          view: 'learn',
+          entityType: 'section',
+          entityId: section.id,
+          properties: { seconds: 60 },
+        });
+      }
+    }, 1_000);
+    document.addEventListener('pointerdown', markInteraction, true);
+    document.addEventListener('keydown', markInteraction, true);
+    document.addEventListener('scroll', markInteraction, true);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('pointerdown', markInteraction, true);
+      document.removeEventListener('keydown', markInteraction, true);
+      document.removeEventListener('scroll', markInteraction, true);
+    };
+  }, [auth?.privacy.status, view, section?.id, section?.content?.id]);
+
+  useEffect(() => {
+    if (!feedbackTarget || auth?.privacy.status !== 'accepted') return;
+    telemetry.track('feedback_opened', {
+      view,
+      entityType: feedbackTarget.scope === 'content_block' ? 'section' : '',
+      entityId: feedbackTarget.scope === 'content_block' ? feedbackTarget.sectionId : '',
+      properties: { scope: feedbackTarget.scope },
+    });
+  }, [auth?.privacy.status, feedbackTarget, view]);
 
   useEffect(() => {
     if (!showUserMenu) return;
@@ -195,7 +275,7 @@ export default function App() {
       const mode = authConfig?.mode === 'password' ? 'password' : 'local';
       const state = await api.credentialsLogin(mode, localUsername, localPassword);
       setAuth(state);
-      setData(state.onboarding.required ? null : await api.bootstrap());
+      setData(state.privacy.required || state.onboarding.required ? null : await api.bootstrap());
       setLocalPassword('');
       setShowLocalPassword(false);
     } catch (reason) {
@@ -224,6 +304,24 @@ export default function App() {
       setShowUserMenu(false);
       window.history.replaceState({}, '', '/');
     }
+  };
+
+  const acceptPrivacy = async () => {
+    const privacy = await api.acceptPrivacy({ privacyAccepted: true, trialAccepted: true });
+    setAuth((current) => current ? { ...current, privacy } : current);
+    await loadAuthenticatedState();
+  };
+
+  const requestAccountExit = async (confirmation: string, reason: string) => {
+    const receipt = await api.requestAccountExit({ confirmation, reason });
+    setExitReceipt(receipt);
+    setAuth(null);
+    setData(null);
+    setShelf(null);
+    setSeries(null);
+    setSection(null);
+    setShowUserMenu(false);
+    window.history.replaceState({}, '', '/');
   };
 
   const goHome = () => {
@@ -462,6 +560,10 @@ export default function App() {
     }
   };
 
+  if (exitReceipt) {
+    return <AccountExitReceiptPage receipt={exitReceipt} onClose={() => setExitReceipt(null)} />;
+  }
+
   if(!auth) {
     const isDemo = authConfig?.mode === 'demo';
     const isLocal = authConfig?.mode === 'local';
@@ -591,9 +693,27 @@ export default function App() {
                     ? '账号仅由内测管理员创建，不开放公开注册。'
                   : `登录将在${providerName}页面完成，Slow 不接收你的密码。`}
             </small>
+            {authConfig?.privacyNotice && (
+              <details className="auth-privacy-brief">
+                <summary>内测隐私与数据说明</summary>
+                <p>{authConfig.privacyNotice.summary}</p>
+                <small>登录后、开始填写学习画像前，需要分别确认隐私告知与自愿参加内测。版本 {authConfig.privacyNotice.noticeVersion}</small>
+              </details>
+            )}
           </section>
         </main>
       </div>
+    );
+  }
+
+  if (auth.privacy.required) {
+    return (
+      <PrivacyConsentGate
+        userName={auth.user.name}
+        privacy={auth.privacy}
+        onAccept={acceptPrivacy}
+        onLogout={logout}
+      />
     );
   }
 
@@ -737,6 +857,8 @@ export default function App() {
               setData(await api.bootstrap());
             }}
             onLogout={logout}
+            privacy={auth.privacy}
+            onRequestExit={requestAccountExit}
           />
         )}
         {view === 'learn' && series && (
@@ -1677,6 +1799,113 @@ function Home({
   );
 }
 
+function PrivacyConsentGate({
+  userName,
+  privacy,
+  onAccept,
+  onLogout,
+}: {
+  userName: string;
+  privacy: PrivacyState;
+  onAccept: () => Promise<void>;
+  onLogout: () => Promise<void>;
+}) {
+  const [privacyAccepted, setPrivacyAccepted] = useState(false);
+  const [trialAccepted, setTrialAccepted] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+
+  const accept = async () => {
+    if (!privacyAccepted || !trialAccepted) {
+      setError('请分别确认隐私告知和自愿参加内测。');
+      return;
+    }
+    setSubmitting(true);
+    setError('');
+    try {
+      await onAccept();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '同意状态保存失败');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="privacy-gate-shell">
+      <header className="privacy-gate-header">
+        <span className="brand"><span className="brand-mark"><i /></span><b>slow</b></span>
+        <button type="button" onClick={() => void onLogout()}>退出账号</button>
+      </header>
+      <main className="privacy-gate-main">
+        <section className="privacy-gate-intro">
+          <p className="eyebrow">INVITED LEARNING TRIAL</p>
+          <small>{userName}，开始学习前</small>
+          <h1>先知道你的学习记录<br />如何被使用。</h1>
+          <p>{privacy.summary}</p>
+          <div className="privacy-version-stamp">
+            <span>告知版本</span><b>{privacy.noticeVersion}</b>
+            <small>同意会按版本单独留痕；未来内容变化时会重新询问。</small>
+          </div>
+        </section>
+
+        <section className="privacy-notice-sheet" aria-labelledby="privacy-notice-title">
+          <header>
+            <p>内测试点说明</p>
+            <h2 id="privacy-notice-title">{privacy.title}</h2>
+          </header>
+          <div className="privacy-notice-items">
+            {privacy.items.map((item) => (
+              <article key={item.title}>
+                <h3>{item.title}</h3>
+                <p>{item.body}</p>
+              </article>
+            ))}
+          </div>
+          <div className="privacy-consent-checks">
+            <label className={privacyAccepted ? 'checked' : ''}>
+              <input type="checkbox" checked={privacyAccepted} onChange={(event) => setPrivacyAccepted(event.target.checked)} />
+              <span><b>我已阅读并同意隐私告知</b><small>允许 Slow 按上述范围处理我的学习数据。</small></span>
+            </label>
+            <label className={trialAccepted ? 'checked' : ''}>
+              <input type="checkbox" checked={trialAccepted} onChange={(event) => setTrialAccepted(event.target.checked)} />
+              <span><b>我自愿参加邀请制产品验证</b><small>我知道可以随时退出并提交数据删除申请。</small></span>
+            </label>
+          </div>
+          {error && <p className="privacy-gate-error" role="alert">{error}</p>}
+          <footer>
+            <button className="primary-button" type="button" disabled={submitting} onClick={() => void accept()}>
+              {submitting ? '正在保存同意记录…' : '同意并继续'}
+            </button>
+            <small>不同意不会创建学习内容；可以直接退出账号。</small>
+          </footer>
+        </section>
+      </main>
+    </div>
+  );
+}
+
+function AccountExitReceiptPage({ receipt, onClose }: { receipt: AccountExitReceipt; onClose: () => void }) {
+  const due = new Date(receipt.deletionDueAt).toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
+  return (
+    <div className="exit-receipt-shell">
+      <main className="exit-receipt-card">
+        <span className="exit-receipt-mark" aria-hidden="true">✓</span>
+        <p className="eyebrow">退出申请已登记</p>
+        <h1>当前会话已经撤销。</h1>
+        <p>Slow 已停止这个账号的新写入。运营者应在 <b>{due}</b> 前完成活动数据库中的删除或去标识化。</p>
+        <dl>
+          <div><dt>申请编号</dt><dd>{receipt.requestId}</dd></div>
+          <div><dt>处理状态</dt><dd>待运营者处理</dd></div>
+          <div><dt>备份副本</dt><dd>受限轮转，14 日清除目标</dd></div>
+        </dl>
+        <p className="exit-receipt-note">请保存申请编号。如需撤回申请，请通过邀请消息的原渠道联系运营者。</p>
+        <button className="primary-button" type="button" onClick={onClose}>返回登录页</button>
+      </main>
+    </div>
+  );
+}
+
 const PROFILE_STAGE_OPTIONS: { value: LearningProfile['stage']; label: string }[] = [
   { value: 'exploring', label: '正在探索' },
   { value: 'beginner', label: '刚刚入门' },
@@ -1740,6 +1969,8 @@ function ProfileCenterPage({
   onBack,
   onSave,
   onLogout,
+  privacy,
+  onRequestExit,
 }: {
   user: AuthState['user'];
   mode: AuthState['mode'];
@@ -1750,6 +1981,8 @@ function ProfileCenterPage({
   onBack: () => void;
   onSave: (body: object) => Promise<void>;
   onLogout: () => Promise<void>;
+  privacy: PrivacyState;
+  onRequestExit: (confirmation: string, reason: string) => Promise<void>;
 }) {
   const [profession, setProfession] = useState(profile.profession);
   const [stage, setStage] = useState<LearningProfile['stage']>(profile.stage);
@@ -1766,6 +1999,10 @@ function ProfileCenterPage({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  const [showExitRequest, setShowExitRequest] = useState(false);
+  const [exitConfirmation, setExitConfirmation] = useState('');
+  const [exitReason, setExitReason] = useState('');
+  const [exitSubmitting, setExitSubmitting] = useState(false);
 
   const domains = useMemo(() => parseProfileDomains(domainText), [domainText]);
 
@@ -1989,11 +2226,56 @@ function ProfileCenterPage({
                 ? '密码不会写入浏览器存储，退出后服务端会话立即撤销。'
                 : '身份由登录服务确认，Slow 不接收身份提供商密码。'}</p>
             </article>
+            <article>
+              <span>内测同意</span>
+              <h3>当前告知已留下版本记录</h3>
+              <p>版本 {privacy.noticeVersion} · {privacy.acceptedAt
+                ? new Date(privacy.acceptedAt).toLocaleDateString('zh-CN')
+                : '当前环境无需同意'}</p>
+            </article>
           </div>
 
           <section className="account-exit-panel">
             <div><h3>退出当前账号</h3><p>退出不会删除任何书架或学习记录，下次登录后可继续。</p></div>
             <button type="button" disabled={saving} onClick={() => void onLogout()}>退出账号</button>
+          </section>
+
+          <section className="account-deletion-panel">
+            <div className="account-deletion-copy">
+              <span>不可撤销操作</span>
+              <h3>退出试点并申请删除数据</h3>
+              <p>提交后会立即撤销全部会话、停用账号并停止新写入。运营者应在 7 日内处理活动数据库；备份副本进入受限轮转，当前试点以 14 日为清除目标。</p>
+            </div>
+            {!showExitRequest ? (
+              <button type="button" className="account-deletion-open" onClick={() => setShowExitRequest(true)}>开始退出申请</button>
+            ) : (
+              <form className="account-deletion-form" onSubmit={async (event) => {
+                event.preventDefault();
+                if (exitConfirmation !== '退出并删除') {
+                  setError('请输入“退出并删除”确认申请。');
+                  return;
+                }
+                setExitSubmitting(true);
+                setError('');
+                try {
+                  await onRequestExit(exitConfirmation, exitReason);
+                } catch (reason) {
+                  setError(reason instanceof Error ? reason.message : '退出申请提交失败');
+                  setExitSubmitting(false);
+                }
+              }}>
+                <label>退出原因 <em>可选</em>
+                  <textarea maxLength={500} value={exitReason} onChange={(event) => setExitReason(event.target.value)} placeholder="帮助我们改进；不要填写密码或其他敏感信息" />
+                </label>
+                <label>输入“退出并删除”确认
+                  <input required autoComplete="off" value={exitConfirmation} onChange={(event) => setExitConfirmation(event.target.value)} />
+                </label>
+                <div>
+                  <button type="button" disabled={exitSubmitting} onClick={() => { setShowExitRequest(false); setExitConfirmation(''); setExitReason(''); }}>取消</button>
+                  <button type="submit" disabled={exitSubmitting || exitConfirmation !== '退出并删除'}>{exitSubmitting ? '正在撤销账号…' : '提交退出与删除申请'}</button>
+                </div>
+              </form>
+            )}
           </section>
         </section>
       )}
@@ -2897,6 +3179,13 @@ function ReaderPanel({
   }, [regenerating]);
 
   const switchTab = (nextTab: ReaderTab) => {
+    if (nextTab === 'quiz' && tab !== 'quiz' && section) {
+      telemetry.track('quiz_viewed', {
+        view: 'learn',
+        entityType: 'section',
+        entityId: section.id,
+      });
+    }
     setTab(nextTab);
     requestAnimationFrame(() => {
       if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;

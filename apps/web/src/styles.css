@@ -577,6 +577,73 @@ button:disabled { cursor: not-allowed; }
 .account-exit-panel h3 { margin: 0 0 6px; font-size: 13px; }
 .account-exit-panel p { margin: 0; color: #7b847d; font-size: 10px; }
 .account-exit-panel button { padding: 9px 13px; border: 1px solid #d8c6c1; border-radius: 7px; background: #fff; color: #8f4639; font-size: 10px; font-weight: 700; }
+.account-deletion-panel { margin-top: 18px; padding: 24px; border: 1px solid #ead8d3; border-left: 4px solid #a44c3f; border-radius: 9px; background: #fff9f7; }
+.account-deletion-copy > span { color: #a44c3f; font: 760 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .1em; }
+.account-deletion-copy h3 { margin: 10px 0 7px; color: #55342e; font-size: 14px; }
+.account-deletion-copy p { margin: 0; color: #826d67; font-size: 10px; line-height: 1.7; }
+.account-deletion-open { margin-top: 18px; padding: 9px 13px; border: 1px solid #c9958a; border-radius: 7px; background: #fff; color: #983f33; font-size: 10px; font-weight: 750; }
+.account-deletion-form { margin-top: 20px; padding-top: 18px; display: grid; gap: 15px; border-top: 1px solid #eadbd7; }
+.account-deletion-form label { color: #634d48; font-size: 10px; font-weight: 700; }
+.account-deletion-form label em { margin-left: 4px; color: #9c8b87; font-style: normal; font-weight: 500; }
+.account-deletion-form input, .account-deletion-form textarea { width: 100%; margin-top: 7px; padding: 10px 11px; border: 1px solid #dbc8c3; border-radius: 7px; outline: 0; background: #fff; color: #3f302d; font-size: 11px; }
+.account-deletion-form textarea { min-height: 76px; resize: vertical; }
+.account-deletion-form input:focus, .account-deletion-form textarea:focus { border-color: #ad6659; box-shadow: 0 0 0 3px rgba(160, 77, 61, .1); }
+.account-deletion-form > div { display: flex; justify-content: flex-end; gap: 9px; }
+.account-deletion-form > div button { padding: 9px 12px; border: 1px solid #d7cbc7; border-radius: 7px; background: #fff; color: #70635f; font-size: 10px; font-weight: 700; }
+.account-deletion-form > div button[type="submit"] { border-color: #984538; background: #984538; color: #fff; }
+.account-deletion-form > div button:disabled { opacity: .48; }
+
+.auth-privacy-brief { margin-top: 14px; padding-top: 13px; border-top: 1px solid #e2e5df; color: #6f786f; font-size: 10px; }
+.auth-privacy-brief summary { color: #375d49; font-weight: 750; cursor: pointer; }
+.auth-privacy-brief p { margin: 8px 0 5px; line-height: 1.65; }
+.auth-privacy-brief small { color: #8a918b; line-height: 1.6; }
+
+.privacy-gate-shell { min-height: 100vh; background: #edf1ec; }
+.privacy-gate-header { height: 68px; padding: 0 28px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #d7ddd7; background: rgba(251,252,248,.96); }
+.privacy-gate-header > button { padding: 8px 11px; border: 1px solid #d6ddd7; border-radius: 7px; background: #fff; color: #657168; font-size: 10px; }
+.privacy-gate-main { width: min(1120px, calc(100% - 48px)); min-height: calc(100vh - 68px); margin: 0 auto; display: grid; grid-template-columns: 355px minmax(0, 1fr); border-left: 1px solid #d7ddd7; border-right: 1px solid #d7ddd7; background: #fbfcf8; }
+.privacy-gate-intro { padding: 68px 43px 42px; border-right: 1px solid #d7ddd7; background: #214f3d; color: #fff; }
+.privacy-gate-intro .eyebrow { color: #c7df79; font: 750 9px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .14em; }
+.privacy-gate-intro > small { margin-top: 52px; display: block; color: #b8cbbf; font-size: 10px; }
+.privacy-gate-intro h1 { margin: 13px 0 22px; font: 650 37px/1.2 "Songti SC", STSong, serif; letter-spacing: -.045em; }
+.privacy-gate-intro > p:not(.eyebrow) { margin: 0; color: #cedbd3; font-size: 12px; line-height: 1.8; }
+.privacy-version-stamp { margin-top: 46px; padding-top: 18px; display: grid; gap: 6px; border-top: 1px solid rgba(232,241,235,.18); }
+.privacy-version-stamp span { color: #a9bdb1; font-size: 9px; }
+.privacy-version-stamp b { color: #d8e99a; font: 700 12px/1.3 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.privacy-version-stamp small { color: #9eb2a6; font-size: 9px; line-height: 1.6; }
+.privacy-notice-sheet { width: min(680px, calc(100% - 80px)); margin: 0 auto; padding: 58px 0 48px; }
+.privacy-notice-sheet > header { padding-bottom: 18px; border-bottom: 1px solid #dce1db; }
+.privacy-notice-sheet > header p { margin: 0 0 8px; color: #568069; font: 750 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .1em; }
+.privacy-notice-sheet > header h2 { margin: 0; color: #26372d; font: 650 26px/1.3 "Songti SC", STSong, serif; }
+.privacy-notice-items { display: grid; grid-template-columns: 1fr 1fr; }
+.privacy-notice-items article { min-height: 138px; padding: 20px 20px 20px 0; border-bottom: 1px solid #e2e5e0; }
+.privacy-notice-items article:nth-child(odd) { padding-right: 24px; border-right: 1px solid #e2e5e0; }
+.privacy-notice-items article:nth-child(even) { padding-left: 24px; }
+.privacy-notice-items h3 { margin: 0 0 9px; color: #375243; font-size: 11px; }
+.privacy-notice-items p { margin: 0; color: #747d76; font-size: 10px; line-height: 1.7; }
+.privacy-consent-checks { margin-top: 24px; display: grid; gap: 9px; }
+.privacy-consent-checks label { padding: 13px 14px; display: grid; grid-template-columns: auto 1fr; gap: 11px; align-items: start; border: 1px solid #dbe0da; border-radius: 8px; background: #fff; color: #4e5d53; }
+.privacy-consent-checks label.checked { border-color: #76937f; background: #edf4ef; box-shadow: inset 3px 0 #9ebc4d; }
+.privacy-consent-checks input { margin-top: 2px; accent-color: #2d694e; }
+.privacy-consent-checks b, .privacy-consent-checks small { display: block; }
+.privacy-consent-checks b { font-size: 11px; }
+.privacy-consent-checks small { margin-top: 4px; color: #838c85; font-size: 9px; line-height: 1.5; }
+.privacy-gate-error { margin: 12px 0 0; color: var(--danger); font-size: 10px; }
+.privacy-notice-sheet > footer { margin-top: 18px; display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.privacy-notice-sheet > footer small { max-width: 250px; color: #8a928c; font-size: 9px; line-height: 1.5; text-align: right; }
+
+.exit-receipt-shell { min-height: 100vh; padding: 54px 24px; display: grid; place-items: center; background: #edf1ec; }
+.exit-receipt-card { width: min(560px, 100%); padding: 52px; border: 1px solid #d5ddd6; border-radius: 12px; background: #fff; box-shadow: 0 22px 60px rgba(31,62,45,.12); }
+.exit-receipt-mark { width: 43px; height: 43px; display: grid; place-items: center; border-radius: 50%; background: #dcebc3; color: #345d45; font-size: 18px; font-weight: 800; }
+.exit-receipt-card .eyebrow { margin: 25px 0 9px; color: #5b7c68; font: 750 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .12em; }
+.exit-receipt-card h1 { margin: 0; color: #27372e; font: 650 36px/1.2 "Songti SC", STSong, serif; letter-spacing: -.04em; }
+.exit-receipt-card > p:not(.eyebrow) { color: #6e786f; font-size: 11px; line-height: 1.75; }
+.exit-receipt-card dl { margin: 24px 0; border-top: 1px solid #e0e4df; }
+.exit-receipt-card dl > div { padding: 12px 0; display: grid; grid-template-columns: 92px 1fr; border-bottom: 1px solid #e5e8e4; }
+.exit-receipt-card dt { color: #8a928c; font-size: 9px; }
+.exit-receipt-card dd { margin: 0; color: #3d4c42; font: 650 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.exit-receipt-note { padding: 12px 14px; border-left: 3px solid #9ab448; background: #f2f5e9; }
+.exit-receipt-card .primary-button { margin-top: 12px; }
 
 /* Library dashboard — a readable learning index, not a decorative furniture scene. */
 .library-dashboard {
@@ -2267,6 +2334,10 @@ button:disabled { cursor: not-allowed; }
 }
 
 @media (max-width: 900px) {
+  .privacy-gate-main { width: 100%; grid-template-columns: 280px minmax(0, 1fr); border: 0; }
+  .privacy-gate-intro { padding: 52px 30px 36px; }
+  .privacy-gate-intro h1 { font-size: 31px; }
+  .privacy-notice-sheet { width: calc(100% - 56px); padding-top: 46px; }
   .library-hero { grid-template-columns: minmax(0, 1fr) 260px; gap: 32px; }
   .library-focus-grid { grid-template-columns: 1fr; }
   .library-focus-card { min-height: auto; }
@@ -2346,6 +2417,11 @@ button:disabled { cursor: not-allowed; }
 }
 
 @media (max-width: 760px) {
+  .privacy-gate-main { display: block; }
+  .privacy-gate-intro { border-right: 0; }
+  .privacy-gate-intro > small { margin-top: 28px; }
+  .privacy-version-stamp { margin-top: 28px; }
+  .privacy-notice-sheet { width: min(100% - 40px, 680px); }
   .profile-main { padding: 20px 16px 42px; }
   .profile-center-page { min-height: calc(100vh - 104px); grid-template-columns: 1fr; }
   .profile-center-sidebar { padding: 18px 20px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px 24px; }
@@ -2360,6 +2436,16 @@ button:disabled { cursor: not-allowed; }
 }
 
 @media (max-width: 560px) {
+  .privacy-gate-header { height: 62px; padding: 0 18px; }
+  .privacy-gate-intro { padding: 42px 24px 32px; }
+  .privacy-gate-intro h1 { font-size: 30px; }
+  .privacy-notice-sheet { width: calc(100% - 32px); padding: 38px 0; }
+  .privacy-notice-items { grid-template-columns: 1fr; }
+  .privacy-notice-items article, .privacy-notice-items article:nth-child(odd), .privacy-notice-items article:nth-child(even) { min-height: 0; padding: 17px 0; border-right: 0; }
+  .privacy-notice-sheet > footer { align-items: stretch; flex-direction: column; }
+  .privacy-notice-sheet > footer small { max-width: none; text-align: left; }
+  .exit-receipt-card { padding: 34px 24px; }
+  .exit-receipt-card h1 { font-size: 31px; }
   .note-view { width: min(100% - 32px, 720px); padding-top: 32px; }
   .note-layer > header { padding: 0 14px; grid-template-columns: 30px 1fr auto; gap: 9px; }
   .note-content-grid, .note-editor-grid { grid-template-columns: 1fr; }

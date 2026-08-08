@@ -120,11 +120,33 @@ export type AuthState = {
   mode:'demo'|'local'|'password'|'oidc';
   user:{id:string;name:string};
   csrfToken:string;
+  privacy:PrivacyState;
   onboarding:OnboardingState;
+};
+export type PrivacyNoticeItem = { title:string; body:string };
+export type PrivacyNotice = {
+  noticeVersion:string;
+  trialTermsVersion:string;
+  title:string;
+  summary:string;
+  items:PrivacyNoticeItem[];
+};
+export type PrivacyState = PrivacyNotice & {
+  required:boolean;
+  status:'accepted'|'required'|'not_required';
+  acceptedAt:string|null;
+};
+export type AccountExitReceipt = {
+  requestId:string;
+  status:'requested'|'processing'|'completed';
+  requestedAt:string;
+  deletionDueAt:string;
+  policyVersion:string;
 };
 export type AuthConfig = {
   mode:'demo'|'local'|'password'|'oidc';
   providerName:string;
+  privacyNotice:PrivacyNotice;
 };
 export type AiRuntime = {
   mode:'provider'|'demo'|'injected';

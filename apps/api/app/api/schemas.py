@@ -1,5 +1,6 @@
+from datetime import datetime
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 
 def camel(value: str):
@@ -69,6 +70,64 @@ class AiRuntimeUpdate(ApiModel):
 class PasswordLogin(ApiModel):
     username: str = Field(min_length=3, max_length=80)
     password: SecretStr = Field(min_length=8, max_length=200)
+
+
+class PrivacyConsentCreate(ApiModel):
+    privacy_accepted: bool = Field(alias="privacyAccepted")
+    trial_accepted: bool = Field(alias="trialAccepted")
+
+
+class AccountExitCreate(ApiModel):
+    confirmation: str = Field(min_length=1, max_length=20)
+    reason: str = Field(default="", max_length=500)
+
+
+ProductEventName = Literal[
+    "home_viewed",
+    "shelf_viewed",
+    "learning_viewed",
+    "profile_viewed",
+    "section_viewed",
+    "quiz_viewed",
+    "feedback_opened",
+    "active_reading_60s",
+    "frontend_error",
+]
+
+
+class ProductEventCreate(ApiModel):
+    model_config = ConfigDict(
+        alias_generator=camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+    event_id: str = Field(min_length=8, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
+    session_id: str = Field(min_length=8, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
+    event_name: ProductEventName
+    occurred_at: datetime
+    page_path: str = Field(default="/", min_length=1, max_length=500)
+    view: Literal["", "home", "shelf", "learn", "profile"] = ""
+    entity_type: Literal["", "shelf", "series", "book", "chapter", "section"] = ""
+    entity_id: str = Field(default="", max_length=160, pattern=r"^[A-Za-z0-9_.:-]*$")
+    properties: dict[str, str | int | float | bool] = Field(default_factory=dict)
+
+    @field_validator("page_path")
+    @classmethod
+    def validate_page_path(cls, value: str) -> str:
+        if not value.startswith("/") or value.startswith("//") or "\\" in value or "\x00" in value:
+            raise ValueError("pagePath 必须是站内路径")
+        return value.split("?", 1)[0].split("#", 1)[0] or "/"
+
+
+class ProductEventBatch(ApiModel):
+    model_config = ConfigDict(
+        alias_generator=camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+    events: list[ProductEventCreate] = Field(min_length=1, max_length=25)
 
 
 ProfileStage = Literal[

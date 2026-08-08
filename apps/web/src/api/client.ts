@@ -209,6 +209,20 @@ export const api = {
     await call<void>('/api/auth/logout',{method:'POST'});
     csrfToken = '';
   },
+  privacy:()=>call<import('../model/types').PrivacyState>('/api/privacy'),
+  acceptPrivacy:(body:{privacyAccepted:boolean;trialAccepted:boolean})=>call<import('../model/types').PrivacyState>('/api/privacy/consent',{
+    method:'POST',
+    body:JSON.stringify(body),
+  }),
+  requestAccountExit:(body:{confirmation:string;reason:string})=>call<import('../model/types').AccountExitReceipt>('/api/account/exit',{
+    method:'POST',
+    body:JSON.stringify(body),
+  }),
+  productEvents:(body:object)=>call<{accepted:number;duplicated:number}>('/api/events/batch',{
+    method:'POST',
+    keepalive:true,
+    body:JSON.stringify(body),
+  }),
   onboarding:()=>call<import('../model/types').OnboardingState>('/api/onboarding'),
   saveProfileDraft:(body:object)=>call<import('../model/types').OnboardingState>('/api/onboarding/profile',{
     method:'PATCH',

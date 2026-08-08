@@ -11,7 +11,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0039_book_outline_lifecycle"
+HEAD_REVISION = "0041_product_events"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -160,8 +160,23 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
             "SELECT sql FROM sqlite_master "
             "WHERE type = 'table' AND name = 'user_feedback'"
         ).fetchone()[0]
+        privacy_consent_schema = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'privacy_consents'"
+        ).fetchone()[0]
+        account_exit_schema = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'account_exit_requests'"
+        ).fetchone()[0]
+        product_event_schema = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'product_events'"
+        ).fetchone()[0]
 
     assert revision == HEAD_REVISION
+    assert "uq_privacy_consents_user_versions" in privacy_consent_schema
+    assert "deletion_due_at" in account_exit_schema
+    assert "uq_product_events_user_event" in product_event_schema
     assert {
         "outline_status",
         "outline_version",

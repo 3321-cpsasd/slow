@@ -237,10 +237,9 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
     client, fake_oidc = oidc_client
     public_config = client.get("/api/auth/config")
     assert public_config.status_code == 200
-    assert public_config.json() == {
-        "mode": "oidc",
-        "providerName": "统一身份账户",
-    }
+    assert public_config.json()["mode"] == "oidc"
+    assert public_config.json()["providerName"] == "统一身份账户"
+    assert public_config.json()["privacyNotice"]["noticeVersion"] == "2026-08-08-r2"
 
     me = login(client, fake_oidc)
     assert me["user"]["name"] == "用户 A"
@@ -250,7 +249,14 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
 
     bootstrap = client.get("/api/bootstrap")
     assert bootstrap.status_code == 428
-    assert bootstrap.json()["code"] == "PROFILE_REQUIRED"
+    assert bootstrap.json()["code"] == "PRIVACY_CONSENT_REQUIRED"
+
+    consent = client.post(
+        "/api/privacy/consent",
+        headers={"X-CSRF-Token": me["csrfToken"]},
+        json={"privacyAccepted": True, "trialAccepted": True},
+    )
+    assert consent.status_code == 200
 
     missing_profile_csrf = client.patch(
         "/api/onboarding/profile",
@@ -438,7 +444,9 @@ def test_demo_auth_config_is_public_and_explicit():
         response = client.get("/api/auth/config")
 
     assert response.status_code == 200
-    assert response.json() == {"mode": "demo", "providerName": ""}
+    assert response.json()["mode"] == "demo"
+    assert response.json()["providerName"] == ""
+    assert response.json()["privacyNotice"]["noticeVersion"] == "2026-08-08-r2"
 
 
 @pytest.fixture
@@ -461,7 +469,8 @@ def test_local_accounts_login_reuses_session_boundary_and_isolates_users(
 ):
     config = local_auth_client.get("/api/auth/config")
     assert config.status_code == 200
-    assert config.json() == {"mode": "local", "providerName": ""}
+    assert config.json()["mode"] == "local"
+    assert config.json()["providerName"] == ""
     assert LOCAL_DEMO_PASSWORD not in config.text
     assert all(persona.username not in config.text for persona in LOCAL_DEMO_PERSONAS)
 

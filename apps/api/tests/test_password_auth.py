@@ -9,7 +9,15 @@ from app.ai.local_adapter import LocalDemoAdapter
 from app.auth.password import PasswordCredentialService
 from app.auth.password_escrow import PasswordEscrowStore
 from app.auth.service import SessionService
-from app.infrastructure.tables import AuthSession, LocalCredential, Shelf, User, now
+from app.infrastructure.tables import (
+    AccountExitRequest,
+    AuthSession,
+    LocalCredential,
+    PrivacyConsent,
+    Shelf,
+    User,
+    now,
+)
 from app.main import create_app
 from app.services.attachment_storage import LocalAttachmentStorage
 from app.services.source_verifier import AcceptingSourceVerifier
@@ -49,6 +57,12 @@ def login(client: TestClient, password: str = PASSWORD):
 
 
 def complete_profile(client: TestClient, csrf_token: str):
+    consent = client.post(
+        "/api/privacy/consent",
+        headers={"X-CSRF-Token": csrf_token},
+        json={"privacyAccepted": True, "trialAccepted": True},
+    )
+    assert consent.status_code == 200
     return client.post(
         "/api/onboarding/profile/complete",
         headers={"X-CSRF-Token": csrf_token},
@@ -67,7 +81,9 @@ def test_production_password_login_requires_precreated_account(tmp_path):
     with TestClient(app, base_url="https://testserver") as client:
         config = client.get("/api/auth/config")
         assert config.status_code == 200
-        assert config.json() == {"mode": "password", "providerName": ""}
+        assert config.json()["mode"] == "password"
+        assert config.json()["providerName"] == ""
+        assert config.json()["privacyNotice"]["noticeVersion"] == "2026-08-08-r2"
 
         missing = login(client)
         assert missing.status_code == 401
@@ -83,11 +99,12 @@ def test_production_password_login_requires_precreated_account(tmp_path):
         }
         assert logged_in.cookies.get("slow_session")
         assert logged_in.cookies.get("slow_csrf")
+        assert logged_in.json()["privacy"]["required"] is True
         assert logged_in.json()["onboarding"]["required"] is True
 
         bootstrap = client.get("/api/bootstrap")
         assert bootstrap.status_code == 428
-        assert bootstrap.json()["code"] == "PROFILE_REQUIRED"
+        assert bootstrap.json()["code"] == "PRIVACY_CONSENT_REQUIRED"
 
         completed = complete_profile(client, logged_in.json()["csrfToken"])
         assert completed.status_code == 200
@@ -105,6 +122,95 @@ def test_production_password_login_requires_precreated_account(tmp_path):
             credential = db.scalar(select(LocalCredential))
             assert credential.password_hash.startswith("$argon2id$")
             assert credential.password_hash != PASSWORD
+
+
+def test_privacy_consent_is_versioned_and_required_before_learning(tmp_path):
+    app = password_app(tmp_path)
+    with TestClient(app, base_url="https://testserver") as client:
+        user = create_account(client)
+        logged_in = login(client)
+        csrf = logged_in.json()["csrfToken"]
+
+        incomplete = client.post(
+            "/api/privacy/consent",
+            headers={"X-CSRF-Token": csrf},
+            json={"privacyAccepted": True, "trialAccepted": False},
+        )
+        assert incomplete.status_code == 400
+        assert incomplete.json()["code"] == "PRIVACY_CONSENT_INCOMPLETE"
+
+        accepted = client.post(
+            "/api/privacy/consent",
+            headers={"X-CSRF-Token": csrf},
+            json={"privacyAccepted": True, "trialAccepted": True},
+        )
+        assert accepted.status_code == 200
+        assert accepted.json()["required"] is False
+        assert accepted.json()["status"] == "accepted"
+        assert accepted.json()["acceptedAt"]
+
+        replay = client.post(
+            "/api/privacy/consent",
+            headers={"X-CSRF-Token": csrf},
+            json={"privacyAccepted": True, "trialAccepted": True},
+        )
+        assert replay.status_code == 200
+        with client.app.state.sessions() as db:
+            consents = db.scalars(
+                select(PrivacyConsent).where(PrivacyConsent.user_id == user.id)
+            ).all()
+            assert len(consents) == 1
+
+
+def test_account_exit_revokes_sessions_and_creates_deletion_request(tmp_path):
+    app = password_app(tmp_path)
+    with TestClient(app, base_url="https://testserver") as client:
+        user = create_account(client)
+        logged_in = login(client)
+        csrf = logged_in.json()["csrfToken"]
+        assert client.post(
+            "/api/privacy/consent",
+            headers={"X-CSRF-Token": csrf},
+            json={"privacyAccepted": True, "trialAccepted": True},
+        ).status_code == 200
+
+        invalid = client.post(
+            "/api/account/exit",
+            headers={"X-CSRF-Token": csrf},
+            json={"confirmation": "删除", "reason": ""},
+        )
+        assert invalid.status_code == 400
+        assert invalid.json()["code"] == "ACCOUNT_EXIT_CONFIRMATION_INVALID"
+
+        exited = client.post(
+            "/api/account/exit",
+            headers={"X-CSRF-Token": csrf},
+            json={"confirmation": "退出并删除", "reason": "不再参加试点"},
+        )
+        assert exited.status_code == 202
+        assert exited.json()["status"] == "requested"
+        assert exited.json()["deletionDueAt"]
+
+        with client.app.state.sessions() as db:
+            assert db.get(User, user.id).status == "exit_requested"
+            credential = db.scalar(
+                select(LocalCredential).where(LocalCredential.user_id == user.id)
+            )
+            assert credential.status == "disabled"
+            assert not db.scalar(
+                select(AuthSession).where(
+                    AuthSession.user_id == user.id,
+                    AuthSession.status == "active",
+                )
+            )
+            request = db.scalar(
+                select(AccountExitRequest).where(AccountExitRequest.user_id == user.id)
+            )
+            assert request.status == "requested"
+            assert request.reason == "不再参加试点"
+
+        client.cookies.clear()
+        assert login(client).status_code == 401
 
 
 def test_password_session_has_absolute_and_idle_expiry(tmp_path):

@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from sqlalchemy.orm import Session
 from .auth.context import Principal, UserScope, demo_user_scope
 from .auth.profile import ProfileService
+from .auth.privacy import PrivacyService, privacy_notice
 from .auth.local import LocalCredentialService
 from .auth.oidc import OidcClient
 from .auth.password import PasswordCredentialService
@@ -23,7 +24,7 @@ from .ai.anthropic_adapter import AnthropicAdapter
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AiRuntimeUpdate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, FeedbackCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PlanCreate, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ReviewSubmit, ShelfCreate
+from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, FeedbackCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ReviewSubmit, ShelfCreate
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -32,6 +33,7 @@ from .infrastructure.database import build_database
 from .infrastructure.tables import Base, LearningTask, QuizAttempt, Remediation, User
 from .modules.learning.tasks import claim_task, heartbeat_task, recoverable_task_ids
 from .modules.feedback.service import FeedbackService
+from .modules.telemetry.service import ProductEventService
 from .services.source_verifier import ModelOnlySourcePolicy
 from .services.attachment_storage import LocalAttachmentStorage
 from .services.runtime_settings import RuntimeSettingsStore
@@ -375,6 +377,9 @@ def create_app(
         try: yield session
         finally: session.close()
 
+    def privacy_required(request: Request) -> bool:
+        return request.app.state.auth_mode in {"password", "oidc"}
+
     async def current_scope(
         request: Request,
         session: Session = Depends(db),
@@ -396,6 +401,15 @@ def create_app(
                     request.headers.get("X-CSRF-Token"),
                 )
             request.state.auth_session = auth_session
+        consent_exempt_paths = {
+            "/api/auth/me",
+            "/api/auth/logout",
+            "/api/privacy",
+            "/api/privacy/consent",
+            "/api/account/exit",
+        }
+        if privacy_required(request) and request.url.path not in consent_exempt_paths:
+            PrivacyService(session, scope.user_id).require_current(required=True)
         with request.app.state.ai_usage_recorder.attributed(
             scope.principal
         ):
@@ -501,6 +515,7 @@ def create_app(
                 if request.app.state.auth_mode == "oidc"
                 else ""
             ),
+            "privacyNotice": privacy_notice(),
         }
         return response
 
@@ -586,6 +601,9 @@ def create_app(
             "mode": mode,
             "user": {"id": user.id, "name": user.name},
             "csrfToken": csrf_token,
+            "privacy": PrivacyService(session, user.id).state(
+                required=privacy_required(request)
+            ),
             "onboarding": ProfileService(session, user.id).state(),
         })
         set_session_cookies(
@@ -732,8 +750,60 @@ def create_app(
             "mode": request.app.state.auth_mode,
             "user": {"id": user.id, "name": user.name},
             "csrfToken": csrf_token,
+            "privacy": PrivacyService(session, user.id).state(
+                required=privacy_required(request)
+            ),
             "onboarding": ProfileService(session, user.id).state(),
         }
+
+    @app.get("/api/privacy/notice")
+    def get_privacy_notice():
+        return privacy_notice()
+
+    @app.get("/api/privacy")
+    def get_privacy_state(
+        request: Request,
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        return PrivacyService(session, scope.user_id).state(
+            required=privacy_required(request)
+        )
+
+    @app.post("/api/privacy/consent")
+    def accept_privacy_consent(
+        body: PrivacyConsentCreate,
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        return PrivacyService(session, scope.user_id).accept(
+            privacy_accepted=body.privacy_accepted,
+            trial_accepted=body.trial_accepted,
+        )
+
+    @app.post("/api/account/exit", status_code=202)
+    def request_account_exit(
+        body: AccountExitCreate,
+        request: Request,
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        receipt = PrivacyService(session, scope.user_id).request_exit(
+            confirmation=body.confirmation,
+            reason=body.reason,
+        )
+        response = JSONResponse(receipt, status_code=202)
+        response.delete_cookie(settings.session_cookie_name, path="/")
+        response.delete_cookie("slow_csrf", path="/")
+        return response
+
+    @app.post("/api/events/batch", status_code=202)
+    def append_product_events(
+        body: ProductEventBatch,
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        return ProductEventService(session, scope.user_id).append(body.events)
 
     @app.post("/api/auth/logout", status_code=204)
     def auth_logout(
