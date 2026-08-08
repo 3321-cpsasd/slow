@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 144" role="img" aria-labelledby="title desc">
+  <title id="title">Slow</title>
+  <desc id="desc">The word slow with a friendly tortoise forming the o and a hare leaping above it.</desc>
+  <defs>
+    <linearGradient id="s" x1="12" y1="24" x2="75" y2="118" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#236A4E"/><stop offset="1" stop-color="#123D30"/>
+    </linearGradient>
+    <linearGradient id="l" x1="100" y1="18" x2="100" y2="114" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#AFC53B"/><stop offset="1" stop-color="#C2CE43"/>
+    </linearGradient>
+    <linearGradient id="turtle" x1="128" y1="50" x2="276" y2="115" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#28AEB0"/><stop offset="1" stop-color="#60BE82"/>
+    </linearGradient>
+    <linearGradient id="shell" x1="176" y1="43" x2="270" y2="117" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#65C184"/><stop offset="1" stop-color="#49AD7B"/>
+    </linearGradient>
+    <linearGradient id="hare" x1="246" y1="14" x2="300" y2="82" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F5A02A"/><stop offset="1" stop-color="#E97821"/>
+    </linearGradient>
+    <linearGradient id="w" x1="309" y1="51" x2="394" y2="111" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F1A32E"/><stop offset="1" stop-color="#ED8B26"/>
+    </linearGradient>
+  </defs>
+
+  <path d="M69 45C61 28 30 28 19 45C5 67 64 64 64 87C64 109 30 117 15 100" fill="none" stroke="url(#s)" stroke-width="28" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M101 22V108" fill="none" stroke="url(#l)" stroke-width="28" stroke-linecap="round"/>
+
+  <g aria-hidden="true">
+    <ellipse cx="220" cy="81" rx="59" ry="45" fill="url(#shell)"/>
+    <path d="M183 76C175 69 171 59 158 57C141 54 127 65 127 81C127 96 141 106 158 104C172 103 178 95 186 90Z" fill="url(#turtle)"/>
+    <path d="M163 94C151 98 144 107 147 115C158 117 170 113 178 104C176 98 171 95 163 94Z" fill="url(#turtle)"/>
+    <path d="M252 98C264 98 272 104 272 114C261 118 250 116 242 108C244 102 247 99 252 98Z" fill="url(#shell)"/>
+    <path d="M274 82L286 91L273 97Z" fill="#4EAF79"/>
+    <circle cx="147" cy="78" r="8.5" fill="#FBFAF6"/>
+    <circle cx="148.5" cy="78" r="4.2" fill="#25A4A7"/>
+    <circle cx="164" cy="75" r="8.5" fill="#FBFAF6"/>
+    <circle cx="165.5" cy="75" r="4.2" fill="#25A4A7"/>
+    <path d="M152 90C156 94 161 94 165 90" fill="none" stroke="#FBFAF6" stroke-width="3" stroke-linecap="round"/>
+    <ellipse cx="220" cy="81" rx="32" ry="28" fill="#FBFAF6"/>
+    <path d="M180 49C194 58 200 65 200 79M257 49C244 59 239 66 239 79M178 98C193 91 202 89 220 89C239 89 249 92 263 99" fill="none" stroke="#FBFAF6" stroke-width="5" stroke-linecap="round"/>
+  </g>
+
+  <g fill="url(#hare)" aria-hidden="true">
+    <path d="M267 25C275 15 291 11 306 15C309 20 305 24 299 25L273 31Z"/>
+    <path d="M267 30C280 26 297 29 308 38C307 44 301 45 296 43L270 35Z"/>
+    <circle cx="258" cy="31" r="15"/>
+    <path d="M250 42C263 40 278 48 287 61C292 68 298 70 301 75C301 83 294 84 287 80C276 75 269 65 260 59C254 55 246 54 242 49C242 45 245 43 250 42Z"/>
+    <ellipse cx="242" cy="48" rx="8" ry="5" transform="rotate(25 242 48)"/>
+    <ellipse cx="278" cy="72" rx="10" ry="6" transform="rotate(42 278 72)"/>
+  </g>
+  <circle cx="254" cy="29" r="5.2" fill="#FBFAF6"/>
+  <circle cx="256" cy="29" r="2.2" fill="#E97821"/>
+  <path d="M247 34C249 36 251 36 253 34" fill="none" stroke="#FBFAF6" stroke-width="2" stroke-linecap="round"/>
+
+  <path d="M311 58L328 107L350 68L372 107L395 55" fill="none" stroke="url(#w)" stroke-width="27" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

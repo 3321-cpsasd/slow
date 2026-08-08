@@ -17,12 +17,9 @@
   <ellipse cx="87" cy="105" rx="27" ry="24" fill="#FBFAF6"/>
   <path d="M54 77C66 84 71 91 71 103M119 78C108 86 104 92 104 103M53 121C66 116 74 114 87 114C102 114 111 116 123 122" fill="none" stroke="#FBFAF6" stroke-width="4.5" stroke-linecap="round"/>
   <g fill="url(#h)">
-    <path d="M111 29C121 18 138 17 151 22C152 27 148 30 143 30L115 34Z"/>
-    <path d="M111 34C124 30 141 34 151 44C149 50 144 50 139 48L113 39Z"/>
-    <circle cx="102" cy="36" r="14"/>
-    <path d="M95 48C108 46 121 53 130 65C135 72 140 74 143 79C143 86 137 88 131 84C120 78 115 70 106 64C100 60 93 59 89 54C89 51 91 49 95 48Z"/>
-    <ellipse cx="88" cy="54" rx="7" ry="4.5" transform="rotate(24 88 54)"/>
-    <ellipse cx="124" cy="76" rx="9" ry="5.5" transform="rotate(40 124 76)"/>
+    <path d="M111 29C121 18 138 17 151 22C152 27 148 30 143 30L115 34Z"/><path d="M111 34C124 30 141 34 151 44C149 50 144 50 139 48L113 39Z"/>
+    <circle cx="102" cy="36" r="14"/><path d="M95 48C108 46 121 53 130 65C135 72 140 74 143 79C143 86 137 88 131 84C120 78 115 70 106 64C100 60 93 59 89 54C89 51 91 49 95 48Z"/>
+    <ellipse cx="88" cy="54" rx="7" ry="4.5" transform="rotate(24 88 54)"/><ellipse cx="124" cy="76" rx="9" ry="5.5" transform="rotate(40 124 76)"/>
   </g>
   <circle cx="99" cy="34" r="4.8" fill="#FBFAF6"/><circle cx="101" cy="34" r="2" fill="#E87921"/>
   <path d="M93 40C95 42 97 42 99 40" fill="none" stroke="#FBFAF6" stroke-width="2" stroke-linecap="round"/>

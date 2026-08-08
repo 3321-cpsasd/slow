@@ -573,7 +573,7 @@ export default function App() {
     return (
       <div className="app-shell auth-shell">
         <header className="auth-header">
-          <span className="brand"><span className="brand-mark"><i /></span><b>slow</b></span>
+          <span className="brand"><img className="brand-logo" src="/slow-logo.svg" alt="Slow" /></span>
           <span>AI 原生个人学习系统</span>
         </header>
         <main className="auth-main">
@@ -736,8 +736,7 @@ export default function App() {
           aria-label="返回 Slow 首页"
           onClick={goHome}
         >
-          <span className="brand-mark"><i /></span>
-          <b>slow</b>
+          <img className="brand-logo" src="/slow-logo.svg" alt="" />
         </button>
         {view === 'learn' && series ? (
           <div className="header-context">
@@ -1834,7 +1833,7 @@ function PrivacyConsentGate({
   return (
     <div className="privacy-gate-shell">
       <header className="privacy-gate-header">
-        <span className="brand"><span className="brand-mark"><i /></span><b>slow</b></span>
+        <span className="brand"><img className="brand-logo" src="/slow-logo.svg" alt="Slow" /></span>
         <button type="button" onClick={() => void onLogout()}>退出账号</button>
       </header>
       <main className="privacy-gate-main">

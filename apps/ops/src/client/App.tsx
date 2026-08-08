@@ -72,7 +72,7 @@ export function App() {
 
   return <div className="ops-shell">
     <header className="topbar">
-      <div className="brand"><span>Slow</span><i>运营瞭望台</i></div>
+      <div className="brand"><img src="/slow-mark.svg" alt="Slow" width="42" height="42" /><i>运营瞭望台</i></div>
       <div className="connection"><span className="connection-dot" />东京 PostgreSQL · 只读隧道</div>
       <button className="refresh" disabled={loading} onClick={() => void load(true)}>{loading ? "同步中" : "刷新数据"}</button>
     </header>

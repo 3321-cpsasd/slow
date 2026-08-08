@@ -112,7 +112,7 @@ export function ProfileOnboardingFlow({
   return (
     <div className="profile-flow-shell">
       <header className="profile-flow-header">
-        <span className="brand"><span className="brand-mark"><i /></span><b>slow</b></span>
+        <span className="brand"><img className="brand-logo" src="/slow-logo.svg" alt="Slow" /></span>
         <span>建立你的学习起点</span>
         <button className="quiet-button" disabled={busy} onClick={() => void onLogout()}>退出</button>
       </header>
