@@ -65,6 +65,8 @@ def test_cutover_stops_public_writes_and_verifies_before_authority_switch():
     assert verify_position < authority_position < web_start_position
     assert "restore_sqlite_service" in script
     assert '--env-file "$runtime_env" --env-file "$release_env"' in script
+    assert "compose_sqlite run --rm --no-deps --entrypoint python api" in script
+    assert "python3 -c" not in script
 
 
 def test_api_image_installs_postgresql_driver():

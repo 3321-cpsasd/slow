@@ -38,19 +38,19 @@ restore_sqlite_service() {
 
 mkdir -p "$backup_root"
 backup_timestamp=$(date -u +%Y%m%dT%H%M%SZ)
-sqlite_backup="$backup_root/slow-pre-postgresql-$backup_timestamp.db"
+sqlite_backup_name="slow-pre-postgresql-$backup_timestamp.db"
+sqlite_backup="$backup_root/$sqlite_backup_name"
 
 # Stop every public writer before taking the final authoritative snapshot.
 compose_sqlite stop web api
-if ! python3 -c \
-  'import sqlite3,sys; source=sqlite3.connect(sys.argv[1]); target=sqlite3.connect(sys.argv[2]); source.backup(target); target.close(); source.close()' \
-  "$sqlite_file" "$sqlite_backup"; then
+if ! compose_sqlite run --rm --no-deps --entrypoint python api -c \
+  'import os,sqlite3,sys; source=sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True); target=sqlite3.connect(sys.argv[2]); source.backup(target); result=target.execute("PRAGMA integrity_check").fetchone()[0]; target.close(); source.close(); assert result == "ok" and os.path.getsize(sys.argv[2]) > 0' \
+  /data/slow-v0.db "/data/backups/$sqlite_backup_name"; then
   restore_sqlite_service
   echo "SQLite backup failed; restored the SQLite service." >&2
   exit 1
 fi
-if [ ! -s "$sqlite_backup" ] || \
-   [ "$(python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("PRAGMA integrity_check").fetchone()[0])' "$sqlite_backup")" != "ok" ]; then
+if [ ! -s "$sqlite_backup" ]; then
   restore_sqlite_service
   echo "SQLite backup validation failed; restored the SQLite service." >&2
   exit 1
