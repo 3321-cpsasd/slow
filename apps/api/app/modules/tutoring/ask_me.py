@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 
@@ -9,16 +10,19 @@ from sqlalchemy.orm import Session
 from ...application.generation_context import GenerationContextBuilder
 from ...core.errors import AiError, AppError, safe_error_code
 from ...infrastructure.tables import (
+    AssessmentTarget,
     AskMeDiscussionCommand,
     AskMeDiscussionSession,
     AskMeDiscussionTopic,
     AskMeDiscussionTurnRecord,
     AskMeSession,
-    AssessmentTarget,
+    ContentBlockAssessmentTarget,
+    ContentBlockVersion,
+    ContentVersion,
+    LearningContractAssessmentTarget,
     LearningContractVersion,
     LearningMissionVersion,
     LearningRunSectionBinding,
-    SectionAssessmentTarget,
     now,
 )
 from ..learning.contracts import open_run_section
@@ -29,6 +33,12 @@ class AskMeService:
     """Runs legacy three-stage checks and user-controlled topic discussions."""
 
     DIMENSIONS = ("mechanism", "boundary", "transfer")
+    TARGET_BLOCK_ROLES = {
+        "mechanism": ("mechanism", "core_instruction"),
+        "boundary": ("boundary", "comparison"),
+        "transfer": ("transfer", "application", "practice"),
+    }
+    DISCUSSION_TURN_LEASE = timedelta(minutes=10)
 
     def __init__(
         self,
@@ -124,16 +134,10 @@ class AskMeService:
                 uid=self.uid,
             )
 
-        target_ids = list(self.db.scalars(
-            select(AssessmentTarget.id)
-            .join(
-                SectionAssessmentTarget,
-                SectionAssessmentTarget.assessment_target_id
-                == AssessmentTarget.id,
-            )
-            .where(SectionAssessmentTarget.section_id == section_id)
-            .order_by(SectionAssessmentTarget.position)
-        ))
+        target_specs = self._discussion_target_specs(
+            binding.learning_contract_version_id,
+            binding.content_version_id,
+        )
         session = AskMeDiscussionSession(
             id=self.uid("askme_discussion"),
             learning_run_id=learning_run.id,
@@ -149,7 +153,9 @@ class AskMeService:
         )
         self.db.add(session)
         topics = []
-        for position, spec in enumerate(self._topic_specs(context.section)):
+        for position, spec in enumerate(
+            self._topic_specs(context.section, target_specs)
+        ):
             topic = AskMeDiscussionTopic(
                 id=self.uid("askme_topic"),
                 session_id=session.id,
@@ -157,7 +163,9 @@ class AskMeService:
                 title=spec["title"],
                 purpose=spec["purpose"],
                 dimension=spec["dimension"],
-                assessment_target_ids_json=self.dump(target_ids),
+                assessment_target_ids_json=self.dump([
+                    spec["assessmentTargetId"]
+                ]),
                 status="active" if position == 0 else "pending",
                 current_prompt=spec["prompt"],
                 turn_count=0,
@@ -198,7 +206,11 @@ class AskMeService:
             "answer": answer,
         })
         replay = self._discussion_turn_by_key(request_key)
-        if replay and replay.status != "failed":
+        if (
+            replay
+            and replay.status != "failed"
+            and not self._turn_lease_expired(replay)
+        ):
             return self._turn_replay_or_retry(replay, request_hash, body)
         if replay and replay.request_hash != request_hash:
             raise AppError(
@@ -213,6 +225,7 @@ class AskMeService:
             section_id,
             body.session_id,
         )
+        self._recover_expired_pending_turn(session)
         topic = self._validate_turn_submission(session, body)
         if replay:
             if (
@@ -247,6 +260,9 @@ class AskMeService:
                 error_code="",
             )
             self.db.add(turn)
+        lease_token = self.uid("askme_lease")
+        turn.lease_token = lease_token
+        turn.lease_expires_at = now() + self.DISCUSSION_TURN_LEASE
         session.pending_turn_id = turn.id
         session.updated_at = now()
         turn_id = turn.id
@@ -303,6 +319,8 @@ class AskMeService:
                 not session
                 or not topic
                 or not turn
+                or turn.status != "processing"
+                or turn.lease_token != lease_token
                 or session.pending_turn_id != turn.id
                 or session.revision != body.expected_revision
                 or session.active_topic_id != topic.id
@@ -315,6 +333,8 @@ class AskMeService:
             turn.evaluation = result.evaluation
             turn.feedback_json = self.dump(feedback)
             turn.status = "completed"
+            turn.lease_token = ""
+            turn.lease_expires_at = None
             turn.updated_at = now()
             topic.current_prompt = result.follow_up_prompt
             topic.turn_count += 1
@@ -335,11 +355,22 @@ class AskMeService:
             self.db.rollback()
             failed_turn = self.db.get(AskMeDiscussionTurnRecord, turn_id)
             failed_session = self.db.get(AskMeDiscussionSession, session_id)
-            if failed_turn and failed_turn.status == "processing":
+            owns_lease = bool(
+                failed_turn
+                and failed_turn.status == "processing"
+                and failed_turn.lease_token == lease_token
+            )
+            if owns_lease:
                 failed_turn.status = "failed"
                 failed_turn.error_code = safe_error_code(error)
+                failed_turn.lease_token = ""
+                failed_turn.lease_expires_at = None
                 failed_turn.updated_at = now()
-            if failed_session and failed_session.pending_turn_id == turn_id:
+            if (
+                owns_lease
+                and failed_session
+                and failed_session.pending_turn_id == turn_id
+            ):
                 failed_session.pending_turn_id = ""
                 failed_session.updated_at = now()
             self.db.commit()
@@ -379,6 +410,7 @@ class AskMeService:
             section_id,
             body.session_id,
         )
+        self._recover_expired_pending_turn(session)
         if session.revision != body.expected_revision:
             raise AppError(
                 "讨论状态已经更新，请按当前进度继续",
@@ -527,6 +559,10 @@ class AskMeService:
                 code="ASK_ME_NOT_STARTED",
             )
         section_view = self.section_reader(context.section.id)
+        target_spec = self._discussion_target_specs(
+            binding.learning_contract_version_id,
+            binding.content_version_id,
+        )["mechanism"]
         context_pack = self._generation_context(
             context,
             binding,
@@ -541,6 +577,7 @@ class AskMeService:
                     {
                         "section": section_view,
                         "dimension": "mechanism",
+                        "assessmentTarget": target_spec,
                         "previousAnswer": None,
                         "finalize": False,
                         "validationAttempt": validation_attempt,
@@ -591,6 +628,12 @@ class AskMeService:
         requested_dimension = (
             current_dimension if finalize else self.DIMENSIONS[current + 1]
         )
+        target_specs = self._discussion_target_specs(
+            binding.learning_contract_version_id,
+            binding.content_version_id,
+        )
+        current_target = target_specs[current_dimension]
+        requested_target = target_specs[requested_dimension]
         section_view = self.section_reader(context.section.id)
         context_pack = self._generation_context(
             context,
@@ -610,6 +653,8 @@ class AskMeService:
                         "section": section_view,
                         "dimension": requested_dimension,
                         "evaluatesDimension": current_dimension,
+                        "assessmentTarget": requested_target,
+                        "evaluatesAssessmentTarget": current_target,
                         "previousPrompt": entries[current]["prompt"],
                         "previousAnswer": answer,
                         "priorRounds": entries,
@@ -639,7 +684,16 @@ class AskMeService:
             self.evidence_context(context.section),
             f"{context.section.title}:{current_dimension}",
             "ask_me",
-            {"dimension": current_dimension, "evaluation": turn.evaluation},
+            {
+                "sessionId": session.id,
+                "dimension": current_dimension,
+                "evaluation": turn.evaluation,
+                "assessmentTargetIds": [current_target["assessmentTargetId"]],
+                "learningContractVersionId": (
+                    binding.learning_contract_version_id
+                ),
+                "contentVersionId": binding.content_version_id,
+            },
             delta,
         )
         if finalize:
@@ -670,6 +724,154 @@ class AskMeService:
                 LearningRunSectionBinding.section_id == section_id,
             )
         )
+
+    def _discussion_target_specs(
+        self,
+        contract_version_id: str | None,
+        content_version_id: str | None,
+    ) -> dict[str, dict[str, str]]:
+        if not contract_version_id:
+            raise AppError(
+                "深入讨论缺少冻结的学习契约",
+                code="ASK_ME_CONTRACT_MISSING",
+                status=409,
+            )
+        if not content_version_id:
+            raise AppError(
+                "深入讨论缺少冻结的正文版本",
+                code="ASK_ME_CONTENT_VERSION_MISSING",
+                status=409,
+            )
+        rows = self.db.execute(
+            select(
+                LearningContractAssessmentTarget.position,
+                AssessmentTarget.id,
+                AssessmentTarget.objective_statement,
+                ContentBlockVersion.semantic_role,
+                ContentBlockVersion.position,
+            )
+            .join(
+                AssessmentTarget,
+                AssessmentTarget.id
+                == LearningContractAssessmentTarget.assessment_target_id,
+            )
+            .join(
+                ContentBlockAssessmentTarget,
+                ContentBlockAssessmentTarget.assessment_target_id
+                == AssessmentTarget.id,
+            )
+            .join(
+                ContentBlockVersion,
+                ContentBlockVersion.id
+                == ContentBlockAssessmentTarget.content_block_version_id,
+            )
+            .where(
+                LearningContractAssessmentTarget.contract_version_id
+                == contract_version_id,
+                ContentBlockVersion.content_version_id == content_version_id,
+            )
+            .order_by(
+                LearningContractAssessmentTarget.position,
+                ContentBlockVersion.position,
+            )
+        ).all()
+        candidates_by_role: dict[str, list[dict[str, str]]] = {}
+        for _, target_id, objective, role, _ in rows:
+            candidates = candidates_by_role.setdefault(role, [])
+            if any(item["assessmentTargetId"] == target_id for item in candidates):
+                continue
+            candidates.append({
+                "assessmentTargetId": target_id,
+                "objective": objective,
+            })
+
+        # M1 content keeps the same explicit block-to-objective declarations in
+        # the immutable block payload instead of the normalized binding table.
+        # Accept only exact target IDs or exact frozen objective statements; do
+        # not infer a target from prose or fuzzy similarity.
+        content = self.db.get(ContentVersion, content_version_id)
+        contract_targets = self.db.execute(
+            select(AssessmentTarget.id, AssessmentTarget.objective_statement)
+            .join(
+                LearningContractAssessmentTarget,
+                LearningContractAssessmentTarget.assessment_target_id
+                == AssessmentTarget.id,
+            )
+            .where(
+                LearningContractAssessmentTarget.contract_version_id
+                == contract_version_id
+            )
+            .order_by(LearningContractAssessmentTarget.position)
+        ).all()
+        target_by_id = {
+            target_id: {
+                "assessmentTargetId": target_id,
+                "objective": objective,
+            }
+            for target_id, objective in contract_targets
+        }
+        targets_by_objective: dict[str, list[dict[str, str]]] = {}
+        for target_id, objective in contract_targets:
+            targets_by_objective.setdefault(objective, []).append(
+                target_by_id[target_id]
+            )
+        if content:
+            for block in self.load(content.blocks_json, []):
+                role = str(block.get("role", ""))
+                if not role:
+                    continue
+                raw_target_ids = [
+                    str(item)
+                    for item in block.get("assessmentTargetIds", [])
+                    if str(item)
+                ]
+                if any(item not in target_by_id for item in raw_target_ids):
+                    raise AppError(
+                        "正文目标绑定超出冻结的学习契约",
+                        code="ASK_ME_CONTENT_TARGET_BOUNDARY_INVALID",
+                        status=409,
+                        details={"blockId": str(block.get("id", ""))},
+                    )
+                declared_ids = raw_target_ids
+                if not declared_ids:
+                    for objective in block.get("assessment_objectives", []):
+                        matches = targets_by_objective.get(objective, [])
+                        if len(matches) == 1:
+                            declared_ids.append(
+                                matches[0]["assessmentTargetId"]
+                            )
+                candidates = candidates_by_role.setdefault(role, [])
+                for target_id in declared_ids:
+                    candidate = target_by_id[target_id]
+                    if candidate not in candidates:
+                        candidates.append(candidate)
+
+        assigned: set[str] = set()
+        result: dict[str, dict[str, str]] = {}
+        for dimension in self.DIMENSIONS:
+            candidates: list[dict[str, str]] = []
+            for role in self.TARGET_BLOCK_ROLES[dimension]:
+                for candidate in candidates_by_role.get(role, []):
+                    if candidate not in candidates:
+                        candidates.append(candidate)
+            if not candidates:
+                raise AppError(
+                    "正文没有为深入讨论提供可验证的目标绑定",
+                    code="ASK_ME_TOPIC_TARGETS_MISSING",
+                    status=409,
+                    details={"dimension": dimension},
+                )
+            selected = next(
+                (
+                    item
+                    for item in candidates
+                    if item["assessmentTargetId"] not in assigned
+                ),
+                candidates[0],
+            )
+            result[dimension] = selected
+            assigned.add(selected["assessmentTargetId"])
+        return result
 
     def _session(self, learning_run_id: str, section_id: str):
         return self.db.scalar(
@@ -773,6 +975,35 @@ class AskMeService:
             )
         )
 
+    @staticmethod
+    def _utc(value: datetime) -> datetime:
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    def _turn_lease_expired(self, turn) -> bool:
+        return bool(
+            turn.status == "processing"
+            and turn.lease_expires_at
+            and self._utc(turn.lease_expires_at) <= now()
+        )
+
+    def _recover_expired_pending_turn(self, session) -> None:
+        if not session.pending_turn_id:
+            return
+        pending = self.db.get(
+            AskMeDiscussionTurnRecord,
+            session.pending_turn_id,
+        )
+        if pending and pending.status == "processing":
+            if not self._turn_lease_expired(pending):
+                return
+            pending.status = "failed"
+            pending.error_code = "ASK_ME_DISCUSSION_TURN_LEASE_EXPIRED"
+            pending.lease_token = ""
+            pending.lease_expires_at = None
+            pending.updated_at = now()
+        session.pending_turn_id = ""
+        session.updated_at = now()
+
     def _turn_replay_or_retry(self, turn, request_hash: str, body):
         if turn.request_hash != request_hash:
             raise AppError(
@@ -797,33 +1028,45 @@ class AskMeService:
             details={"expectedRevision": body.expected_revision},
         )
 
-    def _topic_specs(self, section):
+    def _topic_specs(self, section, target_specs):
         anchor = section.question or section.title
+        mechanism = target_specs["mechanism"]["objective"]
+        boundary = target_specs["boundary"]["objective"]
+        transfer = target_specs["transfer"]["objective"]
         return [
             {
                 "dimension": "mechanism",
+                "assessmentTargetId": target_specs["mechanism"][
+                    "assessmentTargetId"
+                ],
                 "title": "把核心机制讲清楚",
-                "purpose": f"解释“{anchor}”背后的因果链和关键判断依据。",
+                "purpose": f"验证目标“{mechanism}”背后的因果链和判断依据。",
                 "prompt": (
-                    f"先用自己的话回答：{anchor}。"
+                    f"围绕“{anchor}”，先用自己的话说明“{mechanism}”。"
                     "请把结论、关键机制和你依据的可观察信号连接起来。"
                 ),
             },
             {
                 "dimension": "boundary",
+                "assessmentTargetId": target_specs["boundary"][
+                    "assessmentTargetId"
+                ],
                 "title": "找到判断失效的边界",
-                "purpose": f"识别关于“{anchor}”的结论在什么条件下不再成立。",
+                "purpose": f"验证目标“{boundary}”在什么条件下不再成立。",
                 "prompt": (
-                    f"围绕“{anchor}”，举出一个容易误判的边界情形。"
+                    f"围绕目标“{boundary}”，举出一个容易误判的边界情形。"
                     "你会用什么证据区分它和正常情况？"
                 ),
             },
             {
                 "dimension": "transfer",
+                "assessmentTargetId": target_specs["transfer"][
+                    "assessmentTargetId"
+                ],
                 "title": "迁移到新的真实情境",
-                "purpose": f"把“{anchor}”的判断方法迁移到新的职业或现实场景。",
+                "purpose": f"把目标“{transfer}”迁移到新的职业或现实场景。",
                 "prompt": (
-                    f"请选择一个没有在正文中直接出现的新场景，应用“{anchor}”的判断方法。"
+                    f"请选择一个正文未直接出现的新场景，应用“{transfer}”的判断方法。"
                     "请说明你的步骤、证据和可能失效的地方。"
                 ),
             },
@@ -907,6 +1150,14 @@ class AskMeService:
                 "dimension": topic.dimension,
                 "evaluation": latest_turn.evaluation,
                 "turnCount": topic.turn_count,
+                "assessmentTargetIds": self.load(
+                    topic.assessment_target_ids_json,
+                    [],
+                ),
+                "learningContractVersionId": (
+                    session.learning_contract_version_id
+                ),
+                "contentVersionId": session.content_version_id,
             },
             {"strong": 20, "partial": 8, "weak": -5}[latest_turn.evaluation],
         )

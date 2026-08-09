@@ -1587,6 +1587,15 @@ function nextBookSection(book: Book) {
   return null;
 }
 
+function bookContainsSection(book: Book, sectionId: string | null | undefined) {
+  return Boolean(
+    sectionId
+    && book.chapters.some((chapter) => (
+      chapter.sections.some((section) => section.id === sectionId)
+    )),
+  );
+}
+
 function Home({
   data,
   dailyMode,
@@ -1888,7 +1897,8 @@ function Home({
             || item.series[0]
             || null;
           const featuredBook = featuredSeries?.books.find((book) => (
-            featuredSeries.id === dashboard?.today?.seriesId && book.title === dashboard.today.bookTitle
+            featuredSeries.id === dashboard?.today?.seriesId
+            && bookContainsSection(book, dashboard.today.sectionId)
           ))
             || featuredSeries?.books.find((book) => book.progress > 0 && book.status !== 'completed')
             || featuredSeries?.books.find((book) => book.status !== 'locked' && book.status !== 'completed')
@@ -1900,7 +1910,7 @@ function Home({
             featuredSeries
             && featuredBook
             && featuredSeries.id === dashboard?.today?.seriesId
-            && featuredBook.title === dashboard.today.bookTitle,
+            && bookContainsSection(featuredBook, dashboard.today.sectionId),
           );
           return (
           <button
@@ -4744,6 +4754,7 @@ function AskMePanel({ sectionId }: { sectionId: string }) {
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
   const turnRequest = useRef<{ fingerprint: string; id: string } | null>(null);
+  const actionRequest = useRef<{ fingerprint: string; id: string } | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -4829,6 +4840,14 @@ function AskMePanel({ sectionId }: { sectionId: string }) {
 
   const applyAction = async (action: 'next_topic' | 'pause' | 'resume' | 'finish') => {
     if (!discussion || actioning || submitting) return;
+    const fingerprint = JSON.stringify({
+      sessionId: discussion.id,
+      revision: discussion.revision,
+      action,
+    });
+    if (!actionRequest.current || actionRequest.current.fingerprint !== fingerprint) {
+      actionRequest.current = { fingerprint, id: crypto.randomUUID() };
+    }
     setActioning(true);
     setError('');
     try {
@@ -4839,12 +4858,13 @@ function AskMePanel({ sectionId }: { sectionId: string }) {
           expectedRevision: discussion.revision,
           action,
         },
-        crypto.randomUUID(),
+        actionRequest.current.id,
       );
       setDiscussion(next);
       setAnswer('');
       setConfirmingFinish(false);
       turnRequest.current = null;
+      actionRequest.current = null;
       setMessage(action === 'next_topic'
         ? '已切换主题。'
         : action === 'pause'

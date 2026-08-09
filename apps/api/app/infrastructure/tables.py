@@ -1814,6 +1814,10 @@ class AssessmentObservation(Base):
             "question_index",
             name="uq_assessment_observations_attempt_question",
         ),
+        UniqueConstraint(
+            "evidence_key",
+            name="uq_assessment_observations_evidence_key",
+        ),
         ForeignKeyConstraint(
             ["learning_run_id", "user_id"],
             ["learning_runs.id", "learning_runs.user_id"],
@@ -1827,7 +1831,9 @@ class AssessmentObservation(Base):
     )
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
-    attempt_id: Mapped[str] = mapped_column(ForeignKey("quiz_attempts.id"), index=True)
+    attempt_id: Mapped[str | None] = mapped_column(
+        ForeignKey("quiz_attempts.id"), nullable=True, index=True
+    )
     quiz_set_id: Mapped[str | None] = mapped_column(
         ForeignKey("quiz_sets.id"), nullable=True, index=True
     )
@@ -1837,14 +1843,20 @@ class AssessmentObservation(Base):
     content_version_id: Mapped[str | None] = mapped_column(
         ForeignKey("content_versions.id"), nullable=True, index=True
     )
-    scoring_result_id: Mapped[str] = mapped_column(
-        ForeignKey("scoring_results.id"), index=True
+    scoring_result_id: Mapped[str | None] = mapped_column(
+        ForeignKey("scoring_results.id"), nullable=True, index=True
     )
     assessment_target_id: Mapped[str] = mapped_column(
         ForeignKey("assessment_targets.id"), index=True
     )
-    question_index: Mapped[int] = mapped_column(Integer)
+    question_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     correct: Mapped[bool] = mapped_column(Boolean)
+    source_type: Mapped[str] = mapped_column(
+        String(32), default="choice_quiz", server_default="choice_quiz", index=True
+    )
+    evidence_key: Mapped[str | None] = mapped_column(
+        String(96), nullable=True
+    )
     assistance_mode: Mapped[str] = mapped_column(
         String(32), default="unassisted_initial"
     )
@@ -2486,11 +2498,6 @@ class AskMeDiscussionTurnRecord(Base):
             "idempotency_key",
             name="uq_ask_me_discussion_turns_user_idempotency",
         ),
-        UniqueConstraint(
-            "topic_id",
-            "turn_index",
-            name="uq_ask_me_discussion_turns_topic_index",
-        ),
     )
     id: Mapped[str] = mapped_column(String, primary_key=True)
     session_id: Mapped[str] = mapped_column(
@@ -2510,6 +2517,12 @@ class AskMeDiscussionTurnRecord(Base):
     request_hash: Mapped[str] = mapped_column(String(64))
     response_json: Mapped[str] = mapped_column(Text, default="")
     error_code: Mapped[str] = mapped_column(String(80), default="")
+    lease_token: Mapped[str] = mapped_column(
+        String(160), default="", server_default=""
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 

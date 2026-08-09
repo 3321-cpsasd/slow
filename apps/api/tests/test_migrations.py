@@ -12,7 +12,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0047_historical_schema_repair"
+HEAD_REVISION = "0048_ask_me_evidence_and_turn_leases"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -177,6 +177,21 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
             row[1]
             for row in connection.execute("PRAGMA table_info(assessment_targets)")
         }
+        observation_columns = {
+            row[1]: row
+            for row in connection.execute(
+                "PRAGMA table_info(assessment_observations)"
+            )
+        }
+        discussion_turn_columns = {
+            row[1]: row
+            for row in connection.execute(
+                "PRAGMA table_info(ask_me_discussion_turns)"
+            )
+        }
+        discussion_turn_indexes = list(connection.execute(
+            "PRAGMA index_list(ask_me_discussion_turns)"
+        ))
         gate_columns = {
             row[1]
             for row in connection.execute("PRAGMA table_info(assessment_gate_states)")
@@ -357,6 +372,17 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
         "user_feedback",
     }.issubset(trustworthy_tables)
     assert "section_id" not in assessment_target_columns
+    assert {"source_type", "evidence_key"}.issubset(observation_columns)
+    assert observation_columns["attempt_id"][3] == 0
+    assert observation_columns["scoring_result_id"][3] == 0
+    assert observation_columns["question_index"][3] == 0
+    assert {"lease_token", "lease_expires_at"}.issubset(
+        discussion_turn_columns
+    )
+    assert not any(
+        row[1] == "uq_ask_me_discussion_turns_topic_index"
+        for row in discussion_turn_indexes
+    )
     assert {
         "concept_revision_id",
         "learning_objective_id",
@@ -384,6 +410,118 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
         row[1] == "sqlite_autoindex_milestone_path_revisions_2" or row[2] == 1
         for row in milestone_revision_indexes
     )
+
+
+def test_0048_empty_database_downgrades_and_upgrades(tmp_path):
+    database = tmp_path / "0048-empty-round-trip.db"
+    run_alembic(database, "upgrade", "head")
+    run_alembic(
+        database,
+        "downgrade",
+        "0047_historical_schema_repair",
+    )
+    run_alembic(database, "upgrade", "head")
+
+
+def test_0048_downgrade_refuses_oral_assessment_facts(tmp_path):
+    database = tmp_path / "0048-oral-facts.db"
+    run_alembic(database, "upgrade", "head")
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute(
+            """
+            INSERT INTO assessment_observations (
+                id, learning_run_id, user_id, section_id,
+                learning_contract_version_id, assessment_target_id, correct,
+                source_type, evidence_key, assistance_mode,
+                learning_episode_id, equivalence_group_id,
+                qualification_at_creation, qualification_rule_version,
+                payload_json, created_at
+            ) VALUES (
+                'observation_oral', 'run_missing', 'user_missing',
+                'section_missing', 'contract_missing', 'target_missing', 1,
+                'ask_me_topic', 'oral-evidence-key', 'unassisted_oral',
+                'ask_me_topic:topic_missing', 'oral-equivalence',
+                'eligible_grouped', 'evidence_v2', '{}',
+                '2026-08-09 12:00:00'
+            )
+            """
+        )
+        connection.commit()
+
+    with pytest.raises(subprocess.CalledProcessError):
+        run_alembic(
+            database,
+            "downgrade",
+            "0047_historical_schema_repair",
+        )
+
+    with sqlite3.connect(database) as connection:
+        revision = connection.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone()[0]
+        oral_count = connection.execute(
+            "SELECT COUNT(*) FROM assessment_observations "
+            "WHERE source_type = 'ask_me_topic'"
+        ).fetchone()[0]
+    assert revision == HEAD_REVISION
+    assert oral_count == 1
+
+
+def test_0048_downgrade_refuses_duplicate_discussion_retries(tmp_path):
+    database = tmp_path / "0048-discussion-retries.db"
+    run_alembic(database, "upgrade", "head")
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.executemany(
+            """
+            INSERT INTO ask_me_discussion_turns (
+                id, session_id, topic_id, user_id, turn_index,
+                prompt, answer, evaluation, feedback_json, status,
+                idempotency_key, request_hash, response_json, error_code,
+                lease_token, lease_expires_at, created_at, updated_at
+            ) VALUES (?, 'session_missing', 'topic_missing', 'user_missing', 0,
+                'prompt', 'answer', ?, '{}', ?, ?, ?, '', ?, '', NULL,
+                '2026-08-09 12:00:00', '2026-08-09 12:00:00')
+            """,
+            [
+                (
+                    "turn_failed",
+                    "",
+                    "failed",
+                    "retry-key-failed",
+                    "hash-failed",
+                    "ASK_ME_DISCUSSION_AI_FAILED",
+                ),
+                (
+                    "turn_completed",
+                    "strong",
+                    "completed",
+                    "retry-key-completed",
+                    "hash-completed",
+                    "",
+                ),
+            ],
+        )
+        connection.commit()
+
+    with pytest.raises(subprocess.CalledProcessError):
+        run_alembic(
+            database,
+            "downgrade",
+            "0047_historical_schema_repair",
+        )
+
+    with sqlite3.connect(database) as connection:
+        revision = connection.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone()[0]
+        retry_count = connection.execute(
+            "SELECT COUNT(*) FROM ask_me_discussion_turns "
+            "WHERE topic_id = 'topic_missing' AND turn_index = 0"
+        ).fetchone()[0]
+    assert revision == HEAD_REVISION
+    assert retry_count == 2
 
 
 def test_generation_lease_migration_accepts_orm_precreated_table(tmp_path):

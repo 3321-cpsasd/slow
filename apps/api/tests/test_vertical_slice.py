@@ -39,6 +39,9 @@ from app.infrastructure.tables import (
     AssessmentGateState,
     AssessmentObservation,
     AssessmentTarget,
+    AskMeDiscussionSession,
+    AskMeDiscussionTopic,
+    AskMeDiscussionTurnRecord,
     Book,
     ChapterRevision,
     ContentBlockVersion,
@@ -1575,7 +1578,7 @@ def test_assessment_gate_remediates_only_failed_target_and_rebuilds(client):
         item for item in memory
         if item.get("assessmentTargetId") == original_targets["核心目标"]
     )
-    assert core_memory["projectionRuleVersion"] == "mastery_v2"
+    assert core_memory["projectionRuleVersion"] == "mastery_v3"
     assert core_memory["pKnown"] == 0.056604
     assert core_memory["mastery"] == 6
 
@@ -2941,7 +2944,7 @@ def test_ask_me_discussion_is_resumable_and_turn_submissions_are_idempotent(clie
     assert continued["topics"][0]["turnCount"] == 2
 
 
-def test_ask_me_discussion_retry_reuses_failed_idempotency_key():
+def test_ask_me_discussion_retry_survives_reload_with_a_new_key():
     class FailOnceDiscussionAi(FakeAi):
         attempts = 0
 
@@ -2985,12 +2988,79 @@ def test_ask_me_discussion_retry_reuses_failed_idempotency_key():
         recovered = retry_client.post(
             f"{path}/turns",
             json=body,
-            headers=headers,
+            headers={"Idempotency-Key": "ask-me-v2-failed-retry-after-reload"},
         )
         assert recovered.status_code == 200
         assert recovered.json()["revision"] == 1
         assert len(recovered.json()["turns"]) == 1
         assert ai.attempts == 2
+
+
+def test_ask_me_discussion_reclaims_expired_processing_turn(client):
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    section = generate_and_pass(client, chapter["sections"][0]["id"])
+    path = f"/api/sections/{section['id']}/ask-me/discussion"
+    started = client.post(path).json()
+    body = {
+        "sessionId": started["id"],
+        "topicId": started["activeTopicId"],
+        "expectedRevision": 0,
+        "answer": "进程退出后，我仍应能够安全地重新提交这一轮回答。",
+    }
+    request_payload = {
+        "sectionId": section["id"],
+        "sessionId": started["id"],
+        "topicId": started["activeTopicId"],
+        "expectedRevision": 0,
+        "answer": body["answer"],
+    }
+    request_hash = hashlib.sha256(json.dumps(
+        request_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()).hexdigest()
+    turn_id = f"askme_turn_{uuid4().hex}"
+    with client.app.state.sessions() as db:
+        session = db.get(AskMeDiscussionSession, started["id"])
+        topic = db.get(AskMeDiscussionTopic, started["activeTopicId"])
+        db.add(AskMeDiscussionTurnRecord(
+            id=turn_id,
+            session_id=session.id,
+            topic_id=topic.id,
+            user_id=session.user_id,
+            turn_index=0,
+            prompt=topic.current_prompt,
+            answer=body["answer"],
+            evaluation="",
+            feedback_json="{}",
+            status="processing",
+            idempotency_key="ask-me-v2-expired-turn",
+            request_hash=request_hash,
+            response_json="",
+            error_code="",
+            lease_token="expired-worker-token",
+            lease_expires_at=now() - timedelta(seconds=1),
+        ))
+        session.pending_turn_id = turn_id
+        db.commit()
+
+    recovered = client.post(
+        f"{path}/turns",
+        json=body,
+        headers={"Idempotency-Key": "ask-me-v2-expired-turn"},
+    )
+    assert recovered.status_code == 200
+    assert recovered.json()["revision"] == 1
+    assert recovered.json()["turns"][0]["id"] == turn_id
+    with client.app.state.sessions() as db:
+        turn = db.get(AskMeDiscussionTurnRecord, turn_id)
+        assert turn.status == "completed"
+        assert turn.lease_token == ""
+        assert turn.lease_expires_at is None
 
 
 def test_ask_me_discussion_user_controls_topic_switch_pause_and_finish(client):
@@ -3001,6 +3071,10 @@ def test_ask_me_discussion_user_controls_topic_switch_pause_and_finish(client):
     section = generate_and_pass(client, chapter["sections"][0]["id"])
     path = f"/api/sections/{section['id']}/ask-me/discussion"
     started = client.post(path).json()
+    assert all(
+        len(topic["assessmentTargetIds"]) == 1
+        for topic in started["topics"]
+    )
     answered = client.post(
         f"{path}/turns",
         json={
@@ -3033,6 +3107,41 @@ def test_ask_me_discussion_user_controls_topic_switch_pause_and_finish(client):
         json=next_body,
         headers=action_headers,
     ).json() == advanced_body
+    target_ids = set(started["topics"][0]["assessmentTargetIds"])
+    with client.app.state.sessions() as db:
+        oral_rows = db.scalars(
+            select(AssessmentObservation).where(
+                AssessmentObservation.section_id == section["id"],
+                AssessmentObservation.source_type == "ask_me_topic",
+            )
+        ).all()
+        assert {item.assessment_target_id for item in oral_rows} == target_ids
+        assert all(item.attempt_id is None for item in oral_rows)
+        assert all(item.scoring_result_id is None for item in oral_rows)
+        gate_qualifications = db.scalars(
+            select(EvidenceQualificationEvent).where(
+                EvidenceQualificationEvent.observation_id.in_(
+                    [item.id for item in oral_rows]
+                ),
+                EvidenceQualificationEvent.projection_family == "gate",
+            )
+        ).all()
+        assert gate_qualifications
+        assert all(item.status == "ineligible" for item in gate_qualifications)
+        mastery_rows = db.scalars(
+            select(KnowledgeStateProjection).where(
+                KnowledgeStateProjection.assessment_target_id.in_(target_ids)
+            )
+        ).all()
+        assert {item.assessment_target_id for item in mastery_rows} == target_ids
+        oral_watermarks = {
+            item.assessment_target_id: item.sequence for item in oral_rows
+        }
+        assert all(
+            item.source_observation_watermark
+            >= oral_watermarks[item.assessment_target_id]
+            for item in mastery_rows
+        )
 
     paused = client.post(
         f"{path}/actions",
@@ -3068,6 +3177,57 @@ def test_ask_me_discussion_user_controls_topic_switch_pause_and_finish(client):
     ).json()
     assert finished["status"] == "completed"
     assert len(finished["topics"]) == 3
+
+
+def test_ask_me_discussion_rejects_multi_target_topic_evidence(client):
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    section = generate_and_pass(client, chapter["sections"][0]["id"])
+    path = f"/api/sections/{section['id']}/ask-me/discussion"
+    started = client.post(path).json()
+    answered = client.post(
+        f"{path}/turns",
+        json={
+            "sessionId": started["id"],
+            "topicId": started["activeTopicId"],
+            "expectedRevision": 0,
+            "answer": "我会说明机制、可观察依据，以及结论不成立的条件。",
+        },
+        headers={"Idempotency-Key": "ask-me-v2-target-boundary-turn"},
+    ).json()
+    with client.app.state.sessions() as db:
+        topic = db.get(AskMeDiscussionTopic, started["activeTopicId"])
+        valid_target_id = json.loads(topic.assessment_target_ids_json)[0]
+        topic.assessment_target_ids_json = json.dumps([
+            valid_target_id,
+            "target_outside_frozen_contract",
+        ])
+        db.commit()
+
+    rejected = client.post(
+        f"{path}/actions",
+        json={
+            "sessionId": started["id"],
+            "expectedRevision": answered["revision"],
+            "action": "next_topic",
+        },
+        headers={"Idempotency-Key": "ask-me-v2-target-boundary-action"},
+    )
+    assert rejected.status_code == 409
+    assert rejected.json()["code"] == "ASK_ME_EVIDENCE_TARGET_BOUNDARY_INVALID"
+    with client.app.state.sessions() as db:
+        topic = db.get(AskMeDiscussionTopic, started["activeTopicId"])
+        oral_count = db.scalar(
+            select(func.count(AssessmentObservation.id)).where(
+                AssessmentObservation.section_id == section["id"],
+                AssessmentObservation.source_type == "ask_me_topic",
+            )
+        )
+        assert topic.status in {"active", "sufficient"}
+        assert not topic.evidence_recorded
+        assert oral_count == 0
 
 
 def test_future_chapter_edits_and_started_boundary(client):

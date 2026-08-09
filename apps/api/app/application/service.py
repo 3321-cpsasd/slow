@@ -53,6 +53,7 @@ from ..modules.curriculum.policy import CHAPTER_SECTION_POLICY
 from ..modules.artifacts.progress import ArtifactProgressStore
 from ..modules.artifacts.service import ArtifactService
 from ..modules.learning.commands import SubmitQuiz
+from ..modules.learning.assessment import record_ask_me_assessment_facts
 from ..modules.learning.generation_leases import (
     acquire_generation_lease,
     release_generation_lease,
@@ -1117,6 +1118,7 @@ class SlowService:
         return task_view(reset_failed_task(self.db, task))
 
     def _add_evidence(self, context, concept, evidence_type, result, delta):
+        result_payload = dict(result)
         evidence = LearningEvidence(
             id=uid("evidence"),
             learning_run_id=self.progress.active_run(context["series"].id).id,
@@ -1128,7 +1130,7 @@ class SlowService:
             section_id=context["section"].id,
             concept=concept[:300],
             evidence_type=evidence_type,
-            result_json=dump(result),
+            result_json=dump(result_payload),
             mastery_delta=delta,
         )
         self.db.add(evidence)
@@ -1140,6 +1142,40 @@ class SlowService:
         memory.evidence_count += 1
         memory.summary = f"{memory.evidence_count} 条证据，当前掌握度 {memory.mastery_score}/100；最近证据：{evidence_type}"
         memory.updated_at = now()
+        if evidence_type in {"ask_me", "ask_me_topic"}:
+            target_ids = [
+                str(item)
+                for item in result_payload.get("assessmentTargetIds", [])
+                if str(item)
+            ]
+            source_id = str(
+                result_payload.get("topicId")
+                or (
+                    f"{result_payload.get('sessionId', '')}:"
+                    f"{result_payload.get('dimension', '')}"
+                )
+            )
+            contract_version_id = str(
+                result_payload.get("learningContractVersionId") or ""
+            )
+            record_ask_me_assessment_facts(
+                self.db,
+                learning_run_id=evidence.learning_run_id,
+                user_id=self.user_id,
+                section_id=context["section"].id,
+                learning_contract_version_id=contract_version_id,
+                content_version_id=(
+                    str(result_payload.get("contentVersionId"))
+                    if result_payload.get("contentVersionId")
+                    else None
+                ),
+                assessment_target_ids=target_ids,
+                source_type=evidence_type,
+                source_id=source_id,
+                evaluation=str(result_payload.get("evaluation") or ""),
+                dimension=str(result_payload.get("dimension") or ""),
+                payload=result_payload,
+            )
 
     def _memory(self, shelf_id, limit=30, *, include_legacy=False):
         target_scope = (
