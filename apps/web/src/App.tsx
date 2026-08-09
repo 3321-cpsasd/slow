@@ -3572,12 +3572,45 @@ function BlockBody({ block }: { block: Block }) {
   }
   const markdown = block.kind === 'table'
     ? normalizeTableMarkdown(block.content)
-    : block.content;
+    : block.kind === 'text'
+      ? normalizeLessonTextMarkdown(block.content)
+      : block.content;
   return (
     <div className={`content-markdown kind-${block.kind}`}>
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
     </div>
   );
+}
+
+function normalizeLessonTextMarkdown(content: string): string {
+  const normalized = content.replace(/\r\n?/g, '\n').trim();
+  const hasAuthoredStructure = /\n\s*\n/.test(normalized)
+    || /(^|\n)\s*(?:#{1,6}\s|[-+*]\s+|\d+[.)]\s+|>\s+|```)/m.test(normalized);
+  if (normalized.length < 200 || hasAuthoredStructure) return normalized;
+
+  const sentences = normalized
+    .match(/[^。！？]+[。！？]+|[^。！？]+$/g)
+    ?.map((sentence) => sentence.trim())
+    .filter(Boolean) || [];
+  if (sentences.length < 4) return normalized;
+
+  const paragraphCount = Math.min(
+    3,
+    Math.floor(sentences.length / 2),
+    Math.max(2, Math.ceil(normalized.length / 150)),
+  );
+  if (paragraphCount < 2) return normalized;
+
+  const paragraphs: string[] = [];
+  let cursor = 0;
+  for (let index = 0; index < paragraphCount; index += 1) {
+    const remainingSentences = sentences.length - cursor;
+    const remainingParagraphs = paragraphCount - index;
+    const take = Math.ceil(remainingSentences / remainingParagraphs);
+    paragraphs.push(sentences.slice(cursor, cursor + take).join(''));
+    cursor += take;
+  }
+  return paragraphs.join('\n\n');
 }
 
 function normalizeTableMarkdown(content: string): string {

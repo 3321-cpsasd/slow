@@ -32,7 +32,7 @@ from ..modules.learning.assessment_items import publish_assessment_item_versions
 
 LESSON_GENERATION_PIPELINE_VERSION = "lesson_generation_v2"
 LESSON_GENERATION_SCHEMA_VERSION = "generated_lesson_slot_candidate_v4"
-LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_slot_prompt_v4"
+LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_slot_prompt_v5"
 LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v4"
 LESSON_CONTEXT_POLICY_VERSION = "lesson_generation_context_v2"
 AI_CONTENT_LABEL_SCHEMA_VERSION = "ai_content_label_v2"
@@ -79,7 +79,7 @@ class LessonGenerationSpec(LessonSpecModel):
         default=LESSON_GENERATION_SCHEMA_VERSION,
         alias="schemaVersion",
     )
-    prompt_version: Literal["lesson_generation_slot_prompt_v4"] = Field(
+    prompt_version: Literal["lesson_generation_slot_prompt_v5"] = Field(
         default=LESSON_GENERATION_PROMPT_VERSION,
         alias="promptVersion",
     )

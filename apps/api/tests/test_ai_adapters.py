@@ -314,6 +314,7 @@ def test_openai_chat_lesson_v2_uses_exactly_one_physical_call():
     assert calls[0]["extra_body"] == {"enable_thinking": False}
     assert calls[0]["max_tokens"] == 12000
     request_payload = json.loads(calls[0]["messages"][1]["content"])
+    assert "段落之间必须保留一个空行" in calls[0]["messages"][0]["content"]
     assert [
         item["allowedClaimVersionIds"]
         for item in request_payload["serverSlotPlan"]["targetSlots"]
