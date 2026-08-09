@@ -46,8 +46,16 @@
       border-bottom: 1px solid var(--line);
       background: rgba(255, 255, 252, .92);
     }
-    .brand { display: flex; align-items: center; color: var(--forest); }
-    .brand-logo { width: 108px; height: 38px; display: block; object-fit: contain; }
+    .brand { display: flex; align-items: center; gap: 9px; color: var(--forest); }
+    .brand-mark {
+      width: 27px;
+      height: 27px;
+      border: 6px solid var(--forest);
+      border-right-color: var(--lime);
+      border-radius: 50%;
+      transform: rotate(-20deg);
+    }
+    .brand b { font-size: 21px; letter-spacing: -.05em; }
     .header-status { position: relative; display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 11px; }
     .expiry-trigger {
       padding: 7px 2px;
@@ -436,7 +444,7 @@
 <body>
   <div class="demo-page" aria-hidden="true">
     <header class="app-header">
-      <div class="brand"><img class="brand-logo" src="../apps/web/public/slow-logo.svg" alt="Slow" /></div>
+      <div class="brand"><span class="brand-mark"></span><b>slow</b></div>
       <div class="header-status">
         <button class="expiry-trigger" id="headerCopy" type="button" disabled aria-haspopup="dialog" aria-expanded="false">本次学习模式尚未设置</button>
         <button class="mode-pill" id="modePill" type="button" aria-label="选择学习模式">未选择</button>
