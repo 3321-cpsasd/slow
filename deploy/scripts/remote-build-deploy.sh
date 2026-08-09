@@ -80,11 +80,23 @@ fi
 
 if [ "$cutover_required" = true ]; then
   bundled_cutover_script="$source_root/deploy/scripts/cutover-sqlite-to-postgres.sh"
-  if [ ! -f "$bundled_cutover_script" ]; then
-    echo "Release archive does not contain the demo cutover script." >&2
-    exit 1
-  fi
+  bundled_compose_file="$source_root/deploy/compose.prod.yml"
+  bundled_demo_compose_override="$source_root/deploy/compose.demo.yml"
+  bundled_rollback_override="$source_root/deploy/compose.sqlite-rollback.yml"
+  for bundled_file in \
+    "$bundled_cutover_script" \
+    "$bundled_compose_file" \
+    "$bundled_demo_compose_override" \
+    "$bundled_rollback_override"; do
+    if [ ! -f "$bundled_file" ]; then
+      echo "Release archive is missing a demo cutover prerequisite: $bundled_file" >&2
+      exit 1
+    fi
+  done
   install -m 700 "$bundled_cutover_script" "$cutover_script"
+  install -m 600 "$bundled_compose_file" "$compose_file"
+  install -m 600 "$bundled_demo_compose_override" "$demo_compose_override"
+  install -m 600 "$bundled_rollback_override" "$rollback_override"
 fi
 
 docker build \
