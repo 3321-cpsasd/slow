@@ -19,6 +19,8 @@
 
 Slow 是一个 AI 原生个人学习应用。它把学习目标组织为可阅读、可验证、可持续推进的个性化教材，而不是只生成一份静态计划。
 
+课程、生成、目录和学习证据共同遵守 [`用户 → 书架 → 系列（学习目标） → 书 → 章 → 节`](PRODUCT_DNA.md) 的领域契约；内容块只是节内结构，不是目录或解锁层级。正文与测验生成遵循 [ADR-0001](docs/decisions/0001-lesson-generation-v2.md)。
+
 ### 当前能力
 
 - React + TypeScript 学习界面
@@ -29,6 +31,8 @@ Slow 是一个 AI 原生个人学习应用。它把学习目标组织为可阅�
 - 可选的多轮 Ask Me 检查
 - 持久化后台任务、恢复与幂等处理
 - 邀请制账号密码登录、本地开发身份和可选 OIDC 身份边界
+- 版本化隐私同意、可审计的退出与数据删除申请
+- 本机运营快照导出，不开放无权限边界的公网管理接口
 - OpenAI 与 Anthropic 兼容供应商接口
 
 ### 快速开始
@@ -49,6 +53,8 @@ cp .env.example .env
 - API：`http://127.0.0.1:8000`
 - OpenAPI：`http://127.0.0.1:8000/docs`
 
+只读运营数据服务见 [`apps/ops/README.md`](apps/ops/README.md)。它运行在运营者本机，通过 SSH 隧道读取生产 PostgreSQL 的受限视图，不占用 ECS 常驻应用资源。
+
 未配置外部模型时，开发环境使用明确标记的本地 Demo 数据。Demo 数据不能被当作真实 AI 内容或正式学习证据。
 
 ### 验证
@@ -57,6 +63,37 @@ cp .env.example .env
 PYTHONPATH=apps/api .venv/bin/pytest -q apps/api/tests
 cd apps/web && pnpm build
 ```
+
+生产数据库兼容性使用显式的一次性 PostgreSQL 测试实例验证：
+
+```bash
+docker compose -f deploy/compose.postgres.test.yml down --remove-orphans
+docker compose -f deploy/compose.postgres.test.yml up -d --wait
+POSTGRES_TEST_DATABASE_URL=postgresql+psycopg://slow_test:slow_test_only@127.0.0.1:55432/slow_test \
+  PYTHONPATH=apps/api .venv/bin/pytest -q apps/api/tests/test_postgresql_support.py
+docker compose -f deploy/compose.postgres.test.yml down --remove-orphans
+```
+
+真实课程基准候选包必须先通过 Schema、引用闭合和显式缺口校验；校验不会写入数据库：
+
+```bash
+PYTHONPATH=apps/api .venv/bin/python apps/api/import_curriculum_baseline.py \
+  apps/api/curriculum_baselines/pku_cs_programming_practice_2025_v1.json \
+  --validate-only
+```
+
+候选内容与人工审核决定分别版本化。审核清单必须冻结候选摘要、逐一覆盖来源、候选关系和显式缺口，并明确区分课程范围、知识发布及能力证据门禁：
+
+```bash
+PYTHONPATH=apps/api .venv/bin/python apps/api/import_curriculum_baseline.py \
+  apps/api/curriculum_baselines/pku_cs_programming_practice_2025_v1.json \
+  --review apps/api/curriculum_baselines/pku_cs_programming_practice_2025_v1_review_20260809.json \
+  --validate-only
+```
+
+去掉 `--validate-only` 只导入候选和审核记录；再显式增加 `--publish` 才会尝试发布。课程范围仍有阻断项、来源未复核或审核清单不闭合时，发布失败且不会进入正式规划。知识事实和开放能力证据继续走独立门禁，不能因为课程基准已发布而自动升级。权威边界见 [ADR-0004](docs/decisions/0004-curriculum-baseline-authority.md)。
+
+测试数据库使用公开的测试凭据和 `tmpfs`，不得与生产 Compose 合并。
 
 ### 安全说明
 
@@ -81,7 +118,7 @@ docker compose --env-file .release.env -f compose.prod.yml -f compose.https.yml 
 
 `create-demo-user.sh` 必须在 ECS 的 `/opt/slow` 下调用。它会使用生产 HTTPS
 Compose 配置自动创建 `slow-demo` 加五位随机数的账号，并生成一个 24 位强密码。
-账号和 Argon2id 密码哈希随 SQLite 数据库持久化到 `/opt/slow/data`；明文密码只在
+账号和 Argon2id 密码哈希随 PostgreSQL 数据库持久化；明文密码只在
 调用终端显示一次，不会进入密码托管文件。请立即复制并通过私密渠道发送给用户。
 
 创建和重置命令默认生成随机密码；也可使用 `--prompt-password` 安全输入自定密码。
@@ -105,6 +142,14 @@ PYTHONPATH=apps/api .venv/bin/python apps/api/manage_users.py purge-passwords --
 `APP_MODE=production` 检测到密码托管开启时会拒绝启动。清理服务器文件后，还应按
 备份保留策略删除可能含有该文件的历史备份。密码重置只撤销身份 Session，不删除或
 重建用户，因此书架、学习进度、测验记录和掌握画像均保持不变。
+
+内测运营者应遵循 [`deploy/PILOT_OPERATIONS.md`](deploy/PILOT_OPERATIONS.md)。生产环境会在学习画像和业务接口前要求当前版本的隐私与试点同意；运营台账快照只允许在 API 容器内导出：
+
+```bash
+python operations_report.py --include-identifiers
+```
+
+输出包含账号状态和学习漏斗指标，不包含密码、Session、API Key、学习正文、问答或笔记内容。
 
 ### 许可证
 

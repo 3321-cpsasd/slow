@@ -1,5 +1,6 @@
+from datetime import datetime
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 
 
 def camel(value: str):
@@ -32,6 +33,30 @@ class PlanCreate(ApiModel):
     details: str = Field(default="", max_length=3000)
 
 
+class MissionCriterionInput(ApiModel):
+    key: str = Field(min_length=1, max_length=160)
+    statement: str = Field(min_length=1, max_length=2000)
+    acceptance: dict = Field(default_factory=dict)
+
+
+class MissionVersionCreate(ApiModel):
+    expected_current_mission_version_id: str
+    why: str = Field(min_length=1, max_length=3000)
+    target_capabilities: list[dict] = Field(min_length=1, max_length=30)
+    constraints: dict = Field(default_factory=dict)
+    out_of_scope: list[str] = Field(default_factory=list, max_length=30)
+    assumptions: list[str] = Field(default_factory=list, max_length=30)
+    learner_context: dict = Field(default_factory=dict)
+    inferred_fields: list[str] = Field(default_factory=list, max_length=30)
+    success_criteria: list[MissionCriterionInput] = Field(min_length=1, max_length=30)
+
+
+class MissionAdoptionCreate(ApiModel):
+    mission_version_id: str
+    expected_current_mission_version_id: str
+    reason: str = Field(min_length=1, max_length=2000)
+
+
 class AiRuntimeUpdate(ApiModel):
     mode: Literal["provider", "demo"] = "provider"
     provider_protocol: Literal["openai", "anthropic"] = "openai"
@@ -47,6 +72,64 @@ class PasswordLogin(ApiModel):
     password: SecretStr = Field(min_length=8, max_length=200)
 
 
+class PrivacyConsentCreate(ApiModel):
+    privacy_accepted: bool = Field(alias="privacyAccepted")
+    trial_accepted: bool = Field(alias="trialAccepted")
+
+
+class AccountExitCreate(ApiModel):
+    confirmation: str = Field(min_length=1, max_length=20)
+    reason: str = Field(default="", max_length=500)
+
+
+ProductEventName = Literal[
+    "home_viewed",
+    "shelf_viewed",
+    "learning_viewed",
+    "profile_viewed",
+    "section_viewed",
+    "quiz_viewed",
+    "feedback_opened",
+    "active_reading_60s",
+    "frontend_error",
+]
+
+
+class ProductEventCreate(ApiModel):
+    model_config = ConfigDict(
+        alias_generator=camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+    event_id: str = Field(min_length=8, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
+    session_id: str = Field(min_length=8, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
+    event_name: ProductEventName
+    occurred_at: datetime
+    page_path: str = Field(default="/", min_length=1, max_length=500)
+    view: Literal["", "home", "shelf", "learn", "profile"] = ""
+    entity_type: Literal["", "shelf", "series", "book", "chapter", "section"] = ""
+    entity_id: str = Field(default="", max_length=160, pattern=r"^[A-Za-z0-9_.:-]*$")
+    properties: dict[str, str | int | float | bool] = Field(default_factory=dict)
+
+    @field_validator("page_path")
+    @classmethod
+    def validate_page_path(cls, value: str) -> str:
+        if not value.startswith("/") or value.startswith("//") or "\\" in value or "\x00" in value:
+            raise ValueError("pagePath 必须是站内路径")
+        return value.split("?", 1)[0].split("#", 1)[0] or "/"
+
+
+class ProductEventBatch(ApiModel):
+    model_config = ConfigDict(
+        alias_generator=camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+    events: list[ProductEventCreate] = Field(min_length=1, max_length=25)
+
+
 ProfileStage = Literal[
     "exploring",
     "beginner",
@@ -56,6 +139,21 @@ ProfileStage = Literal[
 ]
 
 
+class LearningPreferences(ApiModel):
+    opening_style: Literal[
+        "auto", "problem_first", "example_first", "concept_first"
+    ] = "auto"
+    explanation_density: Literal[
+        "auto", "concise", "balanced", "thorough"
+    ] = "auto"
+    format_preferences: list[
+        Literal["diagram", "worked_example", "code", "table", "analogy"]
+    ] = Field(default_factory=list, max_length=5)
+    interaction_rhythm: Literal[
+        "auto", "low_interruption", "balanced", "frequent_checkins"
+    ] = "auto"
+
+
 class ProfileDraftUpdate(ApiModel):
     current_step: Literal["identity", "direction", "review"]
     profession: str | None = Field(default=None, max_length=120)
@@ -63,6 +161,7 @@ class ProfileDraftUpdate(ApiModel):
     purpose: str | None = Field(default=None, max_length=1000)
     domains: list[str] | None = Field(default=None, max_length=6)
     experience: str | None = Field(default=None, max_length=1000)
+    preferences: LearningPreferences | None = None
 
 
 class ProfileComplete(ApiModel):
@@ -71,11 +170,18 @@ class ProfileComplete(ApiModel):
     purpose: str = Field(min_length=1, max_length=1000)
     domains: list[str] = Field(min_length=1, max_length=6)
     experience: str = Field(default="", max_length=1000)
+    weekly_minutes: int = Field(default=0, ge=0, le=10080)
+    target_date: str = Field(default="", max_length=10, pattern=r"^$|^\d{4}-\d{2}-\d{2}$")
+    preferences: LearningPreferences = Field(default_factory=LearningPreferences)
 
 
 class QuizSubmit(ApiModel):
     quiz_set_id: str
     answers: list[list[int]]
+
+
+class ReviewSubmit(ApiModel):
+    answers: list[list[int]] = Field(min_length=1, max_length=5)
 
 
 class AskRequest(ApiModel):
@@ -94,8 +200,55 @@ class NoteUpdate(ApiModel):
     content: dict
 
 
+class NoteReviewSupplementCreate(ApiModel):
+    review_episode_id: str = Field(min_length=8, max_length=120)
+    content: dict
+
+
 class ResumeUpdate(ApiModel):
     block_id: str = Field(default="", max_length=200)
+
+
+class FeedbackCreate(ApiModel):
+    scope: Literal["global", "content_block"]
+    feedback_type: Literal[
+        "inaccurate",
+        "unclear",
+        "poor_example",
+        "typo",
+        "layout",
+        "bug",
+        "feature",
+        "experience",
+        "other",
+    ]
+    message: str = Field(default="", max_length=4000)
+    page_path: str = Field(default="/", max_length=500)
+    view: Literal["", "home", "shelf", "learn", "profile"] = ""
+    section_id: str | None = Field(default=None, max_length=160)
+    content_version_id: str | None = Field(default=None, max_length=160)
+    block_id: str | None = Field(default=None, max_length=160)
+
+    @model_validator(mode="after")
+    def validate_scope(self):
+        paragraph_types = {
+            "inaccurate", "unclear", "poor_example", "typo", "layout", "other"
+        }
+        global_types = {"bug", "feature", "experience", "other"}
+        allowed = paragraph_types if self.scope == "content_block" else global_types
+        if self.feedback_type not in allowed:
+            raise ValueError("反馈类型与反馈范围不匹配")
+        if self.scope == "content_block":
+            if not self.section_id or not self.content_version_id or not self.block_id:
+                raise ValueError("按段反馈必须绑定小节、内容版本和段落")
+        elif self.section_id or self.content_version_id or self.block_id:
+            raise ValueError("全局反馈不能绑定正文段落")
+        self.message = self.message.strip()
+        if self.scope == "global" and len(self.message) < 2:
+            raise ValueError("请补充至少两个字的反馈说明")
+        if self.feedback_type == "other" and len(self.message) < 2:
+            raise ValueError("选择其他时请补充反馈说明")
+        return self
 
 
 class AskMeReply(ApiModel):

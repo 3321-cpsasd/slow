@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     ai_provider_protocol: Literal["openai", "anthropic"] = "openai"
     openai_api_mode: Literal["responses", "chat_completions"] = "responses"
     openai_reasoning_mode: Literal["optional", "required", "disabled"] = "optional"
+    source_claim_fetch_concurrency: int = Field(default=6, ge=1, le=32)
+    source_claim_review_concurrency: int = Field(default=2, ge=1, le=16)
     database_url: str = f"sqlite+pysqlite:///{ROOT / 'data' / 'slow-v0.db'}"
     attachment_storage_dir: Path = ROOT / "data" / "attachments"
     attachment_max_bytes: int = 10 * 1024 * 1024

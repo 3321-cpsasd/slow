@@ -8,6 +8,9 @@ config
 .pnpm-store/
 apps/web/node_modules/
 apps/web/dist/
+apps/ops/node_modules/
+apps/ops/dist/
+apps/ops/dist-server/
 __pycache__/
 *.pyc
 *.tsbuildinfo
@@ -16,10 +19,15 @@ data/*.db
 data/*.db-shm
 data/*.db-wal
 data/runtime-ai.json
+data/ops-reporting.password
 data/backups/
+/output/test
 
 # Private product strategy, internal evidence, and local agent context.
-/docs/
+# Architecture decisions are the only versioned exception under docs/.
+/docs/*
+!/docs/decisions/
+!/docs/decisions/**
 /reports/evaluations/
 /AGENTS.md
 /PROJECT_CONTEXT.md

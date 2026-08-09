@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 
 
+PROGRESSION_RULE_VERSION = "progression_v2_book_outline_gate"
+
+
 @dataclass(frozen=True)
 class ProgressionSnapshot:
     section_id: str
@@ -10,6 +13,7 @@ class ProgressionSnapshot:
     next_chapter_id: str | None = None
     next_chapter_first_section_id: str | None = None
     next_book_id: str | None = None
+    next_book_outline_status: str = "confirmed"
     next_book_first_chapter_id: str | None = None
     next_book_first_section_id: str | None = None
     practice_id: str | None = None
@@ -45,13 +49,22 @@ class ProgressionPolicy:
                 unlocked_section_id=snapshot.next_chapter_first_section_id,
                 available_practice_id=snapshot.practice_id,
             )
+        next_book_confirmed = snapshot.next_book_outline_status == "confirmed"
         return ProgressionDecision(
             completed_section_id=snapshot.section_id,
             completed_chapter_id=snapshot.chapter_id,
             available_practice_id=snapshot.practice_id,
             completed_book_id=snapshot.book_id,
             available_capstone_id=snapshot.capstone_id,
-            unlocked_book_id=snapshot.next_book_id,
-            unlocked_chapter_id=snapshot.next_book_first_chapter_id,
-            unlocked_section_id=snapshot.next_book_first_section_id,
+            unlocked_book_id=(snapshot.next_book_id if next_book_confirmed else None),
+            unlocked_chapter_id=(
+                snapshot.next_book_first_chapter_id
+                if next_book_confirmed
+                else None
+            ),
+            unlocked_section_id=(
+                snapshot.next_book_first_section_id
+                if next_book_confirmed
+                else None
+            ),
         )

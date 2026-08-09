@@ -1,62 +1,68 @@
 from asyncio import CancelledError
 import hashlib
 import json
-import re
-from urllib.parse import unquote, urlparse
-from collections import Counter
-from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import delete, event, func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 from ..auth.context import UserScope, WorkerExecutionContext
 from ..auth.profile import ProfileService
 
-from ..ai.contracts import GeneratedLesson, GeneratedRemediationLesson
 from ..ai.port import AiPort
+from .generation_context import GenerationContextBuilder
+from .section_generation import (
+    SectionGenerationCoordinator,
+    apply_source_repair_scope,
+    source_blacklist_from_generation_traces,
+)
 from ..core.errors import AiError, AppError, safe_error_code
 from ..demo_personas import LOCAL_DEMO_PERSONAS_BY_USER_ID
 from ..infrastructure.tables import (
-    ArtifactAttachment,
-    ArtifactSubmission,
-    AskMeSession,
+    AssessmentObservation,
+    AssessmentTarget,
     Book,
     BookCapstone,
     Chapter,
-    ChapterProgress,
     ChapterPractice,
-    ChapterRevision,
     ContentVersion,
     GenerationRun,
     LearningEvidence,
     LearningMemory,
     LearningNote,
     LearningRun,
+    LearningRunSectionBinding,
     LearningTask,
-    LearningPlan,
     LearningResumePosition,
-    PlanCreationRequest,
-    QaMessage,
-    QaSession,
-    QaThread,
+    KnowledgeStateProjection,
     QuizAttempt,
-    QuizSet,
     Remediation,
     Section,
-    Series,
+    SectionAssessmentTarget,
     Shelf,
-    SourceVerification,
     User,
+    UserFeedback,
     now,
 )
 from ..modules.library.context import ActiveLearningContextResolver
+from ..modules.library.commands import CatalogCommandService
+from ..modules.curriculum.chapter_planning import ChapterPlanningService
+from ..modules.curriculum.book_planning import BookPlanningService
+from ..modules.curriculum.baselines import CurriculumBaselineService
+from ..modules.curriculum.series_planning import SeriesPlanningService
+from ..modules.curriculum.policy import CHAPTER_SECTION_POLICY
 from ..modules.artifacts.progress import ArtifactProgressStore
+from ..modules.artifacts.service import ArtifactService
 from ..modules.learning.commands import SubmitQuiz
 from ..modules.learning.generation_leases import (
     acquire_generation_lease,
     release_generation_lease,
     renew_generation_lease,
+)
+from ..modules.learning.milestones import MilestoneService
+from ..modules.learning.missions import MissionService
+from ..modules.learning.reviews import ReviewAssignmentService
+from ..modules.learning.contracts import (
+    open_run_section,
 )
 from ..modules.learning.progress import ProgressStore
 from ..modules.learning.tasks import (
@@ -66,23 +72,14 @@ from ..modules.learning.tasks import (
     reset_failed_task,
     task_view,
 )
-from ..modules.tutoring.commands import GenerateLearningNote
+from ..modules.tutoring.notes import LearningNoteService
+from ..modules.tutoring.ask_me import AskMeService
+from ..modules.tutoring.qa import QaService
 from ..read_models.library import LibraryReadModel
-from ..services.source_verifier import SourceVerificationError
+from ..read_models.section import SectionReadModel
 
 DEMO_USER_ID = "user_demo"
 EXPECTED_SECTIONS_PER_CHAPTER = 4
-GENERATION_ARTIFACT_MARKERS = (
-    "候选 JSON",
-    "原始候选",
-    "目标 JSON Schema",
-    "JSON 结构修复器",
-    "无法恢复原有事实内容",
-    "最小可验证结构",
-    "服务端校验拒绝",
-)
-
-
 def uid(prefix):
     return f"{prefix}_{uuid4().hex}"
 
@@ -102,124 +99,6 @@ def timestamp(value):
     return value.isoformat() if value else None
 
 
-def normalized(value: str):
-    return re.sub(r"[\W_]+", "", value, flags=re.UNICODE).lower()
-
-
-def assert_lesson_content_quality(lesson) -> None:
-    """Reject provider/repair diagnostics masquerading as lesson content."""
-
-    combined = "\n".join(
-        f"{block.heading}\n{block.content}"
-        for block in lesson.blocks
-    )
-    marker = next(
-        (value for value in GENERATION_ARTIFACT_MARKERS if value in combined),
-        None,
-    )
-    if marker:
-        raise AiError(
-            "AI 返回了生成过程说明而不是教材正文；内容未保存，可安全重新生成",
-            code="AI_CONTENT_QUALITY_FAILED",
-        )
-
-
-def apply_source_repair_scope(before, candidate, failed_sources: list[dict]):
-    """Merge only failed sources and their dependent blocks from a repair."""
-
-    failed_urls = {item["url"] for item in failed_sources}
-    failed_indexes = {
-        index
-        for index, source in enumerate(before.sources)
-        if source.url in failed_urls
-    }
-    if len(before.sources) != len(candidate.sources) or len(before.blocks) != len(candidate.blocks):
-        raise AiError(
-            "来源修复改变了教材整体结构；内容未保存",
-            code="SOURCE_REPAIR_SCOPE_VIOLATION",
-        )
-    if not failed_indexes:
-        raise AiError(
-            "来源修复没有匹配到失败来源；内容未保存",
-            code="SOURCE_REPAIR_SCOPE_VIOLATION",
-        )
-    merged = before.model_copy(deep=True)
-    for index, new_source in enumerate(candidate.sources):
-        if index not in failed_indexes and new_source != before.sources[index]:
-            raise AiError(
-                "来源修复改变了无需替换的来源顺序或内容；内容未保存",
-                code="SOURCE_REPAIR_SCOPE_VIOLATION",
-            )
-        if index in failed_indexes and new_source.url in failed_urls:
-            raise AiError(
-                "来源修复仍返回服务端已拒绝的来源；内容未保存",
-                code="SOURCE_REPAIR_SCOPE_VIOLATION",
-            )
-        if index in failed_indexes:
-            merged.sources[index] = new_source
-    for index, (old_block, new_block) in enumerate(
-        zip(before.blocks, candidate.blocks, strict=True)
-    ):
-        affected = bool(set(old_block.source_indexes) & failed_indexes)
-        if affected:
-            merged.blocks[index] = new_block
-    return merged
-
-
-def source_blacklist_from_generation_traces(
-    traces: list[dict],
-) -> tuple[list[str], list[str]]:
-    """Carry permanent source failures across retries of the same operation."""
-
-    rejected_urls: list[str] = []
-    rejected_hosts: list[str] = []
-    for trace in traces:
-        for stage in trace.get("stageHistory", []):
-            if stage.get("stage") not in {
-                "source_repair",
-                "source_verification_degraded",
-                "source_verification_failed",
-            }:
-                continue
-            for failure in stage.get("failedSources", []):
-                if failure.get("reason") != "not_found":
-                    continue
-                url = failure.get("url")
-                if not isinstance(url, str) or not url:
-                    continue
-                if url not in rejected_urls:
-                    rejected_urls.append(url)
-                host = urlparse(url).hostname
-                if host and host not in rejected_hosts:
-                    rejected_hosts.append(host)
-    return rejected_urls, rejected_hosts
-
-
-def degraded_source_verification_report(
-    sources,
-    error: SourceVerificationError,
-) -> list[dict]:
-    """Build an index-aligned report without treating reachability as truth."""
-
-    available: dict[str, list] = {}
-    for result in error.results:
-        available.setdefault(result.url, []).append(result)
-    report = []
-    for source in sources:
-        matches = available.get(source.url, [])
-        if matches:
-            report.append(matches.pop(0).as_dict())
-            continue
-        report.append({
-            "url": source.url,
-            "reachable": False,
-            "statusCode": 0,
-            "pinned": source.kind != "source_code" or source.version in source.url,
-            "verificationStatus": "failed",
-        })
-    return report
-
-
 class SlowService:
     def __init__(
         self,
@@ -237,7 +116,121 @@ class SlowService:
         self.contexts = ActiveLearningContextResolver(db)
         self.progress = ProgressStore(db, user_id=self.user_id)
         self.artifacts = ArtifactProgressStore(db, user_id=self.user_id)
+        self.artifact_service = ArtifactService(
+            db,
+            user_id=self.user_id,
+            contexts=self.contexts,
+            progress=self.progress,
+            artifact_progress=self.artifacts,
+            attachment_storage=attachment_storage,
+        )
         self.library_reads = LibraryReadModel(db, user_id=self.user_id)
+        self.milestones = MilestoneService(db, user_id=self.user_id, uid=uid)
+        self.missions = MissionService(db, user_id=self.user_id, uid=uid)
+        self.curriculum_baselines = CurriculumBaselineService(db)
+        self.generation_contexts = GenerationContextBuilder(
+            db,
+            user_id=self.user_id,
+        )
+        self.notes = LearningNoteService(
+            db,
+            user_id=self.user_id,
+            tutor=self.ai,
+            contexts=self.contexts,
+            progress=self.progress,
+            generation_contexts=self.generation_contexts,
+            memory_loader=self._memory,
+            section_reader=self.section,
+            uid=uid,
+            dump=dump,
+            load=load,
+            timestamp=timestamp,
+        )
+        self.ask_me_service = AskMeService(
+            db,
+            user_id=self.user_id,
+            tutor=self.ai,
+            contexts=self.contexts,
+            progress=self.progress,
+            missions=self.missions,
+            generation_contexts=self.generation_contexts,
+            section_reader=self.section,
+            memory_loader=self._memory,
+            evidence_recorder=self._add_evidence,
+            evidence_context=self._context,
+            uid=uid,
+            dump=dump,
+            load=load,
+        )
+        self.qa_service = QaService(
+            db,
+            user_id=self.user_id,
+            tutor=self.ai,
+            contexts=self.contexts,
+            progress=self.progress,
+            missions=self.missions,
+            generation_contexts=self.generation_contexts,
+            section_reader=self.section,
+            memory_loader=self._memory,
+            uid=uid,
+            dump=dump,
+            load=load,
+        )
+        self.chapter_planning = ChapterPlanningService(
+            db,
+            ai,
+            user_id=self.user_id,
+            contexts=self.contexts,
+            progress=self.progress,
+            artifacts=self.artifacts,
+            missions=self.missions,
+            generation_contexts=self.generation_contexts,
+            memory_provider=self._memory,
+            chapter_view=self._chapter,
+        )
+        self.book_planning = BookPlanningService(
+            db,
+            ai,
+            user_id=self.user_id,
+            contexts=self.contexts,
+            progress=self.progress,
+            missions=self.missions,
+            milestones=self.milestones,
+            generation_contexts=self.generation_contexts,
+            memory_provider=self._memory,
+            book_view=self.book,
+        )
+        self.series_planning = SeriesPlanningService(
+            db,
+            ai,
+            user_id=self.user_id,
+            progress=self.progress,
+            artifacts=self.artifacts,
+            missions=self.missions,
+            milestones=self.milestones,
+            baselines=self.curriculum_baselines,
+            generation_contexts=self.generation_contexts,
+            shelf_provider=self.shelf,
+            memory_provider=self._memory,
+            series_view=self.series,
+        )
+        self.section_reads = SectionReadModel(
+            db,
+            user_id=self.user_id,
+            contexts=self.contexts,
+            progress=self.progress,
+            note_reader=self.notes.view,
+        )
+        self.catalog_commands = CatalogCommandService(
+            db,
+            user_id=self.user_id,
+            contexts=self.contexts,
+            progress=self.progress,
+            shelf_view=self._shelf,
+            book_view=self.book,
+            chapter_view=self._chapter,
+        )
+        self.section_generation = SectionGenerationCoordinator(self)
         if isinstance(scope, WorkerExecutionContext):
             self._install_worker_fence(scope)
 
@@ -335,12 +328,22 @@ class SlowService:
 
     def bootstrap(self):
         view = self.library_reads.bootstrap()
-        view["profile"] = ProfileService(
+        profile = ProfileService(
             self.db,
             self.user_id,
         ).state()["profile"]
-        view["resume"] = self.resume_position()
+        resume = self.resume_position()
+        view["profile"] = profile
+        view["resume"] = resume
+        view["milestoneDashboard"] = self.milestones.dashboard(
+            library=view,
+            profile=profile,
+            resume=resume,
+        )
         return view
+
+    def confirm_milestone_path(self, series_id: str):
+        return self.milestones.confirm(series_id)
 
     def resume_position(self):
         row = self.db.scalar(
@@ -363,6 +366,34 @@ class SlowService:
             section_id=section_id,
         )
         learning_run = self.progress.active_run(context.series.id)
+        binding = self.db.scalar(
+            select(LearningRunSectionBinding).where(
+                LearningRunSectionBinding.learning_run_id == learning_run.id,
+                LearningRunSectionBinding.user_id == self.user_id,
+                LearningRunSectionBinding.section_id == section_id,
+            )
+        )
+        if not binding:
+            mission = self.missions.current_version(context.series.id)
+            binding = open_run_section(
+                self.db,
+                run=learning_run,
+                section=context.section,
+                mission_version_id=mission.id,
+                source="resume_block_recovery",
+                uid=uid,
+                preferred_block_id=block_id or None,
+            )
+        bound_content = self.db.get(ContentVersion, binding.content_version_id)
+        valid_blocks = {
+            item.get("id") for item in load(bound_content.blocks_json, [])
+        }
+        if block_id and block_id not in valid_blocks:
+            raise AppError(
+                "阅读位置不属于当前正文版本",
+                code="RESUME_BLOCK_INVALID",
+                status=409,
+            )
         row = self.db.scalar(
             select(LearningResumePosition).where(
                 LearningResumePosition.user_id == self.user_id,
@@ -375,11 +406,17 @@ class SlowService:
                 user_id=self.user_id,
                 learning_run_id=learning_run.id,
                 section_id=section_id,
+                learning_contract_version_id=(
+                    binding.learning_contract_version_id
+                ),
+                content_version_id=binding.content_version_id,
                 block_id=block_id,
             )
             self.db.add(row)
         else:
             row.section_id = section_id
+            row.learning_contract_version_id = binding.learning_contract_version_id
+            row.content_version_id = binding.content_version_id
             row.block_id = block_id
             row.updated_at = now()
         self.db.commit()
@@ -398,165 +435,10 @@ class SlowService:
         )
 
     def create_shelf(self, body):
-        row = Shelf(
-            id=uid("shelf"),
-            user_id=self.user_id,
-            name=body.name,
-            domain=body.domain,
-            specialty=body.specialty,
-            tags_json=dump(body.tags),
-            origin="user_created",
-        )
-        self.db.add(row)
-        self.db.commit()
-        return self._shelf(row)
+        return self.catalog_commands.create_shelf(body)
 
     async def create_plan(self, body, idempotency_key: str | None = None):
-        self.shelf(body.shelf_id)
-        request = body.model_dump(by_alias=False)
-        request_key = (idempotency_key or uid("plan_request")).strip()
-        if len(request_key) < 8 or len(request_key) > 128:
-            raise AppError("创建请求标识无效", code="IDEMPOTENCY_KEY_INVALID", status=400)
-        request_hash = hashlib.sha256(
-            json.dumps(request, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-        reservation_key = (request_key, self.user_id)
-        reservation = self.db.get(PlanCreationRequest, reservation_key)
-        owns_reservation = False
-        if not reservation:
-            reservation = PlanCreationRequest(
-                idempotency_key=request_key,
-                user_id=self.user_id,
-                request_hash=request_hash,
-                status="pending",
-            )
-            self.db.add(reservation)
-            try:
-                self.db.commit()
-                owns_reservation = True
-            except IntegrityError:
-                self.db.rollback()
-                reservation = self.db.get(PlanCreationRequest, reservation_key)
-        if not reservation or reservation.user_id != self.user_id or reservation.request_hash != request_hash:
-            raise AppError("创建请求标识已用于其他学习计划", code="IDEMPOTENCY_KEY_REUSED", status=409)
-        if reservation.status == "completed" and reservation.series_id:
-            return self.series(reservation.series_id)
-        if reservation.status == "failed":
-            reservation.status = "pending"
-            reservation.error_code = ""
-            reservation.updated_at = now()
-            self.db.commit()
-            owns_reservation = True
-        elif not owns_reservation:
-            raise AppError("相同学习计划正在生成，请勿重复提交", code="PLAN_CREATION_IN_PROGRESS", status=409)
-        try:
-            memory = self._memory(body.shelf_id)
-            self.db.commit()
-            generated = await self.ai.plan(request, memory)
-        except Exception as error:
-            self.db.rollback()
-            failed = self.db.get(PlanCreationRequest, reservation_key)
-            if failed:
-                failed.status = "failed"
-                failed.error_code = safe_error_code(error)
-                failed.updated_at = now()
-                self.db.commit()
-            raise
-        plan = LearningPlan(
-            id=uid("plan"),
-            **request,
-            assumptions_json=dump(generated.assumptions),
-            confidence=generated.confidence,
-            status="active",
-        )
-        series = Series(
-            id=uid("series"),
-            plan_id=plan.id,
-            shelf_id=body.shelf_id,
-            title=generated.series_title,
-            rationale=generated.rationale,
-        )
-        self.db.add(plan)
-        self.db.flush()
-        self.db.add(series)
-        self.db.flush()
-        reservation.status = "completed"
-        reservation.series_id = series.id
-        reservation.updated_at = now()
-        learning_run = self.progress.create_run(series.id)
-        self.db.flush()
-        initial_chapter_id = None
-        for book_position, item in enumerate(generated.books, 1):
-            book = Book(
-                id=uid("book"),
-                series_id=series.id,
-                shelf_id=body.shelf_id,
-                position=book_position,
-                title=item.title,
-                topic=item.topic,
-                description=item.description,
-                estimated_minutes=item.estimated_minutes,
-            )
-            self.db.add(book)
-            self.db.flush()
-            self.progress.add_book(
-                learning_run,
-                book,
-                status="available" if book_position == 1 else "locked",
-            )
-            capstone = BookCapstone(
-                id=uid("capstone"),
-                book_id=book.id,
-                title=f"《{book.title}》全书大作业",
-                brief_json=dump(
-                    {
-                        "goal": f"综合运用《{book.title}》的关键机制完成一个可复核成果",
-                        "deliverables": ["方案或实现", "验证记录", "边界与复盘"],
-                    }
-                ),
-            )
-            self.db.add(capstone)
-            self.artifacts.add(
-                learning_run_id=learning_run.id,
-                target_type="book_capstone",
-                target_id=capstone.id,
-            )
-            for chapter_position, chapter in enumerate(item.chapters, 1):
-                chapter_row = Chapter(
-                    id=uid("chapter"),
-                    book_id=book.id,
-                    position=chapter_position,
-                    title=chapter.title,
-                    objective=chapter.objective,
-                )
-                self.db.add(chapter_row)
-                self.progress.add_chapter(
-                    learning_run,
-                    chapter_row,
-                    status=(
-                        "available"
-                        if book_position == 1 and chapter_position == 1
-                        else "locked"
-                    ),
-                )
-                if book_position == 1 and chapter_position == 1:
-                    initial_chapter_id = chapter_row.id
-        if initial_chapter_id:
-            self.db.add(
-                LearningTask(
-                    id=uid("task"),
-                    learning_run_id=learning_run.id,
-                    section_id=None,
-                    user_id=self.user_id,
-                    task_type="initial_book_preload",
-                    idempotency_key=f"initial-book:{series.id}",
-                    trigger_id=plan.id,
-                    payload_json=dump({"chapterId": initial_chapter_id}),
-                    status="pending",
-                )
-            )
-        self.db.commit()
-        return self.series(series.id)
+        return await self.series_planning.create(body, idempotency_key)
 
     def series(self, series_id):
         view = self.library_reads.series(series_id)
@@ -573,13 +455,30 @@ class SlowService:
         view["initializationTask"] = task_view(task) if task else None
         return view
 
-    def delete_series(self, series_id):
-        series = self.contexts.resolve_series(user_id=self.user_id, series_id=series_id).series
-        series.deleted_at = now()
-        plan = self.db.get(LearningPlan, series.plan_id)
-        if plan:
-            plan.status = "deleted"
+    def mission(self, series_id: str):
+        return self.missions.view(series_id)
+
+    def create_mission_version(self, series_id: str, body):
+        result = self.missions.create_draft(series_id, body)
         self.db.commit()
+        return result
+
+    def confirm_mission_version(self, series_id: str, mission_version_id: str):
+        result = self.missions.confirm(series_id, mission_version_id)
+        self.db.commit()
+        return result
+
+    def adopt_mission_version(self, series_id: str, body, idempotency_key: str | None):
+        result = self.missions.adopt(
+            series_id,
+            body,
+            idempotency_key=idempotency_key,
+        )
+        self.db.commit()
+        return result
+
+    def delete_series(self, series_id):
+        return self.catalog_commands.delete_series(series_id)
 
     def _book_progress(self, book):
         chapters = self.db.scalars(select(Chapter).where(Chapter.book_id == book.id)).all()
@@ -627,71 +526,7 @@ class SlowService:
         return self.library_reads.book(book_id)
 
     def delete_book(self, book_id):
-        book = self.contexts.resolve_book(user_id=self.user_id, book_id=book_id).book
-        deleted_at = now()
-        book.deleted_at = deleted_at
-        self.db.add(
-            ChapterRevision(
-                id=uid("revision"),
-                book_id=book.id,
-                action="book_soft_delete",
-                before_json=dump(
-                    {
-                        "id": book.id,
-                        "seriesId": book.series_id,
-                        "position": book.position,
-                        "title": book.title,
-                        "status": self.progress.for_book(book).status,
-                    }
-                ),
-                after_json=dump({"deletedAt": timestamp(deleted_at)}),
-            )
-        )
-        remaining = self.db.scalars(
-            select(Book)
-            .where(
-                Book.series_id == book.series_id,
-                Book.id != book.id,
-                Book.deleted_at.is_(None),
-            )
-            .order_by(Book.position)
-        ).all()
-        if not remaining:
-            series = self.db.get(Series, book.series_id)
-            series.deleted_at = deleted_at
-            plan = self.db.get(LearningPlan, series.plan_id)
-            if plan:
-                plan.status = "deleted"
-        elif not any(self.progress.for_book(item).status != "locked" for item in remaining):
-            first_book = remaining[0]
-            self.progress.set_status(self.progress.for_book(first_book), "available")
-            first_chapter = self.db.scalar(
-                select(Chapter)
-                .where(Chapter.book_id == first_book.id)
-                .order_by(Chapter.position)
-            )
-            if first_chapter:
-                first_chapter_progress = self.progress.for_chapter(
-                    first_chapter,
-                    first_book,
-                )
-                if first_chapter_progress.status == "locked":
-                    self.progress.set_status(first_chapter_progress, "available")
-            first_section = self.db.scalar(
-                select(Section)
-                .join(Chapter, Chapter.id == Section.chapter_id)
-                .where(Chapter.book_id == first_book.id)
-                .order_by(Chapter.position, Section.position)
-            )
-            if first_section and first_chapter:
-                first_section_progress = self.progress.for_section(
-                    first_section,
-                    first_chapter,
-                    first_book,
-                )
-                if first_section_progress.status == "locked":
-                    self.progress.set_status(first_section_progress, "available")
-        self.db.commit()
+        return self.catalog_commands.delete_book(book_id)
 
     def _chapter(self, chapter):
         sections = self.db.scalars(select(Section).where(Section.chapter_id == chapter.id).order_by(Section.position)).all()
@@ -704,6 +539,11 @@ class SlowService:
             "objective": chapter.objective,
             "status": self.progress.for_chapter(chapter, book).status,
             "generated": bool(sections),
+            "workloadHint": (
+                CHAPTER_SECTION_POLICY.workload(len(sections))
+                if sections
+                else None
+            ),
             "sections": [self._section_summary(item) for item in sections],
             "practice": self._practice(practice) if practice else None,
         }
@@ -722,159 +562,23 @@ class SlowService:
             "askMeUnlocked": progress.ask_me_unlocked,
         }
 
-    def _assert_future(self, chapter):
-        generated = self.db.scalar(select(func.count()).select_from(Section).where(Section.chapter_id == chapter.id))
-        if self.progress.for_chapter(chapter).status == "completed" or generated:
-            raise AppError("已开始章节不能调整", code="CHAPTER_ALREADY_STARTED", status=409)
-
     def add_chapter(self, book_id, body):
-        book = self.contexts.resolve_book(user_id=self.user_id, book_id=book_id).book
-        chapters = self.db.scalars(select(Chapter).where(Chapter.book_id == book.id).order_by(Chapter.position)).all()
-        started_end = max((item.position for item in chapters if self.progress.for_chapter(item, book).status == "completed" or self.db.scalar(select(func.count()).select_from(Section).where(Section.chapter_id == item.id))), default=0)
-        position = body.position or len(chapters) + 1
-        if position <= started_end or position > len(chapters) + 1:
-            raise AppError("只能在未开始章节范围内新增", code="CHAPTER_POSITION_INVALID", status=409)
-        for item in reversed(chapters):
-            if item.position >= position:
-                item.position += 1000
-        self.db.flush()
-        for item in chapters:
-            if item.position >= 1000:
-                item.position -= 999
-        row = Chapter(id=uid("chapter"), book_id=book.id, position=position, title=body.title, objective=body.objective)
-        self.db.add(row)
-        self.progress.add_chapter(
-            self.progress.active_run(book.series_id),
-            row,
-            status="locked",
-        )
-        self.db.add(ChapterRevision(id=uid("revision"), book_id=book.id, action="add", after_json=dump({"id": row.id, "position": position, "title": row.title})))
-        self.db.commit()
-        return self._chapter(row)
+        return self.catalog_commands.add_chapter(book_id, body)
 
     def update_chapter(self, chapter_id, body):
-        chapter = self.contexts.resolve_chapter(user_id=self.user_id, chapter_id=chapter_id).chapter
-        self._assert_future(chapter)
-        before = {"title": chapter.title, "objective": chapter.objective}
-        if body.title is not None:
-            chapter.title = body.title
-        if body.objective is not None:
-            chapter.objective = body.objective
-        self.db.add(ChapterRevision(id=uid("revision"), book_id=chapter.book_id, action="update", before_json=dump(before), after_json=dump({"title": chapter.title, "objective": chapter.objective})))
-        self.db.commit()
-        return self._chapter(chapter)
+        return self.catalog_commands.update_chapter(chapter_id, body)
 
     def delete_chapter(self, chapter_id):
-        chapter = self.contexts.resolve_chapter(user_id=self.user_id, chapter_id=chapter_id).chapter
-        self._assert_future(chapter)
-        book_id, old_position = chapter.book_id, chapter.position
-        count = self.db.scalar(select(func.count()).select_from(Chapter).where(Chapter.book_id == book_id))
-        if count <= 1:
-            raise AppError("一本书至少保留一章", code="LAST_CHAPTER", status=409)
-        self.db.add(ChapterRevision(id=uid("revision"), book_id=book_id, action="delete", before_json=dump({"id": chapter.id, "position": old_position, "title": chapter.title})))
-        chapter_progress = self.db.scalar(
-            select(ChapterProgress).where(
-                ChapterProgress.user_id == self.user_id,
-                ChapterProgress.chapter_id == chapter.id,
-            )
-        )
-        if chapter_progress:
-            self.db.delete(chapter_progress)
-            self.db.flush()
-        self.db.delete(chapter)
-        self.db.flush()
-        later = self.db.scalars(select(Chapter).where(Chapter.book_id == book_id, Chapter.position > old_position).order_by(Chapter.position)).all()
-        for item in later:
-            item.position += 1000
-        self.db.flush()
-        for item in later:
-            item.position -= 1001
-        self.db.commit()
+        return self.catalog_commands.delete_chapter(chapter_id)
 
     def reorder_chapters(self, book_id, chapter_ids):
-        self.contexts.resolve_book(user_id=self.user_id, book_id=book_id)
-        chapters = self.db.scalars(select(Chapter).where(Chapter.book_id == book_id).order_by(Chapter.position)).all()
-        book = self.contexts.resolve_book(user_id=self.user_id, book_id=book_id).book
-        future = [item for item in chapters if not self.db.scalar(select(func.count()).select_from(Section).where(Section.chapter_id == item.id)) and self.progress.for_chapter(item, book).status != "completed"]
-        if set(chapter_ids) != {item.id for item in future} or len(chapter_ids) != len(future):
-            raise AppError("排序必须且只能包含全部未开始章节", code="CHAPTER_ORDER_INVALID", status=409)
-        slots = sorted(item.position for item in future)
-        by_id = {item.id: item for item in future}
-        before = [item.id for item in sorted(future, key=lambda value: value.position)]
-        for item in future:
-            item.position += 1000
-        self.db.flush()
-        for position, chapter_id in zip(slots, chapter_ids, strict=True):
-            by_id[chapter_id].position = position
-        self.db.add(ChapterRevision(id=uid("revision"), book_id=book_id, action="reorder", before_json=dump(before), after_json=dump(chapter_ids)))
-        self.db.commit()
-        return self.book(book_id)
+        return self.catalog_commands.reorder_chapters(book_id, chapter_ids)
 
     async def replan_chapters(self, book_id):
-        book = self.contexts.resolve_book(user_id=self.user_id, book_id=book_id).book
-        chapters = self.db.scalars(select(Chapter).where(Chapter.book_id == book.id).order_by(Chapter.position)).all()
-        started, future = [], []
-        for item in chapters:
-            target = started if self.progress.for_chapter(item, book).status == "completed" or self.db.scalar(select(func.count()).select_from(Section).where(Section.chapter_id == item.id)) else future
-            target.append(item)
-        before = [{"id": item.id, "title": item.title, "objective": item.objective, "position": item.position} for item in future]
-        request = {
-            "title": book.title,
-            "topic": book.topic,
-            "description": book.description,
-            "started_chapters": [{"title": item.title, "objective": item.objective} for item in started],
-            "future_chapters": [{"title": item.title, "objective": item.objective} for item in future],
-        }
-        memory = self._memory(book.shelf_id)
-        self.db.commit()
-        generated = await self.ai.replan_book(request, memory)
-        proposal = ChapterRevision(
-            id=uid("revision"),
-            book_id=book.id,
-            action="ai_replan_proposal",
-            before_json=dump(before),
-            after_json=dump({"rationale": generated.rationale, "chapters": [item.model_dump() for item in generated.chapters]}),
-        )
-        self.db.add(proposal)
-        self.db.commit()
-        return {"proposalId": proposal.id, "rationale": generated.rationale, "chapters": [item.model_dump() for item in generated.chapters], "requiresConfirmation": True}
+        return await self.book_planning.propose(book_id)
 
     def confirm_replan(self, book_id, proposal_id):
-        book = self.contexts.resolve_book(user_id=self.user_id, book_id=book_id).book
-        proposal = self.db.get(ChapterRevision, proposal_id)
-        if not proposal or proposal.book_id != book_id or proposal.action != "ai_replan_proposal":
-            raise AppError("重规划提案不存在", code="REPLAN_PROPOSAL_NOT_FOUND", status=404)
-        chapters = self.db.scalars(select(Chapter).where(Chapter.book_id == book.id).order_by(Chapter.position)).all()
-        started, future = [], []
-        for item in chapters:
-            target = started if self.progress.for_chapter(item, book).status == "completed" or self.db.scalar(select(func.count()).select_from(Section).where(Section.chapter_id == item.id)) else future
-            target.append(item)
-        current = [{"id": item.id, "title": item.title, "objective": item.objective, "position": item.position} for item in future]
-        if current != load(proposal.before_json, []):
-            raise AppError("未来章节已变化，请重新生成提案", code="REPLAN_PROPOSAL_STALE", status=409)
-        proposed = load(proposal.after_json, {})
-        future_ids = [item.id for item in future]
-        if future_ids:
-            self.db.execute(
-                delete(ChapterProgress).where(
-                    ChapterProgress.user_id == self.user_id,
-                    ChapterProgress.chapter_id.in_(future_ids),
-                )
-            )
-        for item in future:
-            self.db.delete(item)
-        self.db.flush()
-        for offset, item in enumerate(proposed["chapters"], len(started) + 1):
-            chapter = Chapter(id=uid("chapter"), book_id=book.id, position=offset, title=item["title"], objective=item["objective"])
-            self.db.add(chapter)
-            self.progress.add_chapter(
-                self.progress.active_run(book.series_id),
-                chapter,
-                status="locked",
-            )
-        proposal.action = "ai_replan_confirmed"
-        self.db.commit()
-        return self.book(book.id)
+        return self.book_planning.confirm(book_id, proposal_id)
 
     async def generate_chapter(
         self,
@@ -882,116 +586,10 @@ class SlowService:
         *,
         first_section_status="available",
     ):
-        if first_section_status not in {"available", "preparing"}:
-            raise AppError(
-                "首节准备状态无效",
-                code="SECTION_PREPARATION_STATUS_INVALID",
-                status=500,
-            )
-        chapter_context = self.contexts.resolve_chapter(
-            user_id=self.user_id,
-            chapter_id=chapter_id,
+        return await self.chapter_planning.generate(
+            chapter_id,
+            first_section_status=first_section_status,
         )
-        if self.db.scalar(
-            select(func.count())
-            .select_from(Section)
-            .where(Section.chapter_id == chapter_id)
-        ):
-            return self._chapter(chapter_context.chapter)
-        resource_key = f"chapter:{chapter_id}"
-        owner_id = acquire_generation_lease(self.db, resource_key)
-        if owner_id is None:
-            raise AppError(
-                "本章正在生成，请等待当前任务完成",
-                code="GENERATION_IN_PROGRESS",
-                status=409,
-            )
-        try:
-            return await self._generate_chapter_locked(
-                chapter_id,
-                resource_key,
-                owner_id,
-                first_section_status,
-            )
-        finally:
-            release_generation_lease(self.db, resource_key, owner_id)
-
-    def _renew_generation_lease(self, resource_key, owner_id):
-        if not renew_generation_lease(self.db, resource_key, owner_id):
-            raise AppError(
-                "生成租约已经被新的请求接管，旧结果不会保存",
-                code="GENERATION_LEASE_LOST",
-                status=409,
-            )
-
-    async def _generate_chapter_locked(
-        self,
-        chapter_id,
-        resource_key,
-        owner_id,
-        first_section_status,
-    ):
-        chapter_context = self.contexts.resolve_chapter(user_id=self.user_id, chapter_id=chapter_id)
-        chapter = chapter_context.chapter
-        if self.progress.for_chapter(chapter, chapter_context.book).status == "locked":
-            raise AppError("请先完成前置学习", code="CHAPTER_LOCKED", status=403)
-        if not self.db.scalar(select(func.count()).select_from(Section).where(Section.chapter_id == chapter.id)):
-            book = chapter_context.book
-            request = {"title": chapter.title, "objective": chapter.objective}
-            memory = self._memory(book.shelf_id)
-            self.db.commit()
-            generated = await self.ai.chapter(request, memory)
-            self._renew_generation_lease(resource_key, owner_id)
-            chapter_context = self.contexts.resolve_chapter(
-                user_id=self.user_id,
-                chapter_id=chapter_id,
-            )
-            chapter = chapter_context.chapter
-            if self.db.scalar(
-                select(func.count())
-                .select_from(Section)
-                .where(Section.chapter_id == chapter.id)
-            ):
-                self.db.commit()
-                return self._chapter(chapter)
-            for position, item in enumerate(generated.sections, 1):
-                section = Section(
-                    id=uid("section"),
-                    chapter_id=chapter.id,
-                    position=position,
-                    title=item.title,
-                    question=item.question,
-                    objectives_json=dump(item.objectives),
-                )
-                self.db.add(section)
-                self.progress.add_section(
-                    self.progress.active_run(chapter_context.series.id),
-                    section,
-                    status=(
-                        first_section_status
-                        if position == 1
-                        else "locked"
-                    ),
-                )
-            practice = ChapterPractice(
-                id=uid("practice"),
-                chapter_id=chapter.id,
-                title=f"{chapter.title}：章末实践",
-                instructions_json=dump(
-                    {
-                        "objective": chapter.objective,
-                        "steps": ["完成一个最小实践", "保存输入、输出或截图证据", "记录失败边界与复盘"],
-                    }
-                ),
-            )
-            self.db.add(practice)
-            self.artifacts.add(
-                learning_run_id=self.progress.active_run(chapter_context.series.id).id,
-                target_type="chapter_practice",
-                target_id=practice.id,
-            )
-            self.db.commit()
-        return self._chapter(chapter)
 
     async def generate_section(
         self,
@@ -1000,13 +598,17 @@ class SlowService:
         retry_attempt_id=None,
         regenerate=False,
         supersede_remediation_id=None,
+        regeneration_feedback=None,
     ):
         resource_key = f"section:{section_id}"
         owner_id = acquire_generation_lease(self.db, resource_key)
         if owner_id is None:
             if not retry and not regenerate and self.db.scalar(
                 select(ContentVersion)
-                .where(ContentVersion.section_id == section_id)
+                .where(
+                    ContentVersion.section_id == section_id,
+                    ContentVersion.publication_status == "published",
+                )
                 .order_by(ContentVersion.version.desc())
             ):
                 return self.section(section_id)
@@ -1022,6 +624,7 @@ class SlowService:
                 retry_attempt_id=retry_attempt_id,
                 regenerate=regenerate,
                 supersede_remediation_id=supersede_remediation_id,
+                regeneration_feedback=regeneration_feedback,
                 resource_key=resource_key,
                 owner_id=owner_id,
             )
@@ -1035,862 +638,57 @@ class SlowService:
         retry_attempt_id=None,
         regenerate=False,
         supersede_remediation_id=None,
+        regeneration_feedback=None,
         resource_key=None,
         owner_id=None,
     ):
-        section_context = self.contexts.resolve_section(
+        return await self.section_generation.generate(
+            section_id,
+            retry=retry,
+            retry_attempt_id=retry_attempt_id,
+            regenerate=regenerate,
+            supersede_remediation_id=supersede_remediation_id,
+            regeneration_feedback=regeneration_feedback,
+            resource_key=resource_key,
+            owner_id=owner_id,
+        )
+
+    def open_section(self, section_id: str):
+        context = self.contexts.resolve_section(
             user_id=self.user_id,
             section_id=section_id,
         )
-        section = section_context.section
-        superseded_remediation = None
-        if supersede_remediation_id:
-            if not retry or not retry_attempt_id:
-                raise AppError(
-                    "补救内容再生成必须绑定原补救记录和答题记录",
-                    code="REMEDIATION_REGENERATION_SCOPE_INVALID",
-                    status=400,
-                )
-            superseded_remediation = self.db.get(
-                Remediation,
-                supersede_remediation_id,
-            )
-            if (
-                not superseded_remediation
-                or superseded_remediation.section_id != section.id
-                or superseded_remediation.attempt_id != retry_attempt_id
-            ):
-                raise AppError(
-                    "原补救记录不属于当前小节或答题",
-                    code="REMEDIATION_REGENERATION_SCOPE_INVALID",
-                    status=409,
-                )
-            if self.db.scalar(
-                select(Remediation).where(
-                    Remediation.supersedes_id == superseded_remediation.id
-                )
-            ):
-                raise AppError(
-                    "该补救内容已有更新版本",
-                    code="REMEDIATION_ALREADY_SUPERSEDED",
-                    status=409,
-                )
-        section_progress = self.progress.for_section(
-            section,
-            section_context.chapter,
-            section_context.book,
+        progress = self.progress.for_section(
+            context.section,
+            context.chapter,
+            context.book,
         )
-        if section_progress.status == "locked":
+        if progress.status == "locked":
             raise AppError("小节未解锁", code="SECTION_LOCKED", status=403)
-        if (
-            section_progress.status == "preparing"
-            and not isinstance(self.scope, WorkerExecutionContext)
-        ):
+        if progress.status == "preparing":
             raise AppError(
                 "下一节正文和验证题仍在准备中",
                 code="SECTION_PREPARING",
                 status=409,
             )
-        existing = self.db.scalar(select(ContentVersion).where(ContentVersion.section_id == section.id).order_by(ContentVersion.version.desc()))
-        latest_quiz = self.db.scalar(select(QuizSet).where(QuizSet.section_id == section.id).order_by(QuizSet.generation.desc()))
-        if existing and not retry and not regenerate:
-            return self.section(section.id)
-        if regenerate:
-            if not existing:
-                raise AppError(
-                    "本节还没有正文，请直接生成",
-                    code="SECTION_CONTENT_MISSING",
-                    status=409,
-                )
-            assessed = self.db.scalar(
-                select(func.count())
-                .select_from(QuizAttempt)
-                .join(QuizSet, QuizSet.id == QuizAttempt.quiz_set_id)
-                .where(
-                    QuizSet.section_id == section.id,
-                    QuizAttempt.user_id == self.user_id,
-                )
-            ) or 0
-            if assessed:
-                raise AppError(
-                    "本节已有答题证据，不能由学习者重新生成；请联系管理员处理内容纠错",
-                    code="SECTION_ALREADY_ASSESSED",
-                    status=409,
-                )
-        running = self.db.scalar(select(GenerationRun).where(GenerationRun.section_id == section.id, GenerationRun.status == "running").order_by(GenerationRun.started_at.desc()))
-        if running:
-            started = running.started_at if running.started_at.tzinfo else running.started_at.replace(tzinfo=timezone.utc)
-            if (datetime.now(timezone.utc) - started).total_seconds() < 300:
-                raise AppError("本节正在生成，请稍后读取状态", code="GENERATION_IN_PROGRESS", status=409)
-            running.status, running.error_code, running.error_message, running.finished_at = "failed", "GENERATION_ABANDONED", "上一次生成超过 5 分钟未完成，已允许安全重试", now()
-            self.db.commit()
-        attempt = (self.db.scalar(select(func.max(GenerationRun.attempt)).where(GenerationRun.section_id == section.id)) or 0) + 1
-        generation_operation = (
-            "remediation"
-            if retry
-            else "regeneration"
-            if regenerate
-            else "lesson"
+        run = self.progress.active_run(context.series.id)
+        mission = self.missions.current_version(context.series.id)
+        open_run_section(
+            self.db,
+            run=run,
+            section=context.section,
+            mission_version_id=mission.id,
+            source="interactive_open",
+            uid=uid,
         )
-        prior_failed_runs = self.db.scalars(
-            select(GenerationRun)
-            .where(
-                GenerationRun.section_id == section.id,
-                GenerationRun.operation == generation_operation,
-                GenerationRun.status == "failed",
-            )
-            .order_by(GenerationRun.started_at.desc())
-            .limit(10)
-        ).all()
-        carried_rejected_urls, carried_rejected_hosts = (
-            source_blacklist_from_generation_traces(
-                [load(item.trace_json, {}) for item in prior_failed_runs]
-            )
-        )
-        regeneration_trace = {
-            "regenerate": regenerate,
-            "carriedSourceBlacklist": {
-                "urlCount": len(carried_rejected_urls),
-                "hostCount": len(carried_rejected_hosts),
-            },
-            **(
-                {"supersedesRemediationId": superseded_remediation.id}
-                if superseded_remediation
-                else {}
-            ),
-            **(
-                {
-                    "supersedesContentVersionId": existing.id,
-                    "supersedesQuizSetId": latest_quiz.id if latest_quiz else None,
-                }
-                if regenerate
-                else {}
-            ),
-        }
-        run = GenerationRun(
-            id=uid("generation"),
-            section_id=section.id,
-            operation=generation_operation,
-            attempt=attempt,
-            status="running",
-            model=getattr(self.ai, "model", ""),
-            trace_json=dump({
-                "stage": "queued",
-                "retry": retry,
-                **regeneration_trace,
-            }),
-        )
-        self.db.add(run)
         self.db.commit()
-        stage_history: list[dict] = []
-        active_stage_started = None
-
-        def close_active_stage(finished_at):
-            nonlocal active_stage_started
-            if not stage_history or active_stage_started is None:
-                return
-            stage_history[-1]["finishedAt"] = timestamp(finished_at)
-            stage_history[-1]["durationMs"] = max(
-                0,
-                int((finished_at - active_stage_started).total_seconds() * 1000),
-            )
-            active_stage_started = None
-
-        def update_generation_stage(stage: str, **details):
-            nonlocal active_stage_started
-            started_at = now()
-            close_active_stage(started_at)
-            active_stage_started = started_at
-            stage_history.append({
-                "stage": stage,
-                "startedAt": timestamp(started_at),
-                **details,
-            })
-            run.trace_json = dump({
-                "stage": stage,
-                "retry": retry,
-                **regeneration_trace,
-                "stageHistory": stage_history,
-                **details,
-            })
-            self.db.commit()
-        try:
-            prior = (
-                load(latest_quiz.questions_json, [])
-                if (retry or regenerate) and latest_quiz
-                else []
-            )
-            book = self._book_for_section(section)
-            remediation_count = (
-                self.db.scalar(
-                    select(func.count(func.distinct(Remediation.attempt_id)))
-                    .select_from(Remediation)
-                    .where(Remediation.section_id == section.id)
-                )
-                if retry
-                else 0
-            )
-            remediation_strategy = (
-                superseded_remediation.strategy
-                if superseded_remediation
-                else [
-                    "paragraph_locator",
-                    "alternative_explanation",
-                    "prerequisite_supplement",
-                ][min(remediation_count, 2)]
-                if retry
-                else None
-            )
-            memory = self._memory(book.shelf_id)
-            memory_trace = {
-                "memoryApplied": bool(memory),
-                "memoryConceptCount": len(memory),
-            }
-            lesson_request = {
-                **self._section_summary(section),
-                "rejectedSourceUrls": list(carried_rejected_urls),
-                "rejectedSourceHosts": list(carried_rejected_hosts),
-            }
-            if retry:
-                lesson_request["remediationStrategy"] = remediation_strategy
-            lesson = None
-            verification = []
-            rejected_source_urls = list(carried_rejected_urls)
-            rejected_source_hosts = list(carried_rejected_hosts)
-            ai_harness_trace: list[dict] = []
-            max_generation_attempts = 4
-            if getattr(self.ai, "staged_lesson_generation", False):
-                update_generation_stage(
-                    "content_generation",
-                    sourceAttempt=1,
-                    maxSourceAttempts=max_generation_attempts,
-                    **memory_trace,
-                )
-                content_result = await self.ai.lesson_content(
-                    lesson_request,
-                    memory,
-                    prior,
-                )
-                assert_lesson_content_quality(content_result)
-                self._renew_generation_lease(resource_key, owner_id)
-
-                for source_attempt in range(1, max_generation_attempts + 1):
-                    update_generation_stage(
-                        "source_verification",
-                        sourceAttempt=source_attempt,
-                        maxSourceAttempts=max_generation_attempts,
-                        sourceUrls=[item.url for item in content_result.sources],
-                        **memory_trace,
-                    )
-                    try:
-                        verification = await self.source_verifier.verify(
-                            content_result.sources
-                        )
-                        self._renew_generation_lease(resource_key, owner_id)
-                        break
-                    except SourceVerificationError as error:
-                        failed_sources = [
-                            item.failure_dict() for item in error.failures
-                        ]
-                        rejected_source_urls.extend(
-                            item["url"] for item in failed_sources
-                        )
-                        rejected_source_urls = list(
-                            dict.fromkeys(rejected_source_urls)
-                        )
-                        rejected_source_hosts.extend(
-                            host
-                            for item in failed_sources
-                            if item.get("reason") == "not_found"
-                            and (host := urlparse(item["url"]).hostname)
-                        )
-                        rejected_source_hosts = list(
-                            dict.fromkeys(rejected_source_hosts)
-                        )
-                        lesson_request["rejectedSourceUrls"] = (
-                            rejected_source_urls
-                        )
-                        lesson_request["rejectedSourceHosts"] = (
-                            rejected_source_hosts
-                        )
-                        if source_attempt == max_generation_attempts:
-                            verification = degraded_source_verification_report(
-                                content_result.sources,
-                                error,
-                            )
-                            unverified_source_indexes = [
-                                index
-                                for index, item in enumerate(verification)
-                                if item["verificationStatus"] == "failed"
-                            ]
-                            lesson_request["unverifiedSourceIndexes"] = (
-                                unverified_source_indexes
-                            )
-                            lesson_request["contentReliability"] = (
-                                "model_generated_unverified"
-                            )
-                            content_result = content_result.model_copy(
-                                update={"confidence": "low"}
-                            )
-                            update_generation_stage(
-                                "source_verification_degraded",
-                                sourceAttempt=source_attempt,
-                                maxSourceAttempts=max_generation_attempts,
-                                failedSources=failed_sources,
-                                unverifiedSourceIndexes=(
-                                    unverified_source_indexes
-                                ),
-                                rejectedSourceUrlCount=len(
-                                    rejected_source_urls
-                                ),
-                                rejectedSourceHostCount=len(
-                                    rejected_source_hosts
-                                ),
-                                **memory_trace,
-                            )
-                            self._renew_generation_lease(
-                                resource_key,
-                                owner_id,
-                            )
-                            break
-                        update_generation_stage(
-                            "source_repair",
-                            sourceAttempt=source_attempt + 1,
-                            maxSourceAttempts=max_generation_attempts,
-                            failedSources=failed_sources,
-                            rejectedSourceUrlCount=len(rejected_source_urls),
-                            rejectedSourceHostCount=len(rejected_source_hosts),
-                            **memory_trace,
-                        )
-                        previous_content = content_result
-                        try:
-                            content_result = (
-                                await self.ai.repair_lesson_sources(
-                                    lesson_request,
-                                    memory,
-                                    content_result,
-                                    failed_sources,
-                                    prior,
-                                )
-                            )
-                            content_result = apply_source_repair_scope(
-                                previous_content,
-                                content_result,
-                                failed_sources,
-                            )
-                        except AiError as repair_error:
-                            if (
-                                repair_error.code
-                                != "SOURCE_REPAIR_SCOPE_VIOLATION"
-                            ):
-                                raise
-                            content_result = previous_content
-                            update_generation_stage(
-                                "source_repair_rejected",
-                                sourceAttempt=source_attempt + 1,
-                                maxSourceAttempts=max_generation_attempts,
-                                repairErrorCode=repair_error.code,
-                                rejectedSourceUrlCount=len(
-                                    rejected_source_urls
-                                ),
-                                rejectedSourceHostCount=len(
-                                    rejected_source_hosts
-                                ),
-                                **memory_trace,
-                            )
-                            self._renew_generation_lease(
-                                resource_key,
-                                owner_id,
-                            )
-                            continue
-                        assert_lesson_content_quality(content_result)
-                        self._renew_generation_lease(resource_key, owner_id)
-
-                quiz_result = None
-                previous_quiz_rejection = None
-                for quiz_attempt in range(1, max_generation_attempts + 1):
-                    update_generation_stage(
-                        "quiz_generation",
-                        quizAttempt=quiz_attempt,
-                        maxQuizAttempts=max_generation_attempts,
-                        **(
-                            {"previousRejection": previous_quiz_rejection}
-                            if previous_quiz_rejection
-                            else {}
-                        ),
-                        **memory_trace,
-                    )
-                    quiz_result = await self.ai.lesson_quiz(
-                        lesson_request,
-                        content_result,
-                        prior,
-                    )
-                    self._renew_generation_lease(resource_key, owner_id)
-                    if prior and len(prior) == len(quiz_result.questions):
-                        for question, previous in zip(
-                            quiz_result.questions,
-                            prior,
-                            strict=True,
-                        ):
-                            question.objective = previous["objective"]
-                            question.core = previous.get("core", False)
-                            question.difficulty = "standard"
-                    previous_quiz_rejection = self._questions_novelty_issue(
-                        prior,
-                        [item.model_dump() for item in quiz_result.questions],
-                    ) if (retry or regenerate) else None
-                    if not previous_quiz_rejection:
-                        break
-                    quiz_result = None
-                if quiz_result is not None:
-                    lesson_schema = (
-                        GeneratedRemediationLesson if retry else GeneratedLesson
-                    )
-                    lesson = lesson_schema(
-                        **content_result.model_dump(),
-                        questions=quiz_result.questions,
-                    )
-                ai_harness_trace = self._ai_harness_trace()
-            else:
-                for novelty_attempt in range(1, max_generation_attempts + 1):
-                    lesson_request["rejectedSourceUrls"] = rejected_source_urls
-                    update_generation_stage(
-                        "combined_generation",
-                        noveltyAttempt=novelty_attempt,
-                        maxGenerationAttempts=max_generation_attempts,
-                        **memory_trace,
-                    )
-                    lesson = await self.ai.lesson(
-                        lesson_request,
-                        memory,
-                        prior,
-                    )
-                    assert_lesson_content_quality(lesson)
-                    self._renew_generation_lease(resource_key, owner_id)
-                    ai_harness_trace = self._ai_harness_trace()
-                    update_generation_stage(
-                        "source_verification",
-                        noveltyAttempt=novelty_attempt,
-                        maxGenerationAttempts=max_generation_attempts,
-                        sourceUrls=[item.url for item in lesson.sources],
-                        **memory_trace,
-                    )
-                    try:
-                        verification = await self.source_verifier.verify(
-                            lesson.sources
-                        )
-                        self._renew_generation_lease(resource_key, owner_id)
-                    except SourceVerificationError as error:
-                        rejected_source_urls.extend(
-                            item.url for item in error.failures
-                        )
-                        rejected_source_urls = list(
-                            dict.fromkeys(rejected_source_urls)
-                        )
-                        if novelty_attempt < max_generation_attempts:
-                            lesson = None
-                            continue
-                        verification = degraded_source_verification_report(
-                            lesson.sources,
-                            error,
-                        )
-                        unverified_source_indexes = [
-                            index
-                            for index, item in enumerate(verification)
-                            if item["verificationStatus"] == "failed"
-                        ]
-                        lesson_request["unverifiedSourceIndexes"] = (
-                            unverified_source_indexes
-                        )
-                        lesson_request["contentReliability"] = (
-                            "model_generated_unverified"
-                        )
-                        lesson = lesson.model_copy(
-                            update={"confidence": "low"}
-                        )
-                        update_generation_stage(
-                            "source_verification_degraded",
-                            noveltyAttempt=novelty_attempt,
-                            maxGenerationAttempts=max_generation_attempts,
-                            failedSources=[
-                                item.failure_dict()
-                                for item in error.failures
-                            ],
-                            unverifiedSourceIndexes=(
-                                unverified_source_indexes
-                            ),
-                            **memory_trace,
-                        )
-                        self._renew_generation_lease(
-                            resource_key,
-                            owner_id,
-                        )
-                    if not (retry or regenerate) or self._questions_are_novel(
-                        prior,
-                        [item.model_dump() for item in lesson.questions],
-                    ):
-                        break
-                    lesson = None
-            if lesson is None:
-                raise AppError("模型连续返回与旧题实质相同的题集", code="QUIZ_NOT_NOVEL", status=502)
-            update_generation_stage("persistence", **memory_trace)
-            content = existing
-            if not retry:
-                content = ContentVersion(
-                    id=uid("content"),
-                    section_id=section.id,
-                    version=(existing.version + 1 if existing else 1),
-                    blocks_json="[]",
-                    sources_json=dump([item.model_dump() for item in lesson.sources]),
-                    confidence=lesson.confidence,
-                )
-                blocks = []
-                for position, block in enumerate(lesson.blocks, 1):
-                    payload = block.model_dump()
-                    payload["id"] = f"block_{content.id}_{position}"
-                    payload["version"] = content.version
-                    blocks.append(payload)
-                content.blocks_json = dump(blocks)
-                self.db.add(content)
-                self.db.flush()
-                self.db.add(SourceVerification(id=uid("verification"), content_version_id=content.id, report_json=dump(verification)))
-            quiz = QuizSet(
-                id=uid("quiz"),
-                section_id=section.id,
-                content_version_id=content.id,
-                generation=(latest_quiz.generation + 1 if latest_quiz else 1),
-                questions_json=dump([item.model_dump() for item in lesson.questions]),
-            )
-            self.db.add(quiz)
-            self.db.flush()
-            if retry:
-                if not retry_attempt_id:
-                    raise AppError("补救教学必须绑定失败答题", code="REMEDIATION_ATTEMPT_REQUIRED")
-                remediation_blocks = []
-                for position, block in enumerate(lesson.blocks, 1):
-                    payload = block.model_dump()
-                    payload["id"] = f"block_remediation_{quiz.id}_{position}"
-                    payload["version"] = quiz.generation
-                    remediation_blocks.append(payload)
-                failed_objectives = sorted(
-                    {
-                        item["objective"]
-                        for item in load(self.db.get(QuizAttempt, retry_attempt_id).results_json, [])
-                        if not item["correct"]
-                    }
-                )
-                self.db.add(
-                    Remediation(
-                        id=uid("remediation"),
-                        section_id=section.id,
-                        attempt_id=retry_attempt_id,
-                        replacement_quiz_id=quiz.id,
-                        supersedes_id=(
-                            superseded_remediation.id
-                            if superseded_remediation
-                            else None
-                        ),
-                        blocks_json=dump(remediation_blocks),
-                        objectives_json=dump(failed_objectives),
-                        strategy=remediation_strategy,
-                    )
-                )
-            finished_at = now()
-            close_active_stage(finished_at)
-            run.status, run.finished_at = "succeeded", finished_at
-            run.trace_json = dump({
-                "stage": "persisted",
-                "contentVersionId": content.id if content else None,
-                "quizSetId": quiz.id,
-                "sourceVerification": verification,
-                "aiHarness": ai_harness_trace,
-                "stageHistory": stage_history,
-                **regeneration_trace,
-                **memory_trace,
-            })
-            self.db.commit()
-            return self.section(section.id)
-        except BaseException as error:
-            failure_finished_at = now()
-            close_active_stage(failure_finished_at)
-            self.db.rollback()
-            operation_id = run.id
-            run = self.db.get(GenerationRun, operation_id)
-            if run:
-                run.status = "failed"
-                run.error_code = getattr(error, "code", type(error).__name__)
-                run.error_message = (
-                    str(error)[:2000]
-                    if isinstance(error, AppError)
-                    else "生成失败，请稍后重试"
-                )
-                run.finished_at = failure_finished_at
-                previous_trace = load(run.trace_json, {})
-                harness_trace = self._ai_harness_trace()
-                run.trace_json = dump({
-                    **previous_trace,
-                    "stage": "failed",
-                    "stageHistory": stage_history,
-                    **({"aiHarness": harness_trace} if harness_trace else {}),
-                })
-                self.db.commit()
-            if isinstance(error, AppError):
-                if error.operation_id is None:
-                    error.operation_id = operation_id
-                raise
-            if isinstance(error, (CancelledError, KeyboardInterrupt, SystemExit)):
-                raise
-            raise AiError(
-                "小节生成失败；失败状态已保存，可安全重试",
-                operation_id=operation_id,
-            ) from error
-
-    def _ai_harness_trace(self) -> list[dict]:
-        trace = getattr(self.ai, "structured_trace", None)
-        if not callable(trace):
-            return []
-        value = trace()
-        return value if isinstance(value, list) else []
-
-    def _questions_are_novel(self, prior, current):
-        return self._questions_novelty_issue(prior, current) is None
-
-    def _questions_novelty_issue(self, prior, current):
-        if not prior:
-            return "prior_questions_missing"
-        if len(prior) != len(current):
-            return "question_count_mismatch"
-        if Counter(item["objective"] for item in prior) != Counter(item["objective"] for item in current):
-            return "objective_set_mismatch"
-        prior_by_objective = {}
-        for item in prior:
-            prior_by_objective.setdefault(item["objective"], []).append(item)
-        for question in current:
-            candidates = prior_by_objective.get(question["objective"], [])
-            if any(
-                normalized(question["prompt"]) == normalized(old["prompt"])
-                for old in candidates
-            ):
-                return "prompt_duplicate"
-            if any(
-                {normalized(option) for option in question["options"]}
-                == {normalized(option) for option in old["options"]}
-                for old in candidates
-            ):
-                return "options_duplicate"
-            if question.get("difficulty", "standard") != "standard":
-                return "difficulty_mismatch"
-        return None
+        return self.section(section_id)
 
     def section(self, section_id):
-        section_context = self.contexts.resolve_section(
-            user_id=self.user_id,
-            section_id=section_id,
+        return self.section_reads.get(
+            section_id,
+            allow_preparing=isinstance(self.scope, WorkerExecutionContext),
         )
-        section = section_context.section
-        section_progress = self.progress.for_section(
-            section,
-            section_context.chapter,
-            section_context.book,
-        )
-        if (
-            section_progress.status == "preparing"
-            and not isinstance(self.scope, WorkerExecutionContext)
-        ):
-            raise AppError(
-                "下一节正文和验证题仍在准备中",
-                code="SECTION_PREPARING",
-                status=409,
-            )
-        learning_run = self.progress.active_run(section_context.series.id)
-        content = self.db.scalar(select(ContentVersion).where(ContentVersion.section_id == section.id).order_by(ContentVersion.version.desc()))
-        quiz = self.db.scalar(select(QuizSet).where(QuizSet.section_id == section.id).order_by(QuizSet.generation.desc()))
-        note = self.db.scalar(
-            select(LearningNote).where(
-                LearningNote.section_id == section.id,
-                LearningNote.user_id == self.user_id,
-                LearningNote.learning_run_id == learning_run.id,
-            )
-        )
-        run = self.db.scalar(select(GenerationRun).where(GenerationRun.section_id == section.id).order_by(GenerationRun.started_at.desc()))
-        remediation_revisions = self.db.scalars(
-            select(Remediation)
-            .join(QuizAttempt, QuizAttempt.id == Remediation.attempt_id)
-            .where(
-                Remediation.section_id == section.id,
-                QuizAttempt.learning_run_id == learning_run.id,
-            )
-            .order_by(Remediation.created_at)
-        ).all()
-        latest_remediation_by_attempt = {
-            item.attempt_id: item for item in remediation_revisions
-        }
-        remediations = list(latest_remediation_by_attempt.values())
-        remediation_runs = self.db.scalars(
-            select(GenerationRun)
-            .where(
-                GenerationRun.section_id == section.id,
-                GenerationRun.operation == "remediation",
-                GenerationRun.status == "succeeded",
-            )
-            .order_by(GenerationRun.started_at)
-        ).all()
-        remediation_run_by_quiz = {
-            trace.get("quizSetId"): (item, trace)
-            for item in remediation_runs
-            if (trace := load(item.trace_json, {})).get("quizSetId")
-        }
-        workflow_tasks = self.db.scalars(
-            select(LearningTask)
-            .where(
-                LearningTask.learning_run_id == learning_run.id,
-                LearningTask.user_id == self.user_id,
-                LearningTask.section_id == section.id,
-            )
-            .order_by(LearningTask.created_at)
-        ).all()
-        verification = self.db.scalar(select(SourceVerification).where(SourceVerification.content_version_id == content.id)) if content else None
-        questions = load(quiz.questions_json, []) if quiz else []
-        def public_questions(items):
-            return [
-                {
-                    **{
-                        key: value
-                        for key, value in question.items()
-                        if key not in {"correct", "explanation"}
-                    },
-                    "selectionMode": (
-                        "multiple"
-                        if len(set(question.get("correct", []))) > 1
-                        else "single"
-                    ),
-                }
-                for question in items
-            ]
-
-        public = public_questions(questions)
-        latest_attempt = self.db.scalar(
-            select(QuizAttempt)
-            .join(QuizSet, QuizSet.id == QuizAttempt.quiz_set_id)
-            .where(
-                QuizAttempt.learning_run_id == learning_run.id,
-                QuizAttempt.user_id == self.user_id,
-                QuizSet.section_id == section.id,
-            )
-            .order_by(QuizAttempt.created_at.desc())
-        )
-        latest_attempt_results = (
-            load(latest_attempt.results_json, []) if latest_attempt else []
-        )
-        latest_attempt_quiz = (
-            self.db.get(QuizSet, latest_attempt.quiz_set_id)
-            if latest_attempt
-            else None
-        )
-        latest_attempt_tasks = (
-            [
-                task_view(task)
-                for task in workflow_tasks
-                if task.trigger_id == latest_attempt.id
-            ]
-            if latest_attempt
-            else []
-        )
-        return {
-            **self._section_summary(section),
-            "generation": self._generation(run) if run else None,
-            "content": {
-                "id": content.id,
-                "version": content.version,
-                "blocks": load(content.blocks_json, []),
-                "sources": load(content.sources_json, []),
-                "sourceVerification": load(verification.report_json, []) if verification else [],
-                "confidence": content.confidence,
-            }
-            if content
-            else None,
-            "quiz": {"id": quiz.id, "generation": quiz.generation, "questions": public} if quiz else None,
-            "latestAttemptReview": (
-                {
-                    "attemptId": latest_attempt.id,
-                    "score": sum(
-                        bool(item.get("correct"))
-                        for item in latest_attempt_results
-                    ),
-                    "total": len(latest_attempt_results),
-                    "passed": latest_attempt.passed,
-                    "perfect": bool(latest_attempt_results) and all(
-                        item.get("correct") for item in latest_attempt_results
-                    ),
-                    "results": latest_attempt_results,
-                    "questions": public_questions(
-                        load(latest_attempt_quiz.questions_json, [])
-                    ) if latest_attempt_quiz else [],
-                    "remediation": None,
-                    "nextQuiz": None,
-                    "workflowTasks": latest_attempt_tasks,
-                    "noteGeneration": None,
-                }
-                if latest_attempt
-                else None
-            ),
-            "remediations": [
-                {
-                    "id": item.id,
-                    "attemptId": item.attempt_id,
-                    "replacementQuizId": item.replacement_quiz_id,
-                    "blocks": load(item.blocks_json, []),
-                    "objectives": load(item.objectives_json, []),
-                    "strategy": item.strategy,
-                    "sourceVerification": (
-                        remediation_run_by_quiz[item.replacement_quiz_id][1].get(
-                            "sourceVerification", []
-                        )
-                        if item.replacement_quiz_id in remediation_run_by_quiz
-                        else []
-                    ),
-                    "sourceLineage": (
-                        {
-                            "mode": "generation_trace",
-                            "generationRunId": remediation_run_by_quiz[
-                                item.replacement_quiz_id
-                            ][0].id,
-                        }
-                        if item.replacement_quiz_id in remediation_run_by_quiz
-                        else {"mode": "missing", "generationRunId": None}
-                    ),
-                }
-                for item in remediations
-            ],
-            "note": self._note(note) if note else None,
-            "workflowTasks": [task_view(task) for task in workflow_tasks],
-        }
-
-    def _generation(self, run):
-        started = (
-            run.started_at
-            if run.started_at.tzinfo
-            else run.started_at.replace(tzinfo=timezone.utc)
-        )
-        finished = run.finished_at or now()
-        if finished.tzinfo is None:
-            finished = finished.replace(tzinfo=timezone.utc)
-        return {
-            "id": run.id,
-            "operation": run.operation,
-            "attempt": run.attempt,
-            "status": run.status,
-            "model": run.model,
-            "trace": load(run.trace_json, {}),
-            "errorCode": run.error_code or None,
-            "error": run.error_message or None,
-            "startedAt": timestamp(run.started_at),
-            "finishedAt": timestamp(run.finished_at),
-            "durationMs": max(
-                0,
-                int((finished - started).total_seconds() * 1000),
-            ),
-        }
 
     async def submit_quiz(self, section_id, body, idempotency_key=None):
         return await SubmitQuiz(
@@ -1949,9 +747,15 @@ class SlowService:
                     task_id=task.id,
                 )
             task = aggregate.task
-            if task.task_type == "initial_book_preload":
+            if task.task_type == "content_feedback_regeneration":
+                result = await self._regenerate_from_content_feedback(
+                    task,
+                    payload,
+                )
+            elif task.task_type == "initial_book_preload":
                 result = await self._preload_initial_book(
-                    aggregate.chapter.id
+                    task,
+                    aggregate.chapter.id,
                 )
             elif task.task_type == "note_generation":
                 context = self.contexts.resolve_section(
@@ -2011,6 +815,7 @@ class SlowService:
                     }
             elif task.task_type == "next_section_preload":
                 result = await self._preload_next_section(
+                    task,
                     payload.get("sourceSectionId") or task.section_id
                 )
             else:
@@ -2026,7 +831,133 @@ class SlowService:
         except Exception as error:
             return task_view(fail_task(self.db, execution, error))
 
-    async def _preload_initial_book(self, chapter_id):
+    async def _regenerate_from_content_feedback(
+        self,
+        task: LearningTask,
+        payload: dict,
+    ) -> dict:
+        feedback_id = payload.get("feedbackId")
+        feedback = self.db.scalar(
+            select(UserFeedback).where(
+                UserFeedback.id == feedback_id,
+                UserFeedback.user_id == task.user_id,
+                UserFeedback.scope == "content_block",
+                UserFeedback.section_id == task.section_id,
+                UserFeedback.content_version_id
+                == payload.get("contentVersionId"),
+                UserFeedback.block_id == payload.get("blockId"),
+            )
+        )
+        if not feedback or task.trigger_id != feedback.id:
+            raise AppError(
+                "反馈重生成任务缺少可信的反馈事实",
+                code="CONTENT_FEEDBACK_FACT_MISSING",
+                status=409,
+            )
+        prior_runs = self.db.scalars(
+            select(GenerationRun)
+            .where(
+                GenerationRun.section_id == task.section_id,
+                GenerationRun.operation == "regeneration",
+                GenerationRun.status == "succeeded",
+            )
+            .order_by(GenerationRun.started_at.desc())
+            .limit(20)
+        ).all()
+        completed = next(
+            (
+                load(item.trace_json, {})
+                for item in prior_runs
+                if load(item.trace_json, {}).get("feedbackId") == feedback.id
+            ),
+            None,
+        )
+        if completed:
+            return {
+                "contentVersionId": completed.get("contentVersionId"),
+                "quizSetId": completed.get("quizSetId"),
+                "feedbackId": feedback.id,
+            }
+        content = self.db.get(ContentVersion, feedback.content_version_id)
+        if not content or content.section_id != task.section_id:
+            raise AppError(
+                "反馈对应的正文版本不存在",
+                code="FEEDBACK_TARGET_NOT_FOUND",
+                status=404,
+            )
+        block = next(
+            (
+                item
+                for item in load(content.blocks_json, [])
+                if item.get("id") == feedback.block_id
+            ),
+            None,
+        )
+        if not block:
+            raise AppError(
+                "反馈对应的段落不存在",
+                code="FEEDBACK_BLOCK_NOT_FOUND",
+                status=404,
+            )
+        block_snapshot_hash = hashlib.sha256(
+            json.dumps(
+                block,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        if block_snapshot_hash != feedback.block_snapshot_hash:
+            raise AppError(
+                "反馈段落快照与原始事实不一致",
+                code="FEEDBACK_BLOCK_SNAPSHOT_MISMATCH",
+                status=409,
+            )
+        instructions = {
+            "inaccurate": "核查并纠正这一段的不准确内容",
+            "unclear": "重新解释这一段，使机制与因果关系更清楚",
+            "poor_example": "更换或改进这一段的例子",
+            "typo": "修正这一段的文字错误并检查相邻表述",
+            "layout": "改进这一段及相关内容块的表达结构与呈现形式",
+            "other": "依据补充说明改进这一段",
+        }
+        feedback_context = {
+            "feedbackId": feedback.id,
+            "feedbackType": feedback.feedback_type,
+            "instruction": instructions.get(
+                feedback.feedback_type,
+                "依据反馈改进这一段",
+            ),
+            "message": feedback.message,
+            "contentVersionId": feedback.content_version_id,
+            "blockId": feedback.block_id,
+            "blockSnapshotHash": feedback.block_snapshot_hash,
+            "blockSnapshot": block,
+        }
+        view = await self.generate_section(
+            task.section_id,
+            regenerate=True,
+            regeneration_feedback=feedback_context,
+        )
+        generated_content = view.get("content") or {}
+        generated_quiz = view.get("quiz") or {}
+        if (
+            not generated_content.get("id")
+            or generated_content.get("id") == feedback.content_version_id
+            or not generated_quiz.get("id")
+        ):
+            raise AppError(
+                "反馈重生成完成但没有得到新的正文与测验版本",
+                code="CONTENT_FEEDBACK_REGENERATION_RESULT_MISSING",
+                status=500,
+            )
+        return {
+            "contentVersionId": generated_content["id"],
+            "quizSetId": generated_quiz["id"],
+            "feedbackId": feedback.id,
+        }
+
+    async def _preload_initial_book(self, task: LearningTask, chapter_id):
         if not chapter_id:
             raise AppError(
                 "首节预生成任务缺少章节",
@@ -2049,15 +980,22 @@ class SlowService:
                 status=500,
             )
         target_progress = self.progress.for_section(target)
+        payload = load(task.payload_json, {})
+        payload["targetSectionId"] = target.id
+        task.payload_json = dump(payload)
         if target_progress.status != "preparing":
             self.progress.set_status(target_progress, "preparing")
-            self.db.commit()
+        self.db.commit()
         await self.generate_section(target.id)
         self.progress.set_status(target_progress, "available")
         self.db.commit()
         return {"targetSectionId": target.id}
 
-    async def _preload_next_section(self, source_section_id):
+    async def _preload_next_section(
+        self,
+        task: LearningTask,
+        source_section_id,
+    ):
         context = self.contexts.resolve_section(
             user_id=self.user_id,
             section_id=source_section_id,
@@ -2111,9 +1049,12 @@ class SlowService:
         if not target:
             return {"targetSectionId": None, "endOfSeries": True}
         target_progress = self.progress.for_section(target)
+        payload = load(task.payload_json, {})
+        payload["targetSectionId"] = target.id
+        task.payload_json = dump(payload)
         if target_progress.status != "preparing":
             self.progress.set_status(target_progress, "preparing")
-            self.db.commit()
+        self.db.commit()
         await self.generate_section(target.id)
         self.progress.set_status(target_progress, "available")
         self.db.commit()
@@ -2186,510 +1127,689 @@ class SlowService:
         memory.summary = f"{memory.evidence_count} 条证据，当前掌握度 {memory.mastery_score}/100；最近证据：{evidence_type}"
         memory.updated_at = now()
 
-    def _memory(self, shelf_id, limit=30):
-        rows = self.db.scalars(select(LearningMemory).where(LearningMemory.user_id == self.user_id, LearningMemory.shelf_id == shelf_id).order_by(LearningMemory.updated_at.desc()).limit(limit)).all()
-        return [{"concept": item.concept, "mastery": item.mastery_score, "evidenceCount": item.evidence_count, "summary": item.summary} for item in rows]
+    def _memory(self, shelf_id, limit=30, *, include_legacy=False):
+        target_scope = (
+            select(SectionAssessmentTarget.assessment_target_id)
+            .join(Section, Section.id == SectionAssessmentTarget.section_id)
+            .join(Chapter, Chapter.id == Section.chapter_id)
+            .join(Book, Book.id == Chapter.book_id)
+            .where(
+                Book.shelf_id == shelf_id,
+                Book.deleted_at.is_(None),
+            )
+        )
+        projection_rows = self.db.execute(
+            select(KnowledgeStateProjection, AssessmentTarget)
+            .join(
+                AssessmentTarget,
+                AssessmentTarget.id
+                == KnowledgeStateProjection.assessment_target_id,
+            )
+            .where(
+                KnowledgeStateProjection.user_id == self.user_id,
+                KnowledgeStateProjection.assessment_target_id.in_(target_scope),
+            )
+            .order_by(KnowledgeStateProjection.updated_at.desc())
+            .limit(limit)
+        ).all()
+        target_ids = [target.id for _, target in projection_rows]
+        evidence_counts = dict(
+            self.db.execute(
+                select(
+                    AssessmentObservation.assessment_target_id,
+                    func.count(AssessmentObservation.id),
+                )
+                .where(
+                    AssessmentObservation.user_id == self.user_id,
+                    AssessmentObservation.assessment_target_id.in_(target_ids),
+                )
+                .group_by(AssessmentObservation.assessment_target_id)
+            ).all()
+        ) if target_ids else {}
+        result = [
+            {
+                "concept": target.objective_statement,
+                "mastery": round(state.p_known_ppm / 10_000),
+                "evidenceCount": evidence_counts.get(target.id, 0),
+                "summary": (
+                    f"BKT 掌握概率 {state.p_known_ppm / 10_000:.1f}%；"
+                    f"声明 {state.claim_status}；保持轮次 {state.retention_rounds}"
+                ),
+                "assessmentTargetId": target.id,
+                "pKnown": round(state.p_known_ppm / 1_000_000, 6),
+                "uncertainty": round(state.uncertainty_ppm / 1_000_000, 6),
+                "claimStatus": state.claim_status,
+                "retentionRounds": state.retention_rounds,
+                "parameterSetVersion": state.parameter_set_version,
+                "projectionRuleVersion": state.projection_rule_version,
+                "sourceObservationWatermark": state.source_observation_watermark,
+            }
+            for state, target in projection_rows
+        ]
+
+        # Ask Me and pre-M2 evidence still use the legacy memory projection.
+        # Keep it as a compatibility fallback, but never let it override a BKT
+        # projection for the same measured objective.
+        projected_concepts = {
+            " ".join(item["concept"].strip().casefold().split())
+            for item in result
+        }
+        if include_legacy and len(result) < limit:
+            legacy_rows = self.db.scalars(
+                select(LearningMemory)
+                .where(
+                    LearningMemory.user_id == self.user_id,
+                    LearningMemory.shelf_id == shelf_id,
+                )
+                .order_by(LearningMemory.updated_at.desc())
+                .limit(limit)
+            ).all()
+            for item in legacy_rows:
+                key = " ".join(item.concept.strip().casefold().split())
+                if key in projected_concepts:
+                    continue
+                result.append({
+                    "concept": item.concept,
+                    "mastery": item.mastery_score,
+                    "evidenceCount": item.evidence_count,
+                    "summary": item.summary,
+                    "projectionRuleVersion": "legacy_linear_v1",
+                })
+                if len(result) == limit:
+                    break
+        return result
 
     def learning_memory(self, shelf_id=None):
         if shelf_id:
             self.shelf(shelf_id)
-            return self._memory(shelf_id, 200)
+            return self._memory(shelf_id, 200, include_legacy=True)
         shelves = self.db.scalars(select(Shelf).where(Shelf.user_id == self.user_id)).all()
-        return {item.id: self._memory(item.id, 200) for item in shelves}
-
-    async def _ensure_note(self, section):
-        context = self.contexts.resolve_section(
-            user_id=self.user_id,
-            section_id=section.id,
-        )
-        await GenerateLearningNote(
-            self.db,
-            user_id=self.user_id,
-            learning_run_id=self.progress.active_run(context.series.id).id,
-            tutor=self.ai,
-            section_reader=self.section,
-        ).execute(section)
-
-    def _note(self, note):
-        return {"id": note.id, "aiContent": load(note.ai_content_json, {}), "userContent": load(note.user_content_json, {}), "version": note.version}
-
-    def update_note(self, section_id, content):
-        context = self.contexts.resolve_section(user_id=self.user_id, section_id=section_id)
-        learning_run = self.progress.active_run(context.series.id)
-        note = self.db.scalar(
-            select(LearningNote).where(
-                LearningNote.section_id == section_id,
-                LearningNote.user_id == self.user_id,
-                LearningNote.learning_run_id == learning_run.id,
-            )
-        )
-        if not note:
-            raise AppError("笔记不存在", code="NOTE_NOT_FOUND", status=404)
-        note.user_content_json, note.version, note.updated_at = dump(content), note.version + 1, now()
-        self.db.commit()
-        return self._note(note)
-
-    def prepare_ask(self, section_id, body):
-        section_context = self.contexts.resolve_section(
-            user_id=self.user_id,
-            section_id=section_id,
-        )
-        learning_run = self.progress.active_run(section_context.series.id)
-        section_view = self.section(section_id)
-        if not section_view["content"]:
-            raise AppError("请先生成本节", code="SECTION_NOT_GENERATED")
-        valid_blocks = {item["id"] for item in section_view["content"]["blocks"]}
-        if body.block_id not in valid_blocks:
-            raise AppError("内容块不存在或版本已失效", code="BLOCK_INVALID", status=409)
-        session = self.db.scalar(
-            select(QaSession).where(
-                QaSession.section_id == section_id,
-                QaSession.user_id == self.user_id,
-                QaSession.learning_run_id == learning_run.id,
-            )
-        )
-        if not session:
-            session = QaSession(
-                id=uid("qa"),
-                learning_run_id=learning_run.id,
-                section_id=section_id,
-                user_id=self.user_id,
-            )
-            self.db.add(session)
-            self.db.commit()
-        messages = self.db.scalars(select(QaMessage).where(QaMessage.session_id == session.id).order_by(QaMessage.created_at)).all()
-        threads = self.db.scalars(select(QaThread).where(QaThread.session_id == session.id).order_by(QaThread.updated_at.desc())).all()
-        current_history = [
-            {"role": item.role, "content": item.content, "blockId": item.block_id}
-            for item in messages
-            if body.thread_id and item.thread_id == body.thread_id
-        ]
-        related_summaries = [
-            {"threadId": item.thread_id, "summary": item.summary}
-            for item in threads
-            if item.thread_id != body.thread_id and item.summary
-        ][:5]
-        suggested = uid("thread")
         return {
-            "session": session,
-            "suggestedThreadId": suggested,
-            "request": {
-                "section": section_view,
-                "anchorBlockId": body.block_id,
-                "question": body.question,
-                "requestedThreadId": body.thread_id,
-                "forcedRelation": body.force_relation,
-                "newThreadId": suggested,
-                "weightedContext": {
-                    "currentThreadFullHistory": current_history,
-                    "relatedThreadSummaries": related_summaries,
-                    "crossSectionMemory": self._memory(section_context.book.shelf_id, 10),
-                },
-            },
+            item.id: self._memory(item.id, 200, include_legacy=True)
+            for item in shelves
         }
 
-    def _save_qa_answer(self, context, body, answer, suggested_relation, thread_summary=""):
-        session = context["session"]
-        suggested = context["suggestedThreadId"]
-        relation = body.force_relation or suggested_relation
-        if relation == "follow_up" and body.thread_id:
-            thread_id = body.thread_id
-        else:
-            relation, thread_id = "new_question", suggested
-        thread = self.db.scalar(select(QaThread).where(QaThread.session_id == session.id, QaThread.thread_id == thread_id))
-        if not thread:
-            thread = QaThread(id=uid("qathread"), session_id=session.id, thread_id=thread_id, classification=relation)
-            self.db.add(thread)
-        thread_summary = thread_summary.strip() or answer.strip()[:240]
-        thread.summary, thread.updated_at = thread_summary, now()
-        self.db.add_all(
-            [
-                QaMessage(id=uid("msg"), session_id=session.id, thread_id=thread_id, block_id=body.block_id, role="user", content=body.question),
-                QaMessage(id=uid("msg"), session_id=session.id, thread_id=thread_id, block_id=body.block_id, role="assistant", content=answer),
-            ]
+    def due_reviews(self, daily_budget=10):
+        return ReviewAssignmentService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+            context_builder=self.generation_contexts,
+            context_resolver=self.contexts,
+            memory_loader=self._memory,
+        ).due(daily_budget=daily_budget)
+
+    async def start_review(self, assignment_id: str):
+        return await ReviewAssignmentService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+            context_builder=self.generation_contexts,
+            context_resolver=self.contexts,
+            memory_loader=self._memory,
+        ).start(assignment_id)
+
+    def submit_review(self, assignment_id: str, body, idempotency_key=None):
+        return ReviewAssignmentService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+            context_builder=self.generation_contexts,
+            context_resolver=self.contexts,
+            memory_loader=self._memory,
+        ).submit(
+            assignment_id,
+            body.answers,
+            idempotency_key=idempotency_key,
         )
-        memory = load(session.memory_json, {"threads": {}}) or {"threads": {}}
-        memory.setdefault("threads", {})[thread_id] = thread_summary
-        memory["lastThread"] = thread_id
-        session.memory_json = dump(memory)
-        self.db.commit()
-        return {"sessionId": session.id, "threadId": thread_id, "relation": relation, "answer": answer, "classificationCorrectable": True}
+
+    def skip_review(self, assignment_id: str):
+        return ReviewAssignmentService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+            context_builder=self.generation_contexts,
+            context_resolver=self.contexts,
+            memory_loader=self._memory,
+        ).skip(assignment_id)
+
+    def expire_review(self, assignment_id: str):
+        return ReviewAssignmentService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+            context_builder=self.generation_contexts,
+            context_resolver=self.contexts,
+            memory_loader=self._memory,
+        ).expire(assignment_id)
+
+    async def _ensure_note(self, section):
+        return await self.notes.ensure(section)
+
+    def _note(self, note):
+        return self.notes.view(note)
+
+    def update_note(self, section_id, content):
+        return self.notes.update(section_id, content)
+
+    def add_note_review_supplement(
+        self,
+        section_id: str,
+        review_episode_id: str,
+        content: dict,
+    ):
+        return self.notes.add_review_supplement(
+            section_id,
+            review_episode_id,
+            content,
+        )
+
+    def prepare_ask(self, section_id, body):
+        return self.qa_service.prepare(section_id, body)
+
+    def _save_qa_answer(
+        self,
+        context,
+        body,
+        answer,
+        suggested_relation,
+        thread_summary="",
+    ):
+        return self.qa_service.save_answer(
+            context,
+            body,
+            answer,
+            suggested_relation,
+            thread_summary,
+        )
 
     async def ask(self, section_id, body):
-        context = self.prepare_ask(section_id, body)
-        self.db.commit()
-        result = await self.ai.answer(context["request"])
-        return self._save_qa_answer(context, body, result.answer, result.relation, result.thread_summary)
+        return await self.qa_service.ask(section_id, body)
 
     async def ask_stream(self, context, body):
-        parts = []
+        async for event in self.qa_service.stream(context, body):
+            yield event
+
+    async def feedback_repair_stream(self, feedback_id: str):
+        feedback = self.db.scalar(
+            select(UserFeedback).where(
+                UserFeedback.id == feedback_id,
+                UserFeedback.user_id == self.user_id,
+                UserFeedback.scope == "content_block",
+            )
+        )
+        if not feedback:
+            raise AppError(
+                "反馈不存在或不属于当前用户",
+                code="FEEDBACK_NOT_FOUND",
+                status=404,
+            )
+        content = self.db.get(ContentVersion, feedback.content_version_id)
+        if not content or content.section_id != feedback.section_id:
+            raise AppError(
+                "反馈对应的正文版本不存在",
+                code="FEEDBACK_TARGET_NOT_FOUND",
+                status=404,
+            )
+        blocks = load(content.blocks_json, [])
+        target_index = next(
+            (
+                index
+                for index, item in enumerate(blocks)
+                if item.get("id") == feedback.block_id
+            ),
+            None,
+        )
+        if target_index is None:
+            raise AppError(
+                "反馈对应的段落不存在",
+                code="FEEDBACK_BLOCK_NOT_FOUND",
+                status=404,
+            )
+        target_block = blocks[target_index]
+        snapshot_hash = hashlib.sha256(
+            json.dumps(
+                target_block,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        if snapshot_hash != feedback.block_snapshot_hash:
+            raise AppError(
+                "反馈段落与提交时的内容不一致",
+                code="FEEDBACK_BLOCK_SNAPSHOT_MISMATCH",
+                status=409,
+            )
+
+        # V2 corrections regenerate the complete lesson candidate and quiz as
+        # one atomic version. The SSE endpoint remains for client compatibility,
+        # but it streams the already-published replacement block instead of
+        # persisting an independently generated block patch.
+        if callable(getattr(self.ai, "generate_lesson", None)):
+            def mapped_replacement_block(content_blocks, trace):
+                mapping = trace.get("feedbackReplacement") or {}
+                if mapping.get("sourceBlockId") != feedback.block_id:
+                    return None
+                replacement_block_id = mapping.get("replacementBlockId")
+                return next(
+                    (
+                        item
+                        for item in content_blocks
+                        if item.get("id") == replacement_block_id
+                    ),
+                    None,
+                )
+
+            completed_runs = self.db.scalars(
+                select(GenerationRun)
+                .where(
+                    GenerationRun.section_id == feedback.section_id,
+                    GenerationRun.operation == "regeneration",
+                    GenerationRun.status == "succeeded",
+                )
+                .order_by(GenerationRun.started_at.desc())
+                .limit(20)
+            ).all()
+            completed_trace = next(
+                (
+                    load(item.trace_json, {})
+                    for item in completed_runs
+                    if load(item.trace_json, {}).get("feedbackId") == feedback.id
+                ),
+                None,
+            )
+            if completed_trace:
+                replacement = self.db.get(
+                    ContentVersion,
+                    completed_trace.get("contentVersionId"),
+                )
+                replacement_blocks = load(
+                    replacement.blocks_json if replacement else "[]",
+                    [],
+                )
+                if replacement and replacement_blocks:
+                    replacement_block = mapped_replacement_block(
+                        replacement_blocks,
+                        completed_trace,
+                    )
+                    if replacement_block:
+                        yield {"type": "delta", "delta": replacement_block["content"]}
+                        yield {
+                            "type": "done",
+                            "feedbackId": feedback.id,
+                            "contentVersionId": replacement.id,
+                            "contentVersion": replacement.version,
+                            "contentBlockId": replacement_block["id"],
+                            "replayed": True,
+                        }
+                        return
+            instructions = {
+                "inaccurate": "核查并纠正这一段的不准确内容",
+                "unclear": "重新解释这一段，使机制与因果关系更清楚",
+                "poor_example": "更换或改进这一段的例子",
+                "typo": "修正这一段的文字错误并检查相邻表述",
+                "layout": "改进这一段及相关内容块的表达结构与呈现形式",
+                "other": "依据补充说明改进这一段",
+            }
+            view = await self.generate_section(
+                feedback.section_id,
+                regenerate=True,
+                regeneration_feedback={
+                    "feedbackId": feedback.id,
+                    "feedbackType": feedback.feedback_type,
+                    "instruction": instructions.get(
+                        feedback.feedback_type,
+                        "依据反馈改进这一段",
+                    ),
+                    "message": feedback.message,
+                    "contentVersionId": feedback.content_version_id,
+                    "blockId": feedback.block_id,
+                    "blockSnapshotHash": feedback.block_snapshot_hash,
+                    "blockSnapshot": target_block,
+                },
+            )
+            replacement_content = view.get("content") or {}
+            replacement_blocks = replacement_content.get("blocks") or []
+            if not replacement_blocks:
+                raise AppError(
+                    "反馈重生成完成但没有得到新的已发布正文",
+                    code="CONTENT_FEEDBACK_REGENERATION_RESULT_MISSING",
+                    status=500,
+                )
+            generation_trace = (
+                (view.get("generation") or {}).get("trace") or {}
+            )
+            replacement_block = mapped_replacement_block(
+                replacement_blocks,
+                generation_trace,
+            )
+            if not replacement_block:
+                raise AppError(
+                    "反馈重生成完成但缺少已校验的段落替换映射",
+                    code="FEEDBACK_REPLACEMENT_MAPPING_MISSING",
+                    status=500,
+                )
+            yield {"type": "delta", "delta": replacement_block["content"]}
+            yield {
+                "type": "done",
+                "feedbackId": feedback.id,
+                "contentVersionId": replacement_content["id"],
+                "contentVersion": replacement_content["version"],
+                "contentBlockId": replacement_block["id"],
+                "replayed": False,
+            }
+            return
+
+        completed_runs = self.db.scalars(
+            select(GenerationRun)
+            .where(
+                GenerationRun.section_id == feedback.section_id,
+                GenerationRun.operation == "feedback_repair",
+                GenerationRun.status == "succeeded",
+            )
+            .order_by(GenerationRun.started_at.desc())
+            .limit(20)
+        ).all()
+        for completed_run in completed_runs:
+            completed_trace = load(completed_run.trace_json, {})
+            if completed_trace.get("feedbackId") != feedback.id:
+                continue
+            repaired_content = self.db.get(
+                ContentVersion,
+                completed_trace.get("contentVersionId"),
+            )
+            repaired_block = next(
+                (
+                    item
+                    for item in load(
+                        repaired_content.blocks_json if repaired_content else "[]",
+                        [],
+                    )
+                    if item.get("id") == completed_trace.get("contentBlockId")
+                ),
+                None,
+            )
+            if repaired_content and repaired_block:
+                yield {"type": "delta", "delta": repaired_block["content"]}
+                yield {
+                    "type": "done",
+                    "feedbackId": feedback.id,
+                    "contentVersionId": repaired_content.id,
+                    "contentVersion": repaired_content.version,
+                    "contentBlockId": repaired_block["id"],
+                    "replayed": True,
+                }
+                return
+
+        context = self.contexts.resolve_section(
+            user_id=self.user_id,
+            section_id=feedback.section_id,
+        )
+        learning_run = self.progress.active_run(context.series.id)
+        binding = self.db.scalar(
+            select(LearningRunSectionBinding).where(
+                LearningRunSectionBinding.learning_run_id == learning_run.id,
+                LearningRunSectionBinding.user_id == self.user_id,
+                LearningRunSectionBinding.section_id == feedback.section_id,
+            )
+        )
+        if not binding or binding.content_version_id != content.id:
+            raise AppError(
+                "正文已经更新，请在当前版本重新提交反馈",
+                code="FEEDBACK_CONTENT_VERSION_STALE",
+                status=409,
+            )
+
+        resource_key = f"section:{feedback.section_id}"
+        owner_id = acquire_generation_lease(self.db, resource_key)
+        if owner_id is None:
+            raise AppError(
+                "这一节正在处理另一条补救请求",
+                code="GENERATION_IN_PROGRESS",
+                status=409,
+                retryable=True,
+            )
+        attempt = (
+            self.db.scalar(
+                select(func.max(GenerationRun.attempt)).where(
+                    GenerationRun.section_id == feedback.section_id
+                )
+            )
+            or 0
+        ) + 1
+        run = GenerationRun(
+            id=uid("generation"),
+            section_id=feedback.section_id,
+            operation="feedback_repair",
+            attempt=attempt,
+            status="running",
+            model=getattr(self.ai, "model", ""),
+            trace_json=dump(
+                {
+                    "feedbackId": feedback.id,
+                    "contentVersionId": content.id,
+                    "contentBlockId": feedback.block_id,
+                    "delivery": "sse_passthrough_v1",
+                }
+            ),
+        )
+        self.db.add(run)
         self.db.commit()
-        stream_answer = getattr(self.ai, "answer_stream", None)
-        if callable(stream_answer):
-            async for delta in stream_answer(context["request"]):
+        repair_request = {
+            "section": {
+                "id": context.section.id,
+                "title": context.section.title,
+                "question": context.section.question,
+                "objectives": load(context.section.objectives_json, []),
+            },
+            "targetBlock": target_block,
+            "previousBlock": blocks[target_index - 1] if target_index > 0 else None,
+            "nextBlock": (
+                blocks[target_index + 1]
+                if target_index + 1 < len(blocks)
+                else None
+            ),
+            "feedback": {
+                "type": feedback.feedback_type,
+                "message": feedback.message,
+            },
+            "sources": load(content.sources_json, []),
+        }
+        parts: list[str] = []
+        try:
+            stream_repair = getattr(self.ai, "repair_stream", None)
+            if not callable(stream_repair):
+                raise AiError(
+                    "当前模型不支持流式补救",
+                    code="AI_REPAIR_STREAM_UNSUPPORTED",
+                )
+            async for delta in stream_repair(repair_request):
                 if delta:
                     parts.append(delta)
                     yield {"type": "delta", "delta": delta}
-            suggested_relation = "follow_up" if body.thread_id else "new_question"
-        else:
-            result = await self.ai.answer(context["request"])
-            parts.append(result.answer)
-            suggested_relation = result.relation
-            yield {"type": "delta", "delta": result.answer}
-        answer = "".join(parts).strip()
-        if not answer:
-            raise AiError("答疑模型未返回有效内容")
-        saved = self._save_qa_answer(context, body, answer, suggested_relation)
-        yield {
-            "type": "done",
-            "sessionId": saved["sessionId"],
-            "threadId": saved["threadId"],
-            "relation": saved["relation"],
-            "classificationCorrectable": True,
-        }
-
-    def correct_qa_classification(self, section_id, thread_id, body):
-        context = self.contexts.resolve_section(user_id=self.user_id, section_id=section_id)
-        learning_run = self.progress.active_run(context.series.id)
-        session = self.db.scalar(
-            select(QaSession).where(
-                QaSession.section_id == section_id,
-                QaSession.user_id == self.user_id,
-                QaSession.learning_run_id == learning_run.id,
+            repaired_text = "".join(parts)
+            if not repaired_text.strip():
+                raise AiError(
+                    "模型没有返回补救内容",
+                    code="AI_REPAIR_EMPTY_RESPONSE",
+                )
+            if not renew_generation_lease(self.db, resource_key, owner_id):
+                raise AppError(
+                    "补救请求已经失去写入租约",
+                    code="GENERATION_LEASE_LOST",
+                    status=409,
+                )
+            binding = self.db.get(LearningRunSectionBinding, binding.id)
+            if not binding or binding.content_version_id != content.id:
+                raise AppError(
+                    "补救生成期间正文已经更新，当前结果未覆盖新版本",
+                    code="SECTION_BINDING_STALE",
+                    status=409,
+                )
+            next_version = (
+                self.db.scalar(
+                    select(func.max(ContentVersion.version)).where(
+                        ContentVersion.section_id == content.section_id
+                    )
+                )
+                or 0
+            ) + 1
+            repaired_content = ContentVersion(
+                id=uid("content"),
+                section_id=content.section_id,
+                learning_contract_version_id=content.learning_contract_version_id,
+                version=next_version,
+                blocks_json="[]",
+                sources_json=content.sources_json,
+                confidence=content.confidence,
             )
-        )
-        thread = self.db.scalar(select(QaThread).where(QaThread.session_id == session.id, QaThread.thread_id == thread_id)) if session else None
-        if not thread:
-            raise AppError("答疑线程不存在", code="QA_THREAD_NOT_FOUND", status=404)
-        if body.relation == "follow_up":
-            target = self.db.scalar(select(QaThread).where(QaThread.session_id == session.id, QaThread.thread_id == body.target_thread_id)) if body.target_thread_id else None
-            if not target or target.thread_id == thread_id:
-                raise AppError("纠正为追问时必须指定另一条已有线程", code="QA_TARGET_INVALID")
-            messages = self.db.scalars(select(QaMessage).where(QaMessage.session_id == session.id, QaMessage.thread_id == thread_id)).all()
-            for item in messages:
-                item.thread_id = target.thread_id
-            target.summary = "；".join(value for value in [target.summary, thread.summary] if value)
-            target.corrected, target.updated_at = True, now()
-            self.db.delete(thread)
-            corrected_id = target.thread_id
-        else:
-            thread.classification, thread.corrected, thread.updated_at = "new_question", True, now()
-            corrected_id = thread.thread_id
-        self.db.commit()
-        return {"threadId": corrected_id, "relation": body.relation, "corrected": True}
-
-    async def ask_me(self, section_id, answer):
-        section_context = self.contexts.resolve_section(
-            user_id=self.user_id,
-            section_id=section_id,
-        )
-        section = section_context.section
-        learning_run = self.progress.active_run(section_context.series.id)
-        if not self.progress.for_section(
-            section,
-            section_context.chapter,
-            section_context.book,
-        ).ask_me_unlocked:
-            raise AppError("小节满分后才解锁深入讨论", code="ASK_ME_LOCKED", status=403)
-        session = self.db.scalar(
-            select(AskMeSession).where(
-                AskMeSession.section_id == section.id,
-                AskMeSession.user_id == self.user_id,
-                AskMeSession.learning_run_id == learning_run.id,
-            )
-        )
-        entries = load(session.entries_json, []) if session else []
-        dimensions = ["mechanism", "boundary", "transfer"]
-        if session and session.status == "completed":
-            return self._ask_me(session)
-        if not session:
-            if answer:
-                raise AppError("请先开始深入讨论再作答", code="ASK_ME_NOT_STARTED")
-            section_view = self.section(section_id)
-            self.db.commit()
-            turn = None
-            for validation_attempt in range(1, 4):
-                turn = await self.ai.ask_me({"section": section_view, "dimension": "mechanism", "previousAnswer": None, "finalize": False, "validationAttempt": validation_attempt, "requiredEvaluation": "not_evaluated"})
-                if turn.dimension == "mechanism" and turn.evaluation == "not_evaluated":
-                    break
-            if turn is None or turn.dimension != "mechanism" or turn.evaluation != "not_evaluated":
-                raise AiError("Ask Me 首轮结构无效")
-            session = AskMeSession(id=uid("askme"), learning_run_id=learning_run.id, section_id=section.id, user_id=self.user_id, round_index=0, entries_json=dump([{"dimension": "mechanism", "prompt": turn.prompt, "answer": None, "evaluation": "not_evaluated", "rationale": ""}]))
-            self.db.add(session)
-            self.db.commit()
-            return self._ask_me(session)
-        if not answer:
-            raise AppError("本轮回答不能为空", code="ASK_ME_ANSWER_REQUIRED")
-        current = session.round_index
-        current_dimension = dimensions[current]
-        finalize = current == 2
-        requested_dimension = current_dimension if finalize else dimensions[current + 1]
-        section_view = self.section(section_id)
-        self.db.commit()
-        turn = None
-        for validation_attempt in range(1, 4):
-            turn = await self.ai.ask_me(
+            repaired_blocks = []
+            repaired_block_id = ""
+            for position, original_block in enumerate(blocks, 1):
+                repaired_block = dict(original_block)
+                repaired_block["id"] = f"block_{repaired_content.id}_{position}"
+                repaired_block["version"] = next_version
+                if position - 1 == target_index:
+                    repaired_block["kind"] = "text"
+                    repaired_block["content"] = repaired_text
+                    repaired_block_id = repaired_block["id"]
+                repaired_blocks.append(repaired_block)
+            repaired_content.blocks_json = dump(repaired_blocks)
+            self.db.add(repaired_content)
+            self.db.flush()
+            audit = load(binding.lineage_audit_json, {})
+            repair_history = list(audit.get("feedbackRepairs") or [])
+            repair_history.append(
                 {
-                    "section": section_view,
-                    "dimension": requested_dimension,
-                    "evaluatesDimension": current_dimension,
-                    "previousPrompt": entries[current]["prompt"],
-                    "previousAnswer": answer,
-                    "priorRounds": entries,
-                    "finalize": finalize,
-                    "validationAttempt": validation_attempt,
-                    "requiredEvaluation": ["strong", "partial", "weak"],
+                    "generationRunId": run.id,
+                    "feedbackId": feedback.id,
+                    "fromContentVersionId": content.id,
+                    "toContentVersionId": repaired_content.id,
+                    "fromBlockId": feedback.block_id,
+                    "toBlockId": repaired_block_id,
+                    "delivery": "sse_passthrough_v1",
+                    "changedAt": timestamp(now()),
                 }
             )
-            if turn.dimension == requested_dimension and turn.evaluation != "not_evaluated":
-                break
-        if turn is None or turn.evaluation == "not_evaluated":
-            raise AiError("Ask Me 作答后必须给出能力评估")
-        entries[current].update({"answer": answer, "evaluation": turn.evaluation, "rationale": turn.rationale})
-        delta = {"strong": 20, "partial": 8, "weak": -5}[turn.evaluation]
-        self._add_evidence(self._context(section), f"{section.title}:{current_dimension}", "ask_me", {"dimension": current_dimension, "evaluation": turn.evaluation}, delta)
-        if finalize:
-            session.status = "completed"
-        else:
-            if turn.dimension != requested_dimension:
-                raise AiError("Ask Me 轮次顺序无效")
-            entries.append({"dimension": requested_dimension, "prompt": turn.prompt, "answer": None, "evaluation": "not_evaluated", "rationale": ""})
-            session.round_index += 1
-        session.entries_json, session.updated_at = dump(entries), now()
-        self.db.commit()
-        return self._ask_me(session)
+            binding.content_version_id = repaired_content.id
+            binding.source = "feedback_stream_repair"
+            binding.source_fact_id = feedback.id
+            binding.lineage_audit_json = dump(
+                {
+                    **audit,
+                    "contentVersionId": repaired_content.id,
+                    "feedbackRepairs": repair_history,
+                }
+            )
+            resume = self.db.scalar(
+                select(LearningResumePosition).where(
+                    LearningResumePosition.user_id == self.user_id,
+                    LearningResumePosition.learning_run_id == learning_run.id,
+                    LearningResumePosition.section_id == feedback.section_id,
+                )
+            )
+            if resume:
+                resume.content_version_id = repaired_content.id
+                if resume.block_id == feedback.block_id:
+                    resume.block_id = repaired_block_id
+                resume.updated_at = now()
+            finished_at = now()
+            run.status = "succeeded"
+            run.finished_at = finished_at
+            run.trace_json = dump(
+                {
+                    "feedbackId": feedback.id,
+                    "supersedesContentVersionId": content.id,
+                    "contentVersionId": repaired_content.id,
+                    "contentBlockId": repaired_block_id,
+                    "delivery": "sse_passthrough_v1",
+                    "finishedAt": timestamp(finished_at),
+                }
+            )
+            self.db.commit()
+            yield {
+                "type": "done",
+                "feedbackId": feedback.id,
+                "contentVersionId": repaired_content.id,
+                "contentVersion": repaired_content.version,
+                "contentBlockId": repaired_block_id,
+                "replayed": False,
+            }
+        except BaseException as error:
+            self.db.rollback()
+            failed_run = self.db.get(GenerationRun, run.id)
+            if failed_run:
+                failed_run.status = "failed"
+                failed_run.error_code = safe_error_code(error)
+                failed_run.error_message = (
+                    str(error)[:500]
+                    if isinstance(error, AppError)
+                    else "补救内容生成失败，请重试"
+                )
+                failed_run.finished_at = now()
+                self.db.commit()
+            raise
+        finally:
+            release_generation_lease(self.db, resource_key, owner_id)
+
+    def correct_qa_classification(self, section_id, thread_id, body):
+        return self.qa_service.correct_classification(
+            section_id,
+            thread_id,
+            body,
+        )
+
+    async def ask_me(self, section_id, answer):
+        return await self.ask_me_service.answer(section_id, answer)
 
     def _ask_me(self, session):
-        entries = load(session.entries_json, [])
-        return {
-            "id": session.id,
-            "status": session.status,
-            "round": session.round_index + 1,
-            "dimension": entries[session.round_index]["dimension"] if entries else "mechanism",
-            "prompt": entries[session.round_index]["prompt"] if session.status != "completed" and entries else None,
-            "entries": entries,
-        }
+        return self.ask_me_service.view(session)
 
     def chapter_practice(self, chapter_id):
-        self.contexts.resolve_chapter(user_id=self.user_id, chapter_id=chapter_id)
-        practice = self.db.scalar(select(ChapterPractice).where(ChapterPractice.chapter_id == chapter_id))
-        if not practice:
-            raise AppError("请先生成本章", code="PRACTICE_NOT_GENERATED", status=404)
-        return self._practice(practice)
+        return self.artifact_service.chapter_practice(chapter_id)
 
-    def upload_chapter_practice_attachment(self, chapter_id, filename, media_type, data):
-        context = self.contexts.resolve_chapter(user_id=self.user_id, chapter_id=chapter_id)
-        learning_run = self.progress.active_run(context.series.id)
-        practice = self.db.scalar(select(ChapterPractice).where(ChapterPractice.chapter_id == chapter_id))
-        if not practice:
-            raise AppError("章末实践不存在", code="PRACTICE_NOT_FOUND", status=404)
-        if self._practice_progress(practice).status == "locked":
-            raise AppError("完成本章后才可上传附件", code="PRACTICE_LOCKED", status=403)
-        return self._upload_attachment(
-            learning_run.id,
-            "chapter_practice",
-            practice.id,
-            filename,
-            media_type,
-            data,
+    def upload_chapter_practice_attachment(
+        self, chapter_id, filename, media_type, data
+    ):
+        return self.artifact_service.upload_chapter_practice_attachment(
+            chapter_id, filename, media_type, data
         )
 
     def submit_chapter_practice(self, chapter_id, content, attachment_ids):
-        context = self.contexts.resolve_chapter(user_id=self.user_id, chapter_id=chapter_id)
-        learning_run = self.progress.active_run(context.series.id)
-        practice = self.db.scalar(select(ChapterPractice).where(ChapterPractice.chapter_id == chapter_id))
-        if not practice:
-            raise AppError("章末实践不存在", code="PRACTICE_NOT_FOUND", status=404)
-        progress = self._practice_progress(practice)
-        if progress.status == "locked":
-            raise AppError("完成本章后才可提交实践", code="PRACTICE_LOCKED", status=403)
-        if not content:
-            raise AppError("实践提交不能为空", code="PRACTICE_EMPTY")
-        attachments = self._validated_attachments(
-            learning_run.id,
-            "chapter_practice",
-            practice.id,
-            attachment_ids,
+        return self.artifact_service.submit_chapter_practice(
+            chapter_id, content, attachment_ids
         )
-        attachment_ids = [item.id for item in attachments]
-        self.db.add(
-            ArtifactSubmission(
-                id=uid("artifact_submission"),
-                learning_run_id=learning_run.id,
-                user_id=self.user_id,
-                target_type="chapter_practice",
-                target_id=practice.id,
-                content_json=dump(content),
-                attachment_ids_json=dump(attachment_ids),
-            )
-        )
-        progress.submission_json = dump({"content": content, "attachmentIds": attachment_ids})
-        progress.status, progress.updated_at = "completed", now()
-        self.db.commit()
-        return self._practice(practice)
 
     def _practice_progress(self, practice):
-        chapter = self.db.get(Chapter, practice.chapter_id)
-        book = self.db.get(Book, chapter.book_id)
-        run = self.progress.active_run(book.series_id)
-        return self.artifacts.for_target(
-            learning_run_id=run.id,
-            target_type="chapter_practice",
-            target_id=practice.id,
-        )
+        return self.artifact_service.practice_progress(practice)
 
     def _practice(self, practice):
-        progress = self._practice_progress(practice)
-        attachments = self._attachments(
-            progress.learning_run_id,
-            "chapter_practice",
-            practice.id,
-        )
-        return {"id": practice.id, "title": practice.title, "instructions": load(practice.instructions_json, {}), "submission": load(progress.submission_json, {}), "attachments": attachments, "evidenceMode": "file_attachment" if attachments else "structured_only_legacy", "status": progress.status}
+        return self.artifact_service.practice_view(practice)
 
     def book_capstone(self, book_id):
-        self.contexts.resolve_book(user_id=self.user_id, book_id=book_id)
-        capstone = self.db.scalar(select(BookCapstone).where(BookCapstone.book_id == book_id))
-        if not capstone:
-            raise AppError("全书大作业不存在", code="CAPSTONE_NOT_FOUND", status=404)
-        return self._capstone(capstone)
+        return self.artifact_service.book_capstone(book_id)
 
-    def upload_book_capstone_attachment(self, book_id, filename, media_type, data):
-        context = self.contexts.resolve_book(user_id=self.user_id, book_id=book_id)
-        learning_run = self.progress.active_run(context.series.id)
-        capstone = self.db.scalar(select(BookCapstone).where(BookCapstone.book_id == book_id))
-        if not capstone:
-            raise AppError("全书大作业不存在", code="CAPSTONE_NOT_FOUND", status=404)
-        if self._capstone_progress(capstone).status == "locked":
-            raise AppError("完成本书正文后才可上传附件", code="CAPSTONE_LOCKED", status=403)
-        return self._upload_attachment(
-            learning_run.id,
-            "book_capstone",
-            capstone.id,
-            filename,
-            media_type,
-            data,
+    def upload_book_capstone_attachment(
+        self, book_id, filename, media_type, data
+    ):
+        return self.artifact_service.upload_book_capstone_attachment(
+            book_id, filename, media_type, data
         )
 
     def submit_book_capstone(self, book_id, content, attachment_ids):
-        context = self.contexts.resolve_book(user_id=self.user_id, book_id=book_id)
-        learning_run = self.progress.active_run(context.series.id)
-        capstone = self.db.scalar(select(BookCapstone).where(BookCapstone.book_id == book_id))
-        if not capstone:
-            raise AppError("全书大作业不存在", code="CAPSTONE_NOT_FOUND", status=404)
-        progress = self._capstone_progress(capstone)
-        if progress.status == "locked":
-            raise AppError("完成本书后才可提交大作业", code="CAPSTONE_LOCKED", status=403)
-        if not content:
-            raise AppError("大作业提交不能为空", code="CAPSTONE_EMPTY")
-        attachments = self._validated_attachments(
-            learning_run.id,
-            "book_capstone",
-            capstone.id,
-            attachment_ids,
+        return self.artifact_service.submit_book_capstone(
+            book_id, content, attachment_ids
         )
-        attachment_ids = [item.id for item in attachments]
-        self.db.add(
-            ArtifactSubmission(
-                id=uid("artifact_submission"),
-                learning_run_id=learning_run.id,
-                user_id=self.user_id,
-                target_type="book_capstone",
-                target_id=capstone.id,
-                content_json=dump(content),
-                attachment_ids_json=dump(attachment_ids),
-            )
-        )
-        progress.submission_json = dump({"content": content, "attachmentIds": attachment_ids})
-        progress.status, progress.updated_at = "completed", now()
-        self.db.commit()
-        return self._capstone(capstone)
 
     def _capstone_progress(self, capstone):
-        book = self.db.get(Book, capstone.book_id)
-        run = self.progress.active_run(book.series_id)
-        return self.artifacts.for_target(
-            learning_run_id=run.id,
-            target_type="book_capstone",
-            target_id=capstone.id,
-        )
+        return self.artifact_service.capstone_progress(capstone)
 
     def _capstone(self, capstone):
-        progress = self._capstone_progress(capstone)
-        attachments = self._attachments(
-            progress.learning_run_id,
-            "book_capstone",
-            capstone.id,
-        )
-        return {"id": capstone.id, "title": capstone.title, "brief": load(capstone.brief_json, {}), "submission": load(progress.submission_json, {}), "attachments": attachments, "evidenceMode": "file_attachment" if attachments else "structured_only_legacy", "status": progress.status}
-
-    def _upload_attachment(self, learning_run_id, target_type, target_id, filename, media_type, data):
-        if not self.attachment_storage:
-            raise AppError("附件存储未配置", code="ATTACHMENT_STORAGE_UNAVAILABLE", status=503)
-        clean_name = unquote(filename or "attachment.bin").replace("\\", "/").split("/")[-1].strip()
-        if not clean_name or len(clean_name) > 255:
-            raise AppError("附件文件名无效", code="ATTACHMENT_FILENAME_INVALID")
-        attachment_id = uid("attachment")
-        self.db.commit()
-        stored = self.attachment_storage.store(user_id=self.user_id, target_type=target_type, target_id=target_id, attachment_id=attachment_id, data=data)
-        attachment = ArtifactAttachment(
-            id=attachment_id,
-            learning_run_id=learning_run_id,
-            user_id=self.user_id,
-            target_type=target_type,
-            target_id=target_id,
-            original_filename=clean_name,
-            media_type=(media_type or "application/octet-stream")[:160],
-            byte_size=stored.byte_size,
-            sha256=stored.sha256,
-            object_key=stored.object_key,
-        )
-        self.db.add(attachment)
-        try:
-            self.db.commit()
-        except Exception:
-            self.db.rollback()
-            self.attachment_storage.resolve(stored.object_key).unlink(missing_ok=True)
-            raise
-        return self._attachment(attachment)
-
-    def _validated_attachments(self, learning_run_id, target_type, target_id, attachment_ids):
-        if not attachment_ids:
-            raise AppError("必须提交至少一个真实附件", code="ATTACHMENT_REQUIRED")
-        if len(set(attachment_ids)) != len(attachment_ids):
-            raise AppError("附件 ID 不得重复", code="ATTACHMENT_DUPLICATE")
-        attachments = self.db.scalars(
-            select(ArtifactAttachment).where(
-                ArtifactAttachment.id.in_(attachment_ids),
-                ArtifactAttachment.user_id == self.user_id,
-                ArtifactAttachment.learning_run_id == learning_run_id,
-                ArtifactAttachment.target_type == target_type,
-                ArtifactAttachment.target_id == target_id,
-            )
-        ).all()
-        if len(attachments) != len(attachment_ids):
-            raise AppError("附件不存在、无权访问或不属于当前成果", code="ATTACHMENT_INVALID", status=403)
-        by_id = {item.id: item for item in attachments}
-        return [by_id[item_id] for item_id in attachment_ids]
-
-    def _attachments(self, learning_run_id, target_type, target_id):
-        items = self.db.scalars(select(ArtifactAttachment).where(ArtifactAttachment.user_id == self.user_id, ArtifactAttachment.learning_run_id == learning_run_id, ArtifactAttachment.target_type == target_type, ArtifactAttachment.target_id == target_id).order_by(ArtifactAttachment.created_at)).all()
-        return [self._attachment(item) for item in items]
+        return self.artifact_service.capstone_view(capstone)
 
     def attachment(self, attachment_id):
-        item = self.db.scalar(select(ArtifactAttachment).where(ArtifactAttachment.id == attachment_id, ArtifactAttachment.user_id == self.user_id))
-        if not item:
-            raise AppError("附件不存在", code="ATTACHMENT_NOT_FOUND", status=404)
-        if not self.attachment_storage:
-            raise AppError("附件存储未配置", code="ATTACHMENT_STORAGE_UNAVAILABLE", status=503)
-        path = self.attachment_storage.resolve(item.object_key)
-        if not path.is_file():
-            raise AppError("附件对象缺失", code="ATTACHMENT_OBJECT_MISSING", status=410)
-        return item, path
-
-    @staticmethod
-    def _attachment(item):
-        return {"id": item.id, "filename": item.original_filename, "mediaType": item.media_type, "byteSize": item.byte_size, "sha256": item.sha256, "createdAt": timestamp(item.created_at)}
+        return self.artifact_service.attachment(attachment_id)
 
     def _book_for_section(self, section):
         return self.contexts.resolve_section(

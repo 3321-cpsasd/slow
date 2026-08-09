@@ -8,6 +8,9 @@ Slow 的重要变更记录在这里。本项目采用 [Keep a Changelog](https:/
 
 ### Added · 新增
 
+- Added ADR-0001 as the authoritative design for single-call lesson-and-quiz generation, deterministic Learning Contract gates, separated generation-attempt audit, and atomic publication of user-visible content.
+- 新增 ADR-0001，确立正文与测验一次生成、Learning Contract 确定性门禁、生成尝试审计分离及用户可见内容原子发布的权威设计。
+
 - Added production-safe, invitation-only username/password authentication with administrator-only account creation, disable/enable and password-reset commands; disabling or resetting an account revokes all of its active sessions.
 - 新增可用于生产内测的邀请制账号密码鉴权，以及仅限管理员执行的账号创建、禁用/启用和密码重置命令；禁用账号或重置密码会撤销该用户的全部活跃会话。
 - Added a 24-hour idle session timeout, a seven-day absolute session lifetime, and per-IP login rate limiting at the production reverse proxy.

@@ -74,8 +74,8 @@ def _recreate_plan_creation_requests(connection):
                 status VARCHAR(24) NOT NULL,
                 series_id VARCHAR,
                 error_code VARCHAR(80) NOT NULL DEFAULT '',
-                created_at DATETIME NOT NULL,
-                updated_at DATETIME NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL,
                 PRIMARY KEY (idempotency_key, user_id),
                 FOREIGN KEY(user_id) REFERENCES users (id),
                 FOREIGN KEY(series_id) REFERENCES series (id)
@@ -120,34 +120,41 @@ def upgrade():
     connection = op.get_bind()
 
     user_columns = _columns(connection, "users")
-    with op.batch_alter_table("users", recreate="always") as batch_op:
-        if "status" not in user_columns:
-            batch_op.add_column(
-                sa.Column(
-                    "status",
-                    sa.String(length=24),
-                    nullable=False,
-                    server_default="active",
-                )
+    missing_user_columns = []
+    if "status" not in user_columns:
+        missing_user_columns.append(
+            sa.Column(
+                "status",
+                sa.String(length=24),
+                nullable=False,
+                server_default="active",
             )
-        if "created_at" not in user_columns:
-            batch_op.add_column(
-                sa.Column(
-                    "created_at",
-                    sa.DateTime(timezone=True),
-                    nullable=False,
-                    server_default=sa.func.current_timestamp(),
-                )
+        )
+    if "created_at" not in user_columns:
+        missing_user_columns.append(
+            sa.Column(
+                "created_at",
+                sa.DateTime(timezone=True),
+                nullable=False,
+                server_default=sa.func.current_timestamp(),
             )
-        if "updated_at" not in user_columns:
-            batch_op.add_column(
-                sa.Column(
-                    "updated_at",
-                    sa.DateTime(timezone=True),
-                    nullable=False,
-                    server_default=sa.func.current_timestamp(),
-                )
+        )
+    if "updated_at" not in user_columns:
+        missing_user_columns.append(
+            sa.Column(
+                "updated_at",
+                sa.DateTime(timezone=True),
+                nullable=False,
+                server_default=sa.func.current_timestamp(),
             )
+        )
+    if connection.dialect.name == "postgresql":
+        for column in missing_user_columns:
+            op.add_column("users", column)
+    else:
+        with op.batch_alter_table("users", recreate="always") as batch_op:
+            for column in missing_user_columns:
+                batch_op.add_column(column)
     op.create_index("ix_users_status", "users", ["status"], unique=False)
 
     _recreate_plan_creation_requests(connection)
@@ -160,6 +167,15 @@ def upgrade():
         unique=True,
     )
     for table_name in RUN_SCOPED_TABLES:
+        if connection.dialect.name == "postgresql":
+            op.create_foreign_key(
+                f"fk_{table_name}_run_user",
+                table_name,
+                "learning_runs",
+                ["learning_run_id", "user_id"],
+                ["id", "user_id"],
+            )
+            continue
         with op.batch_alter_table(
             table_name,
             recreate="always",
@@ -173,6 +189,11 @@ def upgrade():
 
     for table_name, legacy_columns in LEGACY_STATE_COLUMNS.items():
         existing = _columns(connection, table_name)
+        if connection.dialect.name == "postgresql":
+            for column_name in legacy_columns:
+                if column_name in existing:
+                    op.drop_column(table_name, column_name)
+            continue
         with op.batch_alter_table(
             table_name,
             recreate="always",
@@ -244,8 +265,8 @@ def downgrade():
                 status VARCHAR(24) NOT NULL,
                 series_id VARCHAR,
                 error_code VARCHAR(80) NOT NULL DEFAULT '',
-                created_at DATETIME NOT NULL,
-                updated_at DATETIME NOT NULL,
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users (id),
                 FOREIGN KEY(series_id) REFERENCES series (id)
             )

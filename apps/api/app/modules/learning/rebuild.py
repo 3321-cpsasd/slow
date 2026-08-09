@@ -25,6 +25,7 @@ from ...infrastructure.tables import (
     User,
     now,
 )
+from .assessment import rebuild_assessment_projections, section_gate_decision
 
 
 def _uid(prefix: str) -> str:
@@ -86,6 +87,7 @@ def rebuild_user_projections(db: Session, *, user_id: str) -> dict:
         "sections": 0,
         "artifacts": 0,
         "memories": 0,
+        "assessment": rebuild_assessment_projections(db, user_id=user_id),
     }
 
     for run in runs:
@@ -143,13 +145,18 @@ def rebuild_user_projections(db: Session, *, user_id: str) -> dict:
                     }
                 )
 
-        section_completed = {
-            section_id: any(
-                attempt["passed"]
-                for attempt in attempts
+        section_completed = {}
+        for section_id, attempts in attempts_by_section.items():
+            gate = section_gate_decision(
+                db,
+                learning_run_id=run.id,
+                section_id=section_id,
             )
-            for section_id, attempts in attempts_by_section.items()
-        }
+            section_completed[section_id] = (
+                gate.passed
+                if gate.fixed_total
+                else any(attempt["passed"] for attempt in attempts)
+            )
         chapter_completed = {}
         for chapters in chapters_by_book.values():
             for chapter in chapters:
@@ -168,6 +175,7 @@ def rebuild_user_projections(db: Session, *, user_id: str) -> dict:
 
         previous_books_complete = True
         for book in books:
+            outline_confirmed = book.outline_status == "confirmed"
             book_progress = _projection(
                 db,
                 BookProgress,
@@ -180,13 +188,15 @@ def rebuild_user_projections(db: Session, *, user_id: str) -> dict:
                 "completed"
                 if book_completed[book.id]
                 else "available"
-                if previous_books_complete
+                if previous_books_complete and outline_confirmed
                 else "locked"
             )
             book_progress.updated_at = now()
             rebuilt["books"] += 1
 
-            previous_chapters_complete = previous_books_complete
+            previous_chapters_complete = (
+                previous_books_complete and outline_confirmed
+            )
             for chapter in chapters_by_book[book.id]:
                 chapter_progress = _projection(
                     db,
@@ -308,7 +318,21 @@ def rebuild_user_projections(db: Session, *, user_id: str) -> dict:
         .where(LearningEvidence.user_id == user_id)
         .order_by(LearningEvidence.created_at, LearningEvidence.id)
     ).all()
+    m2_attempt_ids = set(
+        db.scalars(
+            select(QuizAttempt.id).where(
+                QuizAttempt.user_id == user_id,
+                QuizAttempt.learning_contract_version_id.is_not(None),
+            )
+        ).all()
+    )
     for evidence in evidence_rows:
+        evidence_payload = _load(evidence.result_json, {})
+        if (
+            evidence.evidence_type == "quiz"
+            and evidence_payload.get("attemptId") in m2_attempt_ids
+        ):
+            continue
         key = (evidence.shelf_id, evidence.concept)
         memory = memories.get(key)
         if not memory:

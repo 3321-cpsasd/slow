@@ -2,7 +2,7 @@ import hashlib
 import json
 from uuid import uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -13,11 +13,15 @@ from ...infrastructure.tables import (
     BookCapstone,
     Chapter,
     ChapterPractice,
+    GenerationRun,
+    LearningContractVersion,
     LearningEvidence,
     LearningMemory,
     LearningTask,
+    LearningRunSectionBinding,
     QuizAttempt,
     QuizSet,
+    Remediation,
     Section,
     SectionProgress,
     now,
@@ -26,7 +30,19 @@ from ...platform.unit_of_work import SqlAlchemyUnitOfWork
 from ..artifacts.progress import ArtifactProgressStore
 from ..library.context import ActiveLearningContextResolver, SectionContext
 from .domain import ProgressionDecision, ProgressionPolicy, ProgressionSnapshot
+from .assessment import (
+    SectionGateDecision,
+    record_scoring_facts,
+    section_gate_decision,
+)
+from .assessment_items import immutable_questions_for_quiz
+from .content_governance_store import governance_view_for_quiz
 from .progress import ProgressStore
+from .contracts import open_run_section
+from .decision_snapshots import (
+    append_assessment_gate_snapshot,
+    append_progression_snapshot,
+)
 from .tasks import task_view
 
 
@@ -114,6 +130,9 @@ class ProgressionRepository:
                 next_chapter_first_section.id if next_chapter_first_section else None
             ),
             next_book_id=next_book.id if next_book else None,
+            next_book_outline_status=(
+                next_book.outline_status if next_book else "confirmed"
+            ),
             next_book_first_chapter_id=(
                 next_book_first_chapter.id if next_book_first_chapter else None
             ),
@@ -209,23 +228,134 @@ class SubmitQuiz:
             self._validate_replay(replay, request_hash)
             return self._replay_response(replay)
 
+        feedback_regeneration_pending = self.db.scalar(
+            select(func.count())
+            .select_from(LearningTask)
+            .where(
+                LearningTask.user_id == self.user_id,
+                LearningTask.section_id == section_id,
+                LearningTask.task_type == "content_feedback_regeneration",
+                LearningTask.status.in_({"pending", "running"}),
+            )
+        ) or 0
+        regeneration_running = self.db.scalar(
+            select(func.count())
+            .select_from(GenerationRun)
+            .where(
+                GenerationRun.section_id == section_id,
+                GenerationRun.operation.in_({"regeneration", "feedback_repair"}),
+                GenerationRun.status == "running",
+            )
+        ) or 0
+        if feedback_regeneration_pending or regeneration_running:
+            raise AppError(
+                "本节正在根据反馈生成新版本，请完成后再提交验证",
+                code="SECTION_REGENERATION_IN_PROGRESS",
+                status=409,
+            )
+
         section = context.section
         quiz = self.db.get(QuizSet, body.quiz_set_id)
-        latest = self.db.scalar(
-            select(QuizSet)
-            .where(QuizSet.section_id == section_id)
-            .order_by(QuizSet.generation.desc())
-        )
         if not quiz or quiz.section_id != section_id:
             raise AppError("题集无效", code="QUIZ_INVALID")
-        if not latest or latest.id != quiz.id:
-            raise AppError("旧题集已失效，请提交当前题集", code="QUIZ_STALE", status=409)
+        if quiz.publication_status != "published":
+            raise AppError(
+                "题集不是当前正式发布版本",
+                code="QUIZ_NOT_PUBLISHED",
+                status=409,
+            )
+        governance = governance_view_for_quiz(self.db, quiz.id)
+        if not governance or not (
+            governance["allowed"] and governance["assessmentEligible"]
+        ):
+            raise AppError(
+                "题集未通过正式学习证据治理，不能提交",
+                code="QUIZ_GOVERNANCE_REQUIRED",
+                status=409,
+            )
+        binding = self.db.scalar(
+            select(LearningRunSectionBinding).where(
+                LearningRunSectionBinding.learning_run_id == learning_run.id,
+                LearningRunSectionBinding.user_id == self.user_id,
+                LearningRunSectionBinding.section_id == section_id,
+            )
+        )
+        if not binding:
+            contract = (
+                self.db.get(
+                    LearningContractVersion,
+                    quiz.learning_contract_version_id,
+                )
+                if quiz.learning_contract_version_id
+                else None
+            )
+            if not contract:
+                raise AppError(
+                    "旧题集缺少可恢复的学习契约",
+                    code="QUIZ_LINEAGE_MISSING",
+                    status=409,
+                )
+            binding = open_run_section(
+                self.db,
+                run=learning_run,
+                section=section,
+                mission_version_id=contract.mission_version_id,
+                source="quiz_submit_recovery",
+                uid=_uid,
+                preferred_quiz_id=quiz.id,
+            )
+        remediation = self.db.scalar(
+            select(Remediation).where(Remediation.replacement_quiz_id == quiz.id)
+        )
+        remediation_allowed = False
+        if remediation:
+            source_attempt = self.db.get(QuizAttempt, remediation.attempt_id)
+            remediation_allowed = bool(
+                source_attempt
+                and source_attempt.learning_run_id == learning_run.id
+                and quiz.learning_contract_version_id
+                == binding.learning_contract_version_id
+            )
+        active_remediation = self.db.scalar(
+            select(Remediation)
+            .join(QuizAttempt, QuizAttempt.id == Remediation.attempt_id)
+            .join(QuizSet, QuizSet.id == Remediation.replacement_quiz_id)
+            .where(
+                QuizAttempt.learning_run_id == learning_run.id,
+                QuizAttempt.user_id == self.user_id,
+                QuizSet.learning_contract_version_id
+                == binding.learning_contract_version_id,
+            )
+            .order_by(Remediation.created_at.desc())
+        )
+        initial_is_superseded = bool(
+            quiz.id == binding.initial_quiz_set_id and active_remediation
+        )
+        if (
+            initial_is_superseded
+            or (
+                quiz.id != binding.initial_quiz_set_id
+                and not remediation_allowed
+            )
+        ):
+            raise AppError(
+                "题集不属于当前学习实例",
+                code="QUIZ_STALE",
+                status=409,
+            )
 
-        questions = _load(quiz.questions_json, [])
+        questions = immutable_questions_for_quiz(
+            self.db,
+            quiz,
+            require_versions=bool(remediation),
+            require_evidence=True,
+        )
         grade = grade_choice_quiz(questions, body.answers)
         attempt = QuizAttempt(
             id=_uid("attempt"),
             quiz_set_id=quiz.id,
+            learning_contract_version_id=binding.learning_contract_version_id,
+            content_version_id=binding.content_version_id,
             learning_run_id=learning_run.id,
             user_id=self.user_id,
             idempotency_key=request_key,
@@ -241,8 +371,48 @@ class SubmitQuiz:
         )
         was_completed = section_progress.status == "completed"
         self.db.add(attempt)
+        self.db.flush()
+        assistance_mode = (
+            "assisted_immediate"
+            if remediation
+            # A repeated section quiz has no delayed-review assignment or novel
+            # item guarantee. Preserve it as practice, never as retention proof.
+            else "unassisted_repeat"
+            if was_completed
+            else "unassisted_initial"
+        )
+        record_scoring_facts(
+            self.db,
+            attempt=attempt,
+            section=section,
+            questions=questions,
+            results=grade.results,
+            score=grade.score,
+            total=grade.total,
+            passed=grade.passed,
+            assistance_mode=assistance_mode,
+            learning_episode_id=(
+                f"quiz:{remediation.attempt_id}"
+                if remediation
+                else f"quiz:{attempt.id}"
+            ),
+        )
+        gate_decision = section_gate_decision(
+            self.db,
+            learning_run_id=learning_run.id,
+            section_id=section.id,
+        )
+        append_assessment_gate_snapshot(
+            self.db,
+            attempt=attempt,
+            section_id=section.id,
+            decision=gate_decision,
+            trigger_kind="quiz_submit",
+        )
+        completion_passed = grade.passed if was_completed else gate_decision.passed
+        attempt.passed = completion_passed
         first_completion = False
-        if grade.passed and not was_completed:
+        if completion_passed and not was_completed:
             transition = self.db.execute(
                 update(SectionProgress)
                 .where(
@@ -270,15 +440,34 @@ class SubmitQuiz:
             section_progress.ask_me_unlocked |= grade.perfect
             section_progress.version += 1
             section_progress.updated_at = now()
-            if grade.passed:
+            if completion_passed:
                 section_progress.status = "completed"
-        if not grade.passed and not was_completed:
+        if not completion_passed and not was_completed:
             section_progress.status = "available"
-        self._record_evidence(context, questions, grade.results, attempt.id)
+        self._record_evidence(
+            context,
+            questions,
+            grade.results,
+            attempt.id,
+            # Keep the append-only compatibility fact for audit/rebuild, but
+            # M2 mastery is projected exclusively from qualified observations.
+            # Mirroring it into linear memory would let governance-ineligible
+            # evidence re-enter generation context.
+            update_legacy_memory=not bool(quiz.learning_contract_version_id),
+        )
 
         workflow_tasks: list[LearningTask] = []
         if first_completion:
-            decision = self.policy.after_quiz_passed(self.progression.snapshot(context))
+            progression_input = self.progression.snapshot(context)
+            decision = self.policy.after_quiz_passed(progression_input)
+            append_progression_snapshot(
+                self.db,
+                attempt=attempt,
+                section_id=section.id,
+                snapshot=progression_input,
+                decision=decision,
+                trigger_kind="quiz_submit",
+            )
             self.progression.apply(decision)
             self.artifacts.apply_availability(
                 learning_run_id=learning_run.id,
@@ -311,7 +500,7 @@ class SubmitQuiz:
                     payload_json=_dump({"sourceSectionId": section.id}),
                     status="pending",
                 ))
-        if not grade.passed:
+        if not completion_passed and not was_completed:
             workflow_tasks.append(LearningTask(
                 id=_uid("task"),
                 learning_run_id=learning_run.id,
@@ -391,6 +580,22 @@ class SubmitQuiz:
             context.chapter,
             context.book,
         )
+        append_assessment_gate_snapshot(
+            self.db,
+            attempt=attempt,
+            section_id=context.section.id,
+            decision=SectionGateDecision(
+                passed=True,
+                initial_score=score,
+                adjusted_score=score,
+                fixed_total=len(results),
+                unresolved_required_target_ids=(),
+                unresolved_target_ids=(),
+            ),
+            trigger_kind="quiz_reassess",
+            decision_basis="legacy_score_reassessment",
+            rule_version="legacy_score_gate_v1",
+        )
         existing_tasks = list(
             self.db.scalars(
                 select(LearningTask).where(
@@ -405,7 +610,9 @@ class SubmitQuiz:
             ).all()
         )
         if attempt.passed and section_progress.status == "completed":
-            return self._response(attempt, existing_tasks)
+            response = self._response(attempt, existing_tasks)
+            self.uow.commit()
+            return response
 
         transition = self.db.execute(
             update(SectionProgress)
@@ -428,8 +635,15 @@ class SubmitQuiz:
         attempt.passed = True
         workflow_tasks = existing_tasks
         if first_completion:
-            decision = self.policy.after_quiz_passed(
-                self.progression.snapshot(context)
+            progression_input = self.progression.snapshot(context)
+            decision = self.policy.after_quiz_passed(progression_input)
+            append_progression_snapshot(
+                self.db,
+                attempt=attempt,
+                section_id=context.section.id,
+                snapshot=progression_input,
+                decision=decision,
+                trigger_kind="quiz_reassess",
             )
             self.progression.apply(decision)
             self.artifacts.apply_availability(
@@ -507,6 +721,8 @@ class SubmitQuiz:
         questions: list[dict],
         results: list[dict],
         attempt_id: str,
+        *,
+        update_legacy_memory: bool = True,
     ) -> None:
         for question, result in zip(questions, results, strict=True):
             concept = question["objective"][:300]
@@ -532,6 +748,8 @@ class SubmitQuiz:
                 mastery_delta=delta,
             )
             self.db.add(evidence)
+            if not update_legacy_memory:
+                continue
             memory = self.db.scalar(
                 select(LearningMemory).where(
                     LearningMemory.user_id == self.user_id,

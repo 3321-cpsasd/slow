@@ -23,8 +23,46 @@ def _columns(inspector, table_name):
     return {item["name"] for item in inspector.get_columns(table_name)}
 
 
+def _replace_section_unique_constraint(
+    connection,
+    table_name,
+    legacy_name,
+    scoped_name,
+):
+    """Avoid PostgreSQL table recreation when other tables reference its PK."""
+    if connection.dialect.name == "postgresql":
+        op.drop_constraint(legacy_name, table_name, type_="unique")
+        op.create_unique_constraint(
+            scoped_name,
+            table_name,
+            ["section_id", "user_id"],
+        )
+        return
+
+    with op.batch_alter_table(
+        table_name,
+        recreate="always",
+        naming_convention=NAMING_CONVENTION,
+    ) as batch_op:
+        batch_op.drop_constraint(legacy_name, type_="unique")
+        batch_op.create_unique_constraint(
+            scoped_name,
+            ["section_id", "user_id"],
+        )
+
+
 def upgrade():
     connection = op.get_bind()
+    if connection.dialect.name == "postgresql":
+        # Alembic creates version_num as VARCHAR(32), while this and later
+        # descriptive revision identifiers are longer than 32 characters.
+        op.alter_column(
+            "alembic_version",
+            "version_num",
+            existing_type=sa.String(length=32),
+            type_=sa.String(length=128),
+            existing_nullable=False,
+        )
     inspector = sa.inspect(connection)
     quiz_columns = _columns(inspector, "quiz_attempts")
     if "idempotency_key" not in quiz_columns:
@@ -119,44 +157,44 @@ def upgrade():
     # Old schemas made section_id globally unique. Rebuild these two tables so
     # the authority is correctly scoped to (section, user).
     inspector = sa.inspect(connection)
-    qa_uniques = {
-        tuple(item["column_names"])
-        for item in inspector.get_unique_constraints("qa_sessions")
-    }
+    qa_constraints = inspector.get_unique_constraints("qa_sessions")
+    qa_uniques = {tuple(item["column_names"]) for item in qa_constraints}
     if ("section_id",) in qa_uniques and ("section_id", "user_id") not in qa_uniques:
-        with op.batch_alter_table(
+        legacy_name = next(
+            (
+                item["name"]
+                for item in qa_constraints
+                if tuple(item["column_names"]) == ("section_id",)
+                and item["name"]
+            ),
+            "uq_qa_sessions_section_id",
+        )
+        _replace_section_unique_constraint(
+            connection,
             "qa_sessions",
-            recreate="always",
-            naming_convention=NAMING_CONVENTION,
-        ) as batch_op:
-            batch_op.drop_constraint(
-                "uq_qa_sessions_section_id",
-                type_="unique",
-            )
-            batch_op.create_unique_constraint(
-                "uq_qa_sessions_section_id_user_id",
-                ["section_id", "user_id"],
-            )
+            legacy_name,
+            "uq_qa_sessions_section_id_user_id",
+        )
 
     inspector = sa.inspect(connection)
-    note_uniques = {
-        tuple(item["column_names"])
-        for item in inspector.get_unique_constraints("learning_notes")
-    }
+    note_constraints = inspector.get_unique_constraints("learning_notes")
+    note_uniques = {tuple(item["column_names"]) for item in note_constraints}
     if ("section_id",) in note_uniques and ("section_id", "user_id") not in note_uniques:
-        with op.batch_alter_table(
+        legacy_name = next(
+            (
+                item["name"]
+                for item in note_constraints
+                if tuple(item["column_names"]) == ("section_id",)
+                and item["name"]
+            ),
+            "uq_learning_notes_section_id",
+        )
+        _replace_section_unique_constraint(
+            connection,
             "learning_notes",
-            recreate="always",
-            naming_convention=NAMING_CONVENTION,
-        ) as batch_op:
-            batch_op.drop_constraint(
-                "uq_learning_notes_section_id",
-                type_="unique",
-            )
-            batch_op.create_unique_constraint(
-                "uq_learning_notes_section_id_user_id",
-                ["section_id", "user_id"],
-            )
+            legacy_name,
+            "uq_learning_notes_section_id_user_id",
+        )
 
 
 def downgrade():

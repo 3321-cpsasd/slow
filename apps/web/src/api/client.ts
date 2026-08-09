@@ -124,6 +124,68 @@ async function streamQa(
   return completed;
 }
 
+async function streamFeedbackRepair(
+  feedbackId:string,
+  onDelta:(delta:string)=>void,
+):Promise<import('../model/types').FeedbackRepairResult>{
+  const response = await request(`/api/feedback/${feedbackId}/repair/stream`, {
+    method:'POST',
+    headers:{
+      'Accept':'text/event-stream',
+      ...(csrfToken ? {'X-CSRF-Token':csrfToken} : {}),
+    },
+  });
+  if(!response.ok){
+    if(response.status === 401) unauthorizedHandler?.();
+    const text = await response.text();
+    const payload = parsePayload(text);
+    throw new ApiError(
+      String(payload?.message || payload?.error || '补救内容生成失败'),
+      response.status,
+      String(payload?.code || 'FEEDBACK_REPAIR_FAILED'),
+      Boolean(payload?.retryable),
+    );
+  }
+  if(!response.body) throw new Error('浏览器不支持流式补救');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let completed:import('../model/types').FeedbackRepairResult|undefined;
+  const consume = (frame:string) => {
+    let eventType = 'message';
+    const dataLines:string[] = [];
+    for(const line of frame.split(/\r?\n/)){
+      if(line.startsWith('event:')) eventType = line.slice(6).trim();
+      if(line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+    }
+    if(!dataLines.length) return;
+    const payload = JSON.parse(dataLines.join('\n')) as Record<string,unknown>;
+    if(eventType === 'delta') onDelta(String(payload.delta || ''));
+    if(eventType === 'done') completed = payload as import('../model/types').FeedbackRepairResult;
+    if(eventType === 'error') {
+      throw new ApiError(
+        String(payload.message || '补救内容生成失败'),
+        200,
+        String(payload.code || 'FEEDBACK_REPAIR_FAILED'),
+        Boolean(payload.retryable),
+      );
+    }
+  };
+  while(true){
+    const {value,done} = await reader.read();
+    buffer += decoder.decode(value,{stream:!done});
+    const frames = buffer.split(/\r?\n\r?\n/);
+    buffer = frames.pop() || '';
+    for(const frame of frames){
+      if(frame.trim()) consume(frame);
+    }
+    if(done) break;
+  }
+  if(buffer.trim()) consume(buffer);
+  if(!completed) throw new Error('补救内容流意外结束');
+  return completed;
+}
+
 export const api = {
   setUnauthorizedHandler:(handler:()=>void)=>{ unauthorizedHandler = handler; },
   authConfig:()=>call<import('../model/types').AuthConfig>('/api/auth/config'),
@@ -147,6 +209,20 @@ export const api = {
     await call<void>('/api/auth/logout',{method:'POST'});
     csrfToken = '';
   },
+  privacy:()=>call<import('../model/types').PrivacyState>('/api/privacy'),
+  acceptPrivacy:(body:{privacyAccepted:boolean;trialAccepted:boolean})=>call<import('../model/types').PrivacyState>('/api/privacy/consent',{
+    method:'POST',
+    body:JSON.stringify(body),
+  }),
+  requestAccountExit:(body:{confirmation:string;reason:string})=>call<import('../model/types').AccountExitReceipt>('/api/account/exit',{
+    method:'POST',
+    body:JSON.stringify(body),
+  }),
+  productEvents:(body:object)=>call<{accepted:number;duplicated:number}>('/api/events/batch',{
+    method:'POST',
+    keepalive:true,
+    body:JSON.stringify(body),
+  }),
   onboarding:()=>call<import('../model/types').OnboardingState>('/api/onboarding'),
   saveProfileDraft:(body:object)=>call<import('../model/types').OnboardingState>('/api/onboarding/profile',{
     method:'PATCH',
@@ -156,17 +232,31 @@ export const api = {
     method:'POST',
     body:JSON.stringify(body),
   }),
+  updateProfile:(body:object)=>call<import('../model/types').LearningProfile>('/api/profile',{
+    method:'PUT',
+    body:JSON.stringify(body),
+  }),
   bootstrap:()=>call<import('../model/types').Bootstrap>('/api/bootstrap'),
+  submitFeedback:(body:object,idempotencyKey:string)=>call<import('../model/types').FeedbackReceipt>('/api/feedback',{
+    method:'POST',
+    headers:{'Idempotency-Key':idempotencyKey},
+    body:JSON.stringify(body),
+  }),
+  streamFeedbackRepair:(feedbackId:string,onDelta:(delta:string)=>void)=>streamFeedbackRepair(feedbackId,onDelta),
   createShelf:(body:import('../model/types').ShelfCreateInput)=>call<import('../model/types').Shelf>('/api/shelves',{method:'POST',body:JSON.stringify(body)}),
   updateResume:(sectionId:string,blockId='')=>call<import('../model/types').ResumePosition>(`/api/sections/${sectionId}/resume`,{method:'PUT',body:JSON.stringify({blockId})}),
   aiRuntime:()=>call<import('../model/types').AiRuntime>('/api/runtime/ai'),
   updateAiRuntime:(body:object)=>call<import('../model/types').AiRuntime>('/api/runtime/ai',{method:'PUT',body:JSON.stringify(body)}),
   createPlan:(body:object,idempotencyKey:string)=>call<import('../model/types').Series>('/api/plans',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},body:JSON.stringify(body)}),
   series:(id:string)=>call<import('../model/types').Series>(`/api/series/${id}`),
+  confirmMilestonePath:(id:string)=>call<{seriesId:string;status:string;version:number;goalProfileVersion:number}>(`/api/series/${id}/milestone-path/confirm`,{method:'POST'}),
   deleteSeries:(id:string)=>call<void>(`/api/series/${id}`,{method:'DELETE'}),
   deleteBook:(id:string)=>call<void>(`/api/books/${id}`,{method:'DELETE'}),
+  replanBook:(id:string)=>call<import('../model/types').BookReplanProposal>(`/api/books/${id}/chapters/replan`,{method:'POST'}),
+  confirmBookReplan:(id:string,proposalId:string)=>call<import('../model/types').Book>(`/api/books/${id}/chapters/replan/${proposalId}/confirm`,{method:'POST'}),
   chapter:(id:string)=>call<import('../model/types').Chapter>(`/api/chapters/${id}/generate`,{method:'POST'}),
   section:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}`),
+  openSection:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}/open`,{method:'POST'}),
   generateSection:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}/generate`,{method:'POST'}),
   regenerateSection:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}/regenerate`,{method:'POST'}),
   quiz:(id:string,quizSetId:string,answers:number[][],idempotencyKey:string)=>call<import('../model/types').QuizResult>(`/api/sections/${id}/quiz`,{
@@ -178,6 +268,14 @@ export const api = {
     `/api/sections/${sectionId}/quiz-attempts/${attemptId}/reassess`,
     {method:'POST'},
   ),
+  dueReviews:(dailyBudget=10)=>call<import('../model/types').DueReviews>(`/api/reviews/due?daily_budget=${dailyBudget}`),
+  startReview:(assignmentId:string)=>call<import('../model/types').ReviewSession>(`/api/reviews/${assignmentId}/start`,{method:'POST'}),
+  submitReview:(assignmentId:string,answers:number[][],idempotencyKey:string)=>call<import('../model/types').ReviewResult>(`/api/reviews/${assignmentId}/submit`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},
+    body:JSON.stringify({answers}),
+  }),
+  skipReview:(assignmentId:string)=>call<{assignmentId:string;status:'skipped'}>(`/api/reviews/${assignmentId}/skip`,{method:'POST'}),
   learningTask:(id:string)=>call<import('../model/types').LearningTask>(`/api/learning-tasks/${id}`),
   retryLearningTask:(id:string)=>call<import('../model/types').LearningTask>(`/api/learning-tasks/${id}/retry`,{method:'POST'}),
   ask:(id:string,blockId:string,question:string,threadId?:string,forceRelation?:'follow_up'|'new_question')=>call<import('../model/types').QaAnswer>(`/api/sections/${id}/ask`,{method:'POST',body:JSON.stringify({blockId,question,threadId,forceRelation})}),
@@ -185,6 +283,7 @@ export const api = {
   correctQa:(id:string,threadId:string,targetThreadId:string)=>call<import('../model/types').QaCorrection>(`/api/sections/${id}/qa/threads/${threadId}`,{method:'PATCH',body:JSON.stringify({relation:'follow_up',targetThreadId})}),
   askMe:(id:string,answer='')=>call<import('../model/types').AskMe>(`/api/sections/${id}/ask-me`,{method:'POST',body:JSON.stringify({answer})}),
   note:(id:string,content:object)=>call<import('../model/types').Note>(`/api/sections/${id}/note`,{method:'PATCH',body:JSON.stringify({content})}),
+  noteReviewSupplement:(id:string,reviewEpisodeId:string,content:object)=>call<import('../model/types').Note>(`/api/sections/${id}/note/review-supplements`,{method:'POST',body:JSON.stringify({reviewEpisodeId,content})}),
   uploadPractice:(id:string,file:File)=>call<import('../model/types').Attachment>(`/api/chapters/${id}/practice/attachments`,{method:'POST',headers:{'Content-Type':file.type||'application/octet-stream','X-Filename':encodeURIComponent(file.name)},body:file}),
   practice:(id:string,content:object,attachmentIds:string[])=>call<import('../model/types').Practice>(`/api/chapters/${id}/practice`,{method:'POST',body:JSON.stringify({content,attachmentIds})}),
   uploadCapstone:(id:string,file:File)=>call<import('../model/types').Attachment>(`/api/books/${id}/capstone/attachments`,{method:'POST',headers:{'Content-Type':file.type||'application/octet-stream','X-Filename':encodeURIComponent(file.name)},body:file}),

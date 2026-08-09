@@ -17,6 +17,22 @@ concurrency:
 jobs:
   api-tests:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.6-alpine
+        env:
+          POSTGRES_DB: slow_test
+          POSTGRES_USER: slow_test
+          POSTGRES_PASSWORD: slow_test_only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U slow_test -d slow_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      POSTGRES_TEST_DATABASE_URL: postgresql+psycopg://slow_test:slow_test_only@127.0.0.1:5432/slow_test
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -116,11 +132,17 @@ jobs:
             deploy/compose.prod.yml \
             "$ECS_USER@$ECS_HOST:/opt/slow/compose.prod.yml"
           scp -P "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
+            deploy/compose.sqlite-rollback.yml \
+            "$ECS_USER@$ECS_HOST:/opt/slow/compose.sqlite-rollback.yml"
+          scp -P "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
             deploy/scripts/remote-deploy.sh \
             "$ECS_USER@$ECS_HOST:/opt/slow/remote-deploy.sh"
           scp -P "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
             deploy/scripts/create-demo-user.sh \
             "$ECS_USER@$ECS_HOST:/opt/slow/create-demo-user.sh"
+          scp -P "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
+            deploy/scripts/cutover-sqlite-to-postgres.sh \
+            "$ECS_USER@$ECS_HOST:/opt/slow/cutover-sqlite-to-postgres.sh"
       - name: Pull and deploy release
         shell: bash
         run: |
@@ -129,7 +151,7 @@ jobs:
             "docker login ghcr.io -u '$GITHUB_ACTOR' --password-stdin"
           ssh -p "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
             "$ECS_USER@$ECS_HOST" \
-            "chmod 700 /opt/slow/remote-deploy.sh /opt/slow/create-demo-user.sh && APP_VERSION='$GITHUB_SHA' REGISTRY='ghcr.io' IMAGE_NAME='$GITHUB_REPOSITORY' WEB_ORIGIN='$WEB_ORIGIN' /opt/slow/remote-deploy.sh"
+            "chmod 700 /opt/slow/remote-deploy.sh /opt/slow/create-demo-user.sh /opt/slow/cutover-sqlite-to-postgres.sh && APP_VERSION='$GITHUB_SHA' REGISTRY='ghcr.io' IMAGE_NAME='$GITHUB_REPOSITORY' WEB_ORIGIN='$WEB_ORIGIN' /opt/slow/remote-deploy.sh"
 
   deploy-ecs-demo:
     # The mainland ECS currently runs the explicit local-login demo. Build on

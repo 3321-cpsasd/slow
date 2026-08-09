@@ -5,6 +5,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.orm import Session
 
 from ..core.errors import AppError
+from ..modules.curriculum.policy import CHAPTER_SECTION_POLICY
 from ..infrastructure.tables import (
     ArtifactAttachment,
     ArtifactProgress,
@@ -366,6 +367,11 @@ class LibraryReadModel:
                     "objective": chapter.objective,
                     "status": progress.status,
                     "generated": bool(sections),
+                    "workloadHint": (
+                        CHAPTER_SECTION_POLICY.workload(len(sections))
+                        if sections
+                        else None
+                    ),
                     "sections": sections,
                     "practice": practice,
                 }
@@ -423,6 +429,9 @@ class LibraryReadModel:
                     "title": book.title,
                     "description": book.description,
                     "estimatedMinutes": book.estimated_minutes,
+                    "outlineStatus": book.outline_status,
+                    "outlineVersion": book.outline_version,
+                    "outlineConfirmedAt": _timestamp(book.outline_confirmed_at),
                     "status": progress.status,
                     "progress": round(ratio * 100),
                     "practiceProgress": round(practice_ratio * 100),

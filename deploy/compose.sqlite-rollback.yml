@@ -1,0 +1,9 @@
+name: slow
+
+# Emergency rollback bridge for the one-time PostgreSQL cutover. Combine this
+# after compose.prod.yml to point the API back at the preserved SQLite file.
+# Do not use it after PostgreSQL has accepted learner writes.
+services:
+  api:
+    environment:
+      DATABASE_URL: sqlite+pysqlite:////data/slow-v0.db

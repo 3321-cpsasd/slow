@@ -86,6 +86,7 @@ export function ProfileOnboardingFlow({
         purpose: purpose.trim(),
         domains,
         experience: experience.trim(),
+        preferences: initial.profile.preferences,
       });
       await onComplete();
     } catch (reason) {

@@ -7,16 +7,19 @@ from sqlalchemy.orm import Session
 
 from ...auth.context import Principal, WorkerExecutionContext
 from ...core.errors import AppError, safe_error_code
-from ...infrastructure.tables import LearningTask, now
+from ...infrastructure.tables import LearningTask, SectionProgress, now
 
 
 RUNNING_LEASE = timedelta(seconds=90)
 TASK_TYPES = {
+    "content_feedback_regeneration",
     "initial_book_preload",
     "note_generation",
     "remediation_generation",
     "next_section_preload",
 }
+PRELOAD_TASK_TYPES = {"initial_book_preload", "next_section_preload"}
+MANUAL_PRELOAD_RETRY_BUDGET = 3
 
 
 def _load(value: str, default=None):
@@ -26,8 +29,40 @@ def _load(value: str, default=None):
         return default
 
 
+def _restore_terminal_preload_progress(db: Session, task: LearningTask) -> None:
+    """Make an unlocked preload target user-recoverable after terminal failure."""
+
+    if task.task_type not in PRELOAD_TASK_TYPES:
+        return
+    target_section_id = str(
+        (_load(task.payload_json, {}) or {}).get("targetSectionId") or ""
+    )
+    if not target_section_id:
+        return
+    db.execute(
+        update(SectionProgress)
+        .where(
+            SectionProgress.learning_run_id == task.learning_run_id,
+            SectionProgress.user_id == task.user_id,
+            SectionProgress.section_id == target_section_id,
+            SectionProgress.status == "preparing",
+        )
+        .values(status="available", updated_at=now())
+    )
+
+
 def recoverable_task_ids(db: Session, *, limit: int = 20) -> list[str]:
     current = datetime.now(timezone.utc)
+    exhausted_tasks = db.scalars(
+        select(LearningTask).where(
+            LearningTask.status == "running",
+            LearningTask.attempt_count >= LearningTask.max_attempts,
+            or_(
+                LearningTask.lease_expires_at.is_(None),
+                LearningTask.lease_expires_at < current,
+            ),
+        )
+    ).all()
     exhausted = db.execute(
         update(LearningTask)
         .where(
@@ -50,6 +85,8 @@ def recoverable_task_ids(db: Session, *, limit: int = 20) -> list[str]:
         )
     )
     if exhausted.rowcount:
+        for task in exhausted_tasks:
+            _restore_terminal_preload_progress(db, task)
         db.commit()
     return list(
         db.scalars(
@@ -244,6 +281,8 @@ def fail_task(
             code="TASK_LEASE_LOST",
             status=409,
         )
+    if not retry_automatically:
+        _restore_terminal_preload_progress(db, task)
     db.commit()
     task = db.get(LearningTask, context.task_id)
     return task
@@ -284,11 +323,15 @@ def reset_failed_task(db: Session, task: LearningTask) -> LearningTask:
             status=409,
         )
     if task.attempt_count >= task.max_attempts:
-        raise AppError(
-            "学习任务已达到最大重试次数",
-            code="LEARNING_TASK_RETRY_EXHAUSTED",
-            status=409,
-        )
+        if task.task_type not in PRELOAD_TASK_TYPES:
+            raise AppError(
+                "学习任务已达到最大重试次数",
+                code="LEARNING_TASK_RETRY_EXHAUSTED",
+                status=409,
+            )
+        # Preserve the cumulative attempt count and extend the audited budget
+        # instead of resetting history when a user explicitly retries.
+        task.max_attempts = task.attempt_count + MANUAL_PRELOAD_RETRY_BUDGET
     task.status = "pending"
     task.error_code = ""
     task.error_message = ""
@@ -311,7 +354,11 @@ def task_view(task: LearningTask) -> dict:
         "attemptCount": task.attempt_count,
         "maxAttempts": task.max_attempts,
         "retryable": (
-            task.status == "failed" and task.attempt_count < task.max_attempts
+            task.status == "failed"
+            and (
+                task.attempt_count < task.max_attempts
+                or task.task_type in PRELOAD_TASK_TYPES
+            )
         ),
         "errorCode": task.error_code or None,
         "errorMessage": task.error_message or None,
