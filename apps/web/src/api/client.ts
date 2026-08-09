@@ -61,7 +61,7 @@ async function call<T>(path:string, init?:RequestInit):Promise<T>{
     throw new ApiError(
       apiUnavailable
         ? API_UNAVAILABLE_MESSAGE
-        : String(payload?.message || payload?.error || '请求失败'),
+        : String(payload?.message || '请求失败'),
       response.status,
       apiUnavailable ? 'API_UNREACHABLE' : String(payload?.code || 'UNKNOWN_ERROR'),
       Boolean(payload?.retryable),
@@ -92,7 +92,7 @@ async function streamQa(
     throw new ApiError(
       !payload && response.status >= 500
         ? API_UNAVAILABLE_MESSAGE
-        : String(payload?.message || payload?.error || '答疑发送失败'),
+        : String(payload?.message || '答疑发送失败'),
       response.status,
       !payload && response.status >= 500
         ? 'API_UNREACHABLE'
@@ -116,7 +116,7 @@ async function streamQa(
       const event = JSON.parse(line);
       if(event.type === 'delta') onDelta(event.delta);
       if(event.type === 'done') completed = event;
-      if(event.type === 'error') throw new Error(event.error || '答疑生成失败');
+      if(event.type === 'error') throw new Error('答疑暂时没有完成，请稍后重试');
     }
     if(done) break;
   }
@@ -140,7 +140,7 @@ async function streamFeedbackRepair(
     const text = await response.text();
     const payload = parsePayload(text);
     throw new ApiError(
-      String(payload?.message || payload?.error || '补救内容生成失败'),
+      String(payload?.message || '补救内容生成失败'),
       response.status,
       String(payload?.code || 'FEEDBACK_REPAIR_FAILED'),
       Boolean(payload?.retryable),
@@ -164,7 +164,7 @@ async function streamFeedbackRepair(
     if(eventType === 'done') completed = payload as import('../model/types').FeedbackRepairResult;
     if(eventType === 'error') {
       throw new ApiError(
-        String(payload.message || '补救内容生成失败'),
+        '补救内容暂时没有完成，请稍后重试',
         200,
         String(payload.code || 'FEEDBACK_REPAIR_FAILED'),
         Boolean(payload.retryable),

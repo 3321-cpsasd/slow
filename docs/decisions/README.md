@@ -38,3 +38,5 @@
 | [ADR-0003](0003-modular-monolith-boundaries.md) | Accepted，第一阶段已实现 | 应用模块化单体、写入权边界和渐进式门面迁移 |
 | [ADR-0004](0004-curriculum-baseline-authority.md) | Accepted，首个发布纵向切片已通过 M2 | 真实课程基准、候选知识图、人工发布边界和目标覆盖门禁 |
 | [ADR-0005](0005-m2-acceptance-v2.md) | Accepted，M2 十一项门禁已通过 | M2 五阶段可信链路薄切片、机器判定和里程碑边界 |
+| [ADR-0006](0006-daily-mode.md) | Accepted | Daily Mode 的短期学习情境、活动连续性与证据边界 |
+| [ADR-0007](0007-user-interface-expression-boundary.md) | Accepted，已实现首轮收敛 | 普通用户界面与内部治理、运行和审计机制的表达边界 |

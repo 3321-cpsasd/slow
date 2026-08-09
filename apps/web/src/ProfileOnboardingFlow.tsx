@@ -119,9 +119,9 @@ export function ProfileOnboardingFlow({
 
       <main className="profile-flow-main">
         <aside className="profile-flow-rail" aria-label="基础画像填写进度">
-          <p className="eyebrow">BASELINE PROFILE · V{state.flowVersion}</p>
+          <p className="eyebrow">建立学习起点</p>
           <h1>先让教材<br />认识现在的你。</h1>
-          <p>这些自述信息决定第一本书从哪里讲起。之后，答题和实践证据会继续修正你的掌握画像。</p>
+          <p>这些信息决定第一本书从哪里讲起。之后的练习表现会继续调整教材难度和复习安排。</p>
           <ol>
             {state.steps.map((item, index) => (
               <li className={index === stepIndex ? 'active' : index < stepIndex ? 'done' : ''} key={item.id}>
@@ -214,17 +214,17 @@ export function ProfileOnboardingFlow({
             {step.id === 'review' && (
               <div className="profile-step-fields profile-review">
                 <h2>这是教材将采用的起点。</h2>
-                <p>它不是能力证明，只是你对当前状态的自述；真实掌握度将由后续学习证据更新。</p>
+                <p>它不是能力证明，只是你对当前状态的描述；之后的练习表现会继续更新学习建议。</p>
                 <dl>
                   <div><dt>身份</dt><dd>{profession}</dd></div>
                   <div><dt>阶段</dt><dd>{STAGES.find((item) => item.value === stage)?.label}</dd></div>
                   <div><dt>领域</dt><dd>{domains.join(' · ')}</dd></div>
                   <div><dt>目的</dt><dd>{purpose}</dd></div>
-                  <div><dt>经验</dt><dd>{experience || '暂未填写，将从学习证据中逐步补充'}</dd></div>
+                  <div><dt>经验</dt><dd>{experience || '暂未填写，之后可以随时补充'}</dd></div>
                 </dl>
                 <div className="profile-evidence-note">
-                  <span>自述</span>
-                  <p><b>不会直接计为“已掌握”</b>答题、错题、深入讨论和实践结果才会形成掌握证据。</p>
+                  <span>起点说明</span>
+                  <p><b>不会直接计为“已掌握”</b>只有之后实际完成的练习和讨论会更新学习进度。</p>
                 </div>
               </div>
             )}

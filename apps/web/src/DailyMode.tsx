@@ -181,11 +181,11 @@ export function DailyModeDialog({
             <span className="daily-mode-animal" aria-hidden="true">兔</span>
             <small>3–5 MIN · 碎片时间</small>
             <h3>Fast</h3>
-            <p>从同一篇已发布正文中抽取关键段落，先抓住结论、机制与一个可迁移判断。</p>
+            <p>从同一篇正文中挑出关键段落，先抓住结论、机制与一个可迁移判断。</p>
             <ul>
               <li>通勤、户外、临时空档</li>
               <li>短回答与低摩擦互动</li>
-              <li>快速阅读本身不产生掌握证据</li>
+              <li>快速浏览本身不计为完成</li>
             </ul>
           </button>
 
@@ -232,7 +232,7 @@ export function DailyModeDialog({
         </div>
 
         <footer>
-          <p><b>同一份教材，同一套验证。</b> Fast / Slow 不会改变 Learning Contract、答案或及格线。</p>
+          <p><b>同一份教材，同一套验证。</b> Fast / Slow 不会改变题目、答案或通过要求。</p>
           <button
             type="button"
             disabled={!selectedMode || busy}

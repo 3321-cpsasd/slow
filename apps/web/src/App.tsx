@@ -49,21 +49,21 @@ type FeedbackTarget =
     };
 const AI_RUNTIME_SETTINGS_ENABLED = import.meta.env.VITE_INTERNAL_AI_SETTINGS === 'true';
 const GENERATION_STAGE_LABELS: Record<string, string> = {
-  queued: '正在排队',
-  teaching_blueprint: '正在规划改写方案',
-  content_generation: '正在生成正文',
-  combined_generation: '正在生成正文与测验',
-  source_verification: '正在核验来源',
-  source_verification_degraded: '正在记录来源核验结果',
-  source_repair: '正在替换无法核验的来源',
-  source_repair_rejected: '正在重新检查来源',
-  quiz_generation: '正在生成测验',
-  semantic_alignment_review: '正在检查正文与测验是否一致',
-  semantic_alignment_rejected: '正文与测验检查未通过',
-  semantic_claim_verification: '正在核验关键结论',
-  persistence: '正在保存新版本',
+  queued: '正在等待开始',
+  teaching_blueprint: '正在准备学习内容',
+  content_generation: '正在准备学习内容',
+  combined_generation: '正在准备学习内容',
+  source_verification: '正在检查内容',
+  source_verification_degraded: '正在检查内容',
+  source_repair: '正在检查内容',
+  source_repair_rejected: '正在检查内容',
+  quiz_generation: '正在准备验证题',
+  semantic_alignment_review: '正在检查内容',
+  semantic_alignment_rejected: '正在检查内容',
+  semantic_claim_verification: '正在检查内容',
+  persistence: '正在完成',
   persisted: '已经完成',
-  failed: '生成未完成',
+  failed: '准备失败',
 };
 
 const formatElapsed = (milliseconds: number) => {
@@ -503,12 +503,12 @@ export default function App() {
           if (fallbackSectionId) {
             setSection(await openAndTrackSection(fallbackSectionId));
           }
-          setError('第一节后台准备失败。目录已经保存，可以从第一章安全重试。');
+          setError('第一节暂时没有准备完成。目录已经保存，可以从第一章重新尝试。');
           return true;
         }
         await new Promise((resolve) => window.setTimeout(resolve, 1000));
       }
-      setError('第一节仍在后台准备，可以稍后重新进入本书查看。');
+      setError('第一节仍在准备，可以稍后重新进入本书查看。');
       return true;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '无法读取第一节准备状态。');
@@ -598,14 +598,14 @@ export default function App() {
 
   const activateBook = async (book: Book) => {
     const proposal = await run(
-      '正在依据最新学习证据校准下一本书…',
+      '正在根据你最近的学习情况调整下一本书…',
       () => api.replanBook(book.id),
     );
     const outline = proposal.chapters
       .map((chapter, index) => `${index + 1}. ${chapter.title}：${chapter.objective}`)
       .join('\n');
     const confirmed = window.confirm(
-      `校准说明：${proposal.rationale}\n\n${outline}\n\n确认后将冻结这本书的新章节目录。`,
+      `系统根据你最近的学习情况调整了下一本书。\n\n${outline}\n\n确认后即可按这份目录开始学习。`,
     );
     if (!confirmed) return;
     await run(
@@ -616,7 +616,7 @@ export default function App() {
   };
 
   const generateSection = async (sectionId: string) => {
-    const value = await run('正在核查来源并生成本节…', () => api.generateSection(sectionId));
+    const value = await run('正在准备并检查本节内容…', () => api.generateSection(sectionId));
     setSection(value);
     await refreshSeries();
   };
@@ -636,7 +636,7 @@ export default function App() {
     };
     timer = window.setTimeout(pollGeneration, 250);
     try {
-      const value = await run('正在重新生成并核验本节…', () => api.regenerateSection(sectionId));
+      const value = await run('正在重新准备并检查本节内容…', () => api.regenerateSection(sectionId));
       setSection(value);
       await refreshSeries();
     } finally {
@@ -690,7 +690,7 @@ export default function App() {
                 ? '无需配置第三方账号，使用本机固定体验身份查看完整学习闭环。'
                 : usesCredentials
                   ? '输入邀请时收到的账号和密码，进入独立的个人学习书架。'
-                  : '登录后继续你的书架、学习记录与掌握画像。'}
+                  : '登录后继续你的书架、学习记录与复习安排。'}
             </p>
 
             {!authConfig && error ? (
@@ -769,14 +769,14 @@ export default function App() {
             {error && <div className="auth-inline-error">{error}</div>}
 
             <div className="auth-trust-list">
-              <div><i>✓</i><span><b>服务端安全会话</b><small>{usesCredentials ? '密码使用 Argon2id 哈希，浏览器只保留会话 Cookie' : '浏览器不保存身份提供商密码'}</small></span></div>
-              <div><i>✓</i><span><b>学习数据按用户隔离</b><small>书架、证据和画像仅属于你的账户</small></span></div>
-              <div><i>✓</i><span><b>随时安全退出</b><small>退出后服务端会话立即撤销</small></span></div>
+              <div><i>✓</i><span><b>密码不会保存在浏览器</b><small>{usesCredentials ? '登录后只保留安全的登录状态' : 'Slow 不接收身份提供商密码'}</small></span></div>
+              <div><i>✓</i><span><b>学习数据属于当前账号</b><small>书架和学习记录不会与其他账号混合</small></span></div>
+              <div><i>✓</i><span><b>随时安全退出</b><small>退出后当前登录立即失效</small></span></div>
             </div>
 
             <small className="auth-disclaimer">
               {isDemo
-                ? '体验模式会被明确标记，不作为真实账号或真实认证证据。'
+                ? '体验内容会明确标记，并与正式账号数据分开。'
                 : isLocal
                   ? '本地账号仅用于开发和场景验证，生产环境会拒绝启用。'
                   : isPassword
@@ -787,7 +787,7 @@ export default function App() {
               <details className="auth-privacy-brief">
                 <summary>内测隐私与数据说明</summary>
                 <p>{authConfig.privacyNotice.summary}</p>
-                <small>登录后、开始填写学习画像前，需要分别确认隐私告知与自愿参加内测。版本 {authConfig.privacyNotice.noticeVersion}</small>
+                <small>登录后、开始填写学习画像前，需要确认隐私告知与自愿参加内测。</small>
               </details>
             )}
           </section>
@@ -1012,9 +1012,8 @@ export default function App() {
                     succeeded: '已完成',
                   }[series.initializationTask.status]}：
                   {series.initializationTask.status === 'failed'
-                    ? series.initializationTask.errorMessage || series.initializationTask.errorCode || '未知错误'
-                    : '完成后会自动打开，不需要重复点击生成。'}
-                  {' '}（尝试 {series.initializationTask.attemptCount || 0}/{series.initializationTask.maxAttempts || 0}）
+                    ? '暂时没有准备完成，可以重新尝试。'
+                    : '完成后会自动打开，不需要重复点击。'}
                 </span>
                 {series.initializationTask.retryable && (
                   <button
@@ -1022,7 +1021,7 @@ export default function App() {
                     disabled={preparingInitialSection}
                     onClick={retryInitialSection}
                   >
-                    {preparingInitialSection ? '正在重试…' : '安全重试第一节'}
+                    {preparingInitialSection ? '正在重试…' : '重新准备第一节'}
                   </button>
                 )}
               </div>
@@ -1212,7 +1211,7 @@ function FeedbackDialog({
     setRepairText('');
     setStatus('');
     try {
-      const result = await api.streamFeedbackRepair(
+      await api.streamFeedbackRepair(
         feedbackId,
         (delta) => setRepairText((current) => current + delta),
       );
@@ -1220,7 +1219,7 @@ function FeedbackDialog({
         const updated = await api.section(target.sectionId);
         onSectionChange(updated);
         await onRefreshSeries();
-        setStatus(`已应用为第 ${result.contentVersion} 版正文。`);
+        setStatus('修改已经应用到正文。');
       }
     } catch (reason) {
       setRepairFailed(true);
@@ -1268,7 +1267,7 @@ function FeedbackDialog({
         return;
       }
       const blockedMessages: Record<string, string> = {
-        FEEDBACK_CONTENT_VERSION_STALE: '反馈已保存，但当前正文已有更新版本；请刷新后在新版本上再次反馈。',
+        FEEDBACK_CONTENT_VERSION_STALE: '反馈已保存，但当前正文已经更新；请刷新后再反馈一次。',
         SECTION_CONTENT_MISSING: '反馈已保存，但这段正文已经不可用；请刷新后再试。',
       };
       setStatus(
@@ -1575,7 +1574,7 @@ function bookProgressDetails(book: Book) {
 function bookProgressLabel(book: Book, isCurrent: boolean) {
   if (book.status === 'completed') return '已完成';
   if (book.status === 'locked') return '未解锁';
-  if (book.outlineStatus === 'draft') return '待校准';
+  if (book.outlineStatus === 'draft') return '待确认';
   if (isCurrent || book.progress > 0) return '学习中';
   return '待开始';
 }
@@ -1782,7 +1781,7 @@ function Home({
             <div className="review-empty-state" aria-live="polite">
               <span>正在同步</span>
               <h2>{reviewBusy}</h2>
-              <p>复习分配与学习画像都由服务端确认。</p>
+              <p>正在为你安排本次复习。</p>
             </div>
           ) : reviewError ? (
             <div className="review-empty-state review-error-state" role="alert">
@@ -1795,7 +1794,7 @@ function Home({
             <div className="review-result-state" aria-live="polite">
               <span>{reviewResult.passed ? '保持验证完成' : '已记录本次表现'}</span>
               <h2>{reviewResult.score} / {reviewResult.total}</h2>
-              <p>这次结果已作为延迟复习证据候选保存，不会覆盖原小节测验。</p>
+              <p>本次复习已记录，系统会据此安排下一次复习。</p>
               <button onClick={continueReviewQueue}>
                 {pendingReviews.length ? '继续下一项' : '完成今日复习'} <span aria-hidden="true">→</span>
               </button>
@@ -1871,14 +1870,14 @@ function Home({
             <p>按领域归档</p>
             <h2 id="library-catalog-title">我的书架</h2>
           </div>
-          <p>每个书架保存该领域的教材、学习记录与掌握证据。</p>
+          <p>每个书架保存该领域的教材、练习和学习进度。</p>
         </header>
 
         <div className="library-shelf-grid">
         {data && data.shelves.length === 0 && (
           <div className="empty-library-message">
             <span>还没有书架</span>
-            <small>从一个明确的领域开始，把教材、测验与掌握证据放在一起。</small>
+            <small>从一个明确的领域开始，把教材、练习和学习进度放在一起。</small>
             <button className="primary-button" onClick={() => setShowCreate(true)}>创建第一个书架</button>
           </div>
         )}
@@ -2069,7 +2068,7 @@ function PrivacyConsentGate({
           <p>{privacy.summary}</p>
           <div className="privacy-version-stamp">
             <span>告知版本</span><b>{privacy.noticeVersion}</b>
-            <small>同意会按版本单独留痕；未来内容变化时会重新询问。</small>
+            <small>未来告知内容发生变化时，我们会重新询问。</small>
           </div>
         </section>
 
@@ -2117,11 +2116,11 @@ function AccountExitReceiptPage({ receipt, onClose }: { receipt: AccountExitRece
         <span className="exit-receipt-mark" aria-hidden="true">✓</span>
         <p className="eyebrow">退出申请已登记</p>
         <h1>当前会话已经撤销。</h1>
-        <p>Slow 已停止这个账号的新写入。运营者应在 <b>{due}</b> 前完成活动数据库中的删除或去标识化。</p>
+        <p>Slow 已停止这个账号的新写入。主要数据将在 <b>{due}</b> 前删除或去标识化。</p>
         <dl>
           <div><dt>申请编号</dt><dd>{receipt.requestId}</dd></div>
-          <div><dt>处理状态</dt><dd>待运营者处理</dd></div>
-          <div><dt>备份副本</dt><dd>受限轮转，14 日清除目标</dd></div>
+          <div><dt>处理状态</dt><dd>删除处理中</dd></div>
+          <div><dt>备份数据</dt><dd>预计 14 日内清除</dd></div>
         </dl>
         <p className="exit-receipt-note">请保存申请编号。如需撤回申请，请通过邀请消息的原渠道联系运营者。</p>
         <button className="primary-button" type="button" onClick={onClose}>返回登录页</button>
@@ -2255,7 +2254,7 @@ function ProfileCenterPage({
           interactionRhythm,
         },
       });
-      setMessage(`已保存为学习画像 V${profile.version + 1}。已有测验与掌握证据保持不变。`);
+      setMessage('学习画像已保存，只会影响之后生成或调整的教材。');
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '学习画像保存失败');
     } finally {
@@ -2289,8 +2288,8 @@ function ProfileCenterPage({
         </nav>
 
         <div className="profile-sidebar-ledger">
-          <span>当前画像版本</span><b>V{profile.version}</b>
-          <small>每次自述修改都会留下新版本。</small>
+          <span>当前学习设置</span><b>已保存</b>
+          <small>修改只影响之后的教材。</small>
         </div>
         <button type="button" className="profile-back-button" onClick={onBack}><span aria-hidden="true">←</span> 返回书架</button>
       </aside>
@@ -2300,7 +2299,7 @@ function ProfileCenterPage({
           <header className="profile-page-heading">
             <p className="eyebrow">学习画像</p>
             <h1 id="profile-center-title">让教材始终认识<br />现在的你。</h1>
-            <p>这是所有书架共用的学习设置。修改会形成新版本，但不会改写已经产生的测验、笔记与掌握证据。</p>
+            <p>这是所有书架共用的学习设置。修改只影响之后生成或调整的教材，已经完成的学习记录不会改变。</p>
           </header>
 
           <fieldset className="profile-field-group">
@@ -2412,7 +2411,7 @@ function ProfileCenterPage({
             </div>
           </fieldset>
 
-          <div className="profile-version-note"><span>版本化自述</span><p>保存后，相关学习系列会在各自页面提示你重新确认路径。</p></div>
+          <div className="profile-version-note"><span>影响范围</span><p>保存后，相关学习系列会提示你确认是否调整后续内容。</p></div>
           {error && <p className="profile-flow-error" role="alert">{error}</p>}
           {message && <p className="profile-save-message" role="status">{message}</p>}
           <footer>
@@ -2424,7 +2423,7 @@ function ProfileCenterPage({
           <header className="profile-page-heading">
             <p className="eyebrow">账号与数据</p>
             <h1 id="account-page-title">一个账号，<br />一套学习记录。</h1>
-            <p>书架、阅读位置、测验证据和画像版本都绑定到当前账号，不会与其他用户混合。</p>
+            <p>书架、阅读位置和学习记录都属于当前账号，不会与其他用户混合。</p>
           </header>
 
           <div className="account-summary-card">
@@ -2433,27 +2432,27 @@ function ProfileCenterPage({
             <dl>
               <div><dt>书架</dt><dd>{stats.shelves}</dd></div>
               <div><dt>学习系列</dt><dd>{stats.series}</dd></div>
-              <div><dt>画像版本</dt><dd>V{profile.version}</dd></div>
+              <div><dt>学习设置</dt><dd>已保存</dd></div>
             </dl>
           </div>
 
           <div className="account-policy-grid">
             <article>
               <span>数据归属</span>
-              <h3>学习事实属于当前账号</h3>
-              <p>书架、答题记录、复习状态和掌握证据均由服务端按用户隔离。</p>
+              <h3>学习记录属于当前账号</h3>
+              <p>你的书架、答题和复习记录不会与其他账号混合。</p>
             </article>
             <article>
               <span>登录安全</span>
               <h3>浏览器只保存安全会话</h3>
               <p>{mode === 'local' || mode === 'password'
-                ? '密码不会写入浏览器存储，退出后服务端会话立即撤销。'
+                ? '密码不会写入浏览器存储，退出后当前登录立即失效。'
                 : '身份由登录服务确认，Slow 不接收身份提供商密码。'}</p>
             </article>
             <article>
               <span>内测同意</span>
-              <h3>当前告知已留下版本记录</h3>
-              <p>版本 {privacy.noticeVersion} · {privacy.acceptedAt
+              <h3>当前隐私告知已确认</h3>
+              <p>{privacy.noticeVersion} · {privacy.acceptedAt
                 ? new Date(privacy.acceptedAt).toLocaleDateString('zh-CN')
                 : '当前环境无需同意'}</p>
             </article>
@@ -2468,7 +2467,7 @@ function ProfileCenterPage({
             <div className="account-deletion-copy">
               <span>不可撤销操作</span>
               <h3>退出试点并申请删除数据</h3>
-              <p>提交后会立即撤销全部会话、停用账号并停止新写入。运营者应在 7 日内处理活动数据库；备份副本进入受限轮转，当前试点以 14 日为清除目标。</p>
+              <p>提交后会立即退出所有设备并停用账号。主要数据将在 7 日内删除或去标识化，备份数据预计在 14 日内清除。</p>
             </div>
             {!showExitRequest ? (
               <button type="button" className="account-deletion-open" onClick={() => setShowExitRequest(true)}>开始退出申请</button>
@@ -2575,7 +2574,7 @@ function ShelfCreateDialog({
           <div>
             <p className="eyebrow">建立一个学习领域</p>
             <h2 id="shelf-create-title">创建书架</h2>
-            <p>书架用于归拢同一领域的书、学习记录和概念掌握证据。</p>
+            <p>书架用于集中保存同一领域的教材、练习和学习进度。</p>
           </div>
           <button className="dialog-close" aria-label="关闭创建书架" disabled={submitting} onClick={onClose}>×</button>
         </div>
@@ -2632,7 +2631,7 @@ function ShelfCreateDialog({
                 setFormError('');
               }}
             />
-            <small>最多 12 个，用于后续检索和画像归类。</small>
+            <small>最多 12 个，方便以后查找和整理。</small>
           </label>
           {formError && <p className="shelf-create-error" role="alert">{formError}</p>}
           <div className="dialog-actions">
@@ -2706,7 +2705,7 @@ function ShelfPage({
                 <span className="series-volume-kicker">slow learning series</span>
                 <h2>{item.title}</h2>
                 <span className="series-volume-rule" />
-                <p>{item.rationale}</p>
+                <p>围绕这个学习目标安排的连续教材，进入后查看完整路径与下一步。</p>
                 <span className="series-volume-progress">
                   <i><b style={{ width: `${item.progress}%` }} /></i>
                   <small>{item.progress}%</small>
@@ -2748,7 +2747,7 @@ function ShelfPage({
             <span className="delete-confirm-icon"><TrashIcon size={20} /></span>
             <p className="eyebrow">删除学习系列</p>
             <h2 id="delete-series-title">{deleteTarget.title}</h2>
-            <p>该系列及其书、章节会从书架和学习入口中移除。历史学习证据会保留用于审计，当前界面暂不支持恢复。</p>
+            <p>该系列及其书、章节会从书架和学习入口中移除。已有学习记录会保留，但当前界面暂不支持恢复。</p>
             <div>
               <button className="quiet-button" disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button>
               <button
@@ -3123,7 +3122,7 @@ function DirectoryPanel({
             <p className="eyebrow">删除书籍</p>
             <h2 id="delete-book-title">{deleteTarget.title}</h2>
             <p>
-              书籍及其章节会从学习入口中移除，历史学习证据和审计记录仍会保留。
+              书籍及其章节会从学习入口中移除，已有学习记录会保留。
               {series.books.length === 1 ? '这是系列中的最后一本书，删除后该系列也会从书架隐藏。' : ''}
               当前界面暂不支持恢复。
             </p>
@@ -3194,7 +3193,7 @@ function BookTree({
           <b>{book.title}</b>
           <small>
             {book.outlineStatus === 'draft'
-              ? '章节草案'
+              ? '待确认'
               : book.status === 'completed'
                 ? '已完成'
                 : book.status === 'locked'
@@ -3208,16 +3207,16 @@ function BookTree({
       {book.outlineStatus === 'draft' && (
         <div className="book-outline-callout" role="status">
           <span>
-            <b>{canActivate ? '可以校准下一本书' : '章节目录为初始草案'}</b>
+            <b>{canActivate ? '下一本书可以开始准备' : '下一本书将在完成前一册后调整'}</b>
             <small>
               {canActivate
-                ? '将使用刚完成的测验、Ask Me 与复习证据重新规划；确认后才解锁。'
-                : '完成上一本书后，系统会按届时的学习画像重新规划。'}
+                ? '会根据你最近的学习表现调整章节；确认后即可开始。'
+                : '完成上一本书后，会根据你的学习情况调整章节。'}
             </small>
           </span>
           {canActivate && (
             <button className="secondary-button" onClick={() => onActivate(book)}>
-              校准并确认章节
+              查看并确认章节
             </button>
           )}
         </div>
@@ -3455,20 +3454,6 @@ function ReaderPanel({
     typeof generationTrace.stage === 'string'
       ? generationTrace.stage
       : 'queued';
-  const maxSourceAttempts =
-    typeof generationTrace.maxSourceAttempts === 'number'
-      ? generationTrace.maxSourceAttempts
-      : 4;
-  const maxQuizAttempts =
-    typeof generationTrace.maxQuizAttempts === 'number'
-      ? generationTrace.maxQuizAttempts
-      : 4;
-  const generationRound =
-    typeof generationTrace.sourceAttempt === 'number'
-      ? `来源第 ${generationTrace.sourceAttempt}/${maxSourceAttempts} 轮`
-      : typeof generationTrace.quizAttempt === 'number'
-        ? `测验第 ${generationTrace.quizAttempt}/${maxQuizAttempts} 轮`
-        : '';
   const generationElapsed = Math.max(
     activeGeneration?.durationMs || 0,
     regenerationStartedAt ? regenerationClock - regenerationStartedAt : 0,
@@ -3587,12 +3572,12 @@ function ReaderPanel({
           >
             <p className="eyebrow">重新生成本节</p>
             <h2 id="regenerate-section-title">{section.title}</h2>
-            <p>系统会生成新的正文与测验版本，旧版本会保留在审计记录中。已经提交过测验的内容不能重新生成，以免改写学习证据。</p>
+            <p>系统会重新准备正文和验证题。已经提交过验证的内容不能替换，以保证原有学习记录不变。</p>
             {regenerating && (
               <div className="regeneration-progress" aria-live="polite">
                 <span><i />{GENERATION_STAGE_LABELS[generationStage] || '正在处理'}</span>
-                <b>{generationRound || '准备中'} · 已用 {formatElapsed(generationElapsed)}</b>
-                <small>正文来源核验通过后才会生成测验。</small>
+                <b>处理中 · 已用 {formatElapsed(generationElapsed)}</b>
+                <small>内容检查完成后即可继续学习。</small>
               </div>
             )}
             <div>
@@ -3727,12 +3712,12 @@ function LessonContent({
           ))}
         </div>
         {section.generation?.status === 'failed' && (
-          <div className="inline-error">{section.generation.error || '上次生成失败，可安全重试。'}</div>
+          <div className="inline-error">上次准备没有完成，可以重新尝试。</div>
         )}
         <button className="primary-button large" onClick={onGenerate}>
-          {section.generation?.status === 'failed' ? '安全重试' : '生成正文并开始学习'}
+          {section.generation?.status === 'failed' ? '重新准备' : '准备正文并开始学习'}
         </button>
-        <small className="generation-note">正文与测验将一次生成，并在发布前校验 Learning Contract、目标绑定和证据引用。</small>
+        <small className="generation-note">正文和验证题会一起准备，检查完成后即可开始学习。</small>
       </div>
     );
   }
@@ -3755,12 +3740,12 @@ function LessonContent({
       </div>
       <p className="content-trust-note">
         {section.content.generationMode === 'demo'
-          ? '演示内容 · 不代表真实 AI 生成或事实核验'
+          ? '演示内容 · 仅用于体验学习流程'
           : section.content.boundaryValidation.status === 'passed'
-            ? `${section.content.aiGenerated ? 'AI 生成' : '授权内容'} · 已通过结构、契约和证据边界校验 · 未经逐项事实核验`
+            ? `${section.content.aiGenerated ? 'AI 生成' : '授权内容'} · 已完成发布检查 · 关键事实请结合参考来源判断`
             : section.content.boundaryValidation.status === 'legacy'
-              ? '历史内容 · 未确认通过当前结构、契约和证据边界校验 · 未经逐项事实核验'
-              : `${section.content.aiGenerated ? 'AI 生成' : '授权内容'} · 未确认通过结构、契约和证据边界校验 · 未经逐项事实核验`}
+              ? '历史内容 · 尚未按当前标准重新检查 · 关键事实请结合参考来源判断'
+              : `${section.content.aiGenerated ? 'AI 生成' : '授权内容'} · 检查状态未确认 · 关键事实请结合参考来源判断`}
       </p>
       {dailyMode === 'fast' && (
         <aside className="fast-view-notice">
@@ -4062,7 +4047,7 @@ function Quiz({
         setWorkflowRunning(false);
         setWorkflowMessage(
           failures.length
-            ? '评分结果已保存，但部分后续内容生成失败，可以安全重试。'
+            ? '评分结果已保存，但部分后续内容没有准备完成，可以重新尝试。'
             : passed
               ? '个人笔记和下一节已经准备完成。'
               : '补充教学和新的等价题已经准备完成。',
@@ -4076,7 +4061,7 @@ function Quiz({
       await new Promise((resolve) => window.setTimeout(resolve, 1000));
     }
     setWorkflowRunning(false);
-    setWorkflowMessage('评分结果已保存，后续内容仍在后台处理中。');
+    setWorkflowMessage('评分结果已保存，后续内容仍在准备中。');
   };
 
   useEffect(() => {
@@ -4084,11 +4069,9 @@ function Quiz({
       (task) => task.status !== 'succeeded',
     );
     if (!unfinished.length) return;
-    void monitorTasks(unfinished).catch((reason) => {
+    void monitorTasks(unfinished).catch(() => {
       setWorkflowRunning(false);
-      setSubmissionError(
-        reason instanceof Error ? reason.message : '无法恢复后台任务状态。',
-      );
+      setSubmissionError('暂时无法更新后续内容，请稍后再试。');
     });
   }, [section.id]);
 
@@ -4103,8 +4086,8 @@ function Quiz({
         ),
       );
       await monitorTasks(retried, result?.passed, preservedFailures);
-    } catch (reason) {
-      setSubmissionError(reason instanceof Error ? reason.message : '任务重试失败。');
+    } catch {
+      setSubmissionError('后续内容暂时没有准备完成，请稍后再试。');
     } finally {
       setRetryingTasks(false);
     }
@@ -4153,11 +4136,9 @@ function Quiz({
         // The promoted result remains available in memory for this render.
       }
       await onRefreshSeries();
-      void monitorTasks(value.workflowTasks, true).catch((reason) => {
+      void monitorTasks(value.workflowTasks, true).catch(() => {
         setWorkflowRunning(false);
-        setSubmissionError(
-          reason instanceof Error ? reason.message : '无法读取下一节准备状态。',
-        );
+        setSubmissionError('暂时无法更新后续内容，请稍后再试。');
       });
     } catch (reason) {
       setSubmissionError(
@@ -4186,7 +4167,7 @@ function Quiz({
   const submit = async () => {
     if (!section.quiz) return;
     if (quizGovernanceBlocked) {
-      setSubmissionError('这套验证题未通过发布门禁，系统不会接受作答。请重新生成后再试。');
+      setSubmissionError('这套验证题暂时不可用，请重新准备后再试。');
       return;
     }
     const firstUnanswered = answers.findIndex((answer) => answer.length === 0);
@@ -4251,11 +4232,9 @@ function Quiz({
       }
       await onRefreshSeries();
       onSubmissionComplete();
-      void monitorTasks(value.workflowTasks, value.passed).catch((reason) => {
+      void monitorTasks(value.workflowTasks, value.passed).catch(() => {
         setWorkflowRunning(false);
-        setSubmissionError(
-          reason instanceof Error ? reason.message : '无法读取后续任务状态。',
-        );
+        setSubmissionError('暂时无法更新后续内容，请稍后再试。');
       });
     } catch (reason) {
       setSubmissionError(
@@ -4272,12 +4251,12 @@ function Quiz({
     <div className="quiz-view">
       <p className="eyebrow">完成验证后解锁下一节</p>
       <h2>小节验证</h2>
-      <p className="quiz-rule">答对至少 80% 且通过全部必需目标即可继续；错题会进入重点巩固与学习画像。</p>
+      <p className="quiz-rule">答对至少 80%，且关键题达到要求即可继续；错题会用于安排重点巩固。</p>
       <p className="quiz-draft-note">单选题只能选择一个答案，多选题可选择多个；切回正文查阅时，当前作答会自动保留。</p>
       {quizGovernanceBlocked && (
         <aside className="quiz-governance-notice" role="alert">
-          <b>这套验证题尚未通过发布门禁</b>
-          <p>系统不会展示或接受这套题的作答，也不会用它评分、解锁或形成学习证据。请重新生成后再试。</p>
+          <b>这套验证题暂时不可用</b>
+          <p>系统不会展示或接受作答，请重新准备后再试。</p>
         </aside>
       )}
       {quizGovernanceBlocked ? null : result ? (
@@ -4300,7 +4279,7 @@ function Quiz({
         <>
           {section.remediations.map((item) => (
             <section className="remediation-card" key={item.id}>
-              <span>错题补充教学 · {item.strategy}</span>
+              <span>错题补充教学</span>
               {item.blocks.map((block) => (
                 <div key={block.id}>
                   <h3>{block.heading}</h3>
@@ -4364,30 +4343,12 @@ function Quiz({
         )}
         {workflowMessage && <p className={failedTasks.length ? 'result failure' : 'result success'}>{workflowMessage}</p>}
         {workflowTasks.length > 0 && (
-          <div className="workflow-task-list" aria-label="后台任务状态">
-            {workflowTasks.map((task) => (
-              <div className={`workflow-task ${task.status}`} key={task.taskId}>
-                <span>{{
-                  content_feedback_regeneration: '反馈修订',
-                  initial_book_preload: '第一节准备',
-                  note_generation: '个人笔记',
-                  remediation_generation: '补充教学与新题',
-                  next_section_preload: '下一节预加载',
-                }[task.type]}</span>
-                <b>{{
-                  pending: '等待中',
-                  running: '进行中',
-                  succeeded: '已完成',
-                  failed: '失败',
-                }[task.status]}</b>
-                <small>
-                  尝试 {task.attemptCount || 0}/{task.maxAttempts || 0}
-                  {task.status === 'failed'
-                    ? ` · ${task.errorMessage || task.errorCode || '未知错误'}`
-                    : ''}
-                </small>
-              </div>
-            ))}
+          <div className="workflow-task-list" aria-label="后续内容准备状态">
+            <div className={`workflow-task ${failedTasks.length ? 'failed' : workflowRunning ? 'running' : 'succeeded'}`}>
+              <span>后续内容</span>
+              <b>{failedTasks.length ? '需要重试' : workflowRunning ? '准备中' : '已完成'}</b>
+              <small>{failedTasks.length ? '部分内容暂时没有准备完成。' : workflowRunning ? '完成后会自动更新。' : '可以继续学习。'}</small>
+            </div>
           </div>
         )}
         {failedTasks.some((task) => task.retryable) && (
@@ -4397,7 +4358,7 @@ function Quiz({
             disabled={retryingTasks || workflowRunning}
             onClick={retryFailedTasks}
           >
-            {retryingTasks ? '正在重试…' : '安全重试后续生成'}
+            {retryingTasks ? '正在重试…' : '重新准备后续内容'}
           </button>
         )}
       </div>
@@ -4556,11 +4517,11 @@ function QuizReview({
             ) : nextSectionTask.status === 'failed' ? (
               <>
                 <span>本节已通过，下一节准备失败</span>
-                <small>可以在下方安全重试，不会影响已经保存的成绩。</small>
+                <small>可以在下方重新尝试，不会影响已经保存的成绩。</small>
               </>
             ) : (
               <>
-                <span><i />本节已通过，正在直接生成下一节</span>
+                <span><i />本节已通过，正在准备下一节</span>
                 <button className="primary-button" disabled>下一节准备中…</button>
               </>
             )
@@ -4580,7 +4541,7 @@ function QuizReview({
             >
               {reassessing ? '正在更新进度…' : '按当前规则继续'}
             </button>
-            <small>错题仍会进入个人笔记和掌握画像，不会被视为已经掌握。</small>
+            <small>错题仍会用于个人笔记和后续复习，不会被视为已经掌握。</small>
           </>
         ) : remediationReady ? (
           <>
@@ -4595,8 +4556,8 @@ function QuizReview({
           </>
         ) : (
           <>
-            <span><i />个性化补充教学正在后台准备</span>
-            <small>你可以继续阅读上面的错题解析，生成不会阻塞当前页面。</small>
+            <span><i />个性化补充教学正在准备</span>
+            <small>你可以继续阅读上面的错题解析，准备过程不会影响当前页面。</small>
           </>
         )}
       </div>
@@ -4681,41 +4642,31 @@ function Note({
     try {
       await api.note(sectionId, editing);
       onSaved(await api.section(sectionId));
-      setMessage('已保存为新的个人版本；底稿与复习补充保持不变。');
+      setMessage('我的笔记已保存。');
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : '保存失败');
     }
   };
   return (
     <div className="note-view">
-      <p className="eyebrow">完成后持续生长的学习资产</p>
-      <h2>三层学习笔记</h2>
-      <p className="note-intro">底稿记录首次通过时的理解，真正完成复习后只追加补充；你的改写单独保存，不会覆盖前两层。</p>
+      <p className="eyebrow">本节学习记录</p>
+      <h2>学习笔记</h2>
+      <p className="note-intro">这里保存本节总结、复习后的新理解和你的个人表述。</p>
 
       <article className="note-layer note-summary-layer">
         <header>
-          <span className="note-layer-index">01</span>
-          <div><b>学习总结</b><small>首次通过时冻结的稳定底稿</small></div>
-          {summary && <em>V{summary.version}</em>}
+          <div><b>学习总结</b><small>第一次完成本节时生成的总结</small></div>
         </header>
         <NoteContentView content={summary?.content ?? note.aiContent} empty="本节还没有学习总结。" />
-        {summary && (
-          <footer>
-            <span>内容版本 {summary.sourceContentVersionId ?? '旧数据'}</span>
-            <span>契约 {summary.sourceContractVersion}</span>
-            <span>观察水位 {summary.sourceObservationWatermark}</span>
-          </footer>
-        )}
       </article>
 
       <section className="note-layer note-review-layer">
         <header>
-          <span className="note-layer-index">02</span>
-          <div><b>复习补充</b><small>按完成时间追加，不改写底稿</small></div>
+          <div><b>复习补充</b><small>完成复习后新增的理解</small></div>
           <em>{note.layers.reviewSupplements.length} 条</em>
         </header>
         {note.layers.reviewSupplements.length === 0 ? (
-          <p className="note-empty-layer">完成一次无辅助复习后，新的理解会出现在这里。单纯答对不会自动生成正文。</p>
+          <p className="note-empty-layer">完成一次独立复习后，新的理解会出现在这里。</p>
         ) : (
           <div className="note-review-timeline">
             {note.layers.reviewSupplements.map((supplement, index) => (
@@ -4733,11 +4684,10 @@ function Note({
 
       <article className="note-layer note-user-layer">
         <header>
-          <span className="note-layer-index">03</span>
-          <div><b>我的版本</b><small>只有你的保存操作会创建新版本</small></div>
-          <em>{revision ? `V${revision.version}` : '未创建'}</em>
+          <div><b>我的笔记</b><small>用自己的话整理本节内容</small></div>
+          <em>{revision ? '已保存' : '未创建'}</em>
         </header>
-        {revision && <NoteContentView content={revision.content} empty="当前个人版本为空。" />}
+        {revision && <NoteContentView content={revision.content} empty="我的笔记目前为空。" />}
         <div className="note-editor">
           <label>
             <span>我如何描述本节解决的问题</span>
@@ -4759,22 +4709,21 @@ function Note({
               </label>
             ))}
           </div>
-          <button className="primary-button" onClick={save}>保存为新的个人版本</button>
+          <button className="primary-button" onClick={save}>保存我的笔记</button>
         </div>
       </article>
 
-      <aside className="note-verification" aria-label="当前验证标注">
-        <header><b>当前验证标注</b><span>只读 · 会随后续证据变化</span></header>
-        <p>这些状态来自测量与掌握度投影，不属于笔记正文，也不会静默改写任何版本。</p>
+      <aside className="note-verification" aria-label="本节掌握情况">
+        <header><b>本节掌握情况</b><span>会根据之后的学习表现更新</span></header>
+        <p>这里只显示已经验证的学习情况，不会改写上面的笔记。</p>
         {note.verificationAnnotations.length === 0 ? (
-          <small>目前没有可显示的验证标注。</small>
+          <small>目前还没有可显示的掌握情况。</small>
         ) : (
           <ul>
             {note.verificationAnnotations.map((annotation) => (
               <li key={annotation.assessmentTargetId}>
-                <span><b>{annotation.objective}</b><small>{annotation.dimension}</small></span>
-                <em>{annotation.claimStatus}</em>
-                <strong>{Math.round(annotation.pKnown * 100)}%</strong>
+                <span><b>{annotation.objective}</b></span>
+                <em>{annotation.pKnown >= 0.8 ? '掌握稳固' : annotation.pKnown >= 0.55 ? '继续巩固' : '尚未验证'}</em>
               </li>
             ))}
           </ul>
@@ -4902,7 +4851,7 @@ function AskMePanel({ sectionId }: { sectionId: string }) {
           ? '讨论已暂停，刷新页面后也可以继续。'
           : action === 'resume'
             ? '已恢复到上次讨论的位置。'
-            : '讨论已结束，已完成主题的证据已写入掌握画像。');
+            : '讨论已结束，本次实际检查过的内容已经记录。');
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '操作没有完成，请重试。');
     } finally {
@@ -4955,7 +4904,7 @@ function AskMePanel({ sectionId }: { sectionId: string }) {
             {discussion.status === 'completed' ? (
               <div className="askme-complete-card">
                 <h3>本次讨论已结束</h3>
-                <p>已完成主题的回答与评估已形成学习证据；未讨论主题不会被假定为已经掌握。</p>
+                <p>只记录本次实际检查过的内容；未讨论的主题不会计为已掌握。</p>
               </div>
             ) : activeTopic ? (
               <>
