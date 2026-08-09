@@ -64,6 +64,7 @@ from app.infrastructure.tables import (
     MilestonePathRevision,
     QuizAttempt,
     QuizSet,
+    QaSession,
     ReviewState,
     ScoringResult,
     Remediation,
@@ -75,6 +76,7 @@ from app.infrastructure.tables import (
     SourceClaimVersion,
     SourceVersion,
     UserFeedback,
+    UserDailyModeState,
     now,
 )
 from app.modules.learning.assessment import (
@@ -2790,6 +2792,61 @@ def test_qa_correction_and_three_round_ask_me(client):
     before = client.get(f"/api/sections/{section['id']}").json()["note"]
     edited = client.patch(f"/api/sections/{section['id']}/note", json={"content":{"my":"补充"}}).json()
     assert edited["aiContent"] == before["aiContent"] and edited["userContent"] == {"my":"补充"}
+
+
+def test_ask_ai_tracks_explicit_daily_mode_switch_but_not_expiry(client):
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    section = generate_and_pass(client, chapter["sections"][0]["id"])
+    block_id = section["content"]["blocks"][0]["id"]
+
+    fast = client.put(
+        "/api/daily-mode",
+        headers={"Idempotency-Key": "qa-mode-fast"},
+        json={
+            "dailyMode": "fast",
+            "duration": "1h",
+            "timezone": "Asia/Shanghai",
+            "source": "header_toggle",
+        },
+    )
+    assert fast.status_code == 200
+    assert client.post(
+        f"/api/sections/{section['id']}/ask",
+        json={"blockId": block_id, "question": "先说结论"},
+    ).status_code == 200
+    with client.app.state.sessions() as db:
+        assert db.scalar(select(QaSession)).daily_mode == "fast"
+
+    slow = client.put(
+        "/api/daily-mode",
+        headers={"Idempotency-Key": "qa-mode-slow"},
+        json={
+            "dailyMode": "slow",
+            "duration": "1h",
+            "timezone": "Asia/Shanghai",
+            "source": "header_toggle",
+        },
+    )
+    assert slow.status_code == 200
+    assert client.post(
+        f"/api/sections/{section['id']}/ask",
+        json={"blockId": block_id, "question": "再说清楚机制"},
+    ).status_code == 200
+    with client.app.state.sessions() as db:
+        assert db.scalar(select(QaSession)).daily_mode == "slow"
+        state = db.scalar(select(UserDailyModeState))
+        state.expires_at = now() - timedelta(seconds=1)
+        db.commit()
+
+    assert client.post(
+        f"/api/sections/{section['id']}/ask",
+        json={"blockId": block_id, "question": "到期后继续"},
+    ).status_code == 200
+    with client.app.state.sessions() as db:
+        assert db.scalar(select(QaSession)).daily_mode == "slow"
 
 
 def test_ask_me_retries_invalid_model_evaluation():

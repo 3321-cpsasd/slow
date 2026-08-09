@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { api } from './api/client';
 import { telemetry } from './telemetry';
 import { ProfileOnboardingFlow } from './ProfileOnboardingFlow';
+import { DailyModeDialog, DailyModeHeader } from './DailyMode';
 import type {
   AskMeDiscussion,
   AiRuntime,
@@ -16,6 +17,9 @@ import type {
   PrivacyState,
   Chapter,
   DueReviews,
+  DailyMode,
+  DailyModeDuration,
+  DailyModeSource,
   LearningTask,
   LearningProfile,
   LearningPreferences,
@@ -98,10 +102,21 @@ export default function App() {
     new URLSearchParams(window.location.search).get('section') === 'account' ? 'account' : 'profile'
   ));
   const [preparingInitialSection, setPreparingInitialSection] = useState(false);
+  const [dailyModeDialogOpen, setDailyModeDialogOpen] = useState(false);
+  const [dailyModeBusy, setDailyModeBusy] = useState(false);
+  const [activityDailyMode, setActivityDailyMode] = useState<DailyMode | null>(null);
+  const [dailyModeExpiredDuringActivity, setDailyModeExpiredDuringActivity] = useState(false);
+  const [pendingSectionId, setPendingSectionId] = useState('');
   const [generatingChapterId, setGeneratingChapterId] = useState('');
   const chapterGenerationRequests = useRef(new Set<string>());
   const userMenuRef = useRef<HTMLDivElement | null>(null);
   const lastViewedSection = useRef('');
+
+  const hasActiveDailyMode = () => Boolean(
+    data?.dailyMode?.active
+    && data.dailyMode.expiresAt
+    && new Date(data.dailyMode.expiresAt).getTime() > Date.now(),
+  );
 
   const loadAuthenticatedState = async () => {
     const value = await api.authMe();
@@ -254,6 +269,41 @@ export default function App() {
     };
   }, [showUserMenu]);
 
+  useEffect(() => {
+    const state = data?.dailyMode;
+    if (!state) return;
+    if (!state.active || !state.expiresAt) {
+      if (!(view === 'learn' && section && activityDailyMode)) setDailyModeDialogOpen(true);
+      return;
+    }
+    const expire = () => {
+      setData((current) => current ? {
+        ...current,
+        dailyMode: {
+          ...current.dailyMode,
+          active: false,
+          dailyMode: null,
+          duration: null,
+          activatedAt: null,
+          expiresAt: null,
+          serverNow: new Date().toISOString(),
+        },
+      } : current);
+      if (view === 'learn' && section && activityDailyMode) {
+        setDailyModeExpiredDuringActivity(true);
+      } else {
+        setDailyModeDialogOpen(true);
+      }
+    };
+    const remaining = new Date(state.expiresAt).getTime() - Date.now();
+    if (remaining <= 0) {
+      expire();
+      return;
+    }
+    const timer = window.setTimeout(expire, Math.min(remaining, 2_147_000_000));
+    return () => window.clearTimeout(timer);
+  }, [data?.dailyMode?.version, data?.dailyMode?.active, data?.dailyMode?.expiresAt, view, section?.id, activityDailyMode]);
+
   const run = async <T,>(label: string, action: () => Promise<T>) => {
     setBusy(label);
     setError('');
@@ -330,6 +380,9 @@ export default function App() {
     setView('home');
     setSeries(null);
     setSection(null);
+    setActivityDailyMode(null);
+    setDailyModeExpiredDuringActivity(false);
+    if (!hasActiveDailyMode()) setDailyModeDialogOpen(true);
     void api.bootstrap()
       .then(setData)
       .catch((reason) => setError(reason instanceof Error ? reason.message : '主页刷新失败'));
@@ -354,17 +407,54 @@ export default function App() {
 
   const openAndTrackSection = async (sectionId: string) => {
     const value = await api.openSection(sectionId);
+    setActivityDailyMode(value.dailyModeAtStart || data?.dailyMode?.dailyMode || 'slow');
+    setDailyModeExpiredDuringActivity(false);
     void api.updateResume(sectionId).catch(() => undefined);
     return value;
   };
 
   const loadSection = async (sectionId: string) => {
+    if (!hasActiveDailyMode()) {
+      setPendingSectionId(sectionId);
+      setDailyModeDialogOpen(true);
+      if (section) return section;
+    }
     const value = await run(
       '正在读取小节…',
       () => openAndTrackSection(sectionId),
     );
     setSection(value);
     return value;
+  };
+
+  const activateDailyMode = async (
+    mode: DailyMode,
+    duration: DailyModeDuration,
+    source: DailyModeSource,
+  ) => {
+    setDailyModeBusy(true);
+    setError('');
+    try {
+      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+      const updated = await api.updateDailyMode(
+        { dailyMode: mode, duration, timezone, source },
+        `daily-mode-${crypto.randomUUID()}`,
+      );
+      setData((current) => current ? { ...current, dailyMode: updated } : current);
+      if (source === 'header_toggle' && section) setActivityDailyMode(mode);
+      setDailyModeExpiredDuringActivity(false);
+      setDailyModeDialogOpen(false);
+      if (pendingSectionId) {
+        const target = pendingSectionId;
+        setPendingSectionId('');
+        const value = await openAndTrackSection(target);
+        setSection(value);
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '学习模式同步失败');
+    } finally {
+      setDailyModeBusy(false);
+    }
   };
 
   const firstUsableSection = (value: Series) => {
@@ -728,6 +818,17 @@ export default function App() {
     );
   }
 
+  const showDailyModeDialog = Boolean(
+    data?.dailyMode
+    && (
+      dailyModeDialogOpen
+      || (
+        !data.dailyMode.active
+        && !(view === 'learn' && section && activityDailyMode)
+      )
+    ),
+  );
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -751,6 +852,15 @@ export default function App() {
           <small>一步一步，学成自己的书</small>
         )}
         <div className="header-actions">
+          {data?.dailyMode && (
+            <DailyModeHeader
+              state={data.dailyMode}
+              effectiveMode={activityDailyMode || data.dailyMode.dailyMode}
+              expiredInActivity={dailyModeExpiredDuringActivity}
+              busy={dailyModeBusy}
+              onActivate={activateDailyMode}
+            />
+          )}
           {busy && <span className="busy-indicator"><i />{busy}</span>}
           {AI_RUNTIME_SETTINGS_ENABLED && (
             <button className="quiet-button ai-settings-trigger" onClick={() => setShowAiSettings(true)}>
@@ -805,6 +915,7 @@ export default function App() {
         {view === 'home' && (
           <Home
             data={data}
+            dailyMode={data?.dailyMode?.dailyMode || data?.dailyMode?.lastDailyMode || 'slow'}
             onOpen={openShelf}
             onContinue={openSeries}
             onCreate={async (body) => {
@@ -921,6 +1032,7 @@ export default function App() {
             <LearningWorkspace
               series={series}
               section={section}
+              dailyMode={activityDailyMode || data?.dailyMode?.dailyMode || 'slow'}
               onSelectSection={loadSection}
               onGenerateSection={generateSection}
               onRegenerateSection={regenerateSection}
@@ -974,6 +1086,13 @@ export default function App() {
           </>
         )}
       </main>
+      {showDailyModeDialog && data?.dailyMode && (
+        <DailyModeDialog
+          state={data.dailyMode}
+          busy={dailyModeBusy}
+          onActivate={activateDailyMode}
+        />
+      )}
       {AI_RUNTIME_SETTINGS_ENABLED && showAiSettings && (
         <AiSettingsDialog onClose={() => setShowAiSettings(false)} />
       )}
@@ -1471,11 +1590,13 @@ function nextBookSection(book: Book) {
 
 function Home({
   data,
+  dailyMode,
   onOpen,
   onContinue,
   onCreate,
 }: {
   data: Bootstrap | null;
+  dailyMode: DailyMode;
   onOpen: (shelf: Shelf) => void;
   onContinue: (seriesId: string) => Promise<void>;
   onCreate: (body: ShelfCreateInput) => Promise<void>;
@@ -1601,12 +1722,14 @@ function Home({
   };
 
   return (
-    <section className="library-dashboard">
+    <section className={`library-dashboard mode-${dailyMode}`}>
       <header className="library-hero">
         <div className="library-hero-copy">
           <p className="library-kicker">知行书架 · Personal library</p>
           <h1>把正在学的，<br /><em>放回眼前。</em></h1>
-          <p>这里不是藏书统计，而是你的学习入口。先继续今天的一节，再回到所属领域查看完整路径。</p>
+          <p>{dailyMode === 'fast'
+            ? '先用几分钟抓住一个关键判断；正式验证仍沿用同一份教材与标准。'
+            : '这里不是藏书统计，而是你的学习入口。先继续今天的一节，再回到所属领域查看完整路径。'}</p>
         </div>
         <div className="library-hero-aside">
           <p className="library-summary">
@@ -1618,11 +1741,11 @@ function Home({
         </div>
       </header>
 
-      <div className="library-focus-grid">
+      <div className={`library-focus-grid ${dailyMode === 'fast' && currentReview ? 'fast-review-first' : ''}`}>
         <article className={`library-focus-card today-focus-card ${dashboard?.today ? '' : 'is-empty'}`}>
           <header>
             <span className="focus-card-label">今天从这里继续</span>
-            {dashboard?.today && <small>约 {dashboard.today.estimatedMinutes} 分钟</small>}
+            {dashboard?.today && <small>{dailyMode === 'fast' ? '快速视图 · 约 3–5 分钟' : `约 ${dashboard.today.estimatedMinutes} 分钟`}</small>}
           </header>
           {dashboard?.today ? (
             <>
@@ -1652,7 +1775,7 @@ function Home({
 
         <article className="library-focus-card review-focus-card">
           <header>
-            <span className="focus-card-label">待复习</span>
+            <span className="focus-card-label">{dailyMode === 'fast' && currentReview ? 'Fast 模式优先 · 待复习' : '待复习'}</span>
             <small>跨书架</small>
           </header>
           {reviewBusy ? (
@@ -2733,6 +2856,7 @@ function PlanForm({ profile, submit }: { profile: LearningProfile; submit: (body
 function LearningWorkspace({
   series,
   section,
+  dailyMode,
   onSelectSection,
   onGenerateSection,
   onRegenerateSection,
@@ -2748,6 +2872,7 @@ function LearningWorkspace({
 }: {
   series: Series;
   section: Section | null;
+  dailyMode: DailyMode;
   onSelectSection: (id: string) => Promise<Section>;
   onGenerateSection: (id: string) => Promise<void>;
   onRegenerateSection: (id: string) => Promise<void>;
@@ -2799,7 +2924,7 @@ function LearningWorkspace({
   };
 
   return (
-    <div className={`learning-workspace ${directoryHidden ? 'directory-collapsed' : ''} ${qaHidden ? 'qa-collapsed' : ''}`}>
+    <div className={`learning-workspace mode-${dailyMode} ${directoryHidden ? 'directory-collapsed' : ''} ${qaHidden ? 'qa-collapsed' : ''}`}>
       {compactLayout && (!directoryHidden || !qaHidden) && (
         <button
           className="panel-backdrop"
@@ -2826,6 +2951,7 @@ function LearningWorkspace({
       />
       <ReaderPanel
         section={section}
+        dailyMode={dailyMode}
         directoryHidden={directoryHidden}
         qaHidden={qaHidden}
         onToggleDirectory={toggleDirectory}
@@ -2846,6 +2972,7 @@ function LearningWorkspace({
       <QaPanel
         key={section?.id || 'empty'}
         section={section}
+        dailyMode={dailyMode}
         hidden={qaHidden}
         onClose={() => setQaHidden(true)}
         selectedBlockId={activeBlockId}
@@ -3226,6 +3353,7 @@ function SectionTreeButton({
 
 function ReaderPanel({
   section,
+  dailyMode,
   directoryHidden,
   qaHidden,
   onToggleDirectory,
@@ -3241,6 +3369,7 @@ function ReaderPanel({
   onFeedbackBlock,
 }: {
   section: Section | null;
+  dailyMode: DailyMode;
   directoryHidden: boolean;
   qaHidden: boolean;
   onToggleDirectory: () => void;
@@ -3419,6 +3548,7 @@ function ReaderPanel({
         {tab === 'content' && (
           <LessonContent
             section={section}
+            dailyMode={dailyMode}
             selectedBlockId={selectedBlockId}
             onGenerate={onGenerate}
             onStartQuiz={() => switchTab('quiz')}
@@ -3548,19 +3678,44 @@ function ReaderPanelToggles({
   );
 }
 
+function selectFastBlocks(blocks: Block[]) {
+  const selected: Block[] = [];
+  const add = (block?: Block) => {
+    if (block && !selected.some((item) => item.id === block.id)) selected.push(block);
+  };
+  add(blocks.find((block) => block.role === 'conclusion'));
+  add(blocks.find((block) => block.role === 'mechanism'));
+  add(blocks.find((block) => block.role === 'example'));
+  add(blocks.find((block) => block.role === 'boundary'));
+  blocks.forEach((block) => {
+    if (selected.length < 4) add(block);
+  });
+  return selected.slice(0, 4);
+}
+
 function LessonContent({
   section,
+  dailyMode,
   selectedBlockId,
   onGenerate,
   onStartQuiz,
   onFeedbackBlock,
 }: {
   section: Section;
+  dailyMode: DailyMode;
   selectedBlockId: string;
   onGenerate: () => void;
   onStartQuiz: () => void;
   onFeedbackBlock: (block: Block) => void;
 }) {
+  const [showCompleteFast, setShowCompleteFast] = useState(false);
+  const [fastCheck, setFastCheck] = useState<'clear'|'unclear'|null>(null);
+
+  useEffect(() => {
+    setShowCompleteFast(false);
+    setFastCheck(null);
+  }, [section.id, section.content?.id, dailyMode]);
+
   if (!section.content) {
     return (
       <div className="lesson-intro">
@@ -3587,6 +3742,10 @@ function LessonContent({
       ? []
       : [{ source, index }]
   ));
+  const fastBlocks = selectFastBlocks(section.content.blocks);
+  const shownBlocks = dailyMode === 'fast' && !showCompleteFast
+    ? fastBlocks
+    : section.content.blocks;
 
   return (
     <article className="lesson-document">
@@ -3603,7 +3762,19 @@ function LessonContent({
               ? '历史内容 · 未确认通过当前结构、契约和证据边界校验 · 未经逐项事实核验'
               : `${section.content.aiGenerated ? 'AI 生成' : '授权内容'} · 未确认通过结构、契约和证据边界校验 · 未经逐项事实核验`}
       </p>
-      {section.content.blocks.map((block) => (
+      {dailyMode === 'fast' && (
+        <aside className="fast-view-notice">
+          <div>
+            <span>FAST VIEW · 快速浏览</span>
+            <b>{showCompleteFast ? '已展开完整正文' : `保留 ${fastBlocks.length} 个关键段落`}</b>
+            <p>这里只调整呈现密度。快速浏览不会计为完成；通过验证后才会记录进度。</p>
+          </div>
+          <button type="button" onClick={() => setShowCompleteFast((shown) => !shown)}>
+            {showCompleteFast ? '收回快速视图' : '展开完整正文'}
+          </button>
+        </aside>
+      )}
+      {shownBlocks.map((block) => (
         <ContentBlock
           key={block.id}
           block={block}
@@ -3611,6 +3782,19 @@ function LessonContent({
           onFeedback={() => onFeedbackBlock(block)}
         />
       ))}
+      {dailyMode === 'fast' && !showCompleteFast && (
+        <section className="fast-check" aria-label="快速自检">
+          <span>30 秒自检 · 不影响进度</span>
+          <h3>你能用一句话复述本节结论，并说出一个失效边界吗？</h3>
+          <div>
+            <button className={fastCheck === 'clear' ? 'selected' : ''} onClick={() => setFastCheck('clear')}>可以复述</button>
+            <button className={fastCheck === 'unclear' ? 'selected' : ''} onClick={() => setFastCheck('unclear')}>边界还不清楚</button>
+          </div>
+          {fastCheck && <p>{fastCheck === 'clear'
+            ? '很好。若要完成本节，请继续完成下方同一套验证题。'
+            : '先展开完整正文，重点阅读边界段落；这次选择不会影响进度。'}</p>}
+        </section>
+      )}
       {visibleSources.length > 0 && <details className="source-list">
         <summary>参考来源 · {visibleSources.length}</summary>
         {visibleSources.map(({ source, index }) => (
@@ -4880,6 +5064,7 @@ function AskMePanel({ sectionId }: { sectionId: string }) {
 
 function QaPanel({
   section,
+  dailyMode,
   hidden,
   onClose,
   selectedBlockId,
@@ -4888,6 +5073,7 @@ function QaPanel({
   onClearQuote,
 }: {
   section: Section | null;
+  dailyMode: DailyMode;
   hidden: boolean;
   onClose: () => void;
   selectedBlockId: string;
@@ -4970,7 +5156,7 @@ function QaPanel({
         <button className="panel-drawer-close" aria-label="关闭答疑" onClick={onClose}>×</button>
         <span className="panel-label">答疑</span>
         <h2>围绕当前小节追问</h2>
-        <p>答疑独立保存，不会打断正文阅读。</p>
+        <p>{dailyMode === 'fast' ? '先结论、后三点；答疑不会影响学习进度。' : '答疑独立保存，不会打断正文阅读。'}</p>
       </div>
       {!section?.content ? (
         <div className="qa-empty">
@@ -5002,7 +5188,7 @@ function QaPanel({
             {messages.length === 0 && (
               <div className="qa-suggestion">
                 <span>可以这样问</span>
-                <button onClick={() => setQuestion('这个机制最容易被误解的地方是什么？')}>这个机制最容易被误解的地方是什么？</button>
+                <button onClick={() => setQuestion(dailyMode === 'fast' ? '用一句结论和三个要点解释这段。' : '这个机制最容易被误解的地方是什么？')}>{dailyMode === 'fast' ? '用一句结论和三个要点解释这段。' : '这个机制最容易被误解的地方是什么？'}</button>
                 <button onClick={() => setQuestion('它在什么边界条件下会失效？')}>它在什么边界条件下会失效？</button>
               </div>
             )}

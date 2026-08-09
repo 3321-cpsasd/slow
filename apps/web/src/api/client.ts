@@ -237,6 +237,17 @@ export const api = {
     body:JSON.stringify(body),
   }),
   bootstrap:()=>call<import('../model/types').Bootstrap>('/api/bootstrap'),
+  dailyMode:()=>call<import('../model/types').DailyModeState>('/api/daily-mode'),
+  updateDailyMode:(body:{
+    dailyMode:import('../model/types').DailyMode;
+    duration:import('../model/types').DailyModeDuration;
+    timezone:string;
+    source:import('../model/types').DailyModeSource;
+  },idempotencyKey:string)=>call<import('../model/types').DailyModeState>('/api/daily-mode',{
+    method:'PUT',
+    headers:{'Idempotency-Key':idempotencyKey},
+    body:JSON.stringify(body),
+  }),
   submitFeedback:(body:object,idempotencyKey:string)=>call<import('../model/types').FeedbackReceipt>('/api/feedback',{
     method:'POST',
     headers:{'Idempotency-Key':idempotencyKey},

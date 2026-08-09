@@ -65,6 +65,7 @@ from ..modules.learning.contracts import (
     open_run_section,
 )
 from ..modules.learning.progress import ProgressStore
+from ..modules.learning.daily_mode import DailyModeService
 from ..modules.learning.tasks import (
     complete_task,
     fail_task,
@@ -115,6 +116,7 @@ class SlowService:
         self.attachment_storage = attachment_storage
         self.contexts = ActiveLearningContextResolver(db)
         self.progress = ProgressStore(db, user_id=self.user_id)
+        self.daily_modes = DailyModeService(db, user_id=self.user_id)
         self.artifacts = ArtifactProgressStore(db, user_id=self.user_id)
         self.artifact_service = ArtifactService(
             db,
@@ -172,6 +174,7 @@ class SlowService:
             generation_contexts=self.generation_contexts,
             section_reader=self.section,
             memory_loader=self._memory,
+            daily_mode_reader=self.daily_modes.current,
             uid=uid,
             dump=dump,
             load=load,
@@ -335,12 +338,19 @@ class SlowService:
         resume = self.resume_position()
         view["profile"] = profile
         view["resume"] = resume
+        view["dailyMode"] = self.daily_modes.current()
         view["milestoneDashboard"] = self.milestones.dashboard(
             library=view,
             profile=profile,
             resume=resume,
         )
         return view
+
+    def daily_mode(self):
+        return self.daily_modes.current()
+
+    def update_daily_mode(self, body, idempotency_key: str):
+        return self.daily_modes.activate(body, idempotency_key)
 
     def confirm_milestone_path(self, series_id: str):
         return self.milestones.confirm(series_id)
@@ -682,7 +692,11 @@ class SlowService:
             uid=uid,
         )
         self.db.commit()
-        return self.section(section_id)
+        view = self.section(section_id)
+        snapshot = self.daily_modes.activity_snapshot()
+        if snapshot:
+            view.update(snapshot)
+        return view
 
     def section(self, section_id):
         return self.section_reads.get(

@@ -33,6 +33,7 @@ class QaService:
         generation_contexts: GenerationContextBuilder,
         section_reader: Callable,
         memory_loader: Callable,
+        daily_mode_reader: Callable,
         uid: Callable[[str], str],
         dump: Callable,
         load: Callable,
@@ -46,6 +47,7 @@ class QaService:
         self.generation_contexts = generation_contexts
         self.section_reader = section_reader
         self.memory_loader = memory_loader
+        self.daily_mode_reader = daily_mode_reader
         self.uid = uid
         self.dump = dump
         self.load = load
@@ -92,6 +94,7 @@ class QaService:
                 QaSession.learning_run_id == learning_run.id,
             )
         )
+        daily_mode_state = self.daily_mode_reader()
         if not session:
             session = QaSession(
                 id=self.uid("qa"),
@@ -102,8 +105,19 @@ class QaService:
                     binding.learning_contract_version_id
                 ),
                 content_version_id=binding.content_version_id,
+                daily_mode=daily_mode_state.get("dailyMode") or "slow",
             )
             self.db.add(session)
+            self.db.commit()
+        elif (
+            daily_mode_state.get("active")
+            and daily_mode_state.get("dailyMode") in {"fast", "slow"}
+            and session.daily_mode != daily_mode_state["dailyMode"]
+        ):
+            # An explicit active-mode change should affect the next answer.
+            # Once the mode expires, keep the session snapshot so an ongoing
+            # activity is not interrupted by the selection dialog.
+            session.daily_mode = daily_mode_state["dailyMode"]
             self.db.commit()
         messages = self.db.scalars(
             select(QaMessage)
@@ -167,6 +181,7 @@ class QaService:
             "requestedThreadId": body.thread_id,
             "forcedRelation": body.force_relation,
             "newThreadId": suggested,
+            "dailyMode": session.daily_mode,
             "weightedContext": {
                 "currentThreadFullHistory": current_history,
                 "relatedThreadSummaries": related_summaries,

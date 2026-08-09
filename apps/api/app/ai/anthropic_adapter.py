@@ -284,10 +284,15 @@ class AnthropicAdapter(OpenAiAdapter):
     async def answer_stream(self, request: dict):
         if not self.client:
             raise AiError("未配置 Anthropic API Key")
+        mode_instruction = (
+            "当前是 Fast：先给一句可行动结论，再用最多三个短要点解释。"
+            if request.get("dailyMode") == "fast"
+            else "当前是 Slow：完整解释结论、机制、边界与必要例子。"
+        )
         developer = (
             "你是绑定当前小节的个性化答疑助手。generationContext 中的学习者画像、"
             "Mission、Learning Contract 和交互历史是权威上下文；按学习者背景和目的"
-            "调整解释，但不得编造经历。当前线程完整历史权重最高，"
+            f"调整解释，但不得编造经历。{mode_instruction}当前线程完整历史权重最高，"
             "其他线程摘要只在相关时使用。只回答锚定内容块及必要前置，"
             "不替用户答测验，不把对话当作掌握证据。输出简洁准确中文，可使用 Markdown 的短标题、"
             "列表、表格和代码块。只输出答案正文。"

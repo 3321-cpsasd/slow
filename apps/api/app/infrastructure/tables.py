@@ -30,6 +30,50 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class UserDailyModeState(Base):
+    """Current, rebuildable daily learning-mode projection for one user."""
+
+    __tablename__ = "user_daily_mode_states"
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id"), primary_key=True
+    )
+    daily_mode: Mapped[str] = mapped_column(String(16), index=True)
+    duration: Mapped[str] = mapped_column(String(16))
+    timezone: Mapped[str] = mapped_column(String(64))
+    activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class DailyModeEvent(Base):
+    """Append-only authority for user-initiated daily-mode changes."""
+
+    __tablename__ = "daily_mode_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "idempotency_key",
+            name="uq_daily_mode_events_user_idempotency",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    previous_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    daily_mode: Mapped[str] = mapped_column(String(16), index=True)
+    duration: Mapped[str] = mapped_column(String(16))
+    timezone: Mapped[str] = mapped_column(String(64))
+    source: Mapped[str] = mapped_column(String(32), index=True)
+    activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    state_version: Mapped[int] = mapped_column(Integer)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
 class UserFeedback(Base):
     """Immutable feedback fact submitted by an authenticated user."""
 
@@ -2119,6 +2163,7 @@ class QaSession(Base):
     content_version_id: Mapped[str | None] = mapped_column(
         ForeignKey("content_versions.id"), nullable=True, index=True
     )
+    daily_mode: Mapped[str] = mapped_column(String(16), default="slow")
     memory_json: Mapped[str] = mapped_column(Text, default="{}")
 
 

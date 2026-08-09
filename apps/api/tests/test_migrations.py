@@ -5,13 +5,14 @@ import sqlite3
 import subprocess
 import sys
 
+import pytest
 from sqlalchemy import create_engine
 
 from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0045_ask_me_discussions"
+HEAD_REVISION = "0047_historical_schema_repair"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -28,6 +29,56 @@ def run_alembic(database: Path, *arguments: str) -> None:
         capture_output=True,
         text=True,
     )
+
+
+def recreate_sqlite_table_without(
+    connection: sqlite3.Connection,
+    table_name: str,
+    fragments: tuple[str, ...],
+) -> None:
+    schema = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()[0]
+    indexes = [
+        row[0]
+        for row in connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL",
+            (table_name,),
+        )
+    ]
+    historical_name = f"{table_name}_historical"
+    historical_schema = schema.replace(
+        f"CREATE TABLE {table_name}",
+        f"CREATE TABLE {historical_name}",
+        1,
+    )
+    for fragment in fragments:
+        assert fragment in historical_schema
+        historical_schema = historical_schema.replace(fragment, "", 1)
+
+    connection.execute("PRAGMA foreign_keys=OFF")
+    connection.execute(historical_schema)
+    columns = [
+        row[1]
+        for row in connection.execute(
+            f'PRAGMA table_info("{historical_name}")'
+        )
+    ]
+    column_list = ", ".join(f'"{column}"' for column in columns)
+    connection.execute(
+        f'INSERT INTO "{historical_name}" ({column_list}) '
+        f'SELECT {column_list} FROM "{table_name}"'
+    )
+    connection.execute(f'DROP TABLE "{table_name}"')
+    connection.execute(
+        f'ALTER TABLE "{historical_name}" RENAME TO "{table_name}"'
+    )
+    for statement in indexes:
+        connection.execute(statement)
+    connection.commit()
+    connection.execute("PRAGMA foreign_keys=ON")
 
 
 def test_fresh_database_migrates_to_combined_head(tmp_path):
@@ -118,6 +169,10 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
+        assert {
+            "user_daily_mode_states",
+            "daily_mode_events",
+        }.issubset(trustworthy_tables)
         assessment_target_columns = {
             row[1]
             for row in connection.execute("PRAGMA table_info(assessment_targets)")
@@ -144,6 +199,11 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
             row[1]
             for row in connection.execute("PRAGMA table_info(learning_runs)")
         }
+        qa_session_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(qa_sessions)")
+        }
+        assert "daily_mode" in qa_session_columns
         content_columns = {
             row[1]
             for row in connection.execute("PRAGMA table_info(content_versions)")
@@ -738,6 +798,199 @@ def test_assessment_migration_repairs_section_scoped_target_schema(tmp_path):
 
     assert revision == HEAD_REVISION
     assert "section_id" not in target_columns
+
+
+def test_historical_schema_repair_restores_known_intermediate_shapes(tmp_path):
+    database = tmp_path / "historical-intermediate-shapes.db"
+    run_alembic(database, "upgrade", "0046_daily_mode")
+
+    projection_fragment = (
+        "\n\tprojection_version INTEGER DEFAULT '1' NOT NULL, ",
+    )
+    evidence_constraint = (
+        ", \n\tCONSTRAINT "
+        "uq_evidence_qualification_observation_family_rule "
+        "UNIQUE (observation_id, projection_family, rule_version)"
+    )
+    feedback_fragments = (
+        "\n\tidempotency_key VARCHAR(128) NOT NULL, ",
+        "\n\trequest_hash VARCHAR(64) NOT NULL, ",
+        ", \n\tCONSTRAINT uq_user_feedback_user_idempotency "
+        "UNIQUE (user_id, idempotency_key)",
+    )
+
+    with sqlite3.connect(database) as connection:
+        for table_name in (
+            "assessment_gate_states",
+            "knowledge_state_projections",
+            "review_states",
+        ):
+            recreate_sqlite_table_without(
+                connection,
+                table_name,
+                projection_fragment,
+            )
+        recreate_sqlite_table_without(
+            connection,
+            "evidence_qualification_events",
+            (evidence_constraint,),
+        )
+        recreate_sqlite_table_without(
+            connection,
+            "user_feedback",
+            feedback_fragments,
+        )
+        connection.execute(
+            "INSERT INTO users (id, name) VALUES (?, ?)",
+            ("historical_feedback_user", "Historical Feedback User"),
+        )
+        user_id = connection.execute(
+            "SELECT id FROM users ORDER BY id LIMIT 1"
+        ).fetchone()[0]
+        connection.execute(
+            """
+            INSERT INTO user_feedback (
+                id, user_id, scope, feedback_type, message, page_path,
+                view, section_id, content_version_id, block_id,
+                block_snapshot_hash, source_mode, schema_version,
+                context_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "feedback_historical",
+                user_id,
+                "global",
+                "other",
+                "保留这条历史反馈",
+                "/",
+                "library",
+                None,
+                None,
+                None,
+                "",
+                "legacy_intermediate",
+                "feedback_v1",
+                "{}",
+                "2026-08-05 20:00:00",
+            ),
+        )
+        connection.commit()
+
+    run_alembic(database, "upgrade", "head")
+
+    with sqlite3.connect(database) as connection:
+        revision = connection.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone()[0]
+        projection_columns = {
+            table_name: {
+                row[1]: row
+                for row in connection.execute(
+                    f'PRAGMA table_info("{table_name}")'
+                )
+            }
+            for table_name in (
+                "assessment_gate_states",
+                "knowledge_state_projections",
+                "review_states",
+            )
+        }
+        evidence_schema = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' "
+            "AND name = 'evidence_qualification_events'"
+        ).fetchone()[0]
+        feedback_schema = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'user_feedback'"
+        ).fetchone()[0]
+        feedback = connection.execute(
+            "SELECT message, idempotency_key, request_hash "
+            "FROM user_feedback WHERE id = 'feedback_historical'"
+        ).fetchone()
+        foreign_key_errors = connection.execute(
+            "PRAGMA foreign_key_check"
+        ).fetchall()
+
+    assert revision == HEAD_REVISION
+    for columns in projection_columns.values():
+        assert columns["projection_version"][3] == 1
+        assert columns["projection_version"][4] == "'1'"
+    assert (
+        "uq_evidence_qualification_observation_family_rule"
+        in evidence_schema
+    )
+    assert "uq_user_feedback_user_idempotency" in feedback_schema
+    assert feedback[0] == "保留这条历史反馈"
+    assert feedback[1].startswith("historical:")
+    assert len(feedback[2]) == 64
+    assert foreign_key_errors == []
+
+    # Downgrading this repair must not remove invariants that were already
+    # authoritative at 0046. A subsequent upgrade is therefore a no-op.
+    run_alembic(database, "downgrade", "0046_daily_mode")
+    run_alembic(database, "upgrade", "head")
+
+
+def test_historical_schema_repair_refuses_duplicate_immutable_facts(tmp_path):
+    database = tmp_path / "historical-duplicate-evidence.db"
+    run_alembic(database, "upgrade", "0046_daily_mode")
+    evidence_constraint = (
+        ", \n\tCONSTRAINT "
+        "uq_evidence_qualification_observation_family_rule "
+        "UNIQUE (observation_id, projection_family, rule_version)"
+    )
+
+    with sqlite3.connect(database) as connection:
+        recreate_sqlite_table_without(
+            connection,
+            "evidence_qualification_events",
+            (evidence_constraint,),
+        )
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.executemany(
+            """
+            INSERT INTO evidence_qualification_events (
+                id, observation_id, projection_family, status, reason,
+                rule_version, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "qualification_duplicate_1",
+                    "missing_observation",
+                    "mastery",
+                    "eligible",
+                    "historical duplicate",
+                    "evidence_v1",
+                    "2026-08-05 20:00:00",
+                ),
+                (
+                    "qualification_duplicate_2",
+                    "missing_observation",
+                    "mastery",
+                    "eligible",
+                    "historical duplicate",
+                    "evidence_v1",
+                    "2026-08-05 20:01:00",
+                ),
+            ],
+        )
+        connection.commit()
+
+    with pytest.raises(subprocess.CalledProcessError):
+        run_alembic(database, "upgrade", "head")
+
+    with sqlite3.connect(database) as connection:
+        revision = connection.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone()[0]
+        count = connection.execute(
+            "SELECT COUNT(*) FROM evidence_qualification_events"
+        ).fetchone()[0]
+
+    assert revision == "0046_daily_mode"
+    assert count == 2
 
 
 def test_shelf_origin_migration_removes_only_empty_non_demo_defaults(tmp_path):

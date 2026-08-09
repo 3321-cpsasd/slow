@@ -23,11 +23,26 @@ export type ResumePosition = {
   blockId:string;
   updatedAt:string;
 };
+export type DailyMode = 'fast'|'slow';
+export type DailyModeDuration = '1h'|'3h'|'6h'|'today';
+export type DailyModeSource = 'dialog'|'header_toggle'|'duration_adjustment';
+export type DailyModeState = {
+  active:boolean;
+  dailyMode:DailyMode|null;
+  lastDailyMode:DailyMode|null;
+  duration:DailyModeDuration|null;
+  timezone:string|null;
+  activatedAt:string|null;
+  expiresAt:string|null;
+  version:number;
+  serverNow:string;
+};
 export type Bootstrap = {
   user:{id:string;name:string};
   shelves:Shelf[];
   profile:LearningProfile;
   resume:ResumePosition|null;
+  dailyMode:DailyModeState;
   milestoneDashboard:MilestoneDashboard;
 };
 export type LearningPreferences = {
@@ -336,7 +351,7 @@ export type AskMeDiscussion = {
     createdAt:string;
   }[];
 };
-export type Section = SectionSummary & { generation:null|Generation; content:null|{id:string;version:number;blocks:Block[];sources:Source[];sourceVerification:SourceVerification[];confidence:string;publicationStatus:string;generationMode:'model_only'|'rights_grounded'|'demo';rightsStatus:string;factualStatus:string;aiGenerated:boolean;schemaVersion:string;promptVersion:string;boundaryValidation:{status:'passed'|'legacy'|'unverified';ruleVersion:string|null}}; quiz:null|{id:string;generation:number;publicationStatus:string;questions:Question[];governance:QuizGovernance|null}; latestAttemptReview:QuizResult|null; remediations:Remediation[]; note:null|Note; workflowTasks:LearningTask[] };
+export type Section = SectionSummary & { dailyModeAtStart?:DailyMode;dailyModeStateVersion?:number;activityStartedAt?:string; generation:null|Generation; content:null|{id:string;version:number;blocks:Block[];sources:Source[];sourceVerification:SourceVerification[];confidence:string;publicationStatus:string;generationMode:'model_only'|'rights_grounded'|'demo';rightsStatus:string;factualStatus:string;aiGenerated:boolean;schemaVersion:string;promptVersion:string;boundaryValidation:{status:'passed'|'legacy'|'unverified';ruleVersion:string|null}}; quiz:null|{id:string;generation:number;publicationStatus:string;questions:Question[];governance:QuizGovernance|null}; latestAttemptReview:QuizResult|null; remediations:Remediation[]; note:null|Note; workflowTasks:LearningTask[] };
 export type LearningTask = {
   taskId:string;
   type:'content_feedback_regeneration'|'initial_book_preload'|'note_generation'|'remediation_generation'|'next_section_preload';

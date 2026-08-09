@@ -82,6 +82,19 @@ class AccountExitCreate(ApiModel):
     reason: str = Field(default="", max_length=500)
 
 
+class DailyModeUpdate(ApiModel):
+    model_config = ConfigDict(
+        alias_generator=camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+    daily_mode: Literal["fast", "slow"]
+    duration: Literal["1h", "3h", "6h", "today"]
+    timezone: str = Field(min_length=1, max_length=64)
+    source: Literal["dialog", "header_toggle", "duration_adjustment"]
+
+
 ProductEventName = Literal[
     "home_viewed",
     "shelf_viewed",

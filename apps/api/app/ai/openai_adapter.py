@@ -1021,12 +1021,22 @@ class OpenAiAdapter:
 
     async def answer(self, request: dict):
         self._begin_structured_operation()
-        return await self._parse(ClassifiedAnswer, """你是绑定当前小节的个性化答疑助手。generationContext 中 learner、mission、curriculum、Learning Contract 与 interaction 是权威上下文；在不编造经历的前提下，按学习者背景、目的和当前深度调整解释与例子。先判断这是当前问题线程追问还是新问题；追问沿用 thread_id，新问题创建 payload 建议的新 ID。当前线程完整历史权重最高，其他线程摘要只在相关时使用。只回答锚定内容块及必要前置，不替用户答测验，不把对话当作掌握证据。输出简洁准确中文。""", request, 2200)
+        mode_instruction = (
+            "dailyMode 为 fast：先给一句可行动结论，再用最多三个短要点解释，适合碎片时间。"
+            if request.get("dailyMode") == "fast"
+            else "dailyMode 为 slow：完整解释结论、机制、边界与必要例子，仍避免无关展开。"
+        )
+        return await self._parse(ClassifiedAnswer, f"""你是绑定当前小节的个性化答疑助手。generationContext 中 learner、mission、curriculum、Learning Contract 与 interaction 是权威上下文；在不编造经历的前提下，按学习者背景、目的和当前深度调整解释与例子。{mode_instruction}先判断这是当前问题线程追问还是新问题；追问沿用 thread_id，新问题创建 payload 建议的新 ID。当前线程完整历史权重最高，其他线程摘要只在相关时使用。只回答锚定内容块及必要前置，不替用户答测验，不把对话当作掌握证据。输出简洁准确中文。""", request, 2200)
 
     async def answer_stream(self, request: dict):
         if not self.client:
             raise AiError("未配置 OPENAI_API_KEY；Slow v0 只接受真实 AI 生成")
-        developer = """你是绑定当前小节的个性化答疑助手。generationContext 中 learner、mission、curriculum、Learning Contract 与 interaction 是权威上下文；在不编造经历的前提下，按学习者背景、目的和当前深度调整解释与例子。当前线程完整历史权重最高，其他线程摘要只在相关时使用。只回答锚定内容块及必要前置，不替用户答测验，不把对话当作掌握证据。输出简洁准确中文，可使用 Markdown 的短标题、列表、表格和代码块。只输出答案正文，不要输出 JSON、线程分类或包裹答案的代码围栏。"""
+        mode_instruction = (
+            "当前是 Fast：先给一句可行动结论，再用最多三个短要点解释，适合碎片时间。"
+            if request.get("dailyMode") == "fast"
+            else "当前是 Slow：完整解释结论、机制、边界与必要例子，仍避免无关展开。"
+        )
+        developer = f"""你是绑定当前小节的个性化答疑助手。generationContext 中 learner、mission、curriculum、Learning Contract 与 interaction 是权威上下文；在不编造经历的前提下，按学习者背景、目的和当前深度调整解释与例子。{mode_instruction}当前线程完整历史权重最高，其他线程摘要只在相关时使用。只回答锚定内容块及必要前置，不替用户答测验，不把对话当作掌握证据。输出简洁准确中文，可使用 Markdown 的短标题、列表、表格和代码块。只输出答案正文，不要输出 JSON、线程分类或包裹答案的代码围栏。"""
         try:
             if not self.prefer_chat:
                 invocation_id = self._start_invocation("qa_answer")

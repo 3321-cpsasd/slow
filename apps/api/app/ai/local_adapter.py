@@ -312,15 +312,25 @@ class LocalDemoAdapter:
 
     async def answer(self, request):
         requested = request.get("requestedThreadId")
+        mode_copy = (
+            "先给出一句结论，再列出两个可立即检查的要点。"
+            if request.get("dailyMode") == "fast"
+            else "沿着结论、机制和边界完整说明。"
+        )
         return ClassifiedAnswer(
             relation="follow_up" if requested else "new_question",
             thread_id=request.get("newThreadId") or requested,
-            answer="这是本地演示答疑：请回到锚定段落，对照机制、前提与边界逐项检查。",
+            answer=f"这是本地演示答疑：{mode_copy}",
             thread_summary="围绕锚定段落核对机制和边界",
         )
 
     async def answer_stream(self, request):
-        for chunk in ["这是本地演示答疑：", "请回到锚定段落，", "对照机制、前提与边界", "逐项检查。"]:
+        chunks = (
+            ["这是本地演示答疑：", "先给出一句结论，", "再列出两个可立即检查的要点。"]
+            if request.get("dailyMode") == "fast"
+            else ["这是本地演示答疑：", "请回到锚定段落，", "对照机制、前提与边界", "逐项检查。"]
+        )
+        for chunk in chunks:
             await asyncio.sleep(0.03)
             yield chunk
 
