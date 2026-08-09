@@ -90,11 +90,23 @@ def test_demo_deploy_bootstraps_postgresql_and_never_reverts_authority():
     install_cutover_position = script.index(
         'install -m 700 "$bundled_cutover_script" "$cutover_script"'
     )
+    install_compose_position = script.index(
+        'install -m 600 "$bundled_compose_file" "$compose_file"'
+    )
+    install_demo_position = script.index(
+        'install -m 600 "$bundled_demo_compose_override" '
+        '"$demo_compose_override"'
+    )
+    install_rollback_position = script.index(
+        'install -m 600 "$bundled_rollback_override" "$rollback_override"'
+    )
     executable_check_position = script.index('if [ ! -x "$cutover_script" ]')
 
     assert build_position < release_env_position < cutover_position < deploy_position
     assert bundled_cutover_position < install_cutover_position
-    assert install_cutover_position < executable_check_position < cutover_position
+    assert install_cutover_position < install_compose_position
+    assert install_compose_position < install_demo_position < install_rollback_position
+    assert install_rollback_position < executable_check_position < cutover_position
     assert '""|sqlite)' in script
     assert 'if [ "$DEPLOY_MODE" != "demo" ]' in script
     assert "secrets.token_hex(32)" in script
