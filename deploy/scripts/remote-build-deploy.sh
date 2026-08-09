@@ -78,6 +78,15 @@ if [ -z "$source_root" ] || [ ! -f "$source_root/deploy/docker/api.Dockerfile" ]
   exit 1
 fi
 
+if [ "$cutover_required" = true ]; then
+  bundled_cutover_script="$source_root/deploy/scripts/cutover-sqlite-to-postgres.sh"
+  if [ ! -f "$bundled_cutover_script" ]; then
+    echo "Release archive does not contain the demo cutover script." >&2
+    exit 1
+  fi
+  install -m 700 "$bundled_cutover_script" "$cutover_script"
+fi
+
 docker build \
   --build-arg "PIP_INDEX_URL=$PIP_INDEX_URL" \
   -f "$source_root/deploy/docker/api.Dockerfile" \
