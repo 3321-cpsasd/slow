@@ -11,7 +11,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0044_chapter_knowledge_identity_scope"
+HEAD_REVISION = "0045_ask_me_discussions"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -264,6 +264,10 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
         "mission_success_criteria",
         "mission_success_criterion_versions",
         "mission_adoption_events",
+        "ask_me_discussion_sessions",
+        "ask_me_discussion_topics",
+        "ask_me_discussion_turns",
+        "ask_me_discussion_commands",
         "concepts",
         "concept_revisions",
         "learning_objectives",

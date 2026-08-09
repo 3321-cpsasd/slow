@@ -13,7 +13,7 @@ import pytest
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, event, func, select
-from app.ai.contracts import AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedChapter, GeneratedContent, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedQuiz, GeneratedSectionOutline, PlanBook, PlanChapter, PlanMilestone, PlanMilestoneCriterion, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
+from app.ai.contracts import AskMeDiscussionTurn, AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedChapter, GeneratedContent, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedQuiz, GeneratedSectionOutline, PlanBook, PlanChapter, PlanMilestone, PlanMilestoneCriterion, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
 from app.application.service import (
     apply_source_repair_scope,
     source_blacklist_from_generation_traces,
@@ -231,6 +231,20 @@ class FakeAi:
     async def ask_me(self, request):
         dimension = request["dimension"]
         return AskMeTurn(dimension=dimension, prompt=f"请说明 {dimension}", evaluation="not_evaluated" if not request.get("previousAnswer") else "strong", rationale="回答覆盖关键点")
+    async def ask_me_discussion(self, request):
+        return AskMeDiscussionTurn(
+            evaluation="partial",
+            correct_points=["回答已经提出了一个可判断的观点。"],
+            issues=[{
+                "kind": "evidence_insufficient",
+                "answer_excerpt": request["previousAnswer"],
+                "explanation": "还需要一个可以验证判断的具体信号。",
+            }],
+            suggestions=["补充一个业务或技术层面的可观察证据。"],
+            follow_up_prompt="什么证据会让你改变刚才的判断？",
+            follow_up_purpose="检查判断边界是否稳定。",
+            topic_sufficiency="insufficient",
+        )
     async def replan_book(self, request, memory):
         return ReplannedBook(rationale="根据学习记忆减少重复", chapters=[ReplannedChapter(title="重规划章节", objective="验证迁移")])
 
@@ -2798,6 +2812,205 @@ def test_ask_me_retries_invalid_model_evaluation():
         advanced = retry_client.post(f"/api/sections/{section['id']}/ask-me", json={"answer":"机制回答"})
         assert advanced.status_code == 200 and advanced.json()["dimension"] == "boundary"
         assert ai.answered_calls == 2
+
+
+def test_ask_me_discussion_is_resumable_and_turn_submissions_are_idempotent(client):
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    section = generate_and_pass(client, chapter["sections"][0]["id"])
+    path = f"/api/sections/{section['id']}/ask-me/discussion"
+
+    assert client.get(path).json() is None
+    started = client.post(path).json()
+    assert started["status"] == "active"
+    assert started["revision"] == 0
+    assert len(started["topics"]) == 3
+    assert [item["dimension"] for item in started["topics"]] == [
+        "mechanism",
+        "boundary",
+        "transfer",
+    ]
+
+    turn_body = {
+        "sessionId": started["id"],
+        "topicId": started["activeTopicId"],
+        "expectedRevision": 0,
+        "answer": "我会先提出判断，再用一个可观察的业务信号验证它。",
+    }
+    headers = {"Idempotency-Key": "ask-me-v2-turn-0001"}
+    submitted = client.post(f"{path}/turns", json=turn_body, headers=headers)
+    assert submitted.status_code == 200
+    first = submitted.json()
+    assert first["revision"] == 1
+    assert len(first["turns"]) == 1
+    assert first["turns"][0]["feedback"]["correctPoints"]
+    assert first["turns"][0]["feedback"]["issues"][0]["explanation"]
+    assert first["turns"][0]["feedback"]["suggestions"]
+
+    replay = client.post(f"{path}/turns", json=turn_body, headers=headers)
+    assert replay.status_code == 200
+    assert replay.json() == first
+    assert len(client.get(path).json()["turns"]) == 1
+
+    conflict_body = {**turn_body, "answer": "复用同一个键提交另一份答案"}
+    conflict = client.post(
+        f"{path}/turns",
+        json=conflict_body,
+        headers=headers,
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "ASK_ME_DISCUSSION_IDEMPOTENCY_CONFLICT"
+
+    stale = client.post(
+        f"{path}/turns",
+        json={**turn_body, "answer": "旧版本上的新回答"},
+        headers={"Idempotency-Key": "ask-me-v2-turn-stale"},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "ASK_ME_DISCUSSION_REVISION_CONFLICT"
+
+    continued = client.post(
+        f"{path}/turns",
+        json={
+            **turn_body,
+            "expectedRevision": 1,
+            "answer": "我继续沿着同一个主题补充反例和判断边界。",
+        },
+        headers={"Idempotency-Key": "ask-me-v2-turn-0002"},
+    ).json()
+    assert continued["activeTopicId"] == started["activeTopicId"]
+    assert continued["topics"][0]["turnCount"] == 2
+
+
+def test_ask_me_discussion_retry_reuses_failed_idempotency_key():
+    class FailOnceDiscussionAi(FakeAi):
+        attempts = 0
+
+        async def ask_me_discussion(self, request):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise AiError("temporary Ask Me failure")
+            return await super().ask_me_discussion(request)
+
+    ai = FailOnceDiscussionAi()
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            ai,
+            AcceptingSourceVerifier(),
+        ),
+        raise_server_exceptions=False,
+    ) as retry_client:
+        series = create_series(retry_client)
+        chapter = retry_client.post(
+            f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+        ).json()
+        section = generate_and_pass(
+            retry_client,
+            chapter["sections"][0]["id"],
+        )
+        path = f"/api/sections/{section['id']}/ask-me/discussion"
+        started = retry_client.post(path).json()
+        body = {
+            "sessionId": started["id"],
+            "topicId": started["activeTopicId"],
+            "expectedRevision": 0,
+            "answer": "这份回答在网络失败后应以同一请求标识安全重试。",
+        }
+        headers = {"Idempotency-Key": "ask-me-v2-failed-retry"}
+
+        failed = retry_client.post(f"{path}/turns", json=body, headers=headers)
+        assert failed.status_code == 502
+        assert retry_client.get(path).json()["pending"] is False
+
+        recovered = retry_client.post(
+            f"{path}/turns",
+            json=body,
+            headers=headers,
+        )
+        assert recovered.status_code == 200
+        assert recovered.json()["revision"] == 1
+        assert len(recovered.json()["turns"]) == 1
+        assert ai.attempts == 2
+
+
+def test_ask_me_discussion_user_controls_topic_switch_pause_and_finish(client):
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    section = generate_and_pass(client, chapter["sections"][0]["id"])
+    path = f"/api/sections/{section['id']}/ask-me/discussion"
+    started = client.post(path).json()
+    answered = client.post(
+        f"{path}/turns",
+        json={
+            "sessionId": started["id"],
+            "topicId": started["activeTopicId"],
+            "expectedRevision": 0,
+            "answer": "这是一段包含判断依据和边界说明的自主回答。",
+        },
+        headers={"Idempotency-Key": "ask-me-v2-action-turn"},
+    ).json()
+
+    next_body = {
+        "sessionId": started["id"],
+        "expectedRevision": answered["revision"],
+        "action": "next_topic",
+    }
+    action_headers = {"Idempotency-Key": "ask-me-v2-next-topic"}
+    advanced = client.post(
+        f"{path}/actions",
+        json=next_body,
+        headers=action_headers,
+    )
+    assert advanced.status_code == 200
+    advanced_body = advanced.json()
+    assert advanced_body["topics"][0]["status"] == "closed"
+    assert advanced_body["topics"][0]["evidenceRecorded"]
+    assert advanced_body["activeTopicId"] == advanced_body["topics"][1]["id"]
+    assert client.post(
+        f"{path}/actions",
+        json=next_body,
+        headers=action_headers,
+    ).json() == advanced_body
+
+    paused = client.post(
+        f"{path}/actions",
+        json={
+            "sessionId": started["id"],
+            "expectedRevision": advanced_body["revision"],
+            "action": "pause",
+        },
+        headers={"Idempotency-Key": "ask-me-v2-pause"},
+    ).json()
+    assert paused["status"] == "paused"
+    assert client.get(path).json()["status"] == "paused"
+
+    resumed = client.post(
+        f"{path}/actions",
+        json={
+            "sessionId": started["id"],
+            "expectedRevision": paused["revision"],
+            "action": "resume",
+        },
+        headers={"Idempotency-Key": "ask-me-v2-resume"},
+    ).json()
+    assert resumed["status"] == "active"
+
+    finished = client.post(
+        f"{path}/actions",
+        json={
+            "sessionId": started["id"],
+            "expectedRevision": resumed["revision"],
+            "action": "finish",
+        },
+        headers={"Idempotency-Key": "ask-me-v2-finish"},
+    ).json()
+    assert finished["status"] == "completed"
+    assert len(finished["topics"]) == 3
 
 
 def test_future_chapter_edits_and_started_boundary(client):

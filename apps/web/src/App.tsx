@@ -5,7 +5,7 @@ import { api } from './api/client';
 import { telemetry } from './telemetry';
 import { ProfileOnboardingFlow } from './ProfileOnboardingFlow';
 import type {
-  AskMe,
+  AskMeDiscussion,
   AiRuntime,
   AuthConfig,
   AuthState,
@@ -4602,42 +4602,278 @@ function Note({
 }
 
 function AskMePanel({ sectionId }: { sectionId: string }) {
-  const [askMe, setAskMe] = useState<AskMe | null>(null);
+  const [discussion, setDiscussion] = useState<AskMeDiscussion | null>(null);
   const [answer, setAnswer] = useState('');
-  const runAskMe = async () => {
-    const next = await api.askMe(sectionId, answer);
-    setAskMe(next);
-    setAnswer('');
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [actioning, setActioning] = useState(false);
+  const [confirmingFinish, setConfirmingFinish] = useState(false);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const turnRequest = useRef<{ fingerprint: string; id: string } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError('');
+    api.askMeDiscussion(sectionId)
+      .then((value) => {
+        if (active) setDiscussion(value);
+      })
+      .catch((reason) => {
+        if (active) setError(reason instanceof Error ? reason.message : '无法恢复深入讨论。');
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, [sectionId]);
+
+  useEffect(() => {
+    if (!message) return;
+    const timer = window.setTimeout(() => setMessage(''), 2400);
+    return () => window.clearTimeout(timer);
+  }, [message]);
+
+  const start = async () => {
+    setError('');
+    setActioning(true);
+    try {
+      setDiscussion(await api.startAskMeDiscussion(sectionId));
+      setMessage('主题已准备。');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '无法开始深入讨论。');
+    } finally {
+      setActioning(false);
+    }
   };
+
+  const activeTopic = discussion?.topics.find((topic) => topic.id === discussion.activeTopicId) || null;
+  const activeTurns = discussion?.turns.filter((turn) => turn.topicId === activeTopic?.id) || [];
+  const activeTopicIndex = activeTopic ? discussion?.topics.findIndex((topic) => topic.id === activeTopic.id) ?? -1 : -1;
+  const isLastTopic = Boolean(discussion && activeTopicIndex === discussion.topics.length - 1);
+  const displayedPrompt = activeTopic?.currentPrompt
+    .replace(/^继续围绕“[^”]+”(?:说明)?[：:]\s*/, '')
+    .trim() || '';
+
+  const submit = async () => {
+    if (!discussion || !activeTopic || !answer.trim() || submitting) return;
+    const normalizedAnswer = answer.trim();
+    const fingerprint = JSON.stringify({
+      sessionId: discussion.id,
+      topicId: activeTopic.id,
+      revision: discussion.revision,
+      answer: normalizedAnswer,
+    });
+    if (!turnRequest.current || turnRequest.current.fingerprint !== fingerprint) {
+      turnRequest.current = { fingerprint, id: crypto.randomUUID() };
+    }
+    setSubmitting(true);
+    setError('');
+    setMessage('正在评估，本次回答只会记录一次…');
+    try {
+      const next = await api.submitAskMeDiscussionTurn(
+        sectionId,
+        {
+          sessionId: discussion.id,
+          topicId: activeTopic.id,
+          expectedRevision: discussion.revision,
+          answer: normalizedAnswer,
+        },
+        turnRequest.current.id,
+      );
+      setDiscussion(next);
+      setAnswer('');
+      turnRequest.current = null;
+      setMessage('回答已记录。');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '回答没有记录成功，请重试。');
+      setMessage('');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const applyAction = async (action: 'next_topic' | 'pause' | 'resume' | 'finish') => {
+    if (!discussion || actioning || submitting) return;
+    setActioning(true);
+    setError('');
+    try {
+      const next = await api.applyAskMeDiscussionAction(
+        sectionId,
+        {
+          sessionId: discussion.id,
+          expectedRevision: discussion.revision,
+          action,
+        },
+        crypto.randomUUID(),
+      );
+      setDiscussion(next);
+      setAnswer('');
+      setConfirmingFinish(false);
+      turnRequest.current = null;
+      setMessage(action === 'next_topic'
+        ? '已切换主题。'
+        : action === 'pause'
+          ? '讨论已暂停，刷新页面后也可以继续。'
+          : action === 'resume'
+            ? '已恢复到上次讨论的位置。'
+            : '讨论已结束，已完成主题的证据已写入掌握画像。');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '操作没有完成，请重试。');
+    } finally {
+      setActioning(false);
+    }
+  };
+
+  const evaluationLabel = (value: string) => ({
+    strong: '理解稳固',
+    partial: '基本到位',
+    weak: '需要补强',
+  }[value] || value);
   return (
     <div className="askme-view">
-      <p className="eyebrow">满分解锁 · 深入讨论</p>
-      <h2>机制 → 边界 → 迁移</h2>
-      <p>这是一场围绕本节内容的深入讨论。系统会依次与你探讨机制、边界和迁移，帮助你检验理解是否稳固。</p>
-      {!askMe ? (
-        <button className="primary-button large" onClick={runAskMe}>开始深入讨论</button>
+      <header className="askme-intro">
+        <div>
+          <p className="eyebrow">隐藏关卡</p>
+          <h2>Grill Me</h2>
+        </div>
+        {discussion && (
+          <span>
+            {discussion.status === 'completed'
+              ? '已结束'
+              : `主题 ${Math.max(activeTopicIndex + 1, 1)} / ${discussion.topics.length}`}
+          </span>
+        )}
+      </header>
+
+      {loading ? (
+        <div className="askme-loading" aria-live="polite">正在恢复讨论…</div>
+      ) : !discussion ? (
+        <div className="askme-start-card">
+          <button className="primary-button large" disabled={actioning} onClick={start}>
+            {actioning ? '正在准备…' : '进入关卡'}
+          </button>
+        </div>
       ) : (
-        <>
-          <div className="oral-timeline">
-            {askMe.entries.map((entry) => (
-              <section key={entry.dimension}>
-                <span>{entry.dimension}</span>
-                <h3>{entry.prompt}</h3>
-                {entry.answer && <p>你的回答：{entry.answer}</p>}
-                {entry.evaluation !== 'not_evaluated' && <b>评估：{entry.evaluation}</b>}
-              </section>
+        <div className="askme-discussion">
+          <nav className="askme-topic-tabs" aria-label="讨论主题">
+            {discussion.topics.map((topic) => (
+              <div className={`askme-topic-item is-${topic.status} ${topic.id === discussion.activeTopicId ? 'is-current' : ''}`} key={topic.id}>
+                <span>{topic.position + 1}</span>
+                <b>{topic.title}</b>
+                {topic.status === 'closed' && <small>已完成</small>}
+              </div>
             ))}
-          </div>
-          {askMe.status !== 'completed' ? (
-            <>
-              <textarea value={answer} onChange={(event) => setAnswer(event.target.value)} placeholder="在这里作答…" />
-              <button className="primary-button" onClick={runAskMe}>提交本轮</button>
-            </>
-          ) : (
-            <p className="result success">深入讨论完成，证据已写入掌握画像。</p>
-          )}
-        </>
+          </nav>
+
+          <section className="askme-conversation">
+            {discussion.status === 'completed' ? (
+              <div className="askme-complete-card">
+                <h3>本次讨论已结束</h3>
+                <p>已完成主题的回答与评估已形成学习证据；未讨论主题不会被假定为已经掌握。</p>
+              </div>
+            ) : activeTopic ? (
+              <>
+                <div className="askme-turn-list">
+                  {activeTurns.map((turn) => (
+                    <article className="askme-turn" key={turn.id}>
+                      <div className="askme-question">
+                        <span>考官追问</span>
+                        <p>{turn.prompt}</p>
+                      </div>
+                      <div className="askme-answer">
+                        <span>你的回答</span>
+                        <p>{turn.answer}</p>
+                      </div>
+                      <div className={`askme-feedback is-${turn.evaluation}`}>
+                        <header>
+                          <span>本轮反馈</span>
+                          <b>{evaluationLabel(turn.evaluation)}</b>
+                        </header>
+                        {turn.feedback.correctPoints.length > 0 && (
+                          <section className="is-correct">
+                            <h4>你答对了什么</h4>
+                            <ul>{turn.feedback.correctPoints.map((item) => <li key={item}>{item}</li>)}</ul>
+                          </section>
+                        )}
+                        {turn.feedback.issues.length > 0 && (
+                          <section className="is-gap">
+                            <h4>具体缺口</h4>
+                            {turn.feedback.issues.map((issue, index) => (
+                              <div key={`${issue.kind}-${index}`}>
+                                {issue.answerExcerpt && <blockquote>“{issue.answerExcerpt}”</blockquote>}
+                                <p>{issue.explanation}</p>
+                              </div>
+                            ))}
+                          </section>
+                        )}
+                        <section className="is-suggestion">
+                          <h4>改进建议</h4>
+                          <ul>{turn.feedback.suggestions.map((item) => <li key={item}>{item}</li>)}</ul>
+                        </section>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+
+                {discussion.status === 'paused' ? (
+                  <div className="askme-paused-card">
+                    <strong>讨论已暂停</strong>
+                    <p>你的主题、回答和反馈都已经保存。</p>
+                    <button className="primary-button" disabled={actioning} onClick={() => applyAction('resume')}>
+                      {actioning ? '正在恢复…' : '继续讨论'}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="askme-composer">
+                    <label htmlFor={`askme-answer-${sectionId}`}>
+                      <span>{activeTurns.length ? '下一问' : '当前问题'}</span>
+                      <strong>{displayedPrompt}</strong>
+                    </label>
+                    <textarea
+                      id={`askme-answer-${sectionId}`}
+                      value={answer}
+                      disabled={submitting || actioning}
+                      onChange={(event) => setAnswer(event.target.value)}
+                      placeholder="写下你的判断、依据和不确定的地方…"
+                    />
+                    <div className="askme-composer-actions">
+                      <button className="primary-button" disabled={submitting || actioning || !answer.trim()} onClick={submit}>
+                        {submitting ? '正在评估…' : '提交回答'}
+                      </button>
+                      {!isLastTopic && (
+                        <button disabled={submitting || actioning} onClick={() => applyAction('next_topic')}>换个主题 →</button>
+                      )}
+                      <button
+                        className="askme-finish"
+                        disabled={submitting || actioning}
+                        aria-expanded={confirmingFinish}
+                        onClick={() => setConfirmingFinish((current) => !current)}
+                      >
+                        结束关卡
+                      </button>
+                    </div>
+                    {confirmingFinish && (
+                      <div className="askme-finish-confirm" role="alert">
+                        <span>结束后不能继续本次讨论。</span>
+                        <button disabled={actioning} onClick={() => setConfirmingFinish(false)}>继续讨论</button>
+                        <button disabled={actioning} onClick={() => applyAction('finish')}>
+                          {actioning ? '正在结束…' : '确认结束'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
+            ) : null}
+          </section>
+        </div>
       )}
+      <div className="askme-live-status" aria-live="polite">
+        {error && <p className="result failure">{error}</p>}
+        {!error && message && <p>{message}</p>}
+      </div>
     </div>
   );
 }

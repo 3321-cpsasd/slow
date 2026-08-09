@@ -1,6 +1,7 @@
 import asyncio
 
 from .contracts import (
+    AskMeDiscussionTurn,
     AskMeTurn,
     ChoiceQuestion,
     ClaimSupportReview,
@@ -347,6 +348,46 @@ class LocalDemoAdapter:
             prompt=f"请用自己的话回答 {request['dimension']} 维度的问题，并给出一个可验证例子。",
             evaluation="partial" if answered else "not_evaluated",
             rationale="演示评估仅检查是否提交了自主回答。" if answered else "",
+        )
+
+    async def ask_me_discussion(self, request):
+        answer = str(request.get("previousAnswer", "")).strip()
+        topic = request.get("currentTopic") or {}
+        title = str(topic.get("title", "当前主题"))
+        if len(answer) >= 45:
+            evaluation = "strong"
+            correct_points = ["回答给出了较完整的判断，并尝试说明依据。"]
+            issues = []
+            suggestions = ["再补充一个会让当前判断失效的反例。"]
+            sufficient = "sufficient"
+        elif len(answer) >= 16:
+            evaluation = "partial"
+            correct_points = ["回答已经触及当前主题的关键对象。"]
+            issues = [{
+                "kind": "evidence_insufficient",
+                "answer_excerpt": answer[:80],
+                "explanation": "目前给出了判断，但支撑判断的可观察依据还不够具体。",
+            }]
+            suggestions = ["补充一个可以被第三方验证的业务或技术信号。"]
+            sufficient = "insufficient"
+        else:
+            evaluation = "weak"
+            correct_points = []
+            issues = [{
+                "kind": "reasoning_gap",
+                "answer_excerpt": answer[:80],
+                "explanation": "回答还没有把结论和判断依据连接起来。",
+            }]
+            suggestions = ["先写出你的结论，再说明你依据的两个具体信号。"]
+            sufficient = "insufficient"
+        return AskMeDiscussionTurn(
+            evaluation=evaluation,
+            correct_points=correct_points,
+            issues=issues,
+            suggestions=suggestions,
+            follow_up_prompt="什么证据会让你改变刚才的判断？",
+            follow_up_purpose="检查判断依据是否稳定，并探测可能遗漏的边界。",
+            topic_sufficiency=sufficient,
         )
 
     async def replan_book(self, request, memory):

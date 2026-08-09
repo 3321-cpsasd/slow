@@ -2367,6 +2367,129 @@ class AskMeSession(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class AskMeDiscussionSession(Base):
+    __tablename__ = "ask_me_discussion_sessions"
+    __table_args__ = (
+        UniqueConstraint(
+            "learning_run_id",
+            "section_id",
+            "user_id",
+            name="uq_ask_me_discussion_sessions_run_section_user",
+        ),
+        ForeignKeyConstraint(
+            ["learning_run_id", "user_id"],
+            ["learning_runs.id", "learning_runs.user_id"],
+            name="fk_ask_me_discussion_sessions_run_user",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    learning_run_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_runs.id"), index=True
+    )
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    learning_contract_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), nullable=True, index=True
+    )
+    content_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("content_versions.id"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    active_topic_id: Mapped[str] = mapped_column(String, default="")
+    pending_turn_id: Mapped[str] = mapped_column(String, default="")
+    schema_version: Mapped[str] = mapped_column(String(40), default="ask_me_v2")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    ended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class AskMeDiscussionTopic(Base):
+    __tablename__ = "ask_me_discussion_topics"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id",
+            "position",
+            name="uq_ask_me_discussion_topics_position",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("ask_me_discussion_sessions.id"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(300))
+    purpose: Mapped[str] = mapped_column(Text)
+    dimension: Mapped[str] = mapped_column(String(32), index=True)
+    assessment_target_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    current_prompt: Mapped[str] = mapped_column(Text)
+    turn_count: Mapped[int] = mapped_column(Integer, default=0)
+    evidence_recorded: Mapped[bool] = mapped_column(Boolean, default=False)
+    final_assessment_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AskMeDiscussionTurnRecord(Base):
+    __tablename__ = "ask_me_discussion_turns"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "idempotency_key",
+            name="uq_ask_me_discussion_turns_user_idempotency",
+        ),
+        UniqueConstraint(
+            "topic_id",
+            "turn_index",
+            name="uq_ask_me_discussion_turns_topic_index",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("ask_me_discussion_sessions.id"), index=True
+    )
+    topic_id: Mapped[str] = mapped_column(
+        ForeignKey("ask_me_discussion_topics.id"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    turn_index: Mapped[int] = mapped_column(Integer)
+    prompt: Mapped[str] = mapped_column(Text)
+    answer: Mapped[str] = mapped_column(Text)
+    evaluation: Mapped[str] = mapped_column(String(24), default="")
+    feedback_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(24), default="processing", index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    response_json: Mapped[str] = mapped_column(Text, default="")
+    error_code: Mapped[str] = mapped_column(String(80), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AskMeDiscussionCommand(Base):
+    __tablename__ = "ask_me_discussion_commands"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "idempotency_key",
+            name="uq_ask_me_discussion_commands_user_idempotency",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("ask_me_discussion_sessions.id"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    command_type: Mapped[str] = mapped_column(String(32), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    response_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class ChapterPractice(Base):
     __tablename__ = "chapter_practices"
     id: Mapped[str] = mapped_column(String, primary_key=True)

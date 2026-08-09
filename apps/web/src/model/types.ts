@@ -292,6 +292,50 @@ export type Note = {
   verificationAnnotations:NoteVerificationAnnotation[];
 };
 export type AskMe = {id:string;status:string;round:number;dimension:string;prompt:string|null;entries:{dimension:string;prompt:string;answer:string|null;evaluation:string;rationale:string}[]};
+export type AskMeDiscussionFeedback = {
+  evaluation:'strong'|'partial'|'weak';
+  correctPoints:string[];
+  issues:{
+    kind:'factual_error'|'reasoning_gap'|'boundary_missed'|'evidence_insufficient'|'transfer_failure'|'off_topic';
+    answerExcerpt:string;
+    explanation:string;
+  }[];
+  suggestions:string[];
+  followUpPrompt:string;
+  followUpPurpose:string;
+  topicSufficiency:'insufficient'|'sufficient';
+};
+export type AskMeDiscussion = {
+  id:string;
+  status:'active'|'paused'|'completed';
+  revision:number;
+  activeTopicId:string;
+  pending:boolean;
+  schemaVersion:string;
+  topics:{
+    id:string;
+    position:number;
+    title:string;
+    purpose:string;
+    dimension:'mechanism'|'boundary'|'transfer';
+    assessmentTargetIds:string[];
+    status:'pending'|'active'|'sufficient'|'closed';
+    currentPrompt:string;
+    turnCount:number;
+    evidenceRecorded:boolean;
+    finalAssessment:Record<string,unknown>;
+  }[];
+  turns:{
+    id:string;
+    topicId:string;
+    turnIndex:number;
+    prompt:string;
+    answer:string;
+    evaluation:'strong'|'partial'|'weak';
+    feedback:AskMeDiscussionFeedback;
+    createdAt:string;
+  }[];
+};
 export type Section = SectionSummary & { generation:null|Generation; content:null|{id:string;version:number;blocks:Block[];sources:Source[];sourceVerification:SourceVerification[];confidence:string;publicationStatus:string;generationMode:'model_only'|'rights_grounded'|'demo';rightsStatus:string;factualStatus:string;aiGenerated:boolean;schemaVersion:string;promptVersion:string;boundaryValidation:{status:'passed'|'legacy'|'unverified';ruleVersion:string|null}}; quiz:null|{id:string;generation:number;publicationStatus:string;questions:Question[];governance:QuizGovernance|null}; latestAttemptReview:QuizResult|null; remediations:Remediation[]; note:null|Note; workflowTasks:LearningTask[] };
 export type LearningTask = {
   taskId:string;

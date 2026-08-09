@@ -255,6 +255,19 @@ class AskMeReply(ApiModel):
     answer: str = Field(default="", max_length=3000)
 
 
+class AskMeDiscussionTurnCreate(ApiModel):
+    session_id: str = Field(min_length=1, max_length=160)
+    topic_id: str = Field(min_length=1, max_length=160)
+    expected_revision: int = Field(ge=0)
+    answer: str = Field(min_length=1, max_length=3000)
+
+
+class AskMeDiscussionAction(ApiModel):
+    session_id: str = Field(min_length=1, max_length=160)
+    expected_revision: int = Field(ge=0)
+    action: Literal["next_topic", "pause", "resume", "finish"]
+
+
 class AttachmentSubmit(ApiModel):
     content: dict
     attachment_ids: list[str] = Field(min_length=1, max_length=20)

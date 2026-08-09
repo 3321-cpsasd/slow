@@ -1763,6 +1763,36 @@ class SlowService:
     async def ask_me(self, section_id, answer):
         return await self.ask_me_service.answer(section_id, answer)
 
+    def ask_me_discussion(self, section_id):
+        return self.ask_me_service.discussion(section_id)
+
+    def start_ask_me_discussion(self, section_id):
+        return self.ask_me_service.start_discussion(section_id)
+
+    async def submit_ask_me_discussion_turn(
+        self,
+        section_id,
+        body,
+        idempotency_key,
+    ):
+        return await self.ask_me_service.submit_discussion_turn(
+            section_id,
+            body,
+            idempotency_key,
+        )
+
+    def apply_ask_me_discussion_action(
+        self,
+        section_id,
+        body,
+        idempotency_key,
+    ):
+        return self.ask_me_service.discussion_action(
+            section_id,
+            body,
+            idempotency_key,
+        )
+
     def _ask_me(self, session):
         return self.ask_me_service.view(session)
 

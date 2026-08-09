@@ -512,6 +512,29 @@ class AskMeTurn(StrictModel):
     rationale: str = ""
 
 
+class AskMeFeedbackIssue(StrictModel):
+    kind: Literal[
+        "factual_error",
+        "reasoning_gap",
+        "boundary_missed",
+        "evidence_insufficient",
+        "transfer_failure",
+        "off_topic",
+    ]
+    answer_excerpt: str
+    explanation: str
+
+
+class AskMeDiscussionTurn(StrictModel):
+    evaluation: Literal["strong", "partial", "weak"]
+    correct_points: list[str] = Field(default_factory=list, max_length=5)
+    issues: list[AskMeFeedbackIssue] = Field(default_factory=list, max_length=5)
+    suggestions: list[str] = Field(min_length=1, max_length=5)
+    follow_up_prompt: str
+    follow_up_purpose: str
+    topic_sufficiency: Literal["insufficient", "sufficient"]
+
+
 class ReplannedChapter(StrictModel):
     title: str
     objective: str

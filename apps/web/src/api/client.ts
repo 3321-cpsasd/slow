@@ -282,6 +282,18 @@ export const api = {
   askStream:(id:string,blockId:string,question:string,onDelta:(delta:string)=>void,threadId?:string,forceRelation?:'follow_up'|'new_question')=>streamQa(`/api/sections/${id}/ask/stream`,{blockId,question,threadId,forceRelation},onDelta),
   correctQa:(id:string,threadId:string,targetThreadId:string)=>call<import('../model/types').QaCorrection>(`/api/sections/${id}/qa/threads/${threadId}`,{method:'PATCH',body:JSON.stringify({relation:'follow_up',targetThreadId})}),
   askMe:(id:string,answer='')=>call<import('../model/types').AskMe>(`/api/sections/${id}/ask-me`,{method:'POST',body:JSON.stringify({answer})}),
+  askMeDiscussion:(id:string)=>call<import('../model/types').AskMeDiscussion|null>(`/api/sections/${id}/ask-me/discussion`),
+  startAskMeDiscussion:(id:string)=>call<import('../model/types').AskMeDiscussion>(`/api/sections/${id}/ask-me/discussion`,{method:'POST'}),
+  submitAskMeDiscussionTurn:(id:string,body:object,idempotencyKey:string)=>call<import('../model/types').AskMeDiscussion>(`/api/sections/${id}/ask-me/discussion/turns`,{
+    method:'POST',
+    headers:{'Idempotency-Key':idempotencyKey},
+    body:JSON.stringify(body),
+  }),
+  applyAskMeDiscussionAction:(id:string,body:object,idempotencyKey:string)=>call<import('../model/types').AskMeDiscussion>(`/api/sections/${id}/ask-me/discussion/actions`,{
+    method:'POST',
+    headers:{'Idempotency-Key':idempotencyKey},
+    body:JSON.stringify(body),
+  }),
   note:(id:string,content:object)=>call<import('../model/types').Note>(`/api/sections/${id}/note`,{method:'PATCH',body:JSON.stringify({content})}),
   noteReviewSupplement:(id:string,reviewEpisodeId:string,content:object)=>call<import('../model/types').Note>(`/api/sections/${id}/note/review-supplements`,{method:'POST',body:JSON.stringify({reviewEpisodeId,content})}),
   uploadPractice:(id:string,file:File)=>call<import('../model/types').Attachment>(`/api/chapters/${id}/practice/attachments`,{method:'POST',headers:{'Content-Type':file.type||'application/octet-stream','X-Filename':encodeURIComponent(file.name)},body:file}),

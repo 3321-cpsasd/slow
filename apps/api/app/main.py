@@ -24,7 +24,7 @@ from .ai.anthropic_adapter import AnthropicAdapter
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, FeedbackCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ReviewSubmit, ShelfCreate
+from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, FeedbackCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ReviewSubmit, ShelfCreate
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -1249,6 +1249,43 @@ def create_app(
 
     @app.post("/api/sections/{section_id}/ask-me")
     async def ask_me(section_id: str, body: AskMeReply, s: SlowService = Depends(service)): return await s.ask_me(section_id, body.answer)
+
+    @app.get("/api/sections/{section_id}/ask-me/discussion")
+    def ask_me_discussion(section_id: str, s: SlowService = Depends(service)):
+        return s.ask_me_discussion(section_id)
+
+    @app.post("/api/sections/{section_id}/ask-me/discussion")
+    def start_ask_me_discussion(
+        section_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return s.start_ask_me_discussion(section_id)
+
+    @app.post("/api/sections/{section_id}/ask-me/discussion/turns")
+    async def submit_ask_me_discussion_turn(
+        section_id: str,
+        body: AskMeDiscussionTurnCreate,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return await s.submit_ask_me_discussion_turn(
+            section_id,
+            body,
+            idempotency_key,
+        )
+
+    @app.post("/api/sections/{section_id}/ask-me/discussion/actions")
+    def apply_ask_me_discussion_action(
+        section_id: str,
+        body: AskMeDiscussionAction,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return s.apply_ask_me_discussion_action(
+            section_id,
+            body,
+            idempotency_key,
+        )
 
     @app.get("/api/chapters/{chapter_id}/practice")
     def practice(chapter_id: str, s: SlowService = Depends(service)): return s.chapter_practice(chapter_id)

@@ -7,6 +7,7 @@ from openai import AsyncOpenAI
 from pydantic import ValidationError
 from ..core.errors import AiError
 from .contracts import (
+    AskMeDiscussionTurn,
     AskMeTurn,
     ClaimSupportReview,
     ClassifiedAnswer,
@@ -1172,6 +1173,10 @@ class OpenAiAdapter:
     async def ask_me(self, request: dict):
         self._begin_structured_operation()
         return await self._parse(AskMeTurn, """你是适应性口试考官，不是教师。generationContext 中 Mission、Learning Contract、目标深度和评分边界是权威规则；learner 的职业与目的只能用于选择真实的 transfer 场景，绝不能改变评分标准。严格按 mechanism、boundary、transfer 三轮顺序探测机制、边界和迁移能力。首轮没有学习者答案时 evaluation 必须是 not_evaluated；只要 previousAnswer 非空，evaluation 必须是 strong、partial、weak 之一，绝不能是 not_evaluated。输出 dimension 必须等于请求中的 dimension。后续先简短评估上一答复，再提出指定维度的下一题。不得在问题或评价中继续教学，不得泄露标准答案。中文输出。""", request, 1800)
+
+    async def ask_me_discussion(self, request: dict):
+        self._begin_structured_operation()
+        return await self._parse(AskMeDiscussionTurn, """你是适应性口试考官，不是教师。generationContext 中 Mission、Learning Contract、当前主题、目标深度和评分边界是权威规则；learner 的职业与目的只能用于选择真实的迁移场景，绝不能改变评分标准。围绕 currentTopic 和 previousPrompt 评估 previousAnswer，并继续提出一个能够定位真实理解的追问。必须具体指出回答中成立的部分、事实错误、推理跳步、边界遗漏、证据不足、迁移失败或偏题之处；每个问题都要引用或准确概括对应回答片段并解释判断依据。suggestions 只能给出可执行的检查方向或思考脚手架，不得直接泄露完整标准答案，不得在评估过程中继续教学。即使回答 strong，也要说明强在哪里并给出更深入的边界或迁移挑战。follow_up_prompt 必须是可直接展示的简洁问题，不得以“继续围绕某主题”“接下来请”等过渡语复述主题；topic_sufficiency 只表示证据是否已经较充分，不能替用户结束讨论。所有反馈使用自然、明确的中文。""", request, 2400)
 
     async def replan_book(self, request: dict, memory: list[dict]):
         self._begin_structured_operation()
