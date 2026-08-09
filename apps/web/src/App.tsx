@@ -1441,6 +1441,34 @@ function shelfDescriptor(shelf: Pick<Shelf, 'domain' | 'specialty'>) {
   return [shelf.domain, shelf.specialty].filter(Boolean).join(' · ');
 }
 
+function bookProgressDetails(book: Book) {
+  const completedChapters = book.chapters.filter((chapter) => chapter.status === 'completed').length;
+  const sections = book.chapters.flatMap((chapter) => chapter.sections);
+  const completedSections = sections.filter((section) => section.status === 'completed').length;
+  return {
+    completedChapters,
+    totalChapters: book.chapters.length,
+    completedSections,
+    totalSections: sections.length,
+  };
+}
+
+function bookProgressLabel(book: Book, isCurrent: boolean) {
+  if (book.status === 'completed') return '已完成';
+  if (book.status === 'locked') return '未解锁';
+  if (book.outlineStatus === 'draft') return '待校准';
+  if (isCurrent || book.progress > 0) return '学习中';
+  return '待开始';
+}
+
+function nextBookSection(book: Book) {
+  for (const chapter of book.chapters) {
+    const section = chapter.sections.find((item) => item.status !== 'locked' && item.status !== 'completed');
+    if (section) return { chapter, section };
+  }
+  return null;
+}
+
 function Home({
   data,
   onOpen,
@@ -1733,6 +1761,25 @@ function Home({
         )}
         {data?.shelves.map((item, shelfIndex) => {
           const itemBookCount = item.series.reduce((total, itemSeries) => total + itemSeries.books.length, 0);
+          const featuredSeries = item.series.find((itemSeries) => itemSeries.id === dashboard?.today?.seriesId)
+            || item.series.find((itemSeries) => itemSeries.progress > 0 && itemSeries.progress < 100)
+            || item.series[0]
+            || null;
+          const featuredBook = featuredSeries?.books.find((book) => (
+            featuredSeries.id === dashboard?.today?.seriesId && book.title === dashboard.today.bookTitle
+          ))
+            || featuredSeries?.books.find((book) => book.progress > 0 && book.status !== 'completed')
+            || featuredSeries?.books.find((book) => book.status !== 'locked' && book.status !== 'completed')
+            || featuredSeries?.books[0]
+            || null;
+          const featuredBookDetails = featuredBook ? bookProgressDetails(featuredBook) : null;
+          const featuredNextSection = featuredBook ? nextBookSection(featuredBook) : null;
+          const isTodayBook = Boolean(
+            featuredSeries
+            && featuredBook
+            && featuredSeries.id === dashboard?.today?.seriesId
+            && featuredBook.title === dashboard.today.bookTitle,
+          );
           return (
           <button
             className="library-shelf-card"
@@ -1759,29 +1806,83 @@ function Home({
                 </span>
               )}
 
-              <span className="shelf-series-list">
-                {item.series.slice(0, 3).map((itemSeries) => (
-                  <span className="shelf-series-row" key={itemSeries.id}>
+              {featuredSeries && featuredBook && featuredBookDetails ? (
+                <span className="shelf-current-book">
+                  <span className="current-book-topline">
                     <span>
-                      <b>{itemSeries.title}</b>
-                      <small>{itemSeries.books.length} 本教材</small>
+                      <b>{isTodayBook ? '正在学习' : '当前教材'}</b>
+                      <small>
+                        系列 {String(item.series.findIndex((candidate) => candidate.id === featuredSeries.id) + 1).padStart(2, '0')}
+                        {' · '}第 {featuredBook.position} 本
+                      </small>
                     </span>
-                    <span className="series-progress-value">{itemSeries.progress}%</span>
-                    <span className="series-progress-track" aria-hidden="true">
-                      <i style={{ width: `${itemSeries.progress}%` }} />
-                    </span>
+                    <em className={`current-book-status is-${featuredBook.status}`}>
+                      {bookProgressLabel(featuredBook, isTodayBook)}
+                    </em>
                   </span>
-                ))}
-                {item.series.length === 0 && (
-                  <span className="shelf-series-empty">还没有教材系列，进入书架开始规划。</span>
-                )}
-                {item.series.length > 3 && (
-                  <span className="more-series">另有 {item.series.length - 3} 个系列</span>
-                )}
-              </span>
+
+                  <strong className="current-book-title">{featuredBook.title}</strong>
+                  <span className="current-book-series">
+                    <small>所属系列</small>
+                    <span>{featuredSeries.title}</span>
+                  </span>
+
+                  <span className="current-book-progress-row">
+                    <span>
+                      {featuredBookDetails.totalChapters > 0
+                        ? `${featuredBookDetails.completedChapters}/${featuredBookDetails.totalChapters} 章`
+                        : '章节待确认'}
+                      {featuredBookDetails.totalSections > 0
+                        ? ` · ${featuredBookDetails.completedSections}/${featuredBookDetails.totalSections} 节完成`
+                        : ''}
+                    </span>
+                    <b>{featuredBook.progress}%</b>
+                  </span>
+                  <span
+                    className="current-book-progress-track"
+                    role="progressbar"
+                    aria-label={`第 ${featuredBook.position} 本《${featuredBook.title}》进度`}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={featuredBook.progress}
+                  >
+                    <i style={{ width: `${featuredBook.progress}%` }} />
+                  </span>
+                  {featuredBookDetails.totalChapters > 0 && (
+                    <span className="current-book-chapters" aria-hidden="true">
+                      {featuredBook.chapters.map((chapter) => (
+                        <i
+                          className={chapter.status === 'completed'
+                            ? 'is-complete'
+                            : chapter.status === 'locked'
+                              ? 'is-locked'
+                              : 'is-current'}
+                          key={chapter.id}
+                        />
+                      ))}
+                    </span>
+                  )}
+
+                  {(isTodayBook || featuredNextSection) && (
+                    <span className="current-book-next">
+                      <small>{isTodayBook ? '下一节' : '从这里开始'}</small>
+                      <span>
+                        <b>{isTodayBook ? dashboard!.today!.chapterTitle : featuredNextSection!.chapter.title}</b>
+                        <i aria-hidden="true">/</i>
+                        <strong>{isTodayBook ? dashboard!.today!.sectionTitle : featuredNextSection!.section.title}</strong>
+                      </span>
+                    </span>
+                  )}
+                </span>
+              ) : (
+                <span className="shelf-current-empty">
+                  <b>还没有正在学习的教材</b>
+                  <small>进入书架创建学习系列后，当前教材会固定显示在这里。</small>
+                </span>
+              )}
 
               <span className="shelf-card-action">
-                打开书架 <i aria-hidden="true">→</i>
+                {featuredBook ? '继续这本' : '打开书架'} <i aria-hidden="true">→</i>
               </span>
             </span>
           </button>
