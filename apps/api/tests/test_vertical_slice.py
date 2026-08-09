@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from threading import Event
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -33,6 +34,8 @@ from app.services.source_verifier import (
     Verification,
 )
 from app.infrastructure.tables import (
+    AssessmentItemEvidenceBlock,
+    AssessmentItemVersion,
     AssessmentGateState,
     AssessmentObservation,
     AssessmentTarget,
@@ -78,6 +81,7 @@ from app.modules.learning.assessment import (
     bind_questions_to_targets,
     rebuild_assessment_projections,
 )
+from app.modules.learning.assessment_items import publish_assessment_item_versions
 from app.modules.learning.contracts import ensure_learning_contract
 from app.modules.learning.content_governance_store import (
     record_verified_claim_binding,
@@ -205,7 +209,7 @@ class FakeAi:
                     core=i == 0,
                     objective=objectives[i % len(objectives)],
                     explanation=f"因为 B{generation}",
-                    claim_block_indexes=[] if prior_questions else [0],
+                    claim_block_indexes=[0],
                 )
                 for i in range(question_count)
             ],
@@ -806,8 +810,38 @@ def test_complete_real_shape_vertical_slice(client):
                 "statusCode": 200,
                 "pinned": True,
                 "verificationStatus": "verified",
-            }
+        }
     ]
+    with client.app.state.sessions() as db:
+        item_versions = db.scalars(
+            select(AssessmentItemVersion)
+            .where(
+                AssessmentItemVersion.quiz_set_id == remediated["quiz"]["id"]
+            )
+            .order_by(AssessmentItemVersion.position)
+        ).all()
+        assert len(item_versions) == len(remediated["quiz"]["questions"])
+        assert all(item.item_key for item in item_versions)
+        evidence_bindings = db.scalars(
+            select(AssessmentItemEvidenceBlock).where(
+                AssessmentItemEvidenceBlock.assessment_item_version_id.in_(
+                    [item.id for item in item_versions]
+                )
+            )
+        ).all()
+        assert len(evidence_bindings) == len(item_versions)
+
+        # QuizSet JSON is a compatibility projection. Scoring must use the
+        # immutable item versions even if that projection is corrupted.
+        quiz_projection = db.get(QuizSet, remediated["quiz"]["id"])
+        projected_questions = json.loads(quiz_projection.questions_json)
+        for question in projected_questions:
+            question["correct"] = [0]
+        quiz_projection.questions_json = json.dumps(
+            projected_questions,
+            ensure_ascii=False,
+        )
+        db.commit()
     stale = client.post(f"/api/sections/{section_id}/quiz", json={"quizSetId":quiz_id,"answers":[[1],[1],[1],[1],[1]]})
     assert stale.status_code == 409 and stale.json()["code"] == "QUIZ_STALE"
     passed = client.post(f"/api/sections/{section_id}/quiz", json={"quizSetId":remediated["quiz"]["id"],"answers":[[1],[0],[1],[1],[1]]}).json()
@@ -1250,14 +1284,7 @@ def test_quiz_exposes_selection_mode_without_leaking_answers(tmp_path):
         async def lesson(self, request, memory, prior_questions=None):
             lesson = await super().lesson(request, memory, prior_questions)
             first = lesson.questions[0]
-            lesson.questions[0] = ChoiceQuestion(
-                prompt=first.prompt,
-                options=first.options,
-                correct=[0, 1],
-                core=first.core,
-                objective=first.objective,
-                explanation=first.explanation,
-            )
+            lesson.questions[0] = first.model_copy(update={"correct": [0, 1]})
             return lesson
 
     storage = LocalAttachmentStorage(tmp_path / "mixed-choice-attachments")
@@ -1410,10 +1437,34 @@ def test_assessment_gate_remediates_only_failed_target_and_rebuilds(client):
             question["objective"] = "核心目标" if index < 4 else "辅助目标"
             question.pop("assessmentTargetId", None)
             question.pop("equivalenceGroupId", None)
-        quiz.questions_json = json.dumps(
-            bind_questions_to_targets(db, stored, questions, contract),
-            ensure_ascii=False,
+        bound_questions = bind_questions_to_targets(
+            db,
+            stored,
+            questions,
+            contract,
         )
+        item_versions = db.scalars(
+            select(AssessmentItemVersion)
+            .where(AssessmentItemVersion.quiz_set_id == quiz.id)
+            .order_by(AssessmentItemVersion.position)
+        ).all()
+        for item, question in zip(
+            item_versions,
+            bound_questions,
+            strict=True,
+        ):
+            payload = json.loads(item.payload_json)
+            payload.update(question)
+            payload["id"] = item.id
+            payload["itemKey"] = item.item_key
+            item.assessment_target_id = question["assessmentTargetId"]
+            item.payload_json = json.dumps(payload, ensure_ascii=False)
+            question.update({
+                "id": item.id,
+                "itemKey": item.item_key,
+                "evidenceBlockIds": payload.get("evidenceBlockIds", []),
+            })
+        quiz.questions_json = json.dumps(bound_questions, ensure_ascii=False)
         blocks = json.loads(content.blocks_json)
         for block in blocks:
             block["assessment_objectives"] = ["核心目标", "辅助目标"]
@@ -1465,10 +1516,28 @@ def test_assessment_gate_remediates_only_failed_target_and_rebuilds(client):
     replacement = remediated["quiz"]
     with client.app.state.sessions() as db:
         stored_replacement = db.get(QuizSet, replacement["id"])
+        replacement_questions = json.loads(stored_replacement.questions_json)
+        source_items = db.scalars(
+            select(AssessmentItemVersion)
+            .where(
+                AssessmentItemVersion.quiz_set_id == section["quiz"]["id"],
+                AssessmentItemVersion.assessment_target_id == core_target_id,
+            )
+            .order_by(AssessmentItemVersion.position)
+        ).all()
+        source_evidence = {
+            item.id: tuple(json.loads(item.payload_json)["evidenceBlockIds"])
+            for item in source_items
+        }
+        assert all("claim_block_indexes" not in item for item in replacement_questions)
         assert {
-            tuple(question["claim_block_indexes"])
-            for question in json.loads(stored_replacement.questions_json)
-        } == {(0,)}
+            tuple(item["evidenceBlockIds"])
+            for item in replacement_questions
+        } == set(source_evidence.values())
+        assert {
+            item["sourceAssessmentItemVersionId"]
+            for item in replacement_questions
+        } == set(source_evidence)
     assert {
         question["assessmentTargetId"] for question in replacement["questions"]
     } == {original_targets["核心目标"]}
@@ -1583,6 +1652,8 @@ def test_retention_discounts_same_source_and_counts_delayed_novel_review(client)
         original_quiz = db.get(QuizSet, section["quiz"]["id"])
         novel_questions = json.loads(original_quiz.questions_json)
         for index, question in enumerate(novel_questions):
+            question.pop("id", None)
+            question.pop("itemKey", None)
             question["prompt"] = f"延迟复习变式 {index}"
             question["equivalenceGroupId"] = f"novel-review-{index}"
         novel_quiz = QuizSet(
@@ -1597,6 +1668,16 @@ def test_retention_discounts_same_source_and_counts_delayed_novel_review(client)
         )
         db.add(novel_quiz)
         db.flush()
+        publish_assessment_item_versions(
+            db,
+            quiz=novel_quiz,
+            questions=novel_questions,
+            evidence_block_ids_by_position=[
+                question.get("evidenceBlockIds", [])
+                for question in novel_questions
+            ],
+            uid=lambda prefix: f"{prefix}_{uuid4().hex}",
+        )
         reevaluate_generated_governance(
             db,
             quiz_id=novel_quiz.id,
@@ -2964,7 +3045,7 @@ def test_section_regeneration_appends_versions_and_preserves_audit(client):
             "answers": [[1] for _ in replacement["quiz"]["questions"]],
         },
     )
-    assert assessed.status_code == 200
+    assert assessed.status_code == 200, assessed.json()
     blocked = client.post(f"/api/sections/{original['id']}/regenerate")
     assert blocked.status_code == 409
     assert blocked.json()["code"] == "SECTION_ALREADY_ASSESSED"
@@ -3439,7 +3520,7 @@ def test_missing_generated_lineage_cannot_be_inferred_into_formal_evidence(tmp_p
         )
 
 
-def test_unverified_governance_allows_compatibility_gate_but_not_mastery():
+def test_unverified_governance_blocks_submission_and_all_evidence():
     with TestClient(
         create_app(
             "sqlite+pysqlite:///:memory:",
@@ -3462,39 +3543,17 @@ def test_unverified_governance_allows_compatibility_gate_but_not_mastery():
                 "answers": [[1] for _ in section["quiz"]["questions"]],
             },
         )
-        assert submitted.status_code == 200
-        assert submitted.json()["passed"] is True
+        assert submitted.status_code == 409
+        assert submitted.json()["code"] == "QUIZ_GOVERNANCE_REQUIRED"
         with compatibility.app.state.sessions() as db:
             attempts = db.scalars(
                 select(QuizAttempt).where(
                     QuizAttempt.quiz_set_id == section["quiz"]["id"]
                 )
             ).all()
-            observations = db.scalars(
-                select(AssessmentObservation).where(
-                    AssessmentObservation.attempt_id == attempts[-1].id
-                )
-            ).all()
-            statuses = {
-                (item.observation_id, item.projection_family): item.status
-                for item in db.scalars(
-                    select(EvidenceQualificationEvent).where(
-                        EvidenceQualificationEvent.observation_id.in_(
-                            [item.id for item in observations]
-                        )
-                    )
-                ).all()
-            }
-            assert {
-                status
-                for (observation_id, family), status in statuses.items()
-                if family == "gate"
-            } == {"eligible"}
-            assert {
-                status
-                for (observation_id, family), status in statuses.items()
-                if family in {"mastery", "retention"}
-            } == {"ineligible"}
+            assert attempts == []
+            assert db.scalars(select(AssessmentObservation)).all() == []
+            assert db.scalars(select(EvidenceQualificationEvent)).all() == []
             rebuild_user_projections(db, user_id="user_demo")
         assert compatibility.get(
             "/api/learning-memory?shelf_id=shelf_technology"
@@ -3506,7 +3565,7 @@ def test_unverified_remediation_cannot_bypass_quiz_governance():
         create_app(
             "sqlite+pysqlite:///:memory:",
             FakeAi(),
-            ReachabilityOnlyVerifier(),
+            AcceptingSourceVerifier(),
         )
     ) as compatibility:
         series = create_series(compatibility)
@@ -3536,7 +3595,38 @@ def test_unverified_remediation_cannot_bypass_quiz_governance():
         replacement = compatibility.get(
             f"/api/sections/{section['id']}"
         ).json()["quiz"]
-        assert replacement["governance"]["assessmentEligible"] is False
+        assert replacement["governance"]["assessmentEligible"] is True
+        with compatibility.app.state.sessions() as db:
+            knowledge_state_count = db.scalar(
+                select(func.count()).select_from(KnowledgeStateProjection)
+            )
+            previous = db.scalar(
+                select(GovernanceDecisionSnapshot)
+                .where(
+                    GovernanceDecisionSnapshot.quiz_set_id == replacement["id"],
+                    GovernanceDecisionSnapshot.decision_scope == "quiz_publication",
+                )
+                .order_by(GovernanceDecisionSnapshot.created_at.desc())
+            )
+            db.add(GovernanceDecisionSnapshot(
+                id="governance_rejected_remediation",
+                decision_scope="quiz_publication",
+                content_version_id=previous.content_version_id,
+                quiz_set_id=previous.quiz_set_id,
+                learning_contract_version_id=previous.learning_contract_version_id,
+                requested_mode="formal",
+                mode="rejected",
+                allowed=False,
+                assessment_eligible=False,
+                reasons_json='[{"code":"TEST_REJECTION"}]',
+                rule_version="test_rejection_v1",
+                input_hash="0" * 64,
+                actor_kind="test_governance",
+                actor_id="test_governance",
+                idempotency_key="test-rejected-remediation",
+                created_at=now() + timedelta(seconds=1),
+            ))
+            db.commit()
         resolved = compatibility.post(
             f"/api/sections/{section['id']}/quiz",
             json={
@@ -3544,8 +3634,8 @@ def test_unverified_remediation_cannot_bypass_quiz_governance():
                 "answers": [[1] for _ in replacement["questions"]],
             },
         )
-        assert resolved.status_code == 200
-        assert resolved.json()["passed"] is True
+        assert resolved.status_code == 409
+        assert resolved.json()["code"] == "QUIZ_GOVERNANCE_REQUIRED"
 
         with compatibility.app.state.sessions() as db:
             observations = db.scalars(
@@ -3553,19 +3643,138 @@ def test_unverified_remediation_cannot_bypass_quiz_governance():
                     AssessmentObservation.quiz_set_id == replacement["id"]
                 )
             ).all()
-            mastery_statuses = {
-                item.status
-                for item in db.scalars(
-                    select(EvidenceQualificationEvent).where(
-                        EvidenceQualificationEvent.observation_id.in_(
-                            [item.id for item in observations]
-                        ),
-                        EvidenceQualificationEvent.projection_family == "mastery",
-                    )
-                ).all()
-            }
-            assert mastery_statuses == {"ineligible"}
-            assert db.scalars(select(KnowledgeStateProjection)).all() == []
+            assert observations == []
+            assert db.scalar(
+                select(func.count()).select_from(KnowledgeStateProjection)
+            ) == knowledge_state_count
+
+
+def test_invalid_remediation_candidate_never_becomes_published_quiz(tmp_path):
+    class InvalidRemediationAi(FakeAi):
+        async def lesson(self, request, memory, prior_questions=None):
+            lesson = await super().lesson(request, memory, prior_questions)
+            if not prior_questions:
+                return lesson
+            return lesson.model_copy(update={
+                "blocks": [
+                    block.model_copy(update={"assessment_objectives": []})
+                    for block in lesson.blocks
+                ],
+            })
+
+    with TestClient(create_app(
+        f"sqlite+pysqlite:///{tmp_path / 'invalid-remediation.db'}",
+        InvalidRemediationAi(),
+        AcceptingSourceVerifier(),
+        LocalAttachmentStorage(tmp_path / "invalid-remediation-attachments"),
+    )) as rejected:
+        series = create_series(rejected)
+        initialization = wait_for_task(
+            rejected,
+            series["initializationTask"]["taskId"],
+        )
+        assert initialization["status"] == "succeeded"
+        section_id = initialization["result"]["targetSectionId"]
+        section = rejected.get(f"/api/sections/{section_id}").json()
+        answers = [[1] for _ in section["quiz"]["questions"]]
+        answers[0] = [0]
+        answers[1] = [0]
+        failed = rejected.post(
+            f"/api/sections/{section_id}/quiz",
+            json={"quizSetId": section["quiz"]["id"], "answers": answers},
+        ).json()
+        remediation_task = next(
+            task
+            for task in failed["workflowTasks"]
+            if task["type"] == "remediation_generation"
+        )
+        task = wait_for_task(
+            rejected,
+            remediation_task["taskId"],
+            timeout=5,
+        )
+        assert task["status"] == "failed"
+        assert task["attemptCount"] == task["maxAttempts"]
+        assert task["errorCode"] == "REMEDIATION_TARGET_NOT_TAUGHT"
+
+        refreshed = rejected.get(f"/api/sections/{section_id}").json()
+        assert refreshed["quiz"]["id"] == section["quiz"]["id"]
+        assert refreshed["remediations"] == []
+        with rejected.app.state.sessions() as db:
+            quizzes = db.scalars(
+                select(QuizSet).where(QuizSet.section_id == section_id)
+            ).all()
+            assert [quiz.id for quiz in quizzes] == [section["quiz"]["id"]]
+            assert db.scalars(
+                select(Remediation).where(Remediation.section_id == section_id)
+            ).all() == []
+
+
+def test_exhausted_next_section_preload_restores_progress_and_can_retry(tmp_path):
+    class ExhaustedPreloadAi(FakeAi):
+        def __init__(self):
+            self.fail_preload = False
+
+        async def lesson(self, request, memory, prior_questions=None):
+            if self.fail_preload:
+                raise AiError("simulated exhausted preload")
+            return await super().lesson(request, memory, prior_questions)
+
+    ai = ExhaustedPreloadAi()
+    with TestClient(create_app(
+        f"sqlite+pysqlite:///{tmp_path / 'exhausted-preload.db'}",
+        ai,
+        AcceptingSourceVerifier(),
+        LocalAttachmentStorage(tmp_path / "exhausted-preload-attachments"),
+    )) as recovering:
+        series = create_series(recovering)
+        initialization = wait_for_task(
+            recovering,
+            series["initializationTask"]["taskId"],
+        )
+        assert initialization["status"] == "succeeded"
+        current = recovering.get(f"/api/series/{series['id']}").json()
+        first_section = current["books"][0]["chapters"][0]["sections"][0]
+        section = recovering.get(f"/api/sections/{first_section['id']}").json()
+
+        ai.fail_preload = True
+        passed = recovering.post(
+            f"/api/sections/{first_section['id']}/quiz",
+            json={
+                "quizSetId": section["quiz"]["id"],
+                "answers": [[1] for _ in section["quiz"]["questions"]],
+            },
+        ).json()
+        preload = next(
+            task
+            for task in passed["workflowTasks"]
+            if task["type"] == "next_section_preload"
+        )
+        failed = wait_for_task(recovering, preload["taskId"], timeout=5)
+        assert failed["status"] == "failed"
+        assert failed["attemptCount"] == failed["maxAttempts"]
+        assert failed["retryable"] is True
+
+        stalled = recovering.get(f"/api/series/{series['id']}").json()
+        next_section = stalled["books"][0]["chapters"][0]["sections"][1]
+        assert next_section["status"] == "available"
+        assert recovering.get(
+            f"/api/sections/{next_section['id']}"
+        ).status_code == 200
+
+        ai.fail_preload = False
+        retried = recovering.post(
+            f"/api/learning-tasks/{preload['taskId']}/retry"
+        )
+        assert retried.status_code == 200
+        assert retried.json()["status"] == "pending"
+        completed = wait_for_task(recovering, preload["taskId"], timeout=5)
+        assert completed["status"] == "succeeded"
+        assert completed["attemptCount"] == failed["attemptCount"] + 1
+        assert completed["maxAttempts"] == failed["attemptCount"] + 3
+        ready = recovering.get(f"/api/sections/{next_section['id']}")
+        assert ready.status_code == 200
+        assert ready.json()["content"] is not None
 
 
 def test_runner_persists_failure_report_and_evidence_snapshot(tmp_path, monkeypatch):

@@ -35,6 +35,8 @@ from .assessment import (
     record_scoring_facts,
     section_gate_decision,
 )
+from .assessment_items import immutable_questions_for_quiz
+from .content_governance_store import governance_view_for_quiz
 from .progress import ProgressStore
 from .contracts import open_run_section
 from .decision_snapshots import (
@@ -256,6 +258,21 @@ class SubmitQuiz:
         quiz = self.db.get(QuizSet, body.quiz_set_id)
         if not quiz or quiz.section_id != section_id:
             raise AppError("题集无效", code="QUIZ_INVALID")
+        if quiz.publication_status != "published":
+            raise AppError(
+                "题集不是当前正式发布版本",
+                code="QUIZ_NOT_PUBLISHED",
+                status=409,
+            )
+        governance = governance_view_for_quiz(self.db, quiz.id)
+        if not governance or not (
+            governance["allowed"] and governance["assessmentEligible"]
+        ):
+            raise AppError(
+                "题集未通过正式学习证据治理，不能提交",
+                code="QUIZ_GOVERNANCE_REQUIRED",
+                status=409,
+            )
         binding = self.db.scalar(
             select(LearningRunSectionBinding).where(
                 LearningRunSectionBinding.learning_run_id == learning_run.id,
@@ -327,7 +344,12 @@ class SubmitQuiz:
                 status=409,
             )
 
-        questions = _load(quiz.questions_json, [])
+        questions = immutable_questions_for_quiz(
+            self.db,
+            quiz,
+            require_versions=bool(remediation),
+            require_evidence=True,
+        )
         grade = grade_choice_quiz(questions, body.answers)
         attempt = QuizAttempt(
             id=_uid("attempt"),

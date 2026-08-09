@@ -595,6 +595,7 @@ class SectionGenerationCoordinator:
                         key: item[key]
                         for key in (
                             "assessmentTargetId",
+                            "conceptRevisionId",
                             "objective",
                             "dimension",
                             "targetDepth",
@@ -611,6 +612,7 @@ class SectionGenerationCoordinator:
                 for item in memory
                 if item.get("assessmentTargetId") in target_ids
             ],
+            knowledgeContext=context_payload["knowledgeContext"],
             depthPolicy=context_payload["policy"]["depthPolicy"],
             feedback=regeneration_feedback or {},
             rightsAssetVersionIds=[],
@@ -636,6 +638,9 @@ class SectionGenerationCoordinator:
                     "contextPolicyVersion": LESSON_CONTEXT_POLICY_VERSION,
                     "contextHash": spec.context_hash(),
                     "contractVersionId": contract.id,
+                    "knowledgeContext": (
+                        context_pack.knowledge_context.audit_manifest()
+                    ),
                     "generationMode": spec.generation_mode,
                     "physicalCallBudget": 1,
                     "regenerate": regenerate,
@@ -753,6 +758,13 @@ class SectionGenerationCoordinator:
                     "contentVersionId": published.content.id,
                     "quizSetId": published.quiz.id,
                     "publicationStatus": "published",
+                    "contentKnowledgeClaimVersionIds": sorted(
+                        {
+                            claim_id
+                            for block in candidate.blocks
+                            for claim_id in block.claim_version_ids
+                        }
+                    ),
                     **(
                         {
                             "feedbackReplacement": {

@@ -179,6 +179,7 @@ def assessment_contract_view(
     return [
         {
             "assessmentTargetId": target.id,
+            "conceptRevisionId": target.concept_revision_id or "",
             "objective": target.objective_statement,
             "dimension": target.dimension,
             "targetDepth": contract.target_depth,
@@ -726,7 +727,8 @@ def _record_qualification_events(
         observation.learning_contract_version_id and governance is None
     )
     governance_ineligible = m2_governance_missing or bool(
-        governance and not governance.assessment_eligible
+        governance
+        and (not governance.allowed or not governance.assessment_eligible)
     )
     statuses = (
         {
@@ -742,9 +744,9 @@ def _record_qualification_events(
         }
         if qualification_profile == "review_assignment"
         else {
-            # Compatibility keeps the reading/unlock loop usable, but an
-            # unverified M2 publication must not become mastery or retention.
-            "gate": ("eligible", "compatibility gate only; content governance is unresolved"),
+            # Defense in depth: even if a caller bypasses the submission
+            # boundary, governance-ineligible evidence has no projection rights.
+            "gate": ("ineligible", "quiz is not governance-qualified for progression"),
             "mastery": ("ineligible", "quiz is not governance-qualified for mastery"),
             "retention": ("ineligible", "quiz is not governance-qualified for retention"),
         }

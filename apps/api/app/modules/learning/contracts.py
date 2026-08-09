@@ -157,6 +157,85 @@ def _ensure_section_targets(
     ).all()
     by_key = {target.objective_key: (binding, target) for binding, target in rows}
 
+    # Stable M2 identities must be declared by exact baseline keys in the
+    # section objective metadata. Never infer them from title/prose similarity.
+    from ..knowledge.fact_graph import resolve_published_section_identities
+
+    published_identities = resolve_published_section_identities(
+        db,
+        chapter_id=section.chapter_id,
+        objectives_json=section.objectives_json,
+    )
+    if published_identities:
+        expected_pairs = {
+            (item.concept_revision_id, item.learning_objective_id)
+            for item in published_identities
+        }
+        if rows:
+            actual_pairs = {
+                (target.concept_revision_id, target.learning_objective_id)
+                for _, target in rows
+            }
+            if actual_pairs != expected_pairs or any(
+                target.identity_status != "published_knowledge_graph"
+                for _, target in rows
+            ):
+                raise AppError(
+                    "小节已有考核目标与显式发布知识身份不一致，不能静默改写",
+                    code="SECTION_TARGET_STABLE_IDENTITY_CONFLICT",
+                    status=409,
+                )
+            return sorted(rows, key=lambda pair: pair[0].position)
+        stable_rows = []
+        for position, identity in enumerate(published_identities, 1):
+            semantic_key = (
+                f"{identity.objective_key}@{identity.concept_revision_id}"
+            )
+            dimension = (
+                "application"
+                if "code" in identity.verification_policy
+                else "recognition"
+            )
+            target = db.scalar(
+                select(AssessmentTarget).where(
+                    AssessmentTarget.objective_key == semantic_key,
+                    AssessmentTarget.dimension == dimension,
+                    AssessmentTarget.target_depth == "standard",
+                )
+            )
+            if target is None:
+                target = AssessmentTarget(
+                    id=_stable_id(
+                        "target_knowledge_graph",
+                        identity.concept_revision_id,
+                        identity.learning_objective_id,
+                        dimension,
+                        "standard",
+                    ),
+                    concept_revision_id=identity.concept_revision_id,
+                    learning_objective_id=identity.learning_objective_id,
+                    objective_key=semantic_key,
+                    objective_statement=identity.objective_statement,
+                    dimension=dimension,
+                    target_depth="standard",
+                    identity_status="published_knowledge_graph",
+                    status="active",
+                )
+                db.add(target)
+                db.flush()
+            binding = SectionAssessmentTarget(
+                id=_stable_id("section_target_knowledge_graph", section.id, target.id),
+                section_id=section.id,
+                assessment_target_id=target.id,
+                position=position,
+                required=True,
+                verification_policy=identity.verification_policy,
+            )
+            db.add(binding)
+            db.flush()
+            stable_rows.append((binding, target))
+        return stable_rows
+
     # Existing bindings are historical server-owned semantics. Never rewrite or
     # expand a partially materialized M1 set during migration.
     objectives = [] if rows else _section_objectives(section)
@@ -234,6 +313,13 @@ def ensure_learning_contract(
     if delivery_depth not in {"overview", "deep", "mastery"}:
         delivery_depth = "deep"
     target_rows = _ensure_section_targets(db, section)
+    uses_published_knowledge = bool(target_rows) and all(
+        target.identity_status == "published_knowledge_graph"
+        for _, target in target_rows
+    )
+    contract_provenance = (
+        "published_knowledge_graph" if uses_published_knowledge else provenance_mode
+    )
     payload = {
         "schemaVersion": M1_CONTRACT_SCHEMA_VERSION,
         "sectionId": section.id,
@@ -251,7 +337,7 @@ def ensure_learning_contract(
             }
             for binding, target in target_rows
         ],
-        "provenanceMode": provenance_mode,
+        "provenanceMode": contract_provenance,
     }
     contract_hash = hashlib.sha256(_dump(payload).encode()).hexdigest()
     existing = db.scalar(
@@ -281,14 +367,20 @@ def ensure_learning_contract(
         boundaries_json="[]",
         generation_context_json=_dump(
             {
-                "mode": provenance_mode,
+                "mode": contract_provenance,
                 "sourceObjectives": _load(section.objectives_json, []),
                 "targetDepth": delivery_depth,
                 "contextPolicyVersion": "lesson_content_context_v1",
+                "conceptRevisionIds": [
+                    target.concept_revision_id for _, target in target_rows
+                ],
+                "learningObjectiveIds": [
+                    target.learning_objective_id for _, target in target_rows
+                ],
             }
         ),
-        provenance_mode=provenance_mode,
-        lineage_status="provisional",
+        provenance_mode=contract_provenance,
+        lineage_status=("verified" if uses_published_knowledge else "provisional"),
         contract_hash=contract_hash,
     )
     db.add(contract)

@@ -194,6 +194,13 @@ def test_context_pack_propagates_profile_mission_depth_and_attempt():
                 )
             )
             generation_trace = json.loads(generation_run.trace_json)
+            assert generation_trace["knowledgeContext"]["status"] == "not_applicable"
+            assert generation_trace["knowledgeContext"]["retrievalRuleVersion"]
+            assert generation_trace["knowledgeContext"]["actual"] == {
+                "nodeCount": 0,
+                "edgeCount": 0,
+                "claimCount": 0,
+            }
             assert (
                 generation_trace["generationVariant"]
                 == "preference_aware_blueprint_v1"
@@ -204,6 +211,7 @@ def test_context_pack_propagates_profile_mission_depth_and_attempt():
             )
         content_context = content_request["generationContext"]
         assert content_context["operation"] == "lesson_content"
+        assert content_context["knowledgeContext"]["status"] == "not_applicable"
         assert content_context["learner"]["planRole"] == "猎头顾问"
         assert content_context["mission"]["constraints"]["depth"] == "deep"
         assert content_context["curriculum"]["chapter"]["objective"]

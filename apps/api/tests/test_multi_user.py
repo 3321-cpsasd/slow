@@ -732,11 +732,12 @@ def test_two_local_users_interleave_learning_tasks_without_cross_access(
         )
         assert retried.status_code == 200
         assert retried.json()["status"] == "pending"
-        assert wait_for_owned_task(
+        retried_terminal = wait_for_owned_task(
             client,
             task_a["taskId"],
             headers_a,
-        )["status"] == "succeeded"
+        )
+        assert retried_terminal["status"] == "succeeded", retried_terminal
 
         refreshed_a = client.get(
             f"/api/sections/{section_a['id']}",

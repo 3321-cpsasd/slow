@@ -1,0 +1,415 @@
+{
+  "schemaVersion": "curriculum_baseline_package_v1",
+  "baselineKey": "cn.pku.cs.programming_practice.2025",
+  "version": 1,
+  "title": "北京大学计算机科学与技术专业（2025级）· 程序设计实习候选基准",
+  "status": "candidate",
+  "matchTerms": ["程序设计实习", "程序设计", "编程实践", "c++", "c & c++", "计算机专业新生"],
+  "discipline": {
+    "code": "CN-080901",
+    "name": "计算机科学与技术",
+    "jurisdiction": "CN"
+  },
+  "program": {
+    "institution": "北京大学",
+    "programCode": "pku-cs",
+    "name": "计算机科学与技术专业培养方案",
+    "versionLabel": "2025级",
+    "sourceKey": "pku_cs_training_program_2025",
+    "applicability": {
+      "institution": "北京大学",
+      "program": "计算机科学与技术",
+      "declaredVersion": "2025级"
+    }
+  },
+  "course": {
+    "courseCode": "04831750",
+    "title": "程序设计实习",
+    "versionLabel": "2025培养方案课程 + 教务系统未注明生效年份的课程大纲",
+    "courseType": "专业核心必修课",
+    "credits": {
+      "credits": 3,
+      "totalHours": 68,
+      "practicalHours": 34,
+      "recommendedSemester": "大一/下",
+      "prerequisite": {
+        "courseCode": "04830041",
+        "title": "计算概论A",
+        "syllabusLabel": "计算概论"
+      },
+      "alternativeCourse": {
+        "courseCode": "04835240",
+        "title": "软件设计实践"
+      }
+    },
+    "assessment": {
+      "declaredWeights": {
+        "regularWrittenLabAndClassTests": 0.35,
+        "midterm": 0.15,
+        "final": 0.5
+      },
+      "requiredEvidenceModes": ["choice_quiz", "code_task"],
+      "note": "课程大纲明确平时、期中、期末比例并强调上机能力，但没有给出代码任务评分量规；且大纲生效版本尚未与2025培养方案闭合。"
+    },
+    "aliases": ["Practice of Programming in C&C++", "C++程序设计实习", "编程实践"]
+  },
+  "sources": [
+    {
+      "sourceKey": "pku_cs_training_program_2025",
+      "sourceType": "training_program",
+      "title": "2025年计算机科学与技术专业培养方案",
+      "authority": "北京大学信息科学技术学院",
+      "url": "https://eecs.pku.edu.cn/system/_content/download.jsp?urltype=news.DownloadAttachUrl&owner=1828791678&wbfileid=01A77911F13562E6C4C7ACFDCD384737",
+      "versionLabel": "2025级；学院官网发布于2025-08-17",
+      "publicationDate": "2025-08-17",
+      "applicability": {
+        "institution": "北京大学",
+        "program": "计算机科学与技术",
+        "programVersion": "2025级"
+      },
+      "retrievalDate": "2026-08-09",
+      "contentDigest": "32f38e6746df90cbe4eb162e87679ed9c9fba6a6092d48fbc74dffabc7a7dc20",
+      "verificationStatus": "reachable",
+      "provenance": {
+        "extractionMode": "pdf_text_plus_visual_review",
+        "locators": ["第1页：培养目标与毕业要求", "第3页：计算概论A", "第4页2.2专业核心课：课程号04831750"],
+        "digestScope": "完整官方PDF文件"
+      }
+    },
+    {
+      "sourceKey": "pku_programming_practice_syllabus",
+      "sourceType": "course_syllabus",
+      "title": "程序设计实习课程详细信息与教学大纲",
+      "authority": "北京大学选课系统（开课院系：信息科学技术学院）",
+      "url": "https://elective.pku.edu.cn/elective2008/edu/pku/stu/elective/controller/courseDetail/getCourseDetail.do?course_seq_no=BZ1718204831750_50288&kclx=BK",
+      "versionLabel": "课程号04831750；页面未声明大纲生效年份；2026-08-09检索快照",
+      "publicationDate": "",
+      "applicability": {
+        "institution": "北京大学",
+        "courseCode": "04831750",
+        "programVersion": "unknown"
+      },
+      "retrievalDate": "2026-08-09",
+      "contentDigest": "26683f059ba5935428109be9306be2f13df455e17f4620b4cdc298566a116476",
+      "verificationStatus": "reachable",
+      "provenance": {
+        "extractionMode": "normalized_official_course_detail_fields",
+        "locators": ["课程详细信息", "教学目的和基本要求", "课程大纲和知识点1-16", "考核比例", "教材"],
+        "digestScope": "规范化课程号、目标、主题课时、考核比例和教材字段，不是完整网页归档"
+      }
+    }
+  ],
+  "competencies": [
+    {
+      "key": "program_reading_and_reasoning",
+      "statement": "能够跟踪程序运行中的内存状态，并根据程序逻辑推断计算过程。",
+      "competencyType": "knowledge",
+      "verificationModes": ["choice_quiz", "written_response"],
+      "sources": [
+        {"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲1：阅读程序练习、内存状态改变与逻辑推断", "support": "direct"}
+      ]
+    },
+    {
+      "key": "algorithmic_problem_solving",
+      "statement": "能够使用枚举、递归、搜索和动态规划等基本算法思想解决程序设计问题。",
+      "competencyType": "transfer",
+      "verificationModes": ["choice_quiz", "code_task", "oral"],
+      "sources": [
+        {"sourceKey": "pku_programming_practice_syllabus", "locator": "教学目的2及课程大纲7-10", "support": "direct"}
+      ]
+    },
+    {
+      "key": "cpp_abstraction_and_reuse",
+      "statement": "能够使用C++类库、面向对象机制与标准模板库组织和复用程序。",
+      "competencyType": "skill",
+      "verificationModes": ["choice_quiz", "code_task"],
+      "sources": [
+        {"sourceKey": "pku_programming_practice_syllabus", "locator": "教学目的1及课程大纲11-16", "support": "direct"}
+      ]
+    },
+    {
+      "key": "practical_programming",
+      "statement": "能够编写规范、可运行的程序，并通过上机实践展示实际动手能力。",
+      "competencyType": "practice",
+      "verificationModes": ["code_task", "project"],
+      "sources": [
+        {"sourceKey": "pku_programming_practice_syllabus", "locator": "中文简介、教学目的3及教学方式：配合上机实习", "support": "direct"},
+        {"sourceKey": "pku_cs_training_program_2025", "locator": "第4页：程序设计实习含34实践总学时", "support": "direct"}
+      ]
+    }
+  ],
+  "objectives": [
+    {
+      "key": "trace_program_state_and_logic",
+      "statement": "能够跟踪程序执行状态，并依据控制逻辑解释程序的计算结果。",
+      "competencyKeys": ["program_reading_and_reasoning"],
+      "required": true,
+      "verificationPolicy": "choice_plus_code_v1",
+      "sources": [
+        {"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲1：阅读程序练习", "support": "derived"}
+      ]
+    },
+    {
+      "key": "implement_numeric_string_and_linked_data_tasks",
+      "statement": "能够完成日期与进制、高精度、字符串和链表等基础数据处理任务。",
+      "competencyKeys": ["program_reading_and_reasoning", "practical_programming"],
+      "required": true,
+      "verificationPolicy": "code_task_v1",
+      "sources": [
+        {"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲2、4、5、6", "support": "derived"}
+      ]
+    },
+    {
+      "key": "abstract_behavior_with_function_pointers",
+      "statement": "能够使用函数指针表达可替换行为，并解释其在高阶计算过程抽象中的作用。",
+      "competencyKeys": ["cpp_abstraction_and_reuse", "practical_programming"],
+      "required": true,
+      "verificationPolicy": "choice_plus_code_v1",
+      "sources": [
+        {"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲3：函数指针及高阶计算过程抽象", "support": "derived"}
+      ]
+    },
+    {
+      "key": "solve_with_enumeration_recursion_and_search",
+      "statement": "能够选择枚举、递归、深度优先搜索或广度优先搜索解决适用问题。",
+      "competencyKeys": ["algorithmic_problem_solving", "practical_programming"],
+      "required": true,
+      "verificationPolicy": "code_task_v1",
+      "sources": [
+        {"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲7-9：枚举、递归、搜索", "support": "derived"}
+      ]
+    },
+    {
+      "key": "model_and_solve_with_dynamic_programming",
+      "statement": "能够识别动态规划问题，构造状态与转移，并比较递归和动态规划的实现。",
+      "competencyKeys": ["algorithmic_problem_solving", "practical_programming"],
+      "required": true,
+      "verificationPolicy": "choice_plus_code_v1",
+      "sources": [
+        {"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲10：动态规划及其与递归的转换", "support": "derived"}
+      ]
+    },
+    {
+      "key": "design_classes_and_inheritance",
+      "statement": "能够用类、对象、构造与析构以及继承和可见性规则组织程序。",
+      "competencyKeys": ["cpp_abstraction_and_reuse", "practical_programming"],
+      "required": true,
+      "verificationPolicy": "choice_plus_code_v1",
+      "sources": [
+        {"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲11-12：类和对象、继承", "support": "derived"}
+      ]
+    },
+    {
+      "key": "apply_operator_overloading_and_polymorphism",
+      "statement": "能够在适用场景中使用运算符重载、虚函数和多态，并说明其行为边界。",
+      "competencyKeys": ["cpp_abstraction_and_reuse", "practical_programming"],
+      "required": true,
+      "verificationPolicy": "choice_plus_code_v1",
+      "sources": [
+        {"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲13-14：运算符重载、多态和虚函数", "support": "derived"}
+      ]
+    },
+    {
+      "key": "build_programs_with_streams_files_and_stl",
+      "statement": "能够使用流、文件读写、模板、容器、迭代器和算法模板完成可运行程序。",
+      "competencyKeys": ["cpp_abstraction_and_reuse", "practical_programming"],
+      "required": true,
+      "verificationPolicy": "code_task_v1",
+      "sources": [
+        {"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲15-16：流和文件读写、标准模板库", "support": "derived"}
+      ]
+    }
+  ],
+  "concepts": [
+    {
+      "key": "program_state_and_trace",
+      "label": "程序状态与执行跟踪",
+      "scope": "跟踪程序运行中的内存状态，并根据程序逻辑推断计算过程。",
+      "objectiveKeys": ["trace_program_state_and_logic"],
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲1，2课时", "support": "direct"}]
+    },
+    {
+      "key": "date_and_base_conversion",
+      "label": "日期处理与进制转换",
+      "scope": "覆盖日期表示、日期计算和进制转换的一般方法。",
+      "objectiveKeys": ["implement_numeric_string_and_linked_data_tasks"],
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲2，2课时", "support": "direct"}]
+    },
+    {
+      "key": "function_pointers",
+      "label": "函数指针",
+      "scope": "覆盖函数指针用法及其对高阶计算过程的抽象。",
+      "objectiveKeys": ["abstract_behavior_with_function_pointers"],
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲3，2课时", "support": "direct"}]
+    },
+    {
+      "key": "high_precision_arithmetic",
+      "label": "高精度计算",
+      "scope": "覆盖高精度计算本质及加、减、乘、除实现。",
+      "objectiveKeys": ["implement_numeric_string_and_linked_data_tasks"],
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲4，2课时", "support": "direct"}]
+    },
+    {
+      "key": "string_processing",
+      "label": "字符串处理",
+      "scope": "覆盖字符串表示和C语言字符串处理函数库。",
+      "objectiveKeys": ["implement_numeric_string_and_linked_data_tasks"],
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲5，2课时", "support": "direct"}]
+    },
+    {
+      "key": "linked_lists",
+      "label": "链表",
+      "scope": "覆盖链表定义、插入、删除，以及单链表、双链表、循环链表和应用。",
+      "objectiveKeys": ["implement_numeric_string_and_linked_data_tasks"],
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲6，2课时", "support": "direct"}]
+    },
+    {
+      "key": "enumeration",
+      "label": "枚举",
+      "scope": "覆盖枚举基本思想和使用枚举解决问题。",
+      "objectiveKeys": ["solve_with_enumeration_recursion_and_search"],
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲7，2课时", "support": "direct"}]
+    },
+    {
+      "key": "recursion",
+      "label": "递归",
+      "scope": "覆盖递归基本思想和使用递归解决问题。",
+      "objectiveKeys": ["solve_with_enumeration_recursion_and_search", "model_and_solve_with_dynamic_programming"],
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲8，4课时", "support": "direct"}]
+    },
+    {
+      "key": "graph_search",
+      "label": "深度优先与广度优先搜索",
+      "scope": "覆盖搜索基本思想、深度优先搜索和广度优先搜索。",
+      "objectiveKeys": ["solve_with_enumeration_recursion_and_search"],
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲9，4课时", "support": "direct"}]
+    },
+    {
+      "key": "dynamic_programming",
+      "label": "动态规划",
+      "scope": "覆盖动态规划基本思想、递归到动态规划的转换及应用。",
+      "objectiveKeys": ["model_and_solve_with_dynamic_programming"],
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲10，8课时", "support": "direct"}]
+    },
+    {
+      "key": "classes_and_objects",
+      "label": "类和对象",
+      "scope": "覆盖成员变量、成员函数、构造函数和析构函数。",
+      "objectiveKeys": ["design_classes_and_inheritance"],
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲11，6课时", "support": "direct"}]
+    },
+    {
+      "key": "inheritance_and_visibility",
+      "label": "继承与成员可见性",
+      "scope": "覆盖公有、保护、私有继承及成员可见性。",
+      "objectiveKeys": ["design_classes_and_inheritance"],
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲12，6课时", "support": "direct"}]
+    },
+    {
+      "key": "operator_overloading",
+      "label": "运算符重载",
+      "scope": "覆盖可重载运算符以及成员或友元重载形式。",
+      "objectiveKeys": ["apply_operator_overloading_and_polymorphism"],
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲13，4课时", "support": "direct"}]
+    },
+    {
+      "key": "polymorphism_and_virtual_functions",
+      "label": "多态与虚函数",
+      "scope": "覆盖虚函数、纯虚函数和多态。",
+      "objectiveKeys": ["apply_operator_overloading_and_polymorphism"],
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲14，6课时", "support": "direct"}]
+    },
+    {
+      "key": "streams_and_files",
+      "label": "流与文件读写",
+      "scope": "覆盖C++流和文件读写类。",
+      "objectiveKeys": ["build_programs_with_streams_files_and_stl"],
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲15，4课时", "support": "direct"}]
+    },
+    {
+      "key": "standard_template_library",
+      "label": "标准模板库",
+      "scope": "覆盖类模板、函数模板、容器、迭代器、容器分类和算法模板。",
+      "objectiveKeys": ["build_programs_with_streams_files_and_stl"],
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "课程大纲16，8课时", "support": "direct"}]
+    }
+  ],
+  "relations": [
+    {
+      "fromConceptKey": "program_state_and_trace",
+      "toConceptKey": "recursion",
+      "relationType": "prerequisite_for",
+      "reviewStatus": "candidate",
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "大纲先安排程序状态跟踪再安排递归；前置方向为候选推断", "support": "derived"}]
+    },
+    {
+      "fromConceptKey": "enumeration",
+      "toConceptKey": "graph_search",
+      "relationType": "prerequisite_for",
+      "reviewStatus": "candidate",
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "大纲7枚举先于9搜索；前置方向为候选推断", "support": "derived"}]
+    },
+    {
+      "fromConceptKey": "recursion",
+      "toConceptKey": "graph_search",
+      "relationType": "applies_to",
+      "reviewStatus": "candidate",
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "大纲8递归与9搜索相邻；应用方向为候选推断", "support": "derived"}]
+    },
+    {
+      "fromConceptKey": "recursion",
+      "toConceptKey": "dynamic_programming",
+      "relationType": "contrasts_with",
+      "reviewStatus": "candidate",
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "大纲10明确递归和动态规划之间的转换", "support": "direct"}]
+    },
+    {
+      "fromConceptKey": "classes_and_objects",
+      "toConceptKey": "inheritance_and_visibility",
+      "relationType": "prerequisite_for",
+      "reviewStatus": "candidate",
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "大纲11类和对象先于12继承；前置方向为候选推断", "support": "derived"}]
+    },
+    {
+      "fromConceptKey": "inheritance_and_visibility",
+      "toConceptKey": "polymorphism_and_virtual_functions",
+      "relationType": "prerequisite_for",
+      "reviewStatus": "candidate",
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "大纲12继承先于14多态；前置方向为候选推断", "support": "derived"}]
+    },
+    {
+      "fromConceptKey": "operator_overloading",
+      "toConceptKey": "polymorphism_and_virtual_functions",
+      "relationType": "contrasts_with",
+      "reviewStatus": "candidate",
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "大纲13-14并列呈现两类C++多态机制；对比关系为候选推断", "support": "derived"}]
+    },
+    {
+      "fromConceptKey": "classes_and_objects",
+      "toConceptKey": "standard_template_library",
+      "relationType": "prerequisite_for",
+      "reviewStatus": "candidate",
+      "sources": [{"sourceKey": "pku_programming_practice_syllabus", "locator": "大纲11类和对象先于16类模板与容器；前置方向为候选推断", "support": "derived"}]
+    }
+  ],
+  "gaps": [
+    {
+      "code": "COURSE_SYLLABUS_EFFECTIVE_VERSION_UNKNOWN",
+      "severity": "blocking",
+      "message": "培养方案明确适用于2025级，教务系统大纲虽与课程号04831750精确一致，但页面未声明大纲生效年份；在人工确认前，不能把大纲范围断言为2025级课程的正式范围。",
+      "sourceKeys": ["pku_cs_training_program_2025", "pku_programming_practice_syllabus"]
+    },
+    {
+      "code": "TEXTBOOK_CONTENT_SOURCE_NOT_CAPTURED",
+      "severity": "blocking",
+      "message": "大纲列出了《程序设计导引及在线实践》（2007年10月）和《C++大学教程》（2004年第二版），但尚未取得可审计的教材目录或正文来源；课程主题可作为候选范围，概念定义、机制和边界不能直接发布为平台知识事实。",
+      "sourceKeys": ["pku_programming_practice_syllabus"]
+    },
+    {
+      "code": "CODE_ASSESSMENT_RUBRIC_MISSING",
+      "severity": "blocking",
+      "message": "大纲给出了平时35%、期中15%、期末50%并强调上机能力，但没有代码任务的正确性、复杂度、规范性和独立完成要求等评分量规；选择题通过不能替代程序设计能力证据。",
+      "sourceKeys": ["pku_programming_practice_syllabus"]
+    }
+  ]
+}

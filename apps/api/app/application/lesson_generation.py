@@ -17,9 +17,8 @@ from sqlalchemy.orm import Session
 
 from ..ai.contracts import GeneratedLessonCandidate
 from ..infrastructure.tables import (
-    AssessmentItemEvidenceBlock,
-    AssessmentItemVersion,
     ContentBlockAssessmentTarget,
+    ContentBlockClaimAnchor,
     ContentBlockVersion,
     ContentVersion,
     GenerationRun,
@@ -28,12 +27,13 @@ from ..infrastructure.tables import (
     QuizSet,
     Section,
 )
+from ..modules.learning.assessment_items import publish_assessment_item_versions
 
 
 LESSON_GENERATION_PIPELINE_VERSION = "lesson_generation_v2"
-LESSON_GENERATION_SCHEMA_VERSION = "generated_lesson_candidate_v3"
-LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_prompt_v3"
-LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v3"
+LESSON_GENERATION_SCHEMA_VERSION = "generated_lesson_slot_candidate_v4"
+LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_slot_prompt_v4"
+LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v4"
 LESSON_CONTEXT_POLICY_VERSION = "lesson_generation_context_v2"
 AI_CONTENT_LABEL_SCHEMA_VERSION = "ai_content_label_v2"
 
@@ -52,6 +52,7 @@ class LessonSpecModel(BaseModel):
 
 class LessonTargetSpec(LessonSpecModel):
     assessment_target_id: str = Field(alias="assessmentTargetId")
+    concept_revision_id: str = Field(default="", alias="conceptRevisionId")
     objective: str
     dimension: str
     target_depth: str = Field(alias="targetDepth")
@@ -74,11 +75,11 @@ class LessonGenerationSpec(LessonSpecModel):
         default=LESSON_GENERATION_PIPELINE_VERSION,
         alias="pipelineVersion",
     )
-    schema_version: Literal["generated_lesson_candidate_v3"] = Field(
+    schema_version: Literal["generated_lesson_slot_candidate_v4"] = Field(
         default=LESSON_GENERATION_SCHEMA_VERSION,
         alias="schemaVersion",
     )
-    prompt_version: Literal["lesson_generation_prompt_v3"] = Field(
+    prompt_version: Literal["lesson_generation_slot_prompt_v4"] = Field(
         default=LESSON_GENERATION_PROMPT_VERSION,
         alias="promptVersion",
     )
@@ -104,6 +105,19 @@ class LessonGenerationSpec(LessonSpecModel):
         default_factory=list,
         max_length=8,
         alias="relevantMastery",
+    )
+    knowledge_context: dict[str, Any] = Field(
+        default_factory=lambda: {
+            "schemaVersion": "knowledge_context_pack_v1",
+            "status": "not_applicable",
+            "reason": "standalone_spec_without_curriculum_authority",
+            "retrievalRuleVersion": "published_bounded_bfs_v1",
+            "budget": {"maxNodes": 12, "maxEdges": 18, "maxHops": 2},
+            "nodes": [],
+            "edges": [],
+            "claims": [],
+        },
+        alias="knowledgeContext",
     )
     depth_policy: dict[str, Any] = Field(alias="depthPolicy")
     feedback: dict[str, Any] = Field(default_factory=dict)
@@ -156,6 +170,12 @@ def validate_lesson_candidate(
 
     target_by_id = {item.assessment_target_id: item for item in spec.targets}
     contract_target_ids = set(target_by_id)
+    knowledge_ready = spec.knowledge_context.get("status") == "ready"
+    allowed_claims = {
+        str(item.get("claimVersionId")): item
+        for item in spec.knowledge_context.get("claims", [])
+        if item.get("claimVersionId")
+    }
     block_by_key: dict[str, Any] = {}
     for block in candidate.blocks:
         if block.block_key in block_by_key:
@@ -184,6 +204,42 @@ def validate_lesson_candidate(
                     assessmentTargetId=target_id,
                     contractVersion=spec.learning_contract_version,
                 )
+        unknown_claim_ids = set(block.claim_version_ids) - set(allowed_claims)
+        if unknown_claim_ids:
+            _reject(
+                "CONTENT_KNOWLEDGE_CLAIM_UNBOUND",
+                "正文块引用了当前 KnowledgeContextPack 之外的知识主张",
+                blockKey=block.block_key,
+                claimVersionIds=sorted(unknown_claim_ids),
+            )
+        claim_required = block.role not in {"practice", "transition"}
+        if knowledge_ready and claim_required and not block.claim_version_ids:
+            _reject(
+                "CONTENT_KNOWLEDGE_CLAIM_MISSING",
+                "正式课程的事实性正文块缺少显式知识主张绑定",
+                blockKey=block.block_key,
+                assessmentTargetIds=block.assessment_target_ids,
+            )
+        for claim_id in block.claim_version_ids:
+            scope = allowed_claims[claim_id].get("scope") or {}
+            scoped_concepts = set(scope.get("conceptRevisionIds") or [])
+            for target_id in block.assessment_target_ids:
+                concept_revision_id = target_by_id[target_id].concept_revision_id
+                if not concept_revision_id:
+                    _reject(
+                        "ASSESSMENT_TARGET_CONCEPT_UNBOUND",
+                        "正式课程目标缺少冻结概念版本",
+                        assessmentTargetId=target_id,
+                        blockKey=block.block_key,
+                    )
+                if scoped_concepts and concept_revision_id not in scoped_concepts:
+                    _reject(
+                        "CONTENT_KNOWLEDGE_CLAIM_SCOPE_MISMATCH",
+                        "正文块的知识主张不支持其冻结概念版本",
+                        blockKey=block.block_key,
+                        claimVersionId=claim_id,
+                        conceptRevisionId=concept_revision_id,
+                    )
 
     feedback_block_id = str(spec.feedback.get("blockId") or "").strip()
     feedback_replacement = candidate.feedback_replacement
@@ -324,7 +380,11 @@ def publish_lesson_candidate(
         rights_status=(
             "reviewed" if spec.generation_mode == "rights_grounded" else "not_applicable"
         ),
-        factual_status="unreviewed",
+        factual_status=(
+            "claim_grounded"
+            if spec.knowledge_context.get("status") == "ready"
+            else "unreviewed"
+        ),
         ai_generated=True,
         generation_run_id=generation_run.id,
     )
@@ -335,6 +395,7 @@ def publish_lesson_candidate(
     block_index_by_key: dict[str, int] = {}
     block_payloads: list[dict[str, Any]] = []
     pending_block_targets: list[tuple[str, str]] = []
+    pending_block_claims: list[tuple[str, str]] = []
     for position, block in enumerate(candidate.blocks):
         block_id = f"block_{content.id}_{position + 1}"
         block_id_by_key[block.block_key] = block_id
@@ -354,6 +415,7 @@ def publish_lesson_candidate(
             "content": block.content,
             "source_indexes": [],
             "assessmentTargetIds": block.assessment_target_ids,
+            "knowledgeClaimVersionIds": block.claim_version_ids,
             "assessment_objectives": objectives,
         }
         block_payloads.append(payload)
@@ -368,14 +430,24 @@ def publish_lesson_candidate(
                 heading=block.heading,
                 content=block.content,
                 source_indexes_json="[]",
-                factuality_class="model_generated_unreviewed",
-                trust_state="model_synthesis",
+                factuality_class=(
+                    "published_claim_grounded"
+                    if block.claim_version_ids
+                    else "non_factual_activity"
+                    if block.role in {"practice", "transition"}
+                    else "model_generated_unreviewed"
+                ),
+                trust_state=(
+                    "claim_grounded" if block.claim_version_ids else "model_synthesis"
+                ),
                 generation_method=spec.generation_mode,
                 assessment_eligible=bool(block.assessment_target_ids),
             )
         )
         for target_id in block.assessment_target_ids:
             pending_block_targets.append((block_id, target_id))
+        for claim_id in block.claim_version_ids:
+            pending_block_claims.append((block_id, claim_id))
     db.flush()
     for block_id, target_id in pending_block_targets:
         db.add(
@@ -384,6 +456,23 @@ def publish_lesson_candidate(
                 content_block_version_id=block_id,
                 assessment_target_id=target_id,
                 binding_role="teaches",
+            )
+        )
+    for block_id, claim_id in pending_block_claims:
+        db.add(
+            ContentBlockClaimAnchor(
+                id=uid("block_claim_anchor"),
+                content_block_version_id=block_id,
+                source_claim_version_id=claim_id,
+                anchor_role="states",
+                locator_json=_dump(
+                    {
+                        "bindingMode": "explicit_model_claim_id",
+                        "knowledgeContextHash": spec.knowledge_context.get(
+                            "contextHash", ""
+                        ),
+                    }
+                ),
             )
         )
     content.blocks_json = _dump(block_payloads)
@@ -422,7 +511,7 @@ def publish_lesson_candidate(
     db.flush()
 
     question_payloads: list[dict[str, Any]] = []
-    pending_item_evidence: list[tuple[str, str]] = []
+    evidence_block_ids_by_position: list[list[str]] = []
     for position, question in enumerate(candidate.questions):
         target = validated.target_by_id[question.assessment_target_id]
         item_id = uid("assessment_item")
@@ -451,28 +540,14 @@ def publish_lesson_candidate(
             ),
         }
         question_payloads.append(payload)
-        db.add(
-            AssessmentItemVersion(
-                id=item_id,
-                quiz_set_id=quiz.id,
-                assessment_target_id=question.assessment_target_id,
-                position=position,
-                item_key=question.item_key,
-                payload_json=_dump(payload),
-            )
-        )
-        for block_id in evidence_block_ids:
-            pending_item_evidence.append((item_id, block_id))
-    db.flush()
-    for item_id, block_id in pending_item_evidence:
-        db.add(
-            AssessmentItemEvidenceBlock(
-                id=uid("item_evidence_block"),
-                assessment_item_version_id=item_id,
-                content_block_version_id=block_id,
-            )
-        )
-    quiz.questions_json = _dump(question_payloads)
+        evidence_block_ids_by_position.append(evidence_block_ids)
+    question_payloads = publish_assessment_item_versions(
+        db,
+        quiz=quiz,
+        questions=question_payloads,
+        evidence_block_ids_by_position=evidence_block_ids_by_position,
+        uid=uid,
+    )
 
     if superseded_content:
         superseded_content.publication_status = "superseded"
@@ -518,7 +593,11 @@ def publish_lesson_candidate(
                 quiz_set_id=quiz_id,
                 learning_contract_version_id=contract.id,
                 requested_mode="deterministic",
-                mode="contract_boundary",
+                mode=(
+                    "published_knowledge_claims"
+                    if spec.knowledge_context.get("status") == "ready"
+                    else "contract_boundary"
+                ),
                 allowed=True,
                 assessment_eligible=True,
                 reasons_json="[]",

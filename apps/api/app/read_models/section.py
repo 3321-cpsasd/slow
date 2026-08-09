@@ -20,6 +20,7 @@ from ..infrastructure.tables import (
     now,
 )
 from ..modules.learning.content_governance_store import governance_view_for_quiz
+from ..modules.learning.assessment_items import immutable_questions_for_quiz
 from ..modules.learning.tasks import task_view
 
 
@@ -147,12 +148,17 @@ class SectionReadModel:
             else None
         )
         boundary_validation = self._boundary_validation(content)
-        public_questions = self._public_questions(
-            _load(quiz.questions_json, []) if quiz else []
-        )
         governance = governance_view_for_quiz(
             self.db,
             quiz.id if quiz else None,
+        )
+        quiz_is_eligible = bool(
+            governance
+            and governance["allowed"]
+            and governance["assessmentEligible"]
+        )
+        public_questions = self._public_questions(
+            self._quiz_questions(quiz) if quiz and quiz_is_eligible else []
         )
         latest_attempt = (
             self.db.scalar(
@@ -233,7 +239,7 @@ class SectionReadModel:
                     and all(item.get("correct") for item in latest_results),
                     "results": latest_results,
                     "questions": self._public_questions(
-                        _load(latest_attempt_quiz.questions_json, [])
+                        self._quiz_questions(latest_attempt_quiz)
                     )
                     if latest_attempt_quiz
                     else [],
@@ -294,6 +300,13 @@ class SectionReadModel:
             .order_by(Remediation.created_at)
         ).all()
         return list({item.attempt_id: item for item in revisions}.values())
+
+    def _quiz_questions(self, quiz: QuizSet) -> list[dict]:
+        return immutable_questions_for_quiz(
+            self.db,
+            quiz,
+            require_evidence=quiz.schema_version != "legacy",
+        )
 
     def _boundary_validation(self, content):
         if not content:

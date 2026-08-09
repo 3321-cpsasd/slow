@@ -148,7 +148,7 @@ class FakeChatCompletions:
         )
 
 
-async def chat_adapter(outputs):
+async def chat_adapter(outputs, *, reasoning_mode="optional"):
     adapter = OpenAiAdapter(
         "test-key",
         "qwen-test",
@@ -158,7 +158,7 @@ async def chat_adapter(outputs):
             api_mode="chat_completions",
             structured_output=True,
             streaming=True,
-            reasoning_mode="optional",
+            reasoning_mode=reasoning_mode,
         ),
     )
     await adapter.close()
@@ -217,35 +217,32 @@ def test_openai_chat_repairs_invalid_schema_with_validation_feedback():
 def _lesson_candidate_json():
     blocks = [
         {
-            "block_key": f"b{index}",
+            "slot": slot,
             "kind": "text",
-            "role": role,
-            "relation_to_anchor": relation,
-            "assessment_target_ids": ["target_1"],
-            "heading": f"正文块 {index}",
+            "heading": f"正文块 {slot}",
             "content": "这一正文块完整解释当前目标的机制、判断依据与适用边界，并为测验提供直接证据。学习者可以据此复述因果链并检查反例。",
         }
-        for index, (role, relation) in enumerate(
-            [
-                ("core_instruction", "core"),
-                ("mechanism", "mechanism"),
-                ("comparison", "comparison"),
-                ("boundary", "boundary"),
-                ("practice", "practice"),
-            ],
-            1,
+        for slot in (
+            "T1_CORE",
+            "T2_CORE",
+            "T3_CORE",
+            "SHARED_EXAMPLE",
+            "BOUNDARY",
+            "PRACTICE",
+            "SUMMARY",
         )
     ]
     questions = [
         {
-            "item_key": f"q{index}",
-            "assessment_target_id": "target_1",
-            "evidence_block_keys": ["b1"],
+            "target_slot": f"T{((index - 1) % 3) + 1}",
             "prompt": f"第 {index} 题：哪项符合正文教授的机制？",
-            "options": ["只看标题", "依据机制判断", "忽略边界"],
+            "options": [
+                f"只看标题 {index}",
+                f"依据机制判断 {index}",
+                f"忽略边界 {index}",
+            ],
             "correct": [1],
             "explanation": "正文要求依据机制和边界判断。",
-            "difficulty": "standard",
         }
         for index in range(1, 5)
     ]
@@ -262,16 +259,67 @@ def _lesson_candidate_json():
     )
 
 
+def _lesson_spec():
+    return {
+        "pipelineVersion": "lesson_generation_v2",
+        "learningContractVersionId": "contract_1",
+        "section": {"id": "section_1", "question": "为什么需要稳定绑定？"},
+        "targets": [
+            {
+                "assessmentTargetId": f"target_{index}",
+                "conceptRevisionId": f"concept_{index}",
+                "objective": f"目标 {index}",
+                "required": True,
+            }
+            for index in range(1, 4)
+        ],
+        "knowledgeContext": {
+            "status": "ready",
+            "claims": [
+                {
+                    "claimVersionId": f"claim_{index}",
+                    "scope": {"conceptRevisionIds": [f"concept_{index}"]},
+                }
+                for index in range(1, 4)
+            ],
+        },
+        "feedback": {},
+    }
+
+
 def test_openai_chat_lesson_v2_uses_exactly_one_physical_call():
     async def run():
-        adapter, completions = await chat_adapter([_lesson_candidate_json()])
-        result = await adapter.generate_lesson({"pipelineVersion": "lesson_generation_v2"})
+        adapter, completions = await chat_adapter(
+            [_lesson_candidate_json()],
+            reasoning_mode="required",
+        )
+        result = await adapter.generate_lesson(_lesson_spec())
         return result, completions.calls, adapter.structured_trace()
 
     result, calls, trace = asyncio.run(run())
-    assert len(result.blocks) == 5
+    assert len(result.blocks) == 7
+    assert [block.block_key for block in result.blocks[:3]] == [
+        "t1_core",
+        "t2_core",
+        "t3_core",
+    ]
+    assert result.questions[0].assessment_target_id == "target_1"
+    assert result.questions[0].evidence_block_keys == ["t1_core"]
+    assert {item.correct[0] for item in result.questions} == {0, 1, 2}
+    assert [
+        item.options[item.correct[0]]
+        for item in result.questions
+    ] == [f"依据机制判断 {index}" for index in range(1, 5)]
     assert len(calls) == 1
-    assert trace[0]["schema"] == "GeneratedLessonCandidate"
+    assert calls[0]["extra_body"] == {"enable_thinking": False}
+    assert calls[0]["max_tokens"] == 12000
+    request_payload = json.loads(calls[0]["messages"][1]["content"])
+    assert [
+        item["allowedClaimVersionIds"]
+        for item in request_payload["serverSlotPlan"]["targetSlots"]
+    ] == [["claim_1"], ["claim_2"], ["claim_3"]]
+    assert request_payload["serverSlotPlan"]["optionalBlockSlots"] == ["TRANSITION"]
+    assert trace[0]["schema"] == "GeneratedLessonSlotCandidate"
     assert trace[0]["attempts"] == 1
     assert trace[0]["repairAttempts"] == 0
 
@@ -280,7 +328,7 @@ def test_openai_chat_lesson_v2_does_not_repair_an_invalid_candidate():
     async def run():
         adapter, completions = await chat_adapter(['{"decision":"candidate"}'])
         with pytest.raises(AiError) as raised:
-            await adapter.generate_lesson({"pipelineVersion": "lesson_generation_v2"})
+            await adapter.generate_lesson(_lesson_spec())
         return raised.value, completions.calls, adapter.structured_trace()
 
     error, calls, trace = asyncio.run(run())
@@ -288,6 +336,23 @@ def test_openai_chat_lesson_v2_does_not_repair_an_invalid_candidate():
     assert len(calls) == 1
     assert trace[0]["attempts"] == 1
     assert trace[0]["repairAttempts"] == 0
+
+
+def test_openai_chat_lesson_v2_rejects_plan_external_slots_without_retry():
+    payload = json.loads(_lesson_candidate_json())
+    payload["blocks"][2]["slot"] = "T4_CORE"
+
+    async def run():
+        adapter, completions = await chat_adapter(
+            [json.dumps(payload, ensure_ascii=False)]
+        )
+        with pytest.raises(AiError) as raised:
+            await adapter.generate_lesson(_lesson_spec())
+        return raised.value, completions.calls
+
+    error, calls = asyncio.run(run())
+    assert error.code == "AI_STRUCTURED_OUTPUT_INVALID"
+    assert len(calls) == 1
 
 
 def test_openai_chat_rejects_empty_content_without_invoking_repair():

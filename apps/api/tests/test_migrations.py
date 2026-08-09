@@ -11,7 +11,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0041_product_events"
+HEAD_REVISION = "0044_chapter_knowledge_identity_scope"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -172,11 +172,21 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
             "SELECT sql FROM sqlite_master "
             "WHERE type = 'table' AND name = 'product_events'"
         ).fetchone()[0]
+        curriculum_baseline_schema = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'curriculum_baseline_versions'"
+        ).fetchone()[0]
+        chapter_baseline_schema = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'chapter_curriculum_objective_bindings'"
+        ).fetchone()[0]
 
     assert revision == HEAD_REVISION
     assert "uq_privacy_consents_user_versions" in privacy_consent_schema
     assert "deletion_due_at" in account_exit_schema
     assert "uq_product_events_user_event" in product_event_schema
+    assert "uq_curriculum_baseline_key_version" in curriculum_baseline_schema
+    assert "uq_chapter_curriculum_objective" in chapter_baseline_schema
     assert {
         "outline_status",
         "outline_version",
@@ -270,6 +280,11 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
         "source_claim_bindings",
         "knowledge_gaps",
         "knowledge_gap_events",
+        "knowledge_graph_releases",
+        "knowledge_source_versions",
+        "concept_relation_versions",
+        "concept_objective_bindings",
+        "knowledge_claim_bindings",
         "governance_decision_snapshots",
         "review_selection_runs",
         "review_assignments",

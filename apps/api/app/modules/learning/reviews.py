@@ -528,7 +528,9 @@ class ReviewAssignmentService:
             actor_id=assignment.id,
             actor_kind="review_assignment",
         )
-        if not governance["assessmentEligible"]:
+        if not (
+            governance["allowed"] and governance["assessmentEligible"]
+        ):
             raise AppError(
                 "复习题缺少已核验的正文与主张绑定",
                 code="REVIEW_QUIZ_GOVERNANCE_FAILED",
@@ -581,7 +583,9 @@ class ReviewAssignmentService:
         if not quiz or not questions:
             raise AppError("复习题不存在", code="REVIEW_QUIZ_MISSING", status=409)
         governance = governance_view_for_quiz(self.db, quiz.id)
-        if not governance or not governance["assessmentEligible"]:
+        if not governance or not (
+            governance["allowed"] and governance["assessmentEligible"]
+        ):
             raise AppError(
                 "复习题的可信治理决策缺失或已失效",
                 code="REVIEW_QUIZ_GOVERNANCE_REQUIRED",

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from ...ai.port import AiPort
 from ...core.errors import AppError
 from ...infrastructure.tables import ChapterPractice, Section
+from ..knowledge.fact_graph import KnowledgeFactGraphService
 from ..learning.generation_leases import (
     acquire_generation_lease,
     release_generation_lease,
@@ -21,6 +22,22 @@ def _uid(prefix: str) -> str:
 
 def _dump(value) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+def section_objectives_payload(item) -> list:
+    """Freeze model-selected allowlisted identity keys with each section objective."""
+
+    if not item.baseline_concept_key:
+        return list(item.objectives)
+    return [
+        {
+            "statement": statement,
+            "required": objective_position == 1,
+            "baselineConceptKey": item.baseline_concept_key,
+            "baselineObjectiveKey": item.baseline_objective_key,
+        }
+        for objective_position, statement in enumerate(item.objectives, 1)
+    ]
 
 
 class ChapterPlanningService:
@@ -137,6 +154,9 @@ class ChapterPlanningService:
         book = chapter_context.book
         memory = self.memory_provider(book.shelf_id)
         mission = self.missions.current_version(chapter_context.series.id)
+        knowledge_identities = KnowledgeFactGraphService(
+            self.db
+        ).chapter_identity_allowlist(chapter.id)
         context_pack = self.generation_contexts.build(
             "chapter",
             shelf=chapter_context.shelf,
@@ -147,7 +167,11 @@ class ChapterPlanningService:
             memory=memory,
         )
         request = self.generation_contexts.attach(
-            {"title": chapter.title, "objective": chapter.objective},
+            {
+                "title": chapter.title,
+                "objective": chapter.objective,
+                "knowledgeIdentityAllowlist": knowledge_identities,
+            },
             context_pack,
         )
 
@@ -156,6 +180,10 @@ class ChapterPlanningService:
         self.db.commit()
         generated = await self.ai.chapter(request, memory)
         self._renew_lease(resource_key, owner_id)
+        KnowledgeFactGraphService(self.db).validate_chapter_outline_identities(
+            chapter.id,
+            generated.sections,
+        )
 
         chapter_context = self.contexts.resolve_chapter(
             user_id=self.user_id,
@@ -174,7 +202,7 @@ class ChapterPlanningService:
                 position=position,
                 title=item.title,
                 question=item.question,
-                objectives_json=_dump(item.objectives),
+                objectives_json=_dump(section_objectives_payload(item)),
             )
             self.db.add(section)
             self.progress.add_section(

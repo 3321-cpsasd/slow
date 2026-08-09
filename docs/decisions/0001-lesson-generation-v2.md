@@ -1,6 +1,6 @@
 # ADR-0001：小节正文与测验的一次生成及原子发布
 
-- **状态**：Accepted，核心实现已落地；旧补救与历史兼容代码待观测期后清理
+- **状态**：Accepted，正文与补救题的权威发布边界已落地；旧生成适配器待观测期后清理
 - **决策日期**：2026-08-06
 - **适用范围**：小节规划完成后，从正文生成到正式发布的在线链路
 - **上位产品约束**：[Slow 产品底层基因](../../PRODUCT_DNA.md)
@@ -150,57 +150,60 @@ Learning Contract 必须在正文生成之前冻结。生成器不能创建目�
 
 ## 6. 候选输出与绑定协议
 
-模型返回 `GeneratedLessonCandidate`。示意结构如下：
+在线模型先返回最小化的 `GeneratedLessonSlotCandidate`。服务端按冻结目标顺序预分配
+`T1`、`T2`……槽位，并在 Schema 校验后确定性展开为内部
+`GeneratedLessonCandidate`。模型不再负责抄写稳定 ID、局部 Key、正文角色或证据块引用。
+示意结构如下：
 
 ```json
 {
   "blocks": [
     {
-      "block_key": "b1",
-      "role": "mechanism",
-      "relation_to_anchor": "mechanism",
-      "assessment_target_ids": ["target_123"],
+      "slot": "T1_CORE",
+      "kind": "text",
       "heading": "为什么会出现这个结果",
       "content": "……"
     },
     {
-      "block_key": "b2",
-      "role": "prerequisite_scaffold",
-      "relation_to_anchor": "prerequisite",
-      "assessment_target_ids": [],
-      "heading": "先补上这个前提",
+      "slot": "SHARED_EXAMPLE",
+      "kind": "text",
+      "heading": "把判断放进真实场景",
       "content": "……"
     }
   ],
   "questions": [
     {
-      "item_key": "q1",
-      "assessment_target_id": "target_123",
-      "evidence_block_keys": ["b1"],
+      "target_slot": "T1",
       "prompt": "……",
       "options": ["……", "……", "……", "……"],
       "correct": [1],
       "explanation": "……"
     }
   ],
-  "feedback_replacement": {
-    "source_block_id": "block_content_v1_3",
-    "replacement_block_key": "b1"
-  }
+  "feedback_replacement_slot": "T1_CORE"
 }
 ```
 
 约束如下：
 
-- `assessment_target_id` 必须引用服务端提供的稳定 ID，不能使用标题或自然语言猜测绑定；
-- `block_key` 和 `item_key` 只是本次候选结果内的唯一局部 Key，不是数据库 ID；
+- 每个服务端目标槽位必须且只能对应一个 `Tn_CORE` 块；
+- `SHARED_EXAMPLE`、`BOUNDARY`、`PRACTICE`、`SUMMARY` 是固定共享槽位，
+  `PREREQUISITE` 与 `TRANSITION` 只能按需出现；
+- `target_slot` 只能引用服务端预分配槽位，题目由服务端绑定到同名 `Tn_CORE`；
+- `assessment_target_id`、`block_key`、`item_key`、正文角色、锚点关系与
+  `evidence_block_keys` 全部由服务端确定性派生，模型不得输出；
 - 服务端只在全部校验通过后分配正式的内容块版本 ID 和测验题 ID；
 - `assessment_eligible`、目标规范文案、必需性和 `core` 等权威字段由服务端根据冻结契约派生，不信任模型布尔值；
-- 支撑性关联块的 `assessment_target_ids` 必须为空；
-- 模型输出中的绑定只能被验证或拒绝，不能被服务端猜测、替换或静默删除。
-- 反馈触发完整重生成时，必须返回旧正文稳定 `source_block_id` 到本次候选 `replacement_block_key` 的显式映射；完整重排、增删内容块时禁止按数组位置推断替代关系；非反馈生成不得返回该映射。
+- 共享与支撑槽位不直接获得考核目标；只有 `Tn_CORE` 获得同序目标绑定；
+- 服务端展开是版本化槽位协议的权威派生，不是对模型自由文本的猜测或修复；计划外、缺失或重复槽位整批失败；
+- 反馈触发完整重生成时，模型必须返回真正替代旧块的
+  `feedback_replacement_slot`；服务端再把冻结的旧 `source_block_id` 与新槽位展开出的
+  `replacement_block_key` 显式绑定。非反馈生成该字段必须为空。
 
-内容块角色和锚点关系是节内教学属性，不是目录层级。具体枚举由 Schema 固定并版本化；至少覆盖核心教学、前置脚手架、机制、对比、边界、应用、迁移、练习、总结和过渡所需的最小集合。
+选择题发布前，服务端对选项执行确定性的均衡重排并同步重映射正确答案索引；模型解释不得依赖
+`A/B/C/D` 或选项位置。该派生只改变展示顺序，不改变题义、答案内容、目标或正文证据绑定。
+
+内容块角色和锚点关系是节内教学属性，不是目录层级；它们由服务端根据槽位协议派生并版本化。
 
 ## 7. 确定性发布门禁
 
@@ -272,6 +275,23 @@ published → superseded
 
 事务失败时不得产生部分正文、孤立题集、进度变化或掌握证据。失败调用审计可以单独持久化。
 
+### 8.1 补救题沿用同一发布边界
+
+补救生成可以暂时复用兼容 AI 调用，但其输出只能是候选，不能直接成为题集。服务端必须以失败答题实际使用的冻结
+`QuizSet`、`ContentVersion` 和 `LearningContractVersion` 为唯一源版本，并执行以下确定性约束：
+
+- 原题集必须仍为 `published`，且最新治理决策同时满足 `allowed=true` 和
+  `assessmentEligible=true`；
+- 补救教学块与替代题只能覆盖该次答题失败的稳定目标，并完整覆盖全部失败目标；
+- 每道替代题必须显式记录 `sourceAssessmentItemVersionId`，保持被替换原题的目标，并继承其冻结
+  `evidenceBlockIds`；不得重新通过自然语言、数组位置、旧 claim anchor 或模型输出猜测正文证据；
+- 被继承的正文块必须属于原答题的冻结正文版本，并明确教授同一稳定目标；
+- 全部门禁通过后，新的 `QuizSet(published)`、`AssessmentItemVersion`、证据块绑定、
+  `Remediation`、治理快照和成功运行审计在同一事务中提交。
+
+任何补救候选校验失败都整批回滚。普通读模型不得展示候选或治理拒绝的题，提交入口也必须再次检查发布状态与
+最新治理资格；不合格题不能评分、解锁或写入任何掌握度、保持度与门槛投影。
+
 ## 9. 生成模式、版权与可信表达
 
 Slow 不建设“全网来源包”，不在默认在线请求中抓取公开网页全文。
@@ -302,6 +322,8 @@ Slow 不建设“全网来源包”，不在默认在线请求中抓取公开网
 
 一次调用是默认路径，不是禁止任何失败恢复的教条：
 
+- OpenAI 兼容端点的默认正文 one-shot 调用显式关闭 provider thinking；结构可靠性由槽位协议和服务端门禁承担，不用 Prompt 软约束或小型推理预算充当质量门；
+- 保留宽松的最终输出 token 保险，仅用于终止异常失控，不作为教学质量调节器；
 - 第一次物理调用返回完整候选结果；
 - 确定性校验失败时整批作废；
 - 系统可以进行配置化、有上限的整批重新生成；

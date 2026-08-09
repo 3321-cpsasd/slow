@@ -1,0 +1,116 @@
+{
+  "schemaVersion": "curriculum_baseline_review_v1",
+  "baselineKey": "cn.pku.cs.programming_practice.2025",
+  "baselineVersion": 1,
+  "baselineContentHash": "0aa59a50e66b22ba0d2c8e8f89dc11b806d307d904a976caf08685fb4544386c",
+  "reviewerId": "product_owner_20260809",
+  "confirmationReference": "产品负责人于2026-08-09明确接受课程号精确一致的北大官方大纲快照关联、Slow平台代码量规及公开可审计知识来源方案。",
+  "finalDecision": "approved",
+  "sources": [
+    {
+      "sourceKey": "pku_cs_training_program_2025",
+      "decision": "reviewed",
+      "note": "已核对学院官网发布页、完整PDF摘要和第4页课程号04831750；只用于2025级课程地位、学分、学时与学期。"
+    },
+    {
+      "sourceKey": "pku_programming_practice_syllabus",
+      "decision": "reviewed",
+      "note": "已核对北京大学官方选课系统课程号04831750、目标、主题、教材和考核比例；只声明2026-08-09检索快照，不声称它是2025版大纲。"
+    }
+  ],
+  "relations": [
+    {
+      "fromConceptKey": "program_state_and_trace",
+      "toConceptKey": "recursion",
+      "relationType": "prerequisite_for",
+      "decision": "rejected",
+      "note": "大纲顺序不足以证明平台级前置关系，不发布。"
+    },
+    {
+      "fromConceptKey": "enumeration",
+      "toConceptKey": "graph_search",
+      "relationType": "prerequisite_for",
+      "decision": "rejected",
+      "note": "大纲顺序不足以证明平台级前置关系，不发布。"
+    },
+    {
+      "fromConceptKey": "recursion",
+      "toConceptKey": "graph_search",
+      "relationType": "applies_to",
+      "decision": "rejected",
+      "note": "课程大纲只提供主题相邻证据；该关系改由公开算法来源在知识图发布阶段单独审核。"
+    },
+    {
+      "fromConceptKey": "recursion",
+      "toConceptKey": "dynamic_programming",
+      "relationType": "contrasts_with",
+      "decision": "reviewed",
+      "note": "课程大纲第10项直接写明递归与动态规划之间的转换，接受为课程范围内的对比关系。"
+    },
+    {
+      "fromConceptKey": "classes_and_objects",
+      "toConceptKey": "inheritance_and_visibility",
+      "relationType": "prerequisite_for",
+      "decision": "rejected",
+      "note": "大纲顺序不足以证明平台级前置关系，不发布。"
+    },
+    {
+      "fromConceptKey": "inheritance_and_visibility",
+      "toConceptKey": "polymorphism_and_virtual_functions",
+      "relationType": "prerequisite_for",
+      "decision": "rejected",
+      "note": "课程主题顺序不是经来源支持的前置主张，不发布。"
+    },
+    {
+      "fromConceptKey": "operator_overloading",
+      "toConceptKey": "polymorphism_and_virtual_functions",
+      "relationType": "contrasts_with",
+      "decision": "rejected",
+      "note": "大纲仅并列两个主题，没有直接支持对比关系，不发布。"
+    },
+    {
+      "fromConceptKey": "classes_and_objects",
+      "toConceptKey": "standard_template_library",
+      "relationType": "prerequisite_for",
+      "decision": "rejected",
+      "note": "大纲顺序不足以证明平台级前置关系，不发布。"
+    }
+  ],
+  "gaps": [
+    {
+      "code": "COURSE_SYLLABUS_EFFECTIVE_VERSION_UNKNOWN",
+      "disposition": "accepted_risk",
+      "remainingBlockingStages": [],
+      "note": "以课程号精确一致的官方课程页面作为检索快照关联；持续保留未知生效年份，不声称其为2025版大纲。"
+    },
+    {
+      "code": "TEXTBOOK_CONTENT_SOURCE_NOT_CAPTURED",
+      "disposition": "deferred",
+      "remainingBlockingStages": ["knowledge_publication"],
+      "note": "北大指定教材只记录为课程元数据；知识事实必须改用公开可审计来源，未来取得合法教材后再追加版本绑定。"
+    },
+    {
+      "code": "CODE_ASSESSMENT_RUBRIC_MISSING",
+      "disposition": "resolved",
+      "remainingBlockingStages": [],
+      "note": "采用明确标记为Slow平台规则、非北大官方政策的代码验证量规。"
+    }
+  ],
+  "platformCodeAssessment": {
+    "policyKey": "slow_code_task_v1",
+    "authority": "slow_platform",
+    "officialCoursePolicy": false,
+    "dimensions": [
+      {"key": "functional_correctness", "label": "功能正确性", "weight": 50},
+      {"key": "boundary_cases", "label": "边界与异常情况", "weight": 20},
+      {"key": "algorithm_and_complexity", "label": "算法选择与复杂度", "weight": 15},
+      {"key": "code_quality", "label": "代码结构与可读性", "weight": 10},
+      {"key": "solution_explanation", "label": "解题说明", "weight": 5}
+    ],
+    "requiredDimensionMinimums": {
+      "functional_correctness": 60,
+      "boundary_cases": 50
+    },
+    "passScore": 80
+  }
+}

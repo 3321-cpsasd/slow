@@ -74,6 +74,25 @@ POSTGRES_TEST_DATABASE_URL=postgresql+psycopg://slow_test:slow_test_only@127.0.0
 docker compose -f deploy/compose.postgres.test.yml down --remove-orphans
 ```
 
+真实课程基准候选包必须先通过 Schema、引用闭合和显式缺口校验；校验不会写入数据库：
+
+```bash
+PYTHONPATH=apps/api .venv/bin/python apps/api/import_curriculum_baseline.py \
+  apps/api/curriculum_baselines/pku_cs_programming_practice_2025_v1.json \
+  --validate-only
+```
+
+候选内容与人工审核决定分别版本化。审核清单必须冻结候选摘要、逐一覆盖来源、候选关系和显式缺口，并明确区分课程范围、知识发布及能力证据门禁：
+
+```bash
+PYTHONPATH=apps/api .venv/bin/python apps/api/import_curriculum_baseline.py \
+  apps/api/curriculum_baselines/pku_cs_programming_practice_2025_v1.json \
+  --review apps/api/curriculum_baselines/pku_cs_programming_practice_2025_v1_review_20260809.json \
+  --validate-only
+```
+
+去掉 `--validate-only` 只导入候选和审核记录；再显式增加 `--publish` 才会尝试发布。课程范围仍有阻断项、来源未复核或审核清单不闭合时，发布失败且不会进入正式规划。知识事实和开放能力证据继续走独立门禁，不能因为课程基准已发布而自动升级。权威边界见 [ADR-0004](docs/decisions/0004-curriculum-baseline-authority.md)。
+
 测试数据库使用公开的测试凭据和 `tmpfs`，不得与生产 Compose 合并。
 
 ### 安全说明

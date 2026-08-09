@@ -41,6 +41,7 @@ class SeriesPlanningService:
         artifacts,
         missions,
         milestones,
+        baselines,
         generation_contexts,
         shelf_provider: Callable[[str], object],
         memory_provider: Callable[[str], list[dict]],
@@ -53,6 +54,7 @@ class SeriesPlanningService:
         self.artifacts = artifacts
         self.missions = missions
         self.milestones = milestones
+        self.baselines = baselines
         self.generation_contexts = generation_contexts
         self.shelf_provider = shelf_provider
         self.memory_provider = memory_provider
@@ -62,11 +64,19 @@ class SeriesPlanningService:
         shelf = self.shelf_provider(body.shelf_id)
         request = body.model_dump(by_alias=False)
         memory = self.memory_provider(body.shelf_id)
+        baseline = self.baselines.select_for_plan(
+            shelf=shelf,
+            plan_input=request,
+        )
+        baseline_context = (
+            self.baselines.planning_context(baseline) if baseline else {}
+        )
         context_pack = self.generation_contexts.build(
             "plan",
             shelf=shelf,
             memory=memory,
             plan_input=request,
+            curriculum_baseline=baseline_context,
         )
         ai_request = self.generation_contexts.attach(request, context_pack)
         request_key = (idempotency_key or _uid("plan_request")).strip()
@@ -129,6 +139,8 @@ class SeriesPlanningService:
         try:
             self.db.commit()
             generated = await self.ai.plan(ai_request, memory)
+            if baseline:
+                self.baselines.validate_plan_coverage(baseline, generated)
         except Exception as error:
             self.db.rollback()
             failed = self.db.get(PlanCreationRequest, reservation_key)
@@ -163,6 +175,12 @@ class SeriesPlanningService:
         )
         self.db.add(series)
         self.db.flush()
+        if baseline:
+            self.baselines.bind_series(
+                series_id=series.id,
+                baseline=baseline,
+                plan_input=request,
+            )
         reservation.status = "completed"
         reservation.series_id = series.id
         reservation.updated_at = now()
@@ -227,8 +245,24 @@ class SeriesPlanningService:
                     position=chapter_position,
                     title=item_chapter.title,
                     objective=item_chapter.objective,
+                    knowledge_identity_scope_json="{}",
                 )
                 self.db.add(chapter)
+                self.db.flush()
+                if baseline:
+                    self.baselines.bind_chapter_objectives(
+                        chapter_id=chapter.id,
+                        baseline=baseline,
+                        objective_keys=item_chapter.baseline_objective_ids,
+                    )
+                    from ..knowledge.fact_graph import KnowledgeFactGraphService
+
+                    KnowledgeFactGraphService(self.db).bind_chapter_identity_scope(
+                        chapter_id=chapter.id,
+                        baseline_version_id=baseline.id,
+                        objective_keys=item_chapter.baseline_objective_ids,
+                        concept_keys=item_chapter.baseline_concept_ids,
+                    )
                 milestone_chapters[(book_position, chapter_position)] = (
                     chapter,
                     book,

@@ -30,60 +30,60 @@ from app.services.source_verifier import AcceptingSourceVerifier
 from test_vertical_slice import FakeAi, wait_for_task
 
 
-class TwentySectionAi(FakeAi):
+class ContractThinSliceAi(FakeAi):
     async def plan(self, request, memory):
         chapters = [
             PlanChapter(
-                title=f"M2 验收章 {index}",
-                objective=f"完成 M2 能力目标 {index}",
+                title=f"M2 契约薄切片第 {index} 章",
+                objective=f"完成依赖路径第 {index} 阶段的可信学习链路",
             )
-            for index in range(1, 6)
+            for index in range(1, 3)
         ]
         return GeneratedPlan(
-            series_title="M2 二十节工程验收",
-            rationale="用五章、每章四节验证跨节版本与证据闭环。",
+            series_title="M2 契约薄切片工程验证",
+            rationale="用一个语义连续的三目标样本验证版本与证据闭环；节数不是课程完整性配额。",
             assumptions=[],
             confidence="high",
             books=[
                 PlanBook(
-                    title="M2 工程闭环",
+                    title="M2 契约工程闭环",
                     topic="M2 acceptance",
-                    description="覆盖使命、合同、版本冻结、治理、答题与决策。",
-                    estimated_minutes=1200,
+                    description="覆盖使命、合同、版本冻结、治理、答题与决策的最小样本。",
+                    estimated_minutes=120,
                     chapters=chapters,
                 )
             ],
             milestones=[
                 PlanMilestone(
-                    title="建立合同",
-                    outcome="前三章形成稳定学习合同",
+                    title="冻结契约",
+                    outcome="形成稳定学习契约",
                     criteria=[
                         PlanMilestoneCriterion(
-                            statement=chapters[0].objective,
+                            statement="目标一绑定冻结契约",
                             book_position=1,
                             chapter_position=1,
                         )
                     ],
                 ),
                 PlanMilestone(
-                    title="积累证据",
-                    outcome="跨章积累可回放证据",
+                    title="形成观察",
+                    outcome="形成可回放学习证据",
                     criteria=[
                         PlanMilestoneCriterion(
-                            statement=chapters[2].objective,
+                            statement="目标二形成不可变观察",
                             book_position=1,
-                            chapter_position=3,
+                            chapter_position=1,
                         )
                     ],
                 ),
                 PlanMilestone(
                     title="闭合路径",
-                    outcome="完成整本书的推进决策",
+                    outcome="完成薄切片推进决策",
                     criteria=[
                         PlanMilestoneCriterion(
-                            statement=chapters[4].objective,
+                            statement="目标三形成可解释推进决策",
                             book_position=1,
-                            chapter_position=5,
+                            chapter_position=2,
                         )
                     ],
                 ),
@@ -98,16 +98,16 @@ class TwentySectionAi(FakeAi):
                     question=f"{request['objective']} 的递进问题 {index} 是什么？",
                     objectives=[f"{request['objective']}（目标 {index}）"],
                 )
-                for index in range(1, 5)
+                for index in range(1, 3)
             ]
         )
 
 
-def test_m2_twenty_section_engineering_loop_is_complete():
+def test_m2_contract_thin_slice_engineering_chain_is_complete():
     with TestClient(
         create_app(
             "sqlite+pysqlite:///:memory:",
-            TwentySectionAi(),
+            ContractThinSliceAi(),
             AcceptingSourceVerifier(),
         )
     ) as client:
@@ -115,10 +115,10 @@ def test_m2_twenty_section_engineering_loop_is_complete():
             "/api/plans",
             json={
                 "shelfId": "shelf_technology",
-                "topic": "M2 工程验收",
+                "topic": "M2 契约薄切片",
                 "role": "工程验证者",
                 "experience": "熟悉系统测试",
-                "purpose": "验证二十节学习闭环",
+                "purpose": "验证三目标可信链路",
                 "depth": "deep",
                 "details": "只使用确定性本地 AI fixture",
             },
@@ -141,7 +141,7 @@ def test_m2_twenty_section_engineering_loop_is_complete():
             chapter_response = client.post(f"/api/chapters/{chapter_id}/generate")
             assert chapter_response.status_code == 200, chapter_response.json()
             chapter = chapter_response.json()
-            assert len(chapter["sections"]) == 4
+            assert len(chapter["sections"]) == 2
             for summary in chapter["sections"]:
                 generated = client.post(f"/api/sections/{summary['id']}/generate")
                 assert generated.status_code == 200, generated.json()
@@ -165,45 +165,45 @@ def test_m2_twenty_section_engineering_loop_is_complete():
                     assert wait_for_task(client, task["taskId"])["status"] == "succeeded"
                 completed_ids.append(summary["id"])
 
-        assert len(completed_ids) == len(set(completed_ids)) == 20
+        assert len(completed_ids) == len(set(completed_ids)) == 4
         final = client.get(f"/api/series/{series['id']}").json()
         assert final["books"][0]["status"] == "completed"
 
         with client.app.state.sessions() as db:
-            assert db.scalar(select(func.count()).select_from(Section)) == 20
+            assert db.scalar(select(func.count()).select_from(Section)) == 4
             assert db.scalar(
                 select(func.count()).select_from(SectionProgress).where(
                     SectionProgress.status == "completed"
                 )
-            ) == 20
+            ) == 4
             assert db.scalar(
                 select(func.count()).select_from(LearningMissionVersion)
             ) == 1
             assert db.scalar(
                 select(func.count()).select_from(LearningContractVersion)
-            ) == 20
+            ) == 4
             assert db.scalar(
                 select(func.count()).select_from(LearningRunSectionBinding)
-            ) == 20
-            assert db.scalar(select(func.count()).select_from(ContentVersion)) == 20
-            assert db.scalar(select(func.count()).select_from(QuizSet)) == 20
-            assert db.scalar(select(func.count()).select_from(QuizAttempt)) == 20
+            ) == 4
+            assert db.scalar(select(func.count()).select_from(ContentVersion)) == 4
+            assert db.scalar(select(func.count()).select_from(QuizSet)) == 4
+            assert db.scalar(select(func.count()).select_from(QuizAttempt)) == 4
             assert db.scalar(
                 select(func.count()).select_from(ContentBlockVersion)
-            ) == 100
+            ) == 20
             assert db.scalar(
                 select(func.count()).select_from(GovernanceDecisionSnapshot)
-            ) == 60
+            ) == 12
             # conclusion, mechanism and boundary each carry an explicit
             # claim-level gap per generated section.
-            assert db.scalar(select(func.count()).select_from(KnowledgeGap)) == 60
+            assert db.scalar(select(func.count()).select_from(KnowledgeGap)) == 12
             assert db.scalar(
                 select(func.count()).select_from(LearningDecisionSnapshot).where(
                     LearningDecisionSnapshot.decision_kind == "assessment_gate"
                 )
-            ) == 20
+            ) == 4
             assert db.scalar(
                 select(func.count()).select_from(LearningDecisionSnapshot).where(
                     LearningDecisionSnapshot.decision_kind == "progression"
                 )
-            ) == 20
+            ) == 4

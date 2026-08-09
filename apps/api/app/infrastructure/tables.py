@@ -460,6 +460,347 @@ class LearningObjective(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class CurriculumSourceVersion(Base):
+    """Immutable official-source metadata for one curriculum baseline input."""
+
+    __tablename__ = "curriculum_source_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_key",
+            "version_label",
+            name="uq_curriculum_source_key_version",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    source_key: Mapped[str] = mapped_column(String(160), index=True)
+    source_type: Mapped[str] = mapped_column(String(40), index=True)
+    title: Mapped[str] = mapped_column(Text)
+    authority: Mapped[str] = mapped_column(String(240))
+    url: Mapped[str] = mapped_column(Text)
+    version_label: Mapped[str] = mapped_column(String(160))
+    publication_date: Mapped[str] = mapped_column(String(32), default="")
+    applicability_json: Mapped[str] = mapped_column(Text, default="{}")
+    retrieval_date: Mapped[str] = mapped_column(String(32))
+    content_digest: Mapped[str] = mapped_column(String(64))
+    verification_status: Mapped[str] = mapped_column(
+        String(32), default="candidate", index=True
+    )
+    provenance_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class Discipline(Base):
+    """Stable discipline identity shared by versioned curriculum baselines."""
+
+    __tablename__ = "disciplines"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    code: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(240))
+    jurisdiction: Mapped[str] = mapped_column(String(80), default="")
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ProgramVersion(Base):
+    """One institution- and year-specific training-program version."""
+
+    __tablename__ = "program_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "institution",
+            "program_code",
+            "version_label",
+            name="uq_program_institution_code_version",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    discipline_id: Mapped[str] = mapped_column(
+        ForeignKey("disciplines.id"), index=True
+    )
+    source_version_id: Mapped[str] = mapped_column(
+        ForeignKey("curriculum_source_versions.id"), index=True
+    )
+    institution: Mapped[str] = mapped_column(String(240))
+    program_code: Mapped[str] = mapped_column(String(80))
+    name: Mapped[str] = mapped_column(String(300))
+    version_label: Mapped[str] = mapped_column(String(160))
+    applicability_json: Mapped[str] = mapped_column(Text, default="{}")
+    review_status: Mapped[str] = mapped_column(
+        String(32), default="candidate", index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CourseVersion(Base):
+    """Versioned course scope; never treated as a universal course definition."""
+
+    __tablename__ = "course_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "program_version_id",
+            "course_code",
+            "version_label",
+            name="uq_course_program_code_version",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    program_version_id: Mapped[str] = mapped_column(
+        ForeignKey("program_versions.id"), index=True
+    )
+    course_code: Mapped[str] = mapped_column(String(80))
+    title: Mapped[str] = mapped_column(String(300))
+    version_label: Mapped[str] = mapped_column(String(160))
+    course_type: Mapped[str] = mapped_column(String(80), default="")
+    credits_json: Mapped[str] = mapped_column(Text, default="{}")
+    assessment_json: Mapped[str] = mapped_column(Text, default="{}")
+    aliases_json: Mapped[str] = mapped_column(Text, default="[]")
+    review_status: Mapped[str] = mapped_column(
+        String(32), default="candidate", index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class Competency(Base):
+    """Stable, observable capability named by a curriculum baseline."""
+
+    __tablename__ = "competencies"
+    __table_args__ = (
+        UniqueConstraint(
+            "namespace",
+            "competency_key",
+            name="uq_competency_namespace_key",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    namespace: Mapped[str] = mapped_column(String(160), index=True)
+    competency_key: Mapped[str] = mapped_column(String(160))
+    statement: Mapped[str] = mapped_column(Text)
+    competency_type: Mapped[str] = mapped_column(String(40))
+    verification_modes_json: Mapped[str] = mapped_column(Text, default="[]")
+    review_status: Mapped[str] = mapped_column(
+        String(32), default="candidate", index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CurriculumBaselineVersion(Base):
+    """Reviewed or candidate curriculum graph used as a planning authority."""
+
+    __tablename__ = "curriculum_baseline_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "baseline_key",
+            "version",
+            name="uq_curriculum_baseline_key_version",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    baseline_key: Mapped[str] = mapped_column(String(160), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(300))
+    discipline_id: Mapped[str] = mapped_column(
+        ForeignKey("disciplines.id"), index=True
+    )
+    program_version_id: Mapped[str] = mapped_column(
+        ForeignKey("program_versions.id"), index=True
+    )
+    course_version_id: Mapped[str] = mapped_column(
+        ForeignKey("course_versions.id"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(32), default="candidate", index=True)
+    scope_json: Mapped[str] = mapped_column(Text, default="{}")
+    graph_json: Mapped[str] = mapped_column(Text)
+    gaps_json: Mapped[str] = mapped_column(Text, default="[]")
+    source_version_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    content_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    review_json: Mapped[str] = mapped_column(Text, default="{}")
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class SeriesCurriculumBaselineBinding(Base):
+    """Immutable record of the published baseline selected for one Series."""
+
+    __tablename__ = "series_curriculum_baseline_bindings"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    series_id: Mapped[str] = mapped_column(
+        ForeignKey("series.id"), unique=True, index=True
+    )
+    baseline_version_id: Mapped[str] = mapped_column(
+        ForeignKey("curriculum_baseline_versions.id"), index=True
+    )
+    selection_reason: Mapped[str] = mapped_column(Text)
+    selection_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ChapterCurriculumObjectiveBinding(Base):
+    """Exact baseline-objective coverage claimed by a planned chapter."""
+
+    __tablename__ = "chapter_curriculum_objective_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "chapter_id",
+            "objective_key",
+            name="uq_chapter_curriculum_objective",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    chapter_id: Mapped[str] = mapped_column(ForeignKey("chapters.id"), index=True)
+    baseline_version_id: Mapped[str] = mapped_column(
+        ForeignKey("curriculum_baseline_versions.id"), index=True
+    )
+    objective_key: Mapped[str] = mapped_column(String(160), index=True)
+    coverage_role: Mapped[str] = mapped_column(String(32), default="teaches")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class KnowledgeGraphRelease(Base):
+    """Versioned, fail-closed publication boundary for a reviewed knowledge slice."""
+
+    __tablename__ = "knowledge_graph_releases"
+    __table_args__ = (
+        UniqueConstraint(
+            "baseline_version_id",
+            "version",
+            name="uq_knowledge_graph_release_baseline_version",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    baseline_version_id: Mapped[str] = mapped_column(
+        ForeignKey("curriculum_baseline_versions.id"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(32), default="candidate", index=True)
+    manifest_json: Mapped[str] = mapped_column(Text)
+    gaps_json: Mapped[str] = mapped_column(Text, default="[]")
+    content_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    review_json: Mapped[str] = mapped_column(Text, default="{}")
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class KnowledgeSourceVersion(Base):
+    """Immutable public or licensed source snapshot for platform knowledge facts."""
+
+    __tablename__ = "knowledge_source_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_key",
+            "version_label",
+            name="uq_knowledge_source_key_version",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    source_key: Mapped[str] = mapped_column(String(160), index=True)
+    source_kind: Mapped[str] = mapped_column(String(40), index=True)
+    title: Mapped[str] = mapped_column(Text)
+    authority: Mapped[str] = mapped_column(String(240))
+    url: Mapped[str] = mapped_column(Text)
+    version_label: Mapped[str] = mapped_column(String(200))
+    retrieval_date: Mapped[str] = mapped_column(String(32))
+    content_digest: Mapped[str] = mapped_column(String(64))
+    rights_status: Mapped[str] = mapped_column(String(32), index=True)
+    verification_status: Mapped[str] = mapped_column(
+        String(32), default="candidate", index=True
+    )
+    provenance_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ConceptRelationVersion(Base):
+    """Typed relation between exact concept revisions in one graph release."""
+
+    __tablename__ = "concept_relation_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "release_id",
+            "from_concept_revision_id",
+            "to_concept_revision_id",
+            "relation_type",
+            name="uq_concept_relation_release_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    release_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_graph_releases.id"), index=True
+    )
+    from_concept_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("concept_revisions.id"), index=True
+    )
+    to_concept_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("concept_revisions.id"), index=True
+    )
+    relation_type: Mapped[str] = mapped_column(String(40), index=True)
+    relation_revision: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(24), default="candidate", index=True)
+    provenance_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ConceptObjectiveBinding(Base):
+    """Explicit curriculum outcome served by one exact concept revision."""
+
+    __tablename__ = "concept_objective_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "release_id",
+            "concept_revision_id",
+            "learning_objective_id",
+            name="uq_concept_objective_release_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    release_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_graph_releases.id"), index=True
+    )
+    concept_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("concept_revisions.id"), index=True
+    )
+    learning_objective_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_objectives.id"), index=True
+    )
+    binding_role: Mapped[str] = mapped_column(String(32), default="teaches")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class KnowledgeClaimBinding(Base):
+    """Claim-level support from a knowledge source, independent of lesson content."""
+
+    __tablename__ = "knowledge_claim_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "release_id",
+            "source_claim_version_id",
+            "knowledge_source_version_id",
+            "locator_hash",
+            name="uq_knowledge_claim_binding_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    release_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_graph_releases.id"), index=True
+    )
+    source_claim_version_id: Mapped[str] = mapped_column(
+        ForeignKey("source_claim_versions.id"), index=True
+    )
+    knowledge_source_version_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_source_versions.id"), index=True
+    )
+    locator_type: Mapped[str] = mapped_column(String(32))
+    locator_json: Mapped[str] = mapped_column(Text)
+    locator_hash: Mapped[str] = mapped_column(String(64))
+    excerpt_hash: Mapped[str] = mapped_column(String(64), default="")
+    support_type: Mapped[str] = mapped_column(String(24))
+    verification_status: Mapped[str] = mapped_column(String(32), index=True)
+    review_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class PlanCreationRequest(Base):
     __tablename__ = "plan_creation_requests"
     idempotency_key: Mapped[str] = mapped_column(String(128), primary_key=True)
@@ -548,6 +889,7 @@ class Chapter(Base):
     position: Mapped[int] = mapped_column(Integer)
     title: Mapped[str] = mapped_column(String(240))
     objective: Mapped[str] = mapped_column(Text)
+    knowledge_identity_scope_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
 class Section(Base):

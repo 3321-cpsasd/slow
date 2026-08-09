@@ -115,6 +115,63 @@ def test_valid_candidate_passes_without_repair():
     assert validated.block_by_key["b1"].assessment_target_ids == ["target_core"]
 
 
+def _grounded_spec():
+    value = spec()
+    targets = [
+        item.model_copy(
+            update={
+                "concept_revision_id": (
+                    "concept_core" if item.assessment_target_id == "target_core"
+                    else "concept_boundary"
+                )
+            }
+        )
+        for item in value.targets
+    ]
+    return value.model_copy(
+        update={
+            "targets": targets,
+            "knowledge_context": {
+                "status": "ready",
+                "contextHash": "knowledge_hash",
+                "claims": [
+                    {
+                        "claimVersionId": "claim_core",
+                        "scope": {"conceptRevisionIds": ["concept_core"]},
+                    },
+                    {
+                        "claimVersionId": "claim_boundary",
+                        "scope": {"conceptRevisionIds": ["concept_boundary"]},
+                    },
+                ],
+            },
+        }
+    )
+
+
+def test_grounded_candidate_requires_explicit_in_scope_claim_ids():
+    value = candidate()
+    for block in value.blocks:
+        block.claim_version_ids = [
+            "claim_core"
+            if block.assessment_target_ids == ["target_core"]
+            else "claim_boundary"
+        ]
+    validate_lesson_candidate(_grounded_spec(), value)
+
+    missing = candidate()
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(_grounded_spec(), missing)
+    assert raised.value.code == "CONTENT_KNOWLEDGE_CLAIM_MISSING"
+
+    mismatched = candidate()
+    for block in mismatched.blocks:
+        block.claim_version_ids = ["claim_boundary"]
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(_grounded_spec(), mismatched)
+    assert raised.value.code == "CONTENT_KNOWLEDGE_CLAIM_SCOPE_MISMATCH"
+
+
 @pytest.mark.parametrize(
     ("mutation", "expected_code"),
     [
@@ -374,7 +431,7 @@ def test_legacy_content_never_claims_current_boundary_validation():
         legacy = client.get(f"/api/sections/{section_id}").json()
         assert legacy["content"]["boundaryValidation"] == {
             "status": "legacy",
-            "ruleVersion": "lesson_candidate_gate_v3",
+            "ruleVersion": "lesson_candidate_gate_v4",
         }
 
 

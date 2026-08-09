@@ -1,0 +1,387 @@
+{
+  "schemaVersion": "knowledge_graph_slice_v1",
+  "baselineVersionId": "curriculum_baseline_30a19885e161ddd42ef25127f9f53f4a",
+  "version": 1,
+  "title": "北京大学程序设计实习：递归、图搜索与动态规划知识事实薄切片",
+  "status": "candidate",
+  "sources": [
+    {
+      "sourceKey": "opendsa_recursion_intro",
+      "sourceKind": "open_textbook",
+      "title": "OpenDSA 10.1 Introduction to Recursion",
+      "authority": "OpenDSA Project Contributors",
+      "url": "https://opendsa-server.cs.vt.edu/ODSA/Books/Everything/html/RecIntro.html",
+      "versionLabel": "Everything instance snapshot 2026-08-09",
+      "retrievalDate": "2026-08-09",
+      "contentDigest": "1b99284bfc6859dc384b7c81a29eda1eb815005952a1a78f6d7b21ab30726286",
+      "rightsStatus": "open_access",
+      "verificationStatus": "reviewed",
+      "provenance": {
+        "digestScope": "full retrieved HTML response",
+        "license": "MIT",
+        "licenseUrl": "https://github.com/OpenDSA/OpenDSA/blob/master/MIT-license.txt",
+        "licenseDigest": "a4d83bb66f3f9058c49a9795583fe20a4256def38e9bc365c76c40affaf20709",
+        "reviewMode": "public-source research task plus deterministic digest"
+      }
+    },
+    {
+      "sourceKey": "opendsa_graph_traversals_2019",
+      "sourceKind": "open_textbook",
+      "title": "OpenDSA 19.3 Graph Traversals",
+      "authority": "OpenDSA Project Contributors",
+      "url": "https://opendsa-server.cs.vt.edu/ODSA/Books/ewu/cscd320/spring-2019/01/html/GraphTraversal.html",
+      "versionLabel": "Spring 2019 instance; page updated 2019-04-01",
+      "retrievalDate": "2026-08-09",
+      "contentDigest": "2f0593202a00dbc6f76edfbb913baeca2a0b39efe42df1628b7729a4c76921d9",
+      "rightsStatus": "open_access",
+      "verificationStatus": "reviewed",
+      "provenance": {
+        "digestScope": "full retrieved HTML response",
+        "license": "MIT",
+        "licenseUrl": "https://github.com/OpenDSA/OpenDSA/blob/master/MIT-license.txt",
+        "licenseDigest": "a4d83bb66f3f9058c49a9795583fe20a4256def38e9bc365c76c40affaf20709",
+        "reviewMode": "public-source research task plus deterministic digest"
+      }
+    },
+    {
+      "sourceKey": "opendsa_dynamic_programming_2025",
+      "sourceKind": "open_textbook",
+      "title": "OpenDSA 27.2 Dynamic Programming",
+      "authority": "OpenDSA Project Contributors",
+      "url": "https://opendsa-server.cs.vt.edu/ODSA/Books/duke/cs201/spring-2025/MW/html/DynamicProgramming.html",
+      "versionLabel": "Duke CS201 Spring 2025 instance",
+      "retrievalDate": "2026-08-09",
+      "contentDigest": "526d7f70ee5777ed7e502c06bc1c61812b41f47a2234f6d232f37c183612f2a4",
+      "rightsStatus": "open_access",
+      "verificationStatus": "reviewed",
+      "provenance": {
+        "digestScope": "full retrieved HTML response",
+        "license": "MIT",
+        "licenseUrl": "https://github.com/OpenDSA/OpenDSA/blob/master/MIT-license.txt",
+        "licenseDigest": "a4d83bb66f3f9058c49a9795583fe20a4256def38e9bc365c76c40affaf20709",
+        "reviewMode": "public-source research task plus deterministic digest"
+      }
+    }
+  ],
+  "concepts": [
+    {
+      "key": "recursion",
+      "revision": 1,
+      "label": "递归",
+      "definition": "递归把问题归约为结构相同但更简单的子问题；有效递归必须有无需继续递归的基本情形，并让每次递归调用在某种度量上更接近该基本情形。",
+      "scope": {
+        "course": "04831750 程序设计实习",
+        "pilotRole": "递归机制与终止条件"
+      },
+      "boundaries": [
+        "基本情形和参数推进只是通用结构，具体输入域上的终止性仍需单独证明。",
+        "递归表达清晰不自动意味着运行效率优于迭代实现。"
+      ],
+      "objectiveKeys": [
+        "solve_with_enumeration_recursion_and_search",
+        "model_and_solve_with_dynamic_programming"
+      ],
+      "claimKeys": [
+        "recursion_reduces_same_structure",
+        "recursion_requires_base_and_progress"
+      ]
+    },
+    {
+      "key": "graph_search",
+      "revision": 1,
+      "label": "深度优先与广度优先搜索",
+      "definition": "图遍历从一个起点按确定的组织方式访问可达顶点；DFS 递归或用栈深入未访问邻接点，BFS 用队列逐层扩展，访问标记用于避免环造成重复访问。",
+      "scope": {
+        "course": "04831750 程序设计实习",
+        "pilotRole": "DFS/BFS 遍历机制"
+      },
+      "boundaries": [
+        "从单一起点不保证访问非连通图中的全部顶点。",
+        "复杂度结论依赖图表示、邻接访问成本以及每个顶点和边的处理次数。",
+        "通用遍历机制不证明具体剪枝条件或回溯状态恢复的正确性。"
+      ],
+      "objectiveKeys": [
+        "solve_with_enumeration_recursion_and_search"
+      ],
+      "claimKeys": [
+        "graph_visited_prevents_cycle_revisit",
+        "dfs_recursively_visits_unvisited_neighbors",
+        "bfs_uses_queue_for_level_frontier",
+        "dfs_linear_graph_work_under_model"
+      ]
+    },
+    {
+      "key": "dynamic_programming",
+      "revision": 1,
+      "label": "动态规划",
+      "definition": "动态规划针对会重复求解相同子问题的递归结构，保存子问题结果以避免重复计算；可以用记忆化按需求值，也可以按依赖顺序制表求值。",
+      "scope": {
+        "course": "04831750 程序设计实习",
+        "pilotRole": "从递归到记忆化与制表"
+      },
+      "boundaries": [
+        "状态键必须包含决定子问题结果所需的全部信息。",
+        "通用动态规划模式不证明具体状态转移或边界条件正确。",
+        "制表顺序必须满足子问题依赖，空间压缩还需证明被覆盖状态不会再使用。"
+      ],
+      "objectiveKeys": [
+        "model_and_solve_with_dynamic_programming"
+      ],
+      "claimKeys": [
+        "dp_eliminates_repeated_subproblems",
+        "dp_memoization_reuses_stored_result",
+        "dp_tabulation_respects_dependencies"
+      ]
+    }
+  ],
+  "relations": [
+    {
+      "key": "recursion_applies_to_dfs",
+      "fromConceptKey": "recursion",
+      "toConceptKey": "graph_search",
+      "relationType": "applies_to",
+      "reviewStatus": "reviewed",
+      "claimKeys": [
+        "dfs_recursively_visits_unvisited_neighbors"
+      ],
+      "provenance": {
+        "reviewBasis": "OpenDSA 19.3.1.1 explicitly describes DFS recursively visiting unvisited neighbors",
+        "reviewedBy": "M2 public-source research task"
+      }
+    },
+    {
+      "key": "recursion_contrasts_with_dp",
+      "fromConceptKey": "recursion",
+      "toConceptKey": "dynamic_programming",
+      "relationType": "contrasts_with",
+      "reviewStatus": "reviewed",
+      "claimKeys": [
+        "dp_eliminates_repeated_subproblems",
+        "dp_memoization_reuses_stored_result"
+      ],
+      "provenance": {
+        "reviewBasis": "OpenDSA 27.2.1-27.2.2 contrasts repeated naive recursion with memoized/tabulated evaluation",
+        "reviewedBy": "M2 public-source research task"
+      }
+    }
+  ],
+  "claims": [
+    {
+      "key": "recursion_reduces_same_structure",
+      "statement": "递归通过把较大问题归约为结构相同但更简单的子问题来求解。",
+      "claimKind": "definition",
+      "conceptKeys": ["recursion"],
+      "relationKeys": [],
+      "strict": true,
+      "sourceBindings": [
+        {
+          "sourceKey": "opendsa_recursion_intro",
+          "locatorType": "section",
+          "locator": {"section": "10.1.1", "paragraph": 1},
+          "supportType": "defines",
+          "verificationStatus": "verified",
+          "review": {"mode": "direct semantic match", "reviewedAt": "2026-08-09"}
+        }
+      ]
+    },
+    {
+      "key": "recursion_requires_base_and_progress",
+      "statement": "有效的递归算法需要基本情形，并要求递归调用的参数在某种意义上更接近基本情形。",
+      "claimKind": "mechanism",
+      "conceptKeys": ["recursion"],
+      "relationKeys": [],
+      "strict": true,
+      "sourceBindings": [
+        {
+          "sourceKey": "opendsa_recursion_intro",
+          "locatorType": "section",
+          "locator": {"section": "10.1.1", "paragraphs": [2, 3]},
+          "supportType": "supports",
+          "verificationStatus": "verified",
+          "review": {"mode": "direct semantic match", "reviewedAt": "2026-08-09"}
+        }
+      ]
+    },
+    {
+      "key": "graph_visited_prevents_cycle_revisit",
+      "statement": "图遍历在首次访问顶点时设置访问标记，之后跳过已标记顶点，可以避免遇到环时无限重复访问。",
+      "claimKind": "mechanism",
+      "conceptKeys": ["graph_search"],
+      "relationKeys": [],
+      "strict": true,
+      "sourceBindings": [
+        {
+          "sourceKey": "opendsa_graph_traversals_2019",
+          "locatorType": "section",
+          "locator": {"section": "19.3.1", "paragraphs": [4, 5]},
+          "supportType": "supports",
+          "verificationStatus": "verified",
+          "review": {"mode": "direct semantic match", "reviewedAt": "2026-08-09"}
+        }
+      ]
+    },
+    {
+      "key": "dfs_recursively_visits_unvisited_neighbors",
+      "statement": "DFS 在访问一个顶点后递归访问它尚未访问的邻接顶点，从一条分支深入后再回退。",
+      "claimKind": "mechanism",
+      "conceptKeys": ["graph_search"],
+      "relationKeys": ["recursion_applies_to_dfs"],
+      "strict": true,
+      "sourceBindings": [
+        {
+          "sourceKey": "opendsa_graph_traversals_2019",
+          "locatorType": "section",
+          "locator": {"section": "19.3.1.1", "paragraph": 1},
+          "supportType": "supports",
+          "verificationStatus": "verified",
+          "review": {"mode": "direct semantic match", "reviewedAt": "2026-08-09"}
+        }
+      ]
+    },
+    {
+      "key": "bfs_uses_queue_for_level_frontier",
+      "statement": "BFS 用队列替代递归栈，先检查与起点相连的顶点，再扩展到更远的顶点。",
+      "claimKind": "mechanism",
+      "conceptKeys": ["graph_search"],
+      "relationKeys": [],
+      "strict": true,
+      "sourceBindings": [
+        {
+          "sourceKey": "opendsa_graph_traversals_2019",
+          "locatorType": "section",
+          "locator": {"section": "19.3.2", "paragraph": 1},
+          "supportType": "supports",
+          "verificationStatus": "verified",
+          "review": {"mode": "direct semantic match", "reviewedAt": "2026-08-09"}
+        }
+      ]
+    },
+    {
+      "key": "dfs_linear_graph_work_under_model",
+      "statement": "在每个顶点只访问一次并按邻接关系处理每条边的模型下，DFS 总成本为 Θ(|V|+|E|)。",
+      "claimKind": "boundary",
+      "conceptKeys": ["graph_search"],
+      "relationKeys": [],
+      "strict": true,
+      "sourceBindings": [
+        {
+          "sourceKey": "opendsa_graph_traversals_2019",
+          "locatorType": "section",
+          "locator": {"section": "19.3.1.1", "paragraph": 8},
+          "supportType": "supports",
+          "verificationStatus": "verified",
+          "review": {"mode": "qualified semantic match", "reviewedAt": "2026-08-09"}
+        }
+      ]
+    },
+    {
+      "key": "dp_eliminates_repeated_subproblems",
+      "statement": "动态规划可优化会反复求解相同子问题的递归算法，通过消除重复求解提高效率。",
+      "claimKind": "definition",
+      "conceptKeys": ["dynamic_programming"],
+      "relationKeys": ["recursion_contrasts_with_dp"],
+      "strict": true,
+      "sourceBindings": [
+        {
+          "sourceKey": "opendsa_dynamic_programming_2025",
+          "locatorType": "section",
+          "locator": {"section": "27.2.1", "paragraphs": [1, 2]},
+          "supportType": "defines",
+          "verificationStatus": "verified",
+          "review": {"mode": "direct semantic match", "reviewedAt": "2026-08-09"}
+        }
+      ]
+    },
+    {
+      "key": "dp_memoization_reuses_stored_result",
+      "statement": "记忆化先检查表中是否已有子问题结果；已有结果直接读取，未有结果才计算并存入表。",
+      "claimKind": "mechanism",
+      "conceptKeys": ["dynamic_programming"],
+      "relationKeys": ["recursion_contrasts_with_dp"],
+      "strict": true,
+      "sourceBindings": [
+        {
+          "sourceKey": "opendsa_dynamic_programming_2025",
+          "locatorType": "section",
+          "locator": {"section": "27.2.2", "paragraphs": [11, 12]},
+          "supportType": "supports",
+          "verificationStatus": "verified",
+          "review": {"mode": "direct semantic match", "reviewedAt": "2026-08-09"}
+        }
+      ]
+    },
+    {
+      "key": "dp_tabulation_respects_dependencies",
+      "statement": "制表法需要分析子问题依赖并选择计算顺序，只有依赖的子问题已经求值后才能计算当前子问题。",
+      "claimKind": "mechanism",
+      "conceptKeys": ["dynamic_programming"],
+      "relationKeys": [],
+      "strict": true,
+      "sourceBindings": [
+        {
+          "sourceKey": "opendsa_dynamic_programming_2025",
+          "locatorType": "section",
+          "locator": {"section": "27.2.2", "paragraph": 13},
+          "supportType": "supports",
+          "verificationStatus": "verified",
+          "review": {"mode": "direct semantic match", "reviewedAt": "2026-08-09"}
+        }
+      ]
+    }
+  ],
+  "declaredGaps": [
+    {
+      "code": "TERMINATION_DOMAIN_UNPROVEN",
+      "severity": "warning",
+      "subjectKind": "concept",
+      "subjectKey": "recursion",
+      "message": "通用来源说明基本情形和推进要求，但不能替具体函数证明其在全部允许输入上终止。"
+    },
+    {
+      "code": "PRUNING_PREDICATE_SOUNDNESS_UNPROVEN",
+      "severity": "warning",
+      "subjectKind": "concept",
+      "subjectKey": "graph_search",
+      "message": "薄切片未声明具体剪枝谓词；任何剪枝正确性必须按题目和搜索空间另行证明。"
+    },
+    {
+      "code": "STATE_RESTORATION_INVARIANT_UNPROVEN",
+      "severity": "warning",
+      "subjectKind": "concept",
+      "subjectKey": "graph_search",
+      "message": "通用 DFS 遍历事实不证明具体回溯程序在返回时正确恢复了可变状态。"
+    },
+    {
+      "code": "DP_STATE_KEY_SUFFICIENCY_UNPROVEN",
+      "severity": "warning",
+      "subjectKind": "concept",
+      "subjectKey": "dynamic_programming",
+      "message": "通用动态规划材料不能替具体题目证明状态键包含了决定后续结果的全部信息。"
+    },
+    {
+      "code": "DP_RECURRENCE_CORRECTNESS_UNPROVEN",
+      "severity": "warning",
+      "subjectKind": "concept",
+      "subjectKey": "dynamic_programming",
+      "message": "薄切片只发布通用机制，不发布任何具体题目的状态转移正确性结论。"
+    },
+    {
+      "code": "DP_DEPENDENCY_ACYCLICITY_UNPROVEN",
+      "severity": "warning",
+      "subjectKind": "concept",
+      "subjectKey": "dynamic_programming",
+      "message": "制表需要满足依赖顺序，但具体状态依赖是否无环仍须按题目验证。"
+    },
+    {
+      "code": "COMPLEXITY_MODEL_ASSUMPTIONS_UNDECLARED",
+      "severity": "warning",
+      "subjectKind": "concept",
+      "subjectKey": "graph_search",
+      "message": "Θ(|V|+|E|) 只在顶点、边与邻接访问成本满足声明模型时成立，生成内容必须携带这些假设。"
+    }
+  ],
+  "reviewContext": {
+    "sourcePolicy": "用户确认优先使用可公开审计的算法与 C++ 资料；北大大纲只作为课程范围依据。",
+    "publicationPolicy": "候选来源和关系已由研究任务逐条核对，正式发布仍需记录人工复核人和结论。"
+  }
+}

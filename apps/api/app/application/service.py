@@ -47,6 +47,7 @@ from ..modules.library.context import ActiveLearningContextResolver
 from ..modules.library.commands import CatalogCommandService
 from ..modules.curriculum.chapter_planning import ChapterPlanningService
 from ..modules.curriculum.book_planning import BookPlanningService
+from ..modules.curriculum.baselines import CurriculumBaselineService
 from ..modules.curriculum.series_planning import SeriesPlanningService
 from ..modules.curriculum.policy import CHAPTER_SECTION_POLICY
 from ..modules.artifacts.progress import ArtifactProgressStore
@@ -126,6 +127,7 @@ class SlowService:
         self.library_reads = LibraryReadModel(db, user_id=self.user_id)
         self.milestones = MilestoneService(db, user_id=self.user_id, uid=uid)
         self.missions = MissionService(db, user_id=self.user_id, uid=uid)
+        self.curriculum_baselines = CurriculumBaselineService(db)
         self.generation_contexts = GenerationContextBuilder(
             db,
             user_id=self.user_id,
@@ -206,6 +208,7 @@ class SlowService:
             artifacts=self.artifacts,
             missions=self.missions,
             milestones=self.milestones,
+            baselines=self.curriculum_baselines,
             generation_contexts=self.generation_contexts,
             shelf_provider=self.shelf,
             memory_provider=self._memory,
@@ -751,7 +754,8 @@ class SlowService:
                 )
             elif task.task_type == "initial_book_preload":
                 result = await self._preload_initial_book(
-                    aggregate.chapter.id
+                    task,
+                    aggregate.chapter.id,
                 )
             elif task.task_type == "note_generation":
                 context = self.contexts.resolve_section(
@@ -811,6 +815,7 @@ class SlowService:
                     }
             elif task.task_type == "next_section_preload":
                 result = await self._preload_next_section(
+                    task,
                     payload.get("sourceSectionId") or task.section_id
                 )
             else:
@@ -952,7 +957,7 @@ class SlowService:
             "feedbackId": feedback.id,
         }
 
-    async def _preload_initial_book(self, chapter_id):
+    async def _preload_initial_book(self, task: LearningTask, chapter_id):
         if not chapter_id:
             raise AppError(
                 "首节预生成任务缺少章节",
@@ -975,15 +980,22 @@ class SlowService:
                 status=500,
             )
         target_progress = self.progress.for_section(target)
+        payload = load(task.payload_json, {})
+        payload["targetSectionId"] = target.id
+        task.payload_json = dump(payload)
         if target_progress.status != "preparing":
             self.progress.set_status(target_progress, "preparing")
-            self.db.commit()
+        self.db.commit()
         await self.generate_section(target.id)
         self.progress.set_status(target_progress, "available")
         self.db.commit()
         return {"targetSectionId": target.id}
 
-    async def _preload_next_section(self, source_section_id):
+    async def _preload_next_section(
+        self,
+        task: LearningTask,
+        source_section_id,
+    ):
         context = self.contexts.resolve_section(
             user_id=self.user_id,
             section_id=source_section_id,
@@ -1037,9 +1049,12 @@ class SlowService:
         if not target:
             return {"targetSectionId": None, "endOfSeries": True}
         target_progress = self.progress.for_section(target)
+        payload = load(task.payload_json, {})
+        payload["targetSectionId"] = target.id
+        task.payload_json = dump(payload)
         if target_progress.status != "preparing":
             self.progress.set_status(target_progress, "preparing")
-            self.db.commit()
+        self.db.commit()
         await self.generate_section(target.id)
         self.progress.set_status(target_progress, "available")
         self.db.commit()

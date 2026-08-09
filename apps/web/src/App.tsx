@@ -3620,6 +3620,12 @@ function Quiz({
   const quizDraftKey = `slow:quiz-draft:${section.id}:${section.quiz?.id || 'none'}`;
   const quizRequestStorageKey = `slow:quiz-request:${section.id}:${section.quiz?.id || 'none'}`;
   const quizResultStorageKey = `slow:quiz-result:${section.id}:${section.quiz?.id || 'none'}`;
+  const quizGovernanceBlocked = Boolean(
+    section.quiz && (
+      !section.quiz.governance?.allowed ||
+      !section.quiz.governance?.assessmentEligible
+    ),
+  );
   const [answers, setAnswers] = useState<number[][]>(() => {
     const empty = section.quiz?.questions.map(() => []) || [];
     try {
@@ -3861,6 +3867,10 @@ function Quiz({
 
   const submit = async () => {
     if (!section.quiz) return;
+    if (quizGovernanceBlocked) {
+      setSubmissionError('这套验证题未通过发布门禁，系统不会接受作答。请重新生成后再试。');
+      return;
+    }
     const firstUnanswered = answers.findIndex((answer) => answer.length === 0);
     if (firstUnanswered >= 0) {
       const unansweredCount = answers.filter((answer) => answer.length === 0).length;
@@ -3944,15 +3954,15 @@ function Quiz({
     <div className="quiz-view">
       <p className="eyebrow">完成验证后解锁下一节</p>
       <h2>小节验证</h2>
-      <p className="quiz-rule">答对至少 60% 即可继续；错题仍会进入重点巩固与学习画像。</p>
+      <p className="quiz-rule">答对至少 80% 且通过全部必需目标即可继续；错题会进入重点巩固与学习画像。</p>
       <p className="quiz-draft-note">单选题只能选择一个答案，多选题可选择多个；切回正文查阅时，当前作答会自动保留。</p>
-      {section.quiz && !section.quiz.governance?.assessmentEligible && (
-        <aside className="quiz-governance-notice" role="status">
-          <b>本次成绩只用于学习路径解锁</b>
-          <p>这套题的来源支持或题目绑定尚未完成内容治理，因此成绩不会写入概念掌握度或保持证据。</p>
+      {quizGovernanceBlocked && (
+        <aside className="quiz-governance-notice" role="alert">
+          <b>这套验证题尚未通过发布门禁</b>
+          <p>系统不会展示或接受这套题的作答，也不会用它评分、解锁或形成学习证据。请重新生成后再试。</p>
         </aside>
       )}
-      {result ? (
+      {quizGovernanceBlocked ? null : result ? (
         <QuizReview
           section={section}
           result={result}

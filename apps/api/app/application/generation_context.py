@@ -20,6 +20,7 @@ from ..infrastructure.tables import (
     AssessmentTarget,
     Book,
     Chapter,
+    CurriculumBaselineVersion,
     LearningContractVersion,
     LearningContractAssessmentTarget,
     LearningMissionVersion,
@@ -27,9 +28,12 @@ from ..infrastructure.tables import (
     QuizAttempt,
     Section,
     Series,
+    SeriesCurriculumBaselineBinding,
     Shelf,
     UserProfile,
 )
+from ..modules.curriculum.baselines import CurriculumBaselineService
+from ..modules.knowledge.context import KnowledgeContextBuilder
 
 
 def _load(value: str, default):
@@ -62,6 +66,7 @@ class GenerationContextBuilder:
         attempt: QuizAttempt | None = None,
         feedback: dict[str, Any] | None = None,
         interaction: dict[str, Any] | None = None,
+        curriculum_baseline: dict[str, Any] | None = None,
     ) -> GenerationContextPack:
         plan = self._plan(series, mission)
         learner = self._learner(plan, mission, plan_input)
@@ -83,6 +88,12 @@ class GenerationContextBuilder:
             book=book,
             chapter=chapter,
             section=section,
+            curriculum_baseline=curriculum_baseline,
+        )
+        knowledge_context = KnowledgeContextBuilder(self.db).build(
+            operation=operation,
+            series=series,
+            contract=contract,
         )
         evidence_watermark = self.db.scalar(
             select(func.max(AssessmentObservation.sequence)).where(
@@ -102,6 +113,7 @@ class GenerationContextBuilder:
             mission=mission_context,
             learningContract=self._contract(contract),
             curriculum=curriculum,
+            knowledgeContext=knowledge_context,
             learningState=learning_state,
             interaction=interaction or {},
             policy=policy,
@@ -109,6 +121,11 @@ class GenerationContextBuilder:
                 profileVersion=learner.profile_version,
                 missionVersionId=mission.id if mission else "",
                 contractVersionId=contract.id if contract else "",
+                curriculumBaselineVersionId=str(
+                    curriculum.baseline.get("baselineVersionId", "")
+                ),
+                knowledgeGraphReleaseId=knowledge_context.release_id,
+                knowledgeGraphReleaseVersion=knowledge_context.release_version,
                 evidenceWatermark=evidence_watermark,
                 policyVersion=policy.version,
             ),
@@ -257,6 +274,7 @@ class GenerationContextBuilder:
         book: Book | None,
         chapter: Chapter | None,
         section: Section | None,
+        curriculum_baseline: dict[str, Any] | None,
     ) -> CurriculumContext:
         chapters = (
             self.db.scalars(
@@ -276,6 +294,7 @@ class GenerationContextBuilder:
             if chapter
             else []
         )
+        baseline_context = curriculum_baseline or self._series_baseline(series)
         return CurriculumContext(
             shelf={
                 "id": shelf.id,
@@ -343,7 +362,30 @@ class GenerationContextBuilder:
                 }
                 for item in sections
             ],
+            baseline=baseline_context,
         )
+
+    def _series_baseline(self, series: Series | None) -> dict[str, Any]:
+        if not series:
+            return {}
+        binding = self.db.scalar(
+            select(SeriesCurriculumBaselineBinding).where(
+                SeriesCurriculumBaselineBinding.series_id == series.id
+            )
+        )
+        if not binding:
+            return {}
+        baseline = self.db.get(
+            CurriculumBaselineVersion,
+            binding.baseline_version_id,
+        )
+        if not baseline or baseline.status != "published":
+            raise AppError(
+                "系列绑定的课程基准不可用于正式生成",
+                code="CURRICULUM_BASELINE_BINDING_INVALID",
+                status=500,
+            )
+        return CurriculumBaselineService(self.db).planning_context(baseline)
 
     @staticmethod
     def _attempt(attempt: QuizAttempt | None) -> dict[str, Any]:

@@ -1,0 +1,66 @@
+{
+  "schemaVersion": "knowledge_graph_review_v1",
+  "releaseId": "knowledge_graph_release_a78d23d0114fd2094946ea87018bdc8c",
+  "contentHash": "870934493b4f20c07868ae51bb0a7d7edb31a0efb9b2c25fc735090398a019be",
+  "decision": "pending",
+  "reviewerId": "pending_user_confirmation",
+  "reviewedAt": "2026-08-09T00:00:00+08:00",
+  "reviewNote": "待用户逐项确认三份 OpenDSA 来源、九条主张、两条类型化关系和七项保留缺口后，才可改为 approved 并用于正式发布。",
+  "acceptedSourceKeys": [
+    "opendsa_recursion_intro",
+    "opendsa_graph_traversals_2019",
+    "opendsa_dynamic_programming_2025"
+  ],
+  "acceptedClaimKeys": [
+    "recursion_reduces_same_structure",
+    "recursion_requires_base_and_progress",
+    "graph_visited_prevents_cycle_revisit",
+    "dfs_recursively_visits_unvisited_neighbors",
+    "bfs_uses_queue_for_level_frontier",
+    "dfs_linear_graph_work_under_model",
+    "dp_eliminates_repeated_subproblems",
+    "dp_memoization_reuses_stored_result",
+    "dp_tabulation_respects_dependencies"
+  ],
+  "acceptedRelationKeys": [
+    "recursion_applies_to_dfs",
+    "recursion_contrasts_with_dp"
+  ],
+  "gapDispositions": [
+    {
+      "gapId": "knowledge_graph_gap_8bb599afd744593fa0728bea790e2ea3",
+      "disposition": "acknowledged_warning",
+      "rationale": "保留为具体递归函数生成与考核时必须验证的输入域终止边界。"
+    },
+    {
+      "gapId": "knowledge_graph_gap_ff9c009fd77f2b5d2180c8f36096d164",
+      "disposition": "acknowledged_warning",
+      "rationale": "通用搜索机制不替具体题目证明剪枝谓词正确。"
+    },
+    {
+      "gapId": "knowledge_graph_gap_fee87354805348cf49dd83cde35d1061",
+      "disposition": "acknowledged_warning",
+      "rationale": "通用 DFS 机制不替具体回溯实现证明状态恢复不变量。"
+    },
+    {
+      "gapId": "knowledge_graph_gap_c90486c91825f1a1c1ab099881bfee4a",
+      "disposition": "acknowledged_warning",
+      "rationale": "动态规划状态键的充分性必须针对具体题目验证。"
+    },
+    {
+      "gapId": "knowledge_graph_gap_d8533cb08c6d12a374f0fa55a1daf349",
+      "disposition": "acknowledged_warning",
+      "rationale": "具体状态转移和边界条件的正确性必须单独证明。"
+    },
+    {
+      "gapId": "knowledge_graph_gap_1e4daa126ce844fa0331b9a21aad2c3e",
+      "disposition": "acknowledged_warning",
+      "rationale": "具体制表依赖图是否无环必须按状态设计验证。"
+    },
+    {
+      "gapId": "knowledge_graph_gap_14a254da10ad6c5e8ae537334dd0fa3b",
+      "disposition": "acknowledged_warning",
+      "rationale": "DFS 复杂度主张必须携带图表示与邻接访问成本假设。"
+    }
+  ]
+}

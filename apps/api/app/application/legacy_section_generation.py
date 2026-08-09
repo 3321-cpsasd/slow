@@ -20,6 +20,7 @@ from ..ai.contracts import (
 from ..auth.context import WorkerExecutionContext
 from ..core.errors import AiError, AppError
 from ..infrastructure.tables import (
+    ContentBlockVersion,
     ContentVersion,
     GenerationRun,
     LearningContractVersion,
@@ -35,15 +36,20 @@ from ..modules.learning.assessment import (
     bind_questions_to_targets,
     failed_target_ids_for_attempt,
 )
+from ..modules.learning.assessment_items import (
+    VERSIONED_LEGACY_QUIZ_SCHEMA,
+    immutable_questions_for_quiz,
+    publish_assessment_item_versions,
+)
 from ..modules.learning.contracts import ensure_learning_contract, open_run_section
 from ..modules.learning.content_governance_store import (
-    bind_remediation_questions_to_source_claims,
     generated_claim_verification_candidates,
     persist_generated_governance,
     record_verified_claim_binding,
     reevaluate_generated_governance,
 )
 from ..services.source_verifier import SourceVerificationError
+from .remediation_generation import publish_remediation_candidate
 from .section_generation import (
     apply_source_repair_scope,
     assert_lesson_content_quality,
@@ -96,6 +102,8 @@ async def generate_legacy_section(
     learning_run = self.progress.active_run(section_context.series.id)
     mission_version = self.missions.current_version(section_context.series.id)
     contract = None
+    failed_attempt_for_contract = None
+    failed_quiz_for_contract = None
     if regeneration_feedback:
         feedback_content = self.db.get(
             ContentVersion,
@@ -203,6 +211,11 @@ async def generate_legacy_section(
         )
         .order_by(ContentVersion.version.desc())
     )
+    if retry and failed_quiz_for_contract:
+        existing = self.db.get(
+            ContentVersion,
+            failed_quiz_for_contract.content_version_id,
+        )
     latest_quiz = self.db.scalar(
         select(QuizSet)
         .where(
@@ -390,7 +403,7 @@ async def generate_legacy_section(
         self.db.commit()
     try:
         prior = (
-            load(latest_quiz.questions_json, [])
+            immutable_questions_for_quiz(self.db, latest_quiz)
             if (retry or regenerate) and latest_quiz
             else []
         )
@@ -409,7 +422,12 @@ async def generate_legacy_section(
             if failed_quiz and remediation_targets:
                 prior = [
                     question
-                    for question in load(failed_quiz.questions_json, [])
+                    for question in immutable_questions_for_quiz(
+                        self.db,
+                        failed_quiz,
+                        require_versions=True,
+                        require_evidence=True,
+                    )
                     if question.get("assessmentTargetId") in remediation_targets
                 ]
         book = self._book_for_section(section)
@@ -455,6 +473,9 @@ async def generate_legacy_section(
             memory=memory,
             attempt=failed_attempt_context,
             feedback=regeneration_feedback,
+        )
+        regeneration_trace["knowledgeContext"] = (
+            context_pack.knowledge_context.audit_manifest()
         )
         generation_mode = getattr(
             self.source_verifier,
@@ -935,21 +956,18 @@ async def generate_legacy_section(
             [item.model_dump() for item in lesson.questions],
             contract,
         )
-        if retry:
-            question_payloads = bind_remediation_questions_to_source_claims(
-                self.db,
-                content=content,
-                questions=question_payloads,
-                prior_questions=prior,
+        quiz_generation = latest_quiz.generation + 1 if latest_quiz else 1
+        quiz = None
+        if not retry:
+            quiz = QuizSet(
+                id=uid("quiz"),
+                section_id=section.id,
+                content_version_id=content.id,
+                learning_contract_version_id=contract.id,
+                generation=quiz_generation,
+                questions_json=dump(question_payloads),
+                schema_version=VERSIONED_LEGACY_QUIZ_SCHEMA,
             )
-        quiz = QuizSet(
-            id=uid("quiz"),
-            section_id=section.id,
-            content_version_id=content.id,
-            learning_contract_version_id=contract.id,
-            generation=(latest_quiz.generation + 1 if latest_quiz else 1),
-            questions_json=dump(question_payloads),
-        )
         claim_reports = []
         if not retry and external_sources_allowed:
             verify_claims = getattr(
@@ -1001,9 +1019,9 @@ async def generate_legacy_section(
                     report_json=dump(verification),
                 )
             )
-        self.db.add(quiz)
-        self.db.flush()
         if not retry:
+            self.db.add(quiz)
+            self.db.flush()
             governance = persist_generated_governance(
                 self.db,
                 content=content,
@@ -1046,49 +1064,62 @@ async def generate_legacy_section(
                     generation_run=run,
                     regeneration_feedback=regeneration_feedback,
                 )
-        else:
-            # A remediation quiz still measures against the frozen source
-            # content.  Re-evaluate that content's existing claim/gap facts
-            # for the replacement quiz instead of treating a missing
-            # governance snapshot as implicit approval.
-            governance = reevaluate_generated_governance(
+            block_id_by_position = {
+                item.position: item.id
+                for item in self.db.scalars(
+                    select(ContentBlockVersion)
+                    .where(ContentBlockVersion.content_version_id == content.id)
+                    .order_by(ContentBlockVersion.position)
+                ).all()
+            }
+            evidence_block_ids_by_position = [
+                [
+                    block_id_by_position[index]
+                    for index in question.get("claim_block_indexes", [])
+                    if (
+                        isinstance(index, int)
+                        and not isinstance(index, bool)
+                        and index in block_id_by_position
+                    )
+                ]
+                for question in question_payloads
+            ]
+            question_payloads = publish_assessment_item_versions(
                 self.db,
-                quiz_id=quiz.id,
-                actor_id=run.id,
+                quiz=quiz,
+                questions=question_payloads,
+                evidence_block_ids_by_position=evidence_block_ids_by_position,
+                uid=uid,
             )
-            regeneration_trace["governanceDecision"] = governance
-        if retry:
-            if not retry_attempt_id:
-                raise AppError("补救教学必须绑定失败答题", code="REMEDIATION_ATTEMPT_REQUIRED")
-            remediation_blocks = []
-            for position, block in enumerate(lesson.blocks, 1):
-                payload = block.model_dump()
-                payload["id"] = f"block_remediation_{quiz.id}_{position}"
-                payload["version"] = quiz.generation
-                remediation_blocks.append(payload)
-            failed_objectives = sorted(
-                {
-                    item["objective"]
-                    for item in load(self.db.get(QuizAttempt, retry_attempt_id).results_json, [])
-                    if not item["correct"]
-                }
-            )
-            self.db.add(
-                Remediation(
-                    id=uid("remediation"),
-                    section_id=section.id,
-                    attempt_id=retry_attempt_id,
-                    replacement_quiz_id=quiz.id,
-                    supersedes_id=(
-                        superseded_remediation.id
-                        if superseded_remediation
-                        else None
-                    ),
-                    blocks_json=dump(remediation_blocks),
-                    objectives_json=dump(failed_objectives),
-                    strategy=remediation_strategy,
+        else:
+            if not retry_attempt_id or not failed_attempt or not failed_quiz:
+                raise AppError(
+                    "补救教学必须绑定失败答题",
+                    code="REMEDIATION_ATTEMPT_REQUIRED",
                 )
+            remediation_blocks = [
+                block.model_dump() for block in lesson.blocks
+            ]
+            published_remediation = publish_remediation_candidate(
+                self.db,
+                uid=uid,
+                section=section,
+                contract=contract,
+                source_content=content,
+                source_quiz=failed_quiz,
+                source_attempt=failed_attempt,
+                generation_run=run,
+                quiz_generation=quiz_generation,
+                questions=question_payloads,
+                prior_questions=prior,
+                remediation_blocks=remediation_blocks,
+                failed_target_ids=remediation_targets,
+                strategy=remediation_strategy,
+                superseded_remediation=superseded_remediation,
             )
+            quiz = published_remediation.quiz
+            governance = published_remediation.governance
+            regeneration_trace["governanceDecision"] = governance
         finished_at = now()
         close_active_stage(finished_at)
         run.status, run.finished_at = "succeeded", finished_at

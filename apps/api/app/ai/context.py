@@ -74,6 +74,7 @@ class CurriculumContext(ContextModel):
         default_factory=list,
         alias="neighboringSections",
     )
+    baseline: dict[str, Any] = Field(default_factory=dict)
 
 
 class LearningStateContext(ContextModel):
@@ -98,8 +99,101 @@ class ContextLineage(ContextModel):
     profile_version: int = Field(default=0, alias="profileVersion")
     mission_version_id: str = Field(default="", alias="missionVersionId")
     contract_version_id: str = Field(default="", alias="contractVersionId")
+    curriculum_baseline_version_id: str = Field(
+        default="",
+        alias="curriculumBaselineVersionId",
+    )
+    knowledge_graph_release_id: str = Field(
+        default="",
+        alias="knowledgeGraphReleaseId",
+    )
+    knowledge_graph_release_version: int = Field(
+        default=0,
+        alias="knowledgeGraphReleaseVersion",
+    )
     evidence_watermark: int = Field(default=0, alias="evidenceWatermark")
     policy_version: str = Field(alias="policyVersion")
+
+
+class KnowledgeContextBudget(ContextModel):
+    max_nodes: int = Field(alias="maxNodes", ge=1)
+    max_edges: int = Field(alias="maxEdges", ge=0)
+    max_hops: int = Field(alias="maxHops", ge=0)
+
+
+class KnowledgeContextPack(ContextModel):
+    """Immutable, bounded knowledge subgraph supplied to one generation task."""
+
+    schema_version: str = Field(alias="schemaVersion")
+    status: Literal["ready", "not_applicable"]
+    reason: str = ""
+    release_id: str = Field(default="", alias="releaseId")
+    release_version: int = Field(default=0, alias="releaseVersion")
+    baseline_version_id: str = Field(default="", alias="baselineVersionId")
+    retrieval_rule_version: str = Field(alias="retrievalRuleVersion")
+    budget: KnowledgeContextBudget
+    seed_concept_revision_ids: list[str] = Field(
+        default_factory=list,
+        alias="seedConceptRevisionIds",
+    )
+    nodes: list[dict[str, Any]] = Field(default_factory=list)
+    edges: list[dict[str, Any]] = Field(default_factory=list)
+    claims: list[dict[str, Any]] = Field(default_factory=list)
+    truncation: dict[str, Any] = Field(default_factory=dict)
+    context_hash: str = Field(default="", alias="contextHash")
+
+    def audit_manifest(self) -> dict[str, Any]:
+        return {
+            "schemaVersion": self.schema_version,
+            "status": self.status,
+            "reason": self.reason,
+            "releaseId": self.release_id,
+            "releaseVersion": self.release_version,
+            "baselineVersionId": self.baseline_version_id,
+            "retrievalRuleVersion": self.retrieval_rule_version,
+            "budget": self.budget.model_dump(by_alias=True, mode="json"),
+            "seedConceptRevisionIds": list(self.seed_concept_revision_ids),
+            "nodeRevisionIds": [
+                str(item.get("conceptRevisionId", "")) for item in self.nodes
+            ],
+            "relationVersionIds": [
+                str(item.get("relationVersionId", "")) for item in self.edges
+            ],
+            "claimVersionIds": [
+                str(item.get("claimVersionId", "")) for item in self.claims
+            ],
+            "actual": {
+                "nodeCount": len(self.nodes),
+                "edgeCount": len(self.edges),
+                "claimCount": len(self.claims),
+            },
+            "actualSubgraph": {
+                "nodes": [
+                    {
+                        "conceptRevisionId": item.get("conceptRevisionId", ""),
+                        "distance": item.get("distance", 0),
+                        "role": item.get("role", ""),
+                    }
+                    for item in self.nodes
+                ],
+                "edges": [
+                    {
+                        "relationVersionId": item.get("relationVersionId", ""),
+                        "fromConceptRevisionId": item.get(
+                            "fromConceptRevisionId", ""
+                        ),
+                        "toConceptRevisionId": item.get("toConceptRevisionId", ""),
+                        "relationType": item.get("relationType", ""),
+                    }
+                    for item in self.edges
+                ],
+                "claimVersionIds": [
+                    str(item.get("claimVersionId", "")) for item in self.claims
+                ],
+            },
+            "truncation": self.truncation,
+            "contextHash": self.context_hash,
+        }
 
 
 class GenerationContextPack(ContextModel):
@@ -111,6 +205,7 @@ class GenerationContextPack(ContextModel):
         alias="learningContract",
     )
     curriculum: CurriculumContext
+    knowledge_context: KnowledgeContextPack = Field(alias="knowledgeContext")
     learning_state: LearningStateContext = Field(alias="learningState")
     interaction: dict[str, Any] = Field(default_factory=dict)
     policy: GenerationPolicy
@@ -130,6 +225,7 @@ class GenerationContextPack(ContextModel):
         included = [
             "learner",
             "curriculum",
+            "knowledgeContext",
             "learningState",
             "policy",
         ]

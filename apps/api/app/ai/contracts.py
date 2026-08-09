@@ -10,6 +10,14 @@ class StrictModel(BaseModel):
 class PlanChapter(StrictModel):
     title: str
     objective: str
+    baseline_objective_ids: list[str] = Field(
+        default_factory=list,
+        max_length=20,
+    )
+    baseline_concept_ids: list[str] = Field(
+        default_factory=list,
+        max_length=40,
+    )
 
 
 class PlanBook(StrictModel):
@@ -56,6 +64,16 @@ class GeneratedSectionOutline(StrictModel):
     title: str
     question: str
     objectives: list[str] = Field(min_length=1, max_length=4)
+    baseline_concept_key: str = Field(default="", max_length=160)
+    baseline_objective_key: str = Field(default="", max_length=160)
+
+    @model_validator(mode="after")
+    def stable_curriculum_identity_is_complete(self):
+        if bool(self.baseline_concept_key) != bool(self.baseline_objective_key):
+            raise ValueError(
+                "baseline concept and objective keys must be declared together"
+            )
+        return self
 
 
 class GeneratedChapter(StrictModel):
@@ -218,6 +236,7 @@ class GeneratedLessonBlock(StrictModel):
     role: LESSON_BLOCK_ROLES
     relation_to_anchor: LESSON_ANCHOR_RELATIONS
     assessment_target_ids: list[str] = Field(default_factory=list, max_length=8)
+    claim_version_ids: list[str] = Field(default_factory=list, max_length=8)
     heading: str = Field(min_length=1, max_length=160)
     content: str = Field(min_length=40, max_length=16000)
 
@@ -225,6 +244,8 @@ class GeneratedLessonBlock(StrictModel):
     def unique_target_bindings(self):
         if len(self.assessment_target_ids) != len(set(self.assessment_target_ids)):
             raise ValueError("assessment target ids must be unique within a block")
+        if len(self.claim_version_ids) != len(set(self.claim_version_ids)):
+            raise ValueError("claim version ids must be unique within a block")
         return self
 
 
@@ -291,6 +312,80 @@ class GeneratedLessonCandidate(StrictModel):
             raise ValueError("candidate requires 5-12 content blocks")
         if not 4 <= len(self.questions) <= 5:
             raise ValueError("candidate requires 4-5 questions")
+        return self
+
+
+class GeneratedLessonSlotBlock(StrictModel):
+    """Minimal model-owned lesson block; authoritative bindings are server-derived."""
+
+    slot: str = Field(
+        pattern=(
+            r"^(T[1-8]_CORE|SHARED_EXAMPLE|BOUNDARY|PRACTICE|SUMMARY|"
+            r"PREREQUISITE|TRANSITION)$"
+        )
+    )
+    kind: Literal["text", "code", "formula", "table", "diagram"]
+    heading: str = Field(min_length=1, max_length=160)
+    content: str = Field(min_length=40, max_length=16000)
+    claim_version_ids: list[str] = Field(default_factory=list, max_length=8)
+
+
+class GeneratedLessonSlotQuestion(StrictModel):
+    """A question names only a server-preallocated target slot."""
+
+    target_slot: str = Field(pattern=r"^T[1-8]$")
+    prompt: str = Field(min_length=4, max_length=2000)
+    options: list[str] = Field(min_length=3, max_length=6)
+    correct: list[int] = Field(min_length=1, max_length=6)
+    explanation: str = Field(min_length=4, max_length=3000)
+
+    @model_validator(mode="after")
+    def valid_choice(self):
+        if len(self.options) != len({item.strip() for item in self.options}):
+            raise ValueError("question options must be unique")
+        if len(self.correct) != len(set(self.correct)):
+            raise ValueError("correct indexes must be unique")
+        if any(index < 0 or index >= len(self.options) for index in self.correct):
+            raise ValueError("correct index out of range")
+        return self
+
+
+class GeneratedLessonSlotCandidate(StrictModel):
+    """Compact provider contract used before deterministic server expansion."""
+
+    decision: Literal["candidate", "replan_required"] = "candidate"
+    replan_code: Literal["", "PREREQUISITE_GAP_REQUIRES_REPLAN"] = ""
+    replan_reason: str = Field(default="", max_length=2000)
+    confidence: Literal["high", "medium", "low"] = "medium"
+    blocks: list[GeneratedLessonSlotBlock] = Field(default_factory=list, max_length=12)
+    questions: list[GeneratedLessonSlotQuestion] = Field(
+        default_factory=list,
+        max_length=5,
+    )
+    feedback_replacement_slot: str = Field(default="", max_length=32)
+
+    @model_validator(mode="after")
+    def valid_decision_shape(self):
+        if self.decision == "replan_required":
+            if self.replan_code != "PREREQUISITE_GAP_REQUIRES_REPLAN":
+                raise ValueError("replan decision requires the fixed replan code")
+            if not self.replan_reason.strip():
+                raise ValueError("replan decision requires a reason")
+            if self.blocks or self.questions or self.feedback_replacement_slot:
+                raise ValueError("replan decision cannot contain publishable content")
+            return self
+        if self.replan_code or self.replan_reason:
+            raise ValueError("candidate decision cannot carry replan fields")
+        if not 5 <= len(self.blocks) <= 12:
+            raise ValueError("candidate requires 5-12 content blocks")
+        if not 4 <= len(self.questions) <= 5:
+            raise ValueError("candidate requires 4-5 questions")
+        slots = [block.slot for block in self.blocks]
+        if len(slots) != len(set(slots)):
+            raise ValueError("lesson block slots must be unique")
+        required_shared = {"SHARED_EXAMPLE", "BOUNDARY", "PRACTICE", "SUMMARY"}
+        if not required_shared.issubset(slots):
+            raise ValueError("candidate is missing a required shared lesson slot")
         return self
 
 
