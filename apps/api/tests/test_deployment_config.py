@@ -62,13 +62,21 @@ def test_cutover_stops_public_writes_and_verifies_before_authority_switch():
     ).read_text(encoding="utf-8")
 
     stop_position = script.index("compose_sqlite stop web api")
+    backup_position = script.index("source.backup(target)")
+    sqlite_upgrade_position = script.index(
+        "compose_sqlite run --rm --no-deps api true"
+    )
     import_position = script.index("python migrate_sqlite_to_postgres.py")
     verify_position = script.index("--verify-only")
     authority_position = script.index("printf '%s\\n' postgresql")
     web_start_position = script.index("--force-recreate web")
-    assert stop_position < import_position < verify_position
+    assert stop_position < backup_position < sqlite_upgrade_position
+    assert sqlite_upgrade_position < import_position < verify_position
     assert verify_position < authority_position < web_start_position
     assert "restore_sqlite_service" in script
+    assert "restore_pre_cutover_snapshot" in script
+    assert 'cp "$sqlite_backup" "$sqlite_file"' in script
+    assert script.count("restore_pre_cutover_snapshot") >= 7
     assert '--env-file "$runtime_env" --env-file "$release_env"' in script
     assert "compose_sqlite run --rm --no-deps --entrypoint python api" in script
     assert "python3 -c" not in script
