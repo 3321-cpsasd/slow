@@ -153,6 +153,8 @@
     .versus-arena {
       --fast-fill: transparent;
       --slow-fill: transparent;
+      --fast-ring: color-mix(in srgb, var(--hare) 12%, transparent);
+      --slow-ring: color-mix(in srgb, var(--forest) 12%, transparent);
       min-height: 330px;
       margin: 0;
       padding: 0 34px;
@@ -165,10 +167,32 @@
       content: "";
       position: absolute;
       z-index: 0;
-      inset: -13% -10%;
+      inset: -32% -10%;
       background: linear-gradient(90deg,
         var(--fast-fill) 0 50%,
         var(--slow-fill) 50% 100%
+      );
+      transform: rotate(9deg);
+      pointer-events: none;
+    }
+    .versus-arena::after {
+      content: "";
+      position: absolute;
+      z-index: 0;
+      inset: -32% -10%;
+      background: conic-gradient(from 0deg at 50% calc(19.5% - 8px),
+        var(--slow-ring) 0 50%,
+        var(--fast-ring) 50% 100%
+      );
+      -webkit-mask: radial-gradient(circle at 50% calc(19.5% - 8px),
+        transparent 0 60px,
+        #000 61px 85px,
+        transparent 86px
+      );
+      mask: radial-gradient(circle at 50% calc(19.5% - 8px),
+        transparent 0 60px,
+        #000 61px 85px,
+        transparent 86px
       );
       transform: rotate(9deg);
       pointer-events: none;
@@ -177,6 +201,8 @@
     .versus-arena:has(.fast.selected)::before { --fast-fill: var(--hare-wash); }
     .versus-arena:has(.deep:hover)::before,
     .versus-arena:has(.deep.selected)::before { --slow-fill: var(--forest-wash); }
+    .versus-arena:has(.fast.selected) { --fast-ring: color-mix(in srgb, var(--hare) 24%, transparent); }
+    .versus-arena:has(.deep.selected) { --slow-ring: color-mix(in srgb, var(--forest) 24%, transparent); }
     .versus-line {
       width: 9px;
       position: absolute;
@@ -236,20 +262,6 @@
     .mode-fighter.deep.selected { background: transparent; }
     .mode-fighter:focus-visible { outline: none; }
     .mode-fighter:focus-visible .radio-mark { box-shadow: 0 0 0 4px rgba(186, 201, 69, .34); }
-    .mode-fighter::after {
-      content: "";
-      width: 170px;
-      height: 170px;
-      position: absolute;
-      right: -86px;
-      top: -93px;
-      border: 24px solid var(--fighter);
-      border-radius: 50%;
-      opacity: 0;
-      transition: opacity .2s ease;
-    }
-    .mode-fighter.deep::after { right: auto; left: -86px; }
-    .mode-fighter.selected::after { opacity: .09; }
     .fighter-top { display: flex; align-items: center; justify-content: space-between; position: relative; z-index: 1; }
     .mode-code { color: var(--fighter-deep); font: 850 12px/1 var(--mono); letter-spacing: .15em; }
     .radio-mark { width: 22px; height: 22px; display: grid; place-items: center; border: 1px solid #aab3ac; border-radius: 50%; background: white; }
@@ -262,6 +274,7 @@
       display: grid;
       place-items: center;
       position: relative;
+      z-index: 1;
     }
     .mascot-stage::after {
       content: "";
@@ -273,19 +286,14 @@
       opacity: .22;
     }
     .mascot {
-      width: 180px;
-      height: 135px;
-      overflow: visible;
-      color: var(--fighter-deep);
+      display: block;
+      object-fit: contain;
       transition: transform .28s cubic-bezier(.2, .8, .2, 1);
     }
-    .fast:hover .mascot, .fast.selected .mascot { transform: translateX(7px) rotate(-2deg); }
+    .hare-icon { width: 155px; height: 125px; transform: scaleX(-1); }
+    .turtle-icon { width: 200px; height: 125px; }
+    .fast:hover .mascot, .fast.selected .mascot { transform: translateX(7px) rotate(-2deg) scaleX(-1); }
     .deep:hover .mascot, .deep.selected .mascot { transform: translateX(3px); }
-    .speed-line { stroke: var(--fighter); stroke-width: 5; stroke-linecap: round; opacity: .28; }
-    .animal-fill { fill: var(--fighter); }
-    .animal-dark { fill: var(--fighter-deep); }
-    .animal-paper { fill: var(--paper); }
-    .animal-stroke { fill: none; stroke: var(--fighter-deep); stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; }
 
     .fighter-copy { position: relative; z-index: 1; text-align: center; }
     .mode-details {
@@ -382,6 +390,7 @@
         );
         transform: rotate(-3deg);
       }
+      .versus-arena::after { display: none; }
       .versus-line {
         width: auto;
         height: 7px;
@@ -402,9 +411,9 @@
       .versus-badge { top: 50%; }
       .mode-fighter.fast, .mode-fighter.deep { padding: 17px 16px 28px; }
       .mode-fighter.deep { padding-top: 29px; padding-bottom: 18px; }
-      .mode-fighter.deep::after { left: auto; right: -86px; }
       .mascot-stage { height: 112px; }
-      .mascot { width: 150px; height: 110px; }
+      .hare-icon { width: 136px; height: 110px; }
+      .turtle-icon { width: 176px; height: 110px; }
       .duration-section { padding: 18px 21px 13px; grid-template-columns: 1fr; gap: 10px; }
       .duration-options { display: grid; grid-template-columns: repeat(4, 1fr); }
       .duration-button { min-width: 0; padding: 0 4px; }
@@ -473,17 +482,7 @@
             <span class="radio-mark" aria-hidden="true"></span>
           </span>
           <span class="mascot-stage" aria-hidden="true">
-            <svg class="mascot hare-icon" viewBox="0 0 240 180">
-              <path class="speed-line" d="M12 81h44M22 101h31M38 121h28" />
-              <ellipse class="animal-fill" cx="132" cy="118" rx="60" ry="39" transform="rotate(-8 132 118)" />
-              <circle class="animal-fill" cx="179" cy="78" r="32" />
-              <path class="animal-fill" d="M164 53c-15-31-12-51-1-52 14-1 22 26 23 51z" />
-              <path class="animal-dark" d="M186 51c1-34 11-50 22-46 13 5 3 34-8 55z" />
-              <circle class="animal-paper" cx="190" cy="74" r="4.5" />
-              <circle class="animal-dark" cx="218" cy="84" r="5" />
-              <circle class="animal-paper" cx="83" cy="107" r="18" />
-              <path class="animal-dark" d="M113 145c-28 1-50 8-52 20h80c5-12-6-20-28-20zM158 142c-4 13 5 22 30 25h37c-3-15-24-23-67-25z" />
-            </svg>
+            <img class="mascot hare-icon" src="assets/study-mode-rabbit.png" alt="">
           </span>
           <span class="fighter-copy">
             <span class="mode-details">
@@ -499,16 +498,7 @@
             <span class="radio-mark" aria-hidden="true"></span>
           </span>
           <span class="mascot-stage" aria-hidden="true">
-            <svg class="mascot turtle-icon" viewBox="0 0 240 180">
-              <path class="speed-line" d="M22 145h194" />
-              <ellipse class="animal-fill" cx="121" cy="102" rx="71" ry="50" />
-              <path class="animal-dark" d="M59 101c7-33 30-52 62-52 34 0 58 20 67 53z" />
-              <path class="animal-stroke" style="stroke:var(--fighter);stroke-width:4" d="M84 67l37 35 34-37M76 102h90M121 53v49" />
-              <circle class="animal-fill" cx="195" cy="108" r="25" />
-              <circle class="animal-paper" cx="203" cy="102" r="4" />
-              <path class="animal-dark" d="M56 128c-24 2-35 11-32 25h50c7-13 1-22-18-25zM159 132c-4 13 5 21 28 21h32c0-13-20-21-60-21z" />
-              <path class="animal-fill" d="M54 97 31 111l25 7z" />
-            </svg>
+            <img class="mascot turtle-icon" src="assets/study-mode-turtle.png" alt="">
           </span>
           <span class="fighter-copy">
             <span class="mode-details">
