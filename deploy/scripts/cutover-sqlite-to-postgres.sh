@@ -82,9 +82,26 @@ if [ ! -s "$sqlite_backup" ]; then
   exit 1
 fi
 
-if ! compose_postgres up -d db; then
+restore_pre_cutover_snapshot() {
+  if ! cp "$sqlite_backup" "$sqlite_file"; then
+    echo "Failed to restore the pre-cutover SQLite snapshot; public services remain stopped." >&2
+    return 1
+  fi
   restore_sqlite_service
-  echo "PostgreSQL failed to start; restored the SQLite service." >&2
+}
+
+# The long-lived Demo host may be several Alembic revisions behind the release.
+# Upgrade the stopped SQLite authority with the target image before importing it.
+# Any later pre-authority failure restores the validated, pre-upgrade snapshot.
+if ! compose_sqlite run --rm --no-deps api true; then
+  restore_pre_cutover_snapshot
+  echo "SQLite schema upgrade failed; restored the pre-cutover snapshot." >&2
+  exit 1
+fi
+
+if ! compose_postgres up -d db; then
+  restore_pre_cutover_snapshot
+  echo "PostgreSQL failed to start; restored the pre-cutover SQLite snapshot." >&2
   exit 1
 fi
 
@@ -101,8 +118,8 @@ while [ "$attempt" -le 45 ]; do
   attempt=$((attempt + 1))
 done
 if [ "$healthy" != true ]; then
-  restore_sqlite_service
-  echo "PostgreSQL did not become healthy; restored the SQLite service." >&2
+  restore_pre_cutover_snapshot
+  echo "PostgreSQL did not become healthy; restored the pre-cutover SQLite snapshot." >&2
   exit 1
 fi
 
@@ -110,22 +127,22 @@ fi
 # runs. The importer itself is transactional and refuses a non-empty target.
 if ! compose_postgres run --rm --no-deps api \
   python migrate_sqlite_to_postgres.py /data/slow-v0.db; then
-  restore_sqlite_service
-  echo "SQLite import failed; restored the SQLite service." >&2
+  restore_pre_cutover_snapshot
+  echo "SQLite import failed; restored the pre-cutover SQLite snapshot." >&2
   exit 1
 fi
 if ! compose_postgres run --rm --no-deps api \
   python migrate_sqlite_to_postgres.py /data/slow-v0.db --verify-only; then
-  restore_sqlite_service
-  echo "PostgreSQL verification failed; restored the SQLite service." >&2
+  restore_pre_cutover_snapshot
+  echo "PostgreSQL verification failed; restored the pre-cutover SQLite snapshot." >&2
   exit 1
 fi
 
 # Start only the private API first. The public web container remains stopped,
 # so no PostgreSQL learner writes can race the final authority decision.
 if ! compose_postgres up -d --force-recreate api; then
-  restore_sqlite_service
-  echo "PostgreSQL API failed to start; restored the SQLite service." >&2
+  restore_pre_cutover_snapshot
+  echo "PostgreSQL API failed to start; restored the pre-cutover SQLite snapshot." >&2
   exit 1
 fi
 healthy=false
@@ -142,8 +159,8 @@ while [ "$attempt" -le 45 ]; do
 done
 if [ "$healthy" != true ]; then
   compose_postgres stop api
-  restore_sqlite_service
-  echo "PostgreSQL API health check failed; restored the SQLite service." >&2
+  restore_pre_cutover_snapshot
+  echo "PostgreSQL API health check failed; restored the pre-cutover SQLite snapshot." >&2
   exit 1
 fi
 
