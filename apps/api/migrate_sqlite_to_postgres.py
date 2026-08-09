@@ -253,6 +253,44 @@ def _copy_tables(
             target.execute(target_table.insert(), batch)
 
 
+def _synchronize_postgresql_sequences(
+    target: Connection,
+    table_names: list[str],
+) -> None:
+    """Advance serial/identity sequences after copying explicit column values."""
+    target_tables = _reflected_tables(target, table_names)
+    for table_name in table_names:
+        table = target_tables[table_name]
+        for column in table.columns:
+            sequence_name = target.execute(
+                sa.text(
+                    "SELECT pg_get_serial_sequence(:table_name, :column_name)"
+                ),
+                {
+                    "table_name": table.fullname,
+                    "column_name": column.name,
+                },
+            ).scalar_one()
+            if not sequence_name:
+                continue
+
+            maximum = target.execute(
+                sa.select(sa.func.max(column))
+            ).scalar_one()
+            target.execute(
+                sa.text(
+                    "SELECT setval("
+                    "to_regclass(:sequence_name), :value, :is_called"
+                    ")"
+                ),
+                {
+                    "sequence_name": sequence_name,
+                    "value": int(maximum) if maximum is not None else 1,
+                    "is_called": maximum is not None,
+                },
+            )
+
+
 def migrate(
     source_path: Path,
     target_url: str,
@@ -294,11 +332,14 @@ def migrate(
                         if not verify_only:
                             _assert_target_empty(target, table_names)
                             _copy_tables(source, target, table_names)
-                        return _verify_tables(
+                        counts = _verify_tables(
                             source,
                             target,
                             table_names,
                         )
+                        if not verify_only:
+                            _synchronize_postgresql_sequences(target, table_names)
+                        return counts
             finally:
                 source_engine.dispose()
     finally:
