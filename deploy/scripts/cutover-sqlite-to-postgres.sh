@@ -5,31 +5,57 @@ deploy_root=${DEPLOY_ROOT:-/opt/slow}
 compose_file="$deploy_root/compose.prod.yml"
 rollback_override="$deploy_root/compose.sqlite-rollback.yml"
 https_override="$deploy_root/compose.https.yml"
+demo_override="$deploy_root/compose.demo.yml"
 release_env="$deploy_root/.release.env"
 runtime_env="$deploy_root/.env"
 authority_file="$deploy_root/data/database-authority"
 sqlite_file="$deploy_root/data/slow-v0.db"
 backup_root="$deploy_root/data/backups"
+DEPLOY_MODE=${DEPLOY_MODE:-production}
 
-for required in "$compose_file" "$rollback_override" "$https_override" "$release_env" "$runtime_env" "$sqlite_file"; do
+case "$DEPLOY_MODE" in
+  demo)
+    mode_override="$demo_override"
+    ;;
+  production)
+    mode_override="$https_override"
+    ;;
+  *)
+    echo "DEPLOY_MODE must be 'demo' or 'production'." >&2
+    exit 1
+    ;;
+esac
+
+for required in "$compose_file" "$rollback_override" "$mode_override" "$release_env" "$runtime_env" "$sqlite_file"; do
   if [ ! -f "$required" ]; then
     echo "Missing cutover prerequisite: $required" >&2
     exit 1
   fi
 done
 if [ -f "$authority_file" ]; then
-  echo "Database authority is already recorded; refusing to repeat the cutover." >&2
-  exit 1
+  current_authority=$(sed -n '1p' "$authority_file")
+  case "$current_authority" in
+    sqlite)
+      ;;
+    postgresql)
+      echo "PostgreSQL is already authoritative; refusing to repeat the cutover." >&2
+      exit 1
+      ;;
+    *)
+      echo "Unknown database authority '$current_authority'; refusing the cutover." >&2
+      exit 1
+      ;;
+  esac
 fi
 
 compose_postgres() {
   docker compose --env-file "$runtime_env" --env-file "$release_env" \
-    -f "$compose_file" -f "$https_override" "$@"
+    -f "$compose_file" -f "$mode_override" "$@"
 }
 
 compose_sqlite() {
   docker compose --env-file "$runtime_env" --env-file "$release_env" \
-    -f "$compose_file" -f "$rollback_override" -f "$https_override" "$@"
+    -f "$compose_file" -f "$rollback_override" -f "$mode_override" "$@"
 }
 
 restore_sqlite_service() {
@@ -131,4 +157,4 @@ if ! compose_postgres up -d --force-recreate web; then
   exit 1
 fi
 
-echo "PostgreSQL cutover completed; preserved SQLite backup: $sqlite_backup"
+echo "$DEPLOY_MODE PostgreSQL cutover completed; preserved SQLite backup: $sqlite_backup"

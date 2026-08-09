@@ -44,7 +44,12 @@ def test_deployment_backups_are_postgresql_and_cutover_is_fail_closed():
             encoding="utf-8"
         )
         assert "database-authority" in script
-        assert '!= "postgresql"' in script
+        if name == "remote-build-deploy.sh":
+            assert 'case "$database_authority" in' in script
+            assert "Unknown database authority" in script
+            assert 'if [ "$DEPLOY_MODE" != "demo" ]' in script
+        else:
+            assert '!= "postgresql"' in script
         assert "pg_dump" in script
         assert "pg_restore --list" in script
         assert "sqlite3" not in script
@@ -67,6 +72,28 @@ def test_cutover_stops_public_writes_and_verifies_before_authority_switch():
     assert '--env-file "$runtime_env" --env-file "$release_env"' in script
     assert "compose_sqlite run --rm --no-deps --entrypoint python api" in script
     assert "python3 -c" not in script
+    assert 'DEPLOY_MODE=${DEPLOY_MODE:-production}' in script
+    assert '-f "$compose_file" -f "$rollback_override" -f "$mode_override"' in script
+    assert 'demo)\n    mode_override="$demo_override"' in script
+
+
+def test_demo_deploy_bootstraps_postgresql_and_never_reverts_authority():
+    script = (
+        PROJECT_ROOT / "deploy/scripts/remote-build-deploy.sh"
+    ).read_text(encoding="utf-8")
+
+    build_position = script.index("docker build")
+    release_env_position = script.index('mv "$release_env_next" "$release_env"')
+    cutover_position = script.index('DEPLOY_MODE="$DEPLOY_MODE" "$cutover_script"')
+    deploy_position = script.index("if ! compose up -d")
+
+    assert build_position < release_env_position < cutover_position < deploy_position
+    assert '""|sqlite)' in script
+    assert 'if [ "$DEPLOY_MODE" != "demo" ]' in script
+    assert "secrets.token_hex(32)" in script
+    assert 'chmod 600 "$runtime_env_next"' in script
+    assert "restore_previous_sqlite_release" in script
+    assert "refusing to roll back to SQLite" in script
 
 
 def test_api_image_installs_postgresql_driver():

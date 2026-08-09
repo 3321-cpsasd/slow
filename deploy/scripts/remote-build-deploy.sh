@@ -10,6 +10,8 @@ release_env="$deploy_root/.release.env"
 runtime_env="$deploy_root/.env"
 builds_root="$deploy_root/builds"
 database_authority_file="$deploy_root/data/database-authority"
+cutover_script="$deploy_root/cutover-sqlite-to-postgres.sh"
+rollback_override="$deploy_root/compose.sqlite-rollback.yml"
 
 : "${APP_VERSION:?APP_VERSION is required}"
 : "${IMAGE_NAME:?IMAGE_NAME is required}"
@@ -34,11 +36,26 @@ if [ ! -f .env ]; then
   echo "Missing $deploy_root/.env" >&2
   exit 1
 fi
-if [ ! -f "$database_authority_file" ] || \
-   [ "$(sed -n '1p' "$database_authority_file")" != "postgresql" ]; then
-  echo "PostgreSQL is not the recorded database authority; run the documented SQLite cutover first." >&2
-  exit 1
+database_authority=""
+if [ -f "$database_authority_file" ]; then
+  database_authority=$(sed -n '1p' "$database_authority_file")
 fi
+cutover_required=false
+case "$database_authority" in
+  postgresql)
+    ;;
+  ""|sqlite)
+    if [ "$DEPLOY_MODE" != "demo" ]; then
+      echo "PostgreSQL is not the recorded database authority; run the documented SQLite cutover first." >&2
+      exit 1
+    fi
+    cutover_required=true
+    ;;
+  *)
+    echo "Unknown database authority '$database_authority'; refusing deployment." >&2
+    exit 1
+    ;;
+esac
 if [ ! -f "$source_archive" ]; then
   echo "Missing release source archive: $source_archive" >&2
   exit 1
@@ -102,7 +119,40 @@ restore_previous_release() {
   )
 }
 
-if [ -f "$release_env" ] && compose ps -q db 2>/dev/null | grep -q .; then
+restore_previous_sqlite_release() {
+  if [ -z "$previous_release_env" ]; then
+    return 1
+  fi
+  cp "$previous_release_env" "$release_env"
+  docker compose --env-file "$runtime_env" --env-file "$release_env" \
+    -f "$compose_file" -f "$rollback_override" -f "$demo_compose_override" \
+    up -d --remove-orphans --force-recreate db api web
+}
+
+ensure_demo_postgres_password() {
+  if grep -Eq '^POSTGRES_PASSWORD=.+$' "$runtime_env"; then
+    return
+  fi
+  postgres_password=$(python3 -c 'import secrets; print(secrets.token_hex(32))')
+  runtime_env_next=$(mktemp "$deploy_root/.env.next.XXXXXX")
+  cat "$runtime_env" > "$runtime_env_next"
+  printf '\nPOSTGRES_PASSWORD=%s\n' "$postgres_password" >> "$runtime_env_next"
+  chmod 600 "$runtime_env_next"
+  mv "$runtime_env_next" "$runtime_env"
+  unset postgres_password
+  echo "Generated a server-local PostgreSQL password for the demo cutover."
+}
+
+if [ "$cutover_required" = true ]; then
+  if [ ! -x "$cutover_script" ]; then
+    echo "Missing executable demo cutover script: $cutover_script" >&2
+    exit 1
+  fi
+  ensure_demo_postgres_password
+fi
+
+if [ "$cutover_required" = false ] && [ -f "$release_env" ] && \
+   compose ps -q db 2>/dev/null | grep -q .; then
   backup_timestamp=$(date -u +%Y%m%dT%H%M%SZ)
   backup_file="$deploy_root/data/backups/slow-$backup_timestamp.dump"
   backup_next="$backup_file.next"
@@ -126,8 +176,23 @@ WEB_ORIGIN=$WEB_ORIGIN
 EOF
 mv "$release_env_next" "$release_env"
 
+cutover_completed=false
+if [ "$cutover_required" = true ]; then
+  if ! DEPLOY_MODE="$DEPLOY_MODE" "$cutover_script"; then
+    if [ -n "$previous_release_env" ]; then
+      restore_previous_sqlite_release
+      rm -f "$previous_release_env"
+    fi
+    echo "Demo PostgreSQL cutover failed; restored the previous SQLite release." >&2
+    exit 1
+  fi
+  cutover_completed=true
+fi
+
 if ! compose up -d --remove-orphans --force-recreate db api web; then
-  if [ -n "$previous_release_env" ]; then
+  if [ "$cutover_completed" = true ]; then
+    echo "PostgreSQL is authoritative; refusing to roll back to SQLite after container startup failure." >&2
+  elif [ -n "$previous_release_env" ]; then
     restore_previous_release
   fi
   echo "Deployment failed while starting containers." >&2
@@ -147,7 +212,9 @@ done
 
 if [ "$healthy" != true ]; then
   compose logs --tail=120
-  if [ -n "$previous_release_env" ]; then
+  if [ "$cutover_completed" = true ]; then
+    echo "PostgreSQL is authoritative; refusing to roll back to SQLite after health-check failure." >&2
+  elif [ -n "$previous_release_env" ]; then
     restore_previous_release
     echo "Deployment failed health checks; restored the previous release." >&2
   else
