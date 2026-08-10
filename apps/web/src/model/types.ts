@@ -432,5 +432,6 @@ export type QaHistoryThread = {
 export type QaHistory = {
   sectionId:string;
   lastThreadId:string|null;
+  truncated:boolean;
   threads:QaHistoryThread[];
 };

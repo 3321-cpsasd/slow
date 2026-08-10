@@ -3797,6 +3797,12 @@ function LessonContent({
     setFastCheck(null);
   }, [section.id, section.content?.id, dailyMode]);
 
+  useEffect(() => {
+    if (dailyMode === 'fast' && reviewTargetBlockId) {
+      setShowCompleteFast(true);
+    }
+  }, [dailyMode, reviewTargetBlockId]);
+
   if (!section.content) {
     return (
       <div className="lesson-intro">
@@ -3947,11 +3953,69 @@ function BlockBody({ block }: { block: Block }) {
   if (block.kind === 'code') {
     return <pre className="code-block"><code>{block.content}</code></pre>;
   }
+  const markdown = block.kind === 'table'
+    ? normalizeTableMarkdown(block.content)
+    : block.kind === 'text'
+      ? normalizeLessonTextMarkdown(block.content)
+      : block.content;
   return (
     <div className={`content-markdown kind-${block.kind}`}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{block.content}</ReactMarkdown>
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
     </div>
   );
+}
+
+function normalizeLessonTextMarkdown(content: string): string {
+  const normalized = content.replace(/\r\n?/g, '\n').trim();
+  const hasAuthoredStructure = /\n\s*\n/.test(normalized)
+    || /(^|\n)\s*(?:#{1,6}\s|[-+*]\s+|\d+[.)]\s+|>\s+|```)/m.test(normalized);
+  if (normalized.length < 200 || hasAuthoredStructure) return normalized;
+
+  const sentences = normalized
+    .match(/[^。！？]+[。！？]+|[^。！？]+$/g)
+    ?.map((sentence) => sentence.trim())
+    .filter(Boolean) || [];
+  if (sentences.length < 4) return normalized;
+
+  const paragraphCount = Math.min(
+    3,
+    Math.floor(sentences.length / 2),
+    Math.max(2, Math.ceil(normalized.length / 150)),
+  );
+  if (paragraphCount < 2) return normalized;
+
+  const paragraphs: string[] = [];
+  let cursor = 0;
+  for (let index = 0; index < paragraphCount; index += 1) {
+    const remainingSentences = sentences.length - cursor;
+    const remainingParagraphs = paragraphCount - index;
+    const take = Math.ceil(remainingSentences / remainingParagraphs);
+    paragraphs.push(sentences.slice(cursor, cursor + take).join(''));
+    cursor += take;
+  }
+  return paragraphs.join('\n\n');
+}
+
+function normalizeTableMarkdown(content: string): string {
+  const lines = content.trim().split(/\r?\n/).filter((line) => line.trim());
+  if (lines.length < 2) return content;
+
+  const cells = (line: string) => line
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map((cell) => cell.trim());
+  const columnCount = cells(lines[0]).length;
+  if (columnCount < 2) return content;
+
+  const possibleDivider = cells(lines[1]);
+  const hasDivider = possibleDivider.length === columnCount
+    && possibleDivider.every((cell) => /^:?-{3,}:?$/.test(cell));
+  if (!hasDivider) {
+    lines.splice(1, 0, Array.from({ length: columnCount }, () => '---').join(' | '));
+  }
+  return lines.join('\n');
 }
 
 function Quiz({
@@ -4140,13 +4204,11 @@ function Quiz({
     const reconcileWhenVisible = () => {
       if (document.visibilityState === 'visible') reconcileOnFocus();
     };
-    const interval = window.setInterval(reconcileOnFocus, 5000);
     window.addEventListener('focus', reconcileOnFocus);
     document.addEventListener('visibilitychange', reconcileWhenVisible);
     void reconcileFailedRemediation();
     return () => {
       cancelled = true;
-      window.clearInterval(interval);
       window.removeEventListener('focus', reconcileOnFocus);
       document.removeEventListener('visibilitychange', reconcileWhenVisible);
     };
@@ -5244,6 +5306,7 @@ function QaPanel({
   const [asking, setAsking] = useState(false);
   const [historyStatus, setHistoryStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
   const [historyError, setHistoryError] = useState('');
+  const [historyTruncated, setHistoryTruncated] = useState(false);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const selectedBlock =
@@ -5264,10 +5327,12 @@ function QaPanel({
     if (!section?.content || historyStatus === 'loading') return;
     setHistoryStatus('loading');
     setHistoryError('');
+    setHistoryTruncated(false);
     try {
       const history = await api.qaHistory(section.id);
       setMessages(qaHistoryExchanges(history));
       setThreadId(history.lastThreadId || undefined);
+      setHistoryTruncated(history.truncated);
       if (!selectedQuote && history.lastThreadId) {
         const lastThread = history.threads.find((item) => item.threadId === history.lastThreadId);
         const lastBlockId = [...(lastThread?.messages || [])]
@@ -5406,6 +5471,9 @@ function QaPanel({
                 <button onClick={() => setQuestion(dailyMode === 'fast' ? '用一句结论和三个要点解释这段。' : '这个机制最容易被误解的地方是什么？')}>{dailyMode === 'fast' ? '用一句结论和三个要点解释这段。' : '这个机制最容易被误解的地方是什么？'}</button>
                 <button onClick={() => setQuestion('它在什么边界条件下会失效？')}>它在什么边界条件下会失效？</button>
               </div>
+            )}
+            {historyStatus === 'loaded' && messages.length > 0 && historyTruncated && (
+              <p className="qa-history-truncated">这里只显示最近的答疑记录。</p>
             )}
             {messages.map((message) => (
               <div className={`qa-exchange ${message.status}`} key={message.id}>

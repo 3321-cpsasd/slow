@@ -2810,6 +2810,16 @@ button:disabled { cursor: not-allowed; }
   font-size: 11px;
   font-weight: 700;
 }
+.qa-history-truncated {
+  margin: 0 0 14px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: #f3f5f1;
+  color: #737c74;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+}
 .qa-suggestion > span { display: block; color: #8a918a; font-size: 10px; text-transform: uppercase; letter-spacing: .1em; margin-bottom: 9px; }
 .qa-suggestion button { width: 100%; border: 1px solid #dfe3de; background: #fff; border-radius: 8px; padding: 11px 12px; margin-bottom: 8px; color: #555e57; text-align: left; font-size: 13px; line-height: 1.55; }
 .qa-exchange { margin-bottom: 24px; }

@@ -33,6 +33,7 @@ def test_qa_history_is_empty_then_returns_stably_ordered_threads(tmp_path):
             "sectionId": section["id"],
             "lastThreadId": None,
             "threads": [],
+            "truncated": False,
         }
         with client.app.state.sessions() as db:
             assert db.query(QaSession).count() == 0
@@ -76,6 +77,50 @@ def test_qa_history_is_empty_then_returns_stably_ordered_threads(tmp_path):
             for thread in payload["threads"]
             for message in thread["messages"]
         )
+
+        newest = second
+        for index in range(9):
+            newest = client.post(
+                f"/api/sections/{section['id']}/ask",
+                json={
+                    "blockId": block_id,
+                    "question": f"更多问题 {index}",
+                    "forceRelation": "new_question",
+                },
+            ).json()
+        bounded = client.get(
+            f"/api/sections/{section['id']}/qa/history"
+        ).json()
+        assert bounded["truncated"] is True
+        assert bounded["lastThreadId"] == newest["threadId"]
+        assert len(bounded["threads"]) == 10
+        assert first["threadId"] not in {
+            thread["threadId"] for thread in bounded["threads"]
+        }
+
+        for index in range(10):
+            client.post(
+                f"/api/sections/{section['id']}/ask",
+                json={
+                    "blockId": block_id,
+                    "question": f"更多追问 {index}",
+                    "threadId": newest["threadId"],
+                },
+            )
+        bounded_thread = client.get(
+            f"/api/sections/{section['id']}/qa/history"
+        ).json()
+        latest_thread = next(
+            thread
+            for thread in bounded_thread["threads"]
+            if thread["threadId"] == newest["threadId"]
+        )
+        assert bounded_thread["truncated"] is True
+        assert len(latest_thread["messages"]) == 20
+        assert [message["role"] for message in latest_thread["messages"]] == [
+            role for _ in range(10) for role in ("user", "assistant")
+        ]
+        assert latest_thread["messages"][0]["content"] == "更多追问 0"
 
 
 def test_qa_history_rejects_another_users_section(tmp_path):

@@ -19,6 +19,10 @@ from ..learning.contracts import open_run_section
 from ..learning.progress import ProgressStore
 
 
+QA_HISTORY_THREAD_LIMIT = 10
+QA_HISTORY_MESSAGES_PER_THREAD = 20
+
+
 class QaService:
     """Owns paragraph-bound Ask AI sessions, threads, and classification repair."""
 
@@ -76,27 +80,40 @@ class QaService:
                 "sectionId": section_id,
                 "lastThreadId": None,
                 "threads": [],
+                "truncated": False,
             }
 
-        threads = self.db.scalars(
+        recent_threads = self.db.scalars(
             select(QaThread)
             .where(QaThread.session_id == session.id)
-            .order_by(QaThread.created_at, QaThread.thread_id)
+            .order_by(QaThread.updated_at.desc(), QaThread.thread_id.desc())
+            .limit(QA_HISTORY_THREAD_LIMIT + 1)
         ).all()
-        messages = self.db.scalars(
-            select(QaMessage)
-            .where(QaMessage.session_id == session.id)
-            .order_by(QaMessage.created_at, QaMessage.id)
-        ).all()
+        threads_truncated = len(recent_threads) > QA_HISTORY_THREAD_LIMIT
+        threads = sorted(
+            recent_threads[:QA_HISTORY_THREAD_LIMIT],
+            key=lambda thread: (thread.created_at, thread.thread_id),
+        )
         messages_by_thread: dict[str, list[dict]] = {
             thread.thread_id: [] for thread in threads
         }
-        for message in messages:
-            # A message without its thread is inconsistent persisted state. Do
-            # not fabricate a user-visible thread from an orphaned row.
-            if message.thread_id not in messages_by_thread:
-                continue
-            messages_by_thread[message.thread_id].append(
+        messages_truncated = False
+        for thread in threads:
+            recent_messages = self.db.scalars(
+                select(QaMessage)
+                .where(
+                    QaMessage.session_id == session.id,
+                    QaMessage.thread_id == thread.thread_id,
+                )
+                .order_by(QaMessage.created_at.desc(), QaMessage.id.desc())
+                .limit(QA_HISTORY_MESSAGES_PER_THREAD + 2)
+            ).all()
+            if len(recent_messages) > QA_HISTORY_MESSAGES_PER_THREAD:
+                messages_truncated = True
+            messages = list(reversed(recent_messages))[
+                -QA_HISTORY_MESSAGES_PER_THREAD:
+            ]
+            messages_by_thread[thread.thread_id] = [
                 {
                     "id": message.id,
                     "blockId": message.block_id,
@@ -104,7 +121,8 @@ class QaService:
                     "content": message.content,
                     "createdAt": message.created_at.isoformat(),
                 }
-            )
+                for message in messages
+            ]
 
         # Older rows were inserted as a user/assistant pair without an
         # explicit causal timestamp. SQLAlchemy may flush same-table rows in
@@ -139,6 +157,7 @@ class QaService:
         return {
             "sectionId": section_id,
             "lastThreadId": last_thread_id,
+            "truncated": threads_truncated or messages_truncated,
             "threads": [
                 {
                     "threadId": thread.thread_id,
