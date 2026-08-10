@@ -186,44 +186,36 @@ def test_long_text_requires_authored_paragraph_breaks():
     validate_lesson_candidate(spec(), value)
 
 
-def test_explicit_list_and_step_kinds_require_matching_gfm_structure():
-    bullets = candidate()
-    bullets.blocks[0].kind = "bullet_list"
-    bullets.blocks[0].content = "先比较四个稳定对象：\n\n- 对象 A 满足资源条件。\n- 对象 B 缺少必要资源。\n- 对象 C 标签不匹配。\n- 对象 D 缺少容忍配置。\n\n这些条件共同决定最终结果。"
-    validate_lesson_candidate(spec(), bullets)
+def test_standard_blocks_accept_mixed_gfm_regardless_of_presentation_hint():
+    markdown_samples = {
+        "text": (
+            "下面是判断依据：\n\n"
+            "- 第一项依据说明。\n"
+            "- 第二项依据说明。\n\n"
+            "1. 先观察条件。\n"
+            "2. 再判断结果。"
+        ),
+        "bullet_list": "这一块以连贯段落解释机制；展示提示不应成为内容格式门禁。",
+        "ordered_steps": (
+            "步骤之间也可以补充并列条件：\n\n"
+            "- 条件一必须成立。\n"
+            "- 条件二必须成立。"
+        ),
+        "table": (
+            "先用一句话建立比较背景。\n\n"
+            "| 环节 | 主要作用 |\n"
+            "| --- | --- |\n"
+            "| 应用 | 组织用户任务 |\n"
+            "| 模型 | 提供推理能力 |\n\n"
+            "表格之后可以继续解释结论。"
+        ),
+    }
 
-    missing_bullet = candidate()
-    missing_bullet.blocks[0].kind = "bullet_list"
-    missing_bullet.blocks[0].content = "这一段声称存在多个并列项目，但正文没有提供任何 Markdown 列表结构，因此不能按列表块发布。"
-    with pytest.raises(CandidateValidationFailure) as raised:
-        validate_lesson_candidate(spec(), missing_bullet)
-    assert raised.value.code == "CONTENT_BLOCK_LAYOUT_INVALID"
-    assert raised.value.location["rule"] == "list_items_missing"
-
-    steps = candidate()
-    steps.blocks[0].kind = "ordered_steps"
-    steps.blocks[0].content = "判断过程依次进行：\n\n1. 先检查资源是否足够。\n2. 再检查标签是否匹配。\n3. 最后检查污点是否被容忍。"
-    validate_lesson_candidate(spec(), steps)
-
-
-def test_text_cannot_silently_carry_a_list_and_table_must_be_complete():
-    disguised = candidate()
-    disguised.blocks[0].content = "下面是判断依据：\n\n- 第一项依据说明。\n- 第二项依据说明。\n\n根据以上依据完成判断。"
-    with pytest.raises(CandidateValidationFailure) as raised:
-        validate_lesson_candidate(spec(), disguised)
-    assert raised.value.location["rule"] == "declared_kind_mismatch"
-
-    table = candidate()
-    table.blocks[0].kind = "table"
-    table.blocks[0].content = "| 环节 | 主要作用 |\n| --- | --- |\n| 应用 | 组织用户任务 |\n| 模型 | 提供推理能力 |"
-    validate_lesson_candidate(spec(), table)
-
-    incomplete = candidate()
-    incomplete.blocks[0].kind = "table"
-    incomplete.blocks[0].content = "| 环节 | 主要作用 |\n| 应用 | 组织用户任务 |\n| 模型 | 提供推理能力 |"
-    with pytest.raises(CandidateValidationFailure) as raised:
-        validate_lesson_candidate(spec(), incomplete)
-    assert raised.value.location["rule"] == "table_divider_invalid"
+    for kind, content in markdown_samples.items():
+        value = candidate()
+        value.blocks[0].kind = kind
+        value.blocks[0].content = content
+        validate_lesson_candidate(spec(), value)
 
 
 def _grounded_spec():
@@ -566,7 +558,7 @@ def test_legacy_content_never_claims_current_boundary_validation():
         legacy = client.get(f"/api/sections/{section_id}").json()
         assert legacy["content"]["boundaryValidation"] == {
             "status": "legacy",
-            "ruleVersion": "lesson_candidate_gate_v6",
+            "ruleVersion": "lesson_candidate_gate_v7",
         }
 
 

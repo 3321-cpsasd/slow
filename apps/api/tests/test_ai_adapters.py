@@ -314,10 +314,9 @@ def test_openai_chat_lesson_v2_uses_exactly_one_physical_call():
     assert calls[0]["extra_body"] == {"enable_thinking": False}
     assert calls[0]["max_tokens"] == 12000
     request_payload = json.loads(calls[0]["messages"][1]["content"])
-    assert "段落之间保留一个空行" in calls[0]["messages"][0]["content"]
-    assert "稳定并列项必须使用 bullet_list" in calls[0]["messages"][0]["content"]
-    assert "有明确先后顺序的过程必须使用 ordered_steps" in calls[0]["messages"][0]["content"]
-    assert "不合格候选整批失败且不会自动修复" in calls[0]["messages"][0]["content"]
+    assert "content 始终是可被 GFM 正确解析的 Markdown" in calls[0]["messages"][0]["content"]
+    assert "kind 只是主要展示方式的提示" in calls[0]["messages"][0]["content"]
+    assert "不会因 kind 与 Markdown 结构不同而拒绝候选" in calls[0]["messages"][0]["content"]
     assert "若两个以上选项成立" in calls[0]["messages"][0]["content"]
     assert "选项 1/2/3/4" in calls[0]["messages"][0]["content"]
     assert [

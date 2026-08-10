@@ -33,8 +33,8 @@ from ..modules.learning.assessment_items import publish_assessment_item_versions
 
 LESSON_GENERATION_PIPELINE_VERSION = "lesson_generation_v2"
 LESSON_GENERATION_SCHEMA_VERSION = "generated_lesson_slot_candidate_v5"
-LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_slot_prompt_v7"
-LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v6"
+LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_slot_prompt_v8"
+LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v7"
 LESSON_CONTEXT_POLICY_VERSION = "lesson_generation_context_v2"
 AI_CONTENT_LABEL_SCHEMA_VERSION = "ai_content_label_v2"
 
@@ -80,7 +80,7 @@ class LessonGenerationSpec(LessonSpecModel):
         default=LESSON_GENERATION_SCHEMA_VERSION,
         alias="schemaVersion",
     )
-    prompt_version: Literal["lesson_generation_slot_prompt_v7"] = Field(
+    prompt_version: Literal["lesson_generation_slot_prompt_v8"] = Field(
         default=LESSON_GENERATION_PROMPT_VERSION,
         alias="promptVersion",
     )
@@ -156,9 +156,12 @@ def _reject(code: str, message: str, **location: Any) -> None:
     raise CandidateValidationFailure(code, message, location)
 
 
-_BULLET_ITEM_RE = re.compile(r"^\s*[-+*]\s+\S")
-_ORDERED_ITEM_RE = re.compile(r"^\s*\d+[.)]\s+\S")
-_TABLE_DIVIDER_CELL_RE = re.compile(r"^:?-{3,}:?$")
+_GFM_BLOCK_RE = re.compile(
+    r"^\s*(?:[-+*]\s+\S|\d+[.)]\s+\S|#{1,6}\s+\S|>\s+\S|```|~~~)"
+)
+_GFM_TABLE_DIVIDER_RE = re.compile(
+    r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$"
+)
 _LONG_TEXT_MIN_CHARS = 240
 _MAX_PROSE_PARAGRAPH_CHARS = 360
 _POSITIONAL_OPTION_REFERENCE_PATTERNS = (
@@ -192,17 +195,8 @@ def _paragraphs(content: str) -> list[str]:
     ]
 
 
-def _table_cells(line: str) -> list[str]:
-    normalized = line.strip()
-    if normalized.startswith("|"):
-        normalized = normalized[1:]
-    if normalized.endswith("|"):
-        normalized = normalized[:-1]
-    return [cell.strip() for cell in normalized.split("|")]
-
-
 def _validate_lesson_block_layout(block) -> None:
-    """Fail closed on authored layout; never repair or infer semantic structure."""
+    """Validate publishability without treating a presentation hint as authority."""
 
     content = block.content.replace("\r\n", "\n").replace("\r", "\n").strip()
     lines = content.splitlines()
@@ -218,120 +212,34 @@ def _validate_lesson_block_layout(block) -> None:
             "正文块在内容中重复了标题",
         )
 
-    bullet_lines = [line for line in nonempty_lines if _BULLET_ITEM_RE.match(line)]
-    ordered_lines = [line for line in nonempty_lines if _ORDERED_ITEM_RE.match(line)]
-
-    if block.kind == "text":
-        if bullet_lines or ordered_lines:
-            _layout_reject(
-                block,
-                "declared_kind_mismatch",
-                "普通正文块不能包含列表结构；必须声明明确的列表或步骤类型",
-            )
-        if any("|" in line for line in nonempty_lines[1:]) and any(
-            all(_TABLE_DIVIDER_CELL_RE.match(cell) for cell in _table_cells(line))
-            for line in nonempty_lines
-            if "|" in line
-        ):
-            _layout_reject(
-                block,
-                "declared_kind_mismatch",
-                "普通正文块不能包含表格结构；必须声明 table 类型",
-            )
-        paragraphs = _paragraphs(content)
-        character_count = len(content)
-        if character_count >= _LONG_TEXT_MIN_CHARS and len(paragraphs) < 2:
-            _layout_reject(
-                block,
-                "long_single_paragraph",
-                "较长正文必须按意思分段并保留空行",
-                characterCount=character_count,
-                paragraphCount=len(paragraphs),
-            )
-        for position, paragraph in enumerate(paragraphs, 1):
-            if len(paragraph) > _MAX_PROSE_PARAGRAPH_CHARS:
-                _layout_reject(
-                    block,
-                    "paragraph_too_long",
-                    "正文段落过长，必须拆分为更易阅读的短段落",
-                    paragraphPosition=position,
-                    characterCount=len(paragraph),
-                )
+    # ``content`` is always GFM Markdown. ``kind`` is only a presentation hint,
+    # so a prose block may freely contain lists, steps, tables, or a mixture.
+    # Pure long-form prose still needs authored paragraph breaks for readability.
+    has_authored_gfm_structure = any(
+        _GFM_BLOCK_RE.match(line) or _GFM_TABLE_DIVIDER_RE.match(line)
+        for line in nonempty_lines
+    )
+    if has_authored_gfm_structure:
         return
 
-    if block.kind in {"bullet_list", "ordered_steps"}:
-        expected_lines = bullet_lines if block.kind == "bullet_list" else ordered_lines
-        conflicting_lines = ordered_lines if block.kind == "bullet_list" else bullet_lines
-        if len(expected_lines) < 2:
+    paragraphs = _paragraphs(content)
+    character_count = len(content)
+    if character_count >= _LONG_TEXT_MIN_CHARS and len(paragraphs) < 2:
+        _layout_reject(
+            block,
+            "long_single_paragraph",
+            "较长正文必须按意思分段并保留空行",
+            characterCount=character_count,
+            paragraphCount=len(paragraphs),
+        )
+    for position, paragraph in enumerate(paragraphs, 1):
+        if len(paragraph) > _MAX_PROSE_PARAGRAPH_CHARS:
             _layout_reject(
                 block,
-                "list_items_missing",
-                "列表或步骤块必须包含至少两个与声明类型一致的条目",
-                itemCount=len(expected_lines),
-            )
-        if conflicting_lines:
-            _layout_reject(
-                block,
-                "mixed_list_types",
-                "同一个列表块不能混用并列列表与有序步骤",
-            )
-        prose_runs: list[str] = []
-        current: list[str] = []
-        for line in lines:
-            if not line.strip() or _BULLET_ITEM_RE.match(line) or _ORDERED_ITEM_RE.match(line):
-                if current:
-                    prose_runs.append(" ".join(current))
-                    current = []
-                continue
-            # Indented lines are Markdown continuations of the preceding item.
-            if line[:1].isspace():
-                continue
-            current.append(line.strip())
-        if current:
-            prose_runs.append(" ".join(current))
-        for position, paragraph in enumerate(prose_runs, 1):
-            if len(paragraph) > _MAX_PROSE_PARAGRAPH_CHARS:
-                _layout_reject(
-                    block,
-                    "paragraph_too_long",
-                    "列表前后的说明段落过长",
-                    paragraphPosition=position,
-                    characterCount=len(paragraph),
-                )
-        return
-
-    if block.kind == "table":
-        table_lines = [line for line in nonempty_lines if "|" in line]
-        divider_indexes = [
-            index
-            for index, line in enumerate(table_lines)
-            if len(_table_cells(line)) >= 2
-            and all(
-                _TABLE_DIVIDER_CELL_RE.match(cell)
-                for cell in _table_cells(line)
-            )
-        ]
-        if len(divider_indexes) != 1:
-            _layout_reject(
-                block,
-                "table_divider_invalid",
-                "表格块必须包含一行完整的 GFM 表头分隔行",
-            )
-        divider_index = divider_indexes[0]
-        if divider_index < 1 or divider_index >= len(table_lines) - 1:
-            _layout_reject(
-                block,
-                "table_rows_missing",
-                "表格块必须同时包含表头和至少一行数据",
-            )
-        column_count = len(_table_cells(table_lines[divider_index]))
-        relevant_rows = table_lines[divider_index - 1 :]
-        if any(len(_table_cells(line)) != column_count for line in relevant_rows):
-            _layout_reject(
-                block,
-                "table_column_count_mismatch",
-                "表格每一行的列数必须一致",
-                columnCount=column_count,
+                "paragraph_too_long",
+                "正文段落过长，必须拆分为更易阅读的短段落",
+                paragraphPosition=position,
+                characterCount=len(paragraph),
             )
 
 
