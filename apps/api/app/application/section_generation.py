@@ -361,6 +361,31 @@ class SectionGenerationCoordinator:
                     code="FEEDBACK_CONTRACT_MISSING",
                     status=409,
                 )
+        if regenerate and not regeneration_feedback:
+            active_binding = self.db.scalar(
+                select(LearningRunSectionBinding).where(
+                    LearningRunSectionBinding.learning_run_id == learning_run.id,
+                    LearningRunSectionBinding.user_id == self.user_id,
+                    LearningRunSectionBinding.section_id == section.id,
+                )
+            )
+            bound_contract = (
+                self.db.get(
+                    LearningContractVersion,
+                    active_binding.learning_contract_version_id,
+                )
+                if active_binding
+                else None
+            )
+            if (
+                bound_contract
+                and bound_contract.section_id == section.id
+                and bound_contract.mission_version_id == mission_version.id
+            ):
+                # Migrated readers can be frozen to a provisional M1 contract.
+                # Regenerate against that exact contract so the resulting V2
+                # content/quiz pair can atomically replace the old binding.
+                contract = bound_contract
         contract = contract or ensure_learning_contract(
             self.db,
             section,
@@ -642,7 +667,9 @@ class SectionGenerationCoordinator:
                         context_pack.knowledge_context.audit_manifest()
                     ),
                     "generationMode": spec.generation_mode,
-                    "physicalCallBudget": 1,
+                    "physicalCallBudget": len(
+                        getattr(self.ai, "models", [getattr(self.ai, "model", "")])
+                    ),
                     "regenerate": regenerate,
                     **(
                         {"feedbackId": regeneration_feedback.get("feedbackId")}
@@ -655,8 +682,21 @@ class SectionGenerationCoordinator:
         self.db.add(run)
         self.db.commit()
         try:
-            candidate = await self.ai.generate_lesson(spec.payload())
+            validated_generator = getattr(
+                self.ai,
+                "generate_lesson_validated",
+                None,
+            )
+            candidate = (
+                await validated_generator(
+                    spec.payload(),
+                    lambda item: validate_lesson_candidate(spec, item),
+                )
+                if callable(validated_generator)
+                else await self.ai.generate_lesson(spec.payload())
+            )
             self._renew_generation_lease(resource_key, owner_id)
+            run.model = getattr(self.ai, "last_model", run.model)
             run.status = "validating"
             run.trace_json = dump(
                 {
@@ -665,6 +705,11 @@ class SectionGenerationCoordinator:
                     "candidateBlockCount": len(candidate.blocks),
                     "candidateQuestionCount": len(candidate.questions),
                     "aiHarness": self._ai_harness_trace(),
+                    "modelAttempts": (
+                        self.ai.fallback_trace()
+                        if callable(getattr(self.ai, "fallback_trace", None))
+                        else [{"model": run.model, "outcome": "succeeded"}]
+                    ),
                 }
             )
             self.db.commit()
@@ -791,6 +836,11 @@ class SectionGenerationCoordinator:
             operation_id = run.id
             failed_run = self.db.get(GenerationRun, operation_id)
             if failed_run:
+                failed_run.model = getattr(
+                    self.ai,
+                    "last_model",
+                    failed_run.model,
+                )
                 failed_run.status = "failed"
                 failed_run.error_code = safe_error_code(error)
                 failed_run.error_message = (
@@ -803,6 +853,11 @@ class SectionGenerationCoordinator:
                     {
                         **load(failed_run.trace_json, {}),
                         "stage": "failed",
+                        "modelAttempts": (
+                            self.ai.fallback_trace()
+                            if callable(getattr(self.ai, "fallback_trace", None))
+                            else []
+                        ),
                         **(
                             {"validationDetails": error.details}
                             if isinstance(error, AppError) and error.details

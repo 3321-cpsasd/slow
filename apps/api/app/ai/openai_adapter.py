@@ -801,12 +801,20 @@ class OpenAiAdapter:
                 ) from error
 
         try:
+            # Kimi K3 is exposed as a thinking-only model.  Other chat models
+            # keep the existing non-thinking structured-output path so adding a
+            # fallback does not silently change the primary model's behaviour.
+            lesson_reasoning_mode = (
+                "required"
+                if self.model.strip().lower() == "kimi/kimi-k3"
+                else "disabled"
+            )
             content = await self._chat_parse_once(
                 GeneratedLessonSlotCandidate,
                 developer,
                 payload,
                 output_tokens,
-                reasoning_mode_override="disabled",
+                reasoning_mode_override=lesson_reasoning_mode,
             )
             slot_candidate = GeneratedLessonSlotCandidate.model_validate_json(content)
             result = _expand_lesson_slots(slot_candidate, spec)
@@ -825,6 +833,25 @@ class OpenAiAdapter:
             raise AiError(
                 "AI 返回的教材候选未通过 Schema 校验；本次尝试已失败",
                 code="AI_STRUCTURED_OUTPUT_INVALID",
+            ) from error
+        except Exception as error:
+            self._record_structured_trace(
+                trace_entry(
+                    schema=GeneratedLessonSlotCandidate,
+                    attempts=1,
+                    invalid_outputs=[],
+                    last_error=None,
+                    outcome="provider_failed",
+                    token_budgets=[output_tokens],
+                    repair_attempts=0,
+                )
+            )
+            provider_error = self._provider_error(error)
+            if provider_error:
+                raise provider_error from error
+            raise AiError(
+                "AI 教材生成失败，请稍后重试",
+                code="AI_STRUCTURED_OUTPUT_FAILED",
             ) from error
         self._record_structured_trace(
             trace_entry(

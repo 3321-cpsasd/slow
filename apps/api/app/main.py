@@ -21,6 +21,7 @@ from .auth.password import PasswordCredentialService
 from .auth.service import IdentityService, OidcStateService, SessionService, token_hash
 from .ai.openai_adapter import OpenAiAdapter
 from .ai.anthropic_adapter import AnthropicAdapter
+from .ai.fallback_adapter import FallbackAiAdapter
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
@@ -89,6 +90,77 @@ def build_provider_adapter(
     )
 
 
+def fallback_model_profiles(config: dict) -> list[dict]:
+    configured = config.get("fallbacks")
+    if configured:
+        return list(configured)
+    if (
+        config.get("provider_protocol") != "openai"
+        or "aliyuncs.com" not in str(config.get("base_url") or "")
+    ):
+        return []
+    profiles = []
+    for model in (
+        item.strip()
+        for item in settings.ai_fallback_models.split(",")
+        if item.strip()
+    ):
+        profiles.append({
+            "model": model,
+            "providerProtocol": "openai",
+            "apiMode": (
+                "responses"
+                if model == "qwen3.8-max-preview"
+                else "chat_completions"
+            ),
+            "reasoningMode": (
+                "required" if model == "kimi/kimi-k3" else "optional"
+            ),
+            "apiKey": (
+                settings.qwen38_api_key
+                if model == "qwen3.8-max-preview"
+                else settings.kimi_k3_api_key
+                if model == "kimi/kimi-k3"
+                else ""
+            ),
+            "baseUrl": (
+                settings.qwen38_base_url
+                if model == "qwen3.8-max-preview"
+                else settings.kimi_k3_base_url
+                if model == "kimi/kimi-k3"
+                else ""
+            ),
+        })
+    return profiles
+
+
+def build_runtime_adapter(config: dict):
+    primary_capabilities = provider_capabilities(config)
+    primary = build_provider_adapter(
+        config["api_key"],
+        config["provider_model"],
+        config["base_url"],
+        primary_capabilities,
+    )
+    adapters = [primary]
+    for fallback in fallback_model_profiles(config):
+        model = str(fallback["model"])
+        if model == config["provider_model"]:
+            continue
+        fallback_config = {
+            "provider_protocol": fallback.get("providerProtocol", "openai"),
+            "api_mode": fallback["apiMode"],
+            "reasoning_mode": fallback["reasoningMode"],
+        }
+        adapters.append(build_provider_adapter(
+            fallback.get("apiKey") or config["api_key"],
+            model,
+            fallback.get("baseUrl") or config["base_url"],
+            provider_capabilities(fallback_config),
+        ))
+    return FallbackAiAdapter(adapters) if len(adapters) > 1 else primary
+
+
 def managed_source_verifier(adapter):
     # The MVP default is deliberately no-network. Rights-grounded material is
     # a separate reviewed workflow and must be injected explicitly; provider
@@ -139,8 +211,10 @@ def create_app(
             else settings.openai_api_mode
         ),
         "reasoning_mode": settings.openai_reasoning_mode,
+        "fallbacks": [],
     }
     configured_runtime = saved_runtime or environment_runtime
+    configured_runtime["fallbacks"] = fallback_model_profiles(configured_runtime)
     configured_capabilities = provider_capabilities(configured_runtime)
     if ai is not None:
         adapter = ai
@@ -154,15 +228,11 @@ def create_app(
                 "capabilities",
                 DEFAULT_PROVIDER_CAPABILITIES,
             ),
+            "fallbacks": [],
         }
     else:
         adapter = (
-            build_provider_adapter(
-                configured_runtime["api_key"],
-                configured_runtime["provider_model"],
-                configured_runtime["base_url"],
-                configured_capabilities,
-            )
+            build_runtime_adapter(configured_runtime)
             if configured_runtime["mode"] == "provider"
             else LocalDemoAdapter()
         )
@@ -172,6 +242,7 @@ def create_app(
             "base_url": configured_runtime["base_url"],
             "provider_model": configured_runtime["provider_model"],
             "capabilities": configured_capabilities,
+            "fallbacks": configured_runtime["fallbacks"],
         }
     if hasattr(adapter, "set_usage_recorder"):
         adapter.set_usage_recorder(usage_recorder)
@@ -446,6 +517,9 @@ def create_app(
             "configured": bool(request.app.state.ai.configured),
             "model": request.app.state.ai.model,
             "providerModel": runtime["provider_model"],
+            "fallbackModels": [
+                item["model"] for item in runtime.get("fallbacks", [])
+            ],
             "baseUrl": runtime["base_url"],
             "apiKeyStored": bool(runtime["api_key"]),
             "ephemeral": request.app.state.runtime_store is None,
@@ -902,16 +976,33 @@ def create_app(
                 streaming=True,
                 reasoning_mode=body.reasoning_mode,
             )
-            candidate = build_provider_adapter(
-                api_key,
-                body.model.strip(),
-                base_url,
-                capabilities,
+            fallback_profiles = (
+                current.get("fallbacks", [])
+                if base_url == current.get("base_url")
+                else []
             )
+            candidate_runtime = {
+                "api_key": api_key,
+                "base_url": base_url,
+                "provider_model": body.model.strip(),
+                "provider_protocol": body.provider_protocol,
+                "api_mode": body.api_mode,
+                "reasoning_mode": body.reasoning_mode,
+                "fallbacks": fallback_profiles,
+            }
+            candidate_runtime["fallbacks"] = fallback_model_profiles(
+                candidate_runtime
+            )
+            candidate = build_runtime_adapter(candidate_runtime)
             if hasattr(candidate, "set_usage_recorder"):
                 candidate.set_usage_recorder(request.app.state.ai_usage_recorder)
             try:
-                await candidate.check_connection()
+                primary_check = getattr(
+                    candidate,
+                    "check_primary_connection",
+                    candidate.check_connection,
+                )
+                await primary_check()
             except Exception:
                 await candidate.close()
                 raise AppError("连接验证失败，请检查 API Key、Base URL 和模型名称", code="AI_RUNTIME_CONNECTION_FAILED", status=400)
@@ -921,6 +1012,7 @@ def create_app(
                 "base_url": base_url,
                 "provider_model": body.model.strip(),
                 "capabilities": capabilities,
+                "fallbacks": candidate_runtime["fallbacks"],
             }
         if request.app.state.runtime_store:
             try:

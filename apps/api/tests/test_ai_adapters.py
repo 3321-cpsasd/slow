@@ -329,6 +329,66 @@ def test_openai_chat_lesson_v2_uses_exactly_one_physical_call():
     assert trace[0]["repairAttempts"] == 0
 
 
+def test_kimi_k3_lesson_keeps_required_thinking_mode():
+    async def run():
+        adapter = OpenAiAdapter(
+            "",
+            "kimi/kimi-k3",
+            capabilities=ProviderCapabilities(
+                protocol="openai",
+                api_mode="chat_completions",
+                structured_output=True,
+                streaming=True,
+                reasoning_mode="required",
+            ),
+        )
+        observed = {}
+
+        async def fake_chat_parse_once(
+            _schema,
+            _developer,
+            _payload,
+            _tokens,
+            *,
+            reasoning_mode_override=None,
+        ):
+            observed["reasoning_mode"] = reasoning_mode_override
+            return _lesson_candidate_json()
+
+        adapter._chat_parse_once = fake_chat_parse_once
+        await adapter.generate_lesson(_lesson_spec())
+        return observed
+
+    assert asyncio.run(run())["reasoning_mode"] == "required"
+
+
+def test_openai_chat_lesson_maps_provider_failures_for_fallback_routing():
+    async def run():
+        adapter = OpenAiAdapter(
+            "",
+            "test-model",
+            capabilities=ProviderCapabilities(
+                protocol="openai",
+                api_mode="chat_completions",
+                structured_output=True,
+                streaming=True,
+                reasoning_mode="optional",
+            ),
+        )
+
+        async def fail(*_args, **_kwargs):
+            raise FakeProviderError(status_code=503)
+
+        adapter._chat_parse_once = fail
+        with pytest.raises(AiError) as raised:
+            await adapter.generate_lesson(_lesson_spec())
+        return raised.value
+
+    error = asyncio.run(run())
+    assert error.code == "AI_PROVIDER_UNAVAILABLE"
+    assert error.retryable is True
+
+
 def test_openai_chat_lesson_v2_does_not_repair_an_invalid_candidate():
     async def run():
         adapter, completions = await chat_adapter(['{"decision":"candidate"}'])

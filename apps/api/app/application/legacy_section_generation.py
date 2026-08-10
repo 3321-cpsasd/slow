@@ -25,6 +25,7 @@ from ..infrastructure.tables import (
     GenerationRun,
     LearningContractVersion,
     LearningMissionVersion,
+    LearningRunSectionBinding,
     QuizAttempt,
     QuizSet,
     Remediation,
@@ -149,6 +150,28 @@ async def generate_legacy_section(
             mission_version = self.db.get(
                 LearningMissionVersion, contract.mission_version_id
             )
+    if regenerate and not regeneration_feedback:
+        active_binding = self.db.scalar(
+            select(LearningRunSectionBinding).where(
+                LearningRunSectionBinding.learning_run_id == learning_run.id,
+                LearningRunSectionBinding.user_id == self.user_id,
+                LearningRunSectionBinding.section_id == section.id,
+            )
+        )
+        bound_contract = (
+            self.db.get(
+                LearningContractVersion,
+                active_binding.learning_contract_version_id,
+            )
+            if active_binding
+            else None
+        )
+        if (
+            bound_contract
+            and bound_contract.section_id == section.id
+            and bound_contract.mission_version_id == mission_version.id
+        ):
+            contract = bound_contract
     contract = contract or ensure_learning_contract(
         self.db,
         section,

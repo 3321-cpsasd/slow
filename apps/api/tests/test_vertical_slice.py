@@ -3481,6 +3481,75 @@ def test_section_regeneration_appends_versions_and_preserves_audit(client):
     assert blocked.json()["code"] == "SECTION_ALREADY_ASSESSED"
 
 
+def test_section_regeneration_upgrades_migrated_bound_contract(client):
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    original = client.post(
+        f"/api/sections/{chapter['sections'][0]['id']}/generate"
+    ).json()
+    opened = client.post(f"/api/sections/{original['id']}/open")
+    assert opened.status_code == 200, opened.json()
+
+    with client.app.state.sessions() as db:
+        binding = db.scalar(
+            select(LearningRunSectionBinding).where(
+                LearningRunSectionBinding.section_id == original["id"]
+            )
+        )
+        contract = db.get(
+            LearningContractVersion,
+            binding.learning_contract_version_id,
+        )
+        stored_section = db.get(Section, original["id"])
+        migrated_contract = ensure_learning_contract(
+            db,
+            stored_section,
+            mission_version_id=contract.mission_version_id,
+            provenance_mode="derived_from_m1",
+        )
+        content = db.get(ContentVersion, original["content"]["id"])
+        quiz = db.get(QuizSet, original["quiz"]["id"])
+        content.learning_contract_version_id = migrated_contract.id
+        quiz.learning_contract_version_id = migrated_contract.id
+        binding.learning_contract_version_id = migrated_contract.id
+        content.schema_version = "legacy"
+        content.prompt_version = "legacy"
+        quiz.schema_version = "legacy"
+        decisions = db.scalars(
+            select(GovernanceDecisionSnapshot).where(
+                GovernanceDecisionSnapshot.quiz_set_id == quiz.id,
+                GovernanceDecisionSnapshot.decision_scope == "quiz_publication",
+            )
+        ).all()
+        assert decisions
+        for decision in decisions:
+            decision.learning_contract_version_id = migrated_contract.id
+            decision.allowed = False
+            decision.assessment_eligible = False
+        migrated_contract_id = migrated_contract.id
+        db.commit()
+
+    migrated = client.get(f"/api/sections/{original['id']}").json()
+    assert migrated["quiz"]["governance"]["assessmentEligible"] is False
+
+    regenerated = client.post(f"/api/sections/{original['id']}/regenerate")
+
+    assert regenerated.status_code == 200, regenerated.json()
+    replacement = regenerated.json()
+    assert replacement["content"]["id"] != original["content"]["id"]
+    assert replacement["quiz"]["governance"]["assessmentEligible"] is True
+    assert (
+        replacement["versionBinding"]["learningContractVersionId"]
+        == migrated_contract_id
+    )
+    assert (
+        replacement["versionBinding"]["contentVersionId"]
+        == replacement["content"]["id"]
+    )
+
+
 def test_content_feedback_streams_the_model_repair_and_rebinds_only_content(client):
     series = create_series(client)
     assert wait_for_task(

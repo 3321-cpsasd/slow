@@ -38,6 +38,11 @@ import type {
 
 type View = 'home' | 'shelf' | 'learn' | 'profile';
 type ReaderTab = 'content' | 'quiz' | 'note';
+type AppRoute =
+  | { view: 'home' }
+  | { view: 'profile'; section: 'profile' | 'account' }
+  | { view: 'shelf'; shelfId: string }
+  | { view: 'learn'; seriesId: string; sectionId: string | null };
 type TextQuote = { text: string; blockId: string };
 type SelectionPopup = TextQuote & { top: number; left: number };
 type FeedbackTarget =
@@ -49,6 +54,47 @@ type FeedbackTarget =
       block: Block;
     };
 const AI_RUNTIME_SETTINGS_ENABLED = import.meta.env.VITE_INTERNAL_AI_SETTINGS === 'true';
+
+const routeFromLocation = (): AppRoute => {
+  const parts = window.location.pathname.split('/').filter(Boolean).map((part) => {
+    try {
+      return decodeURIComponent(part);
+    } catch {
+      return part;
+    }
+  });
+  if (parts[0] === 'profile' && parts.length === 1) {
+    return {
+      view: 'profile',
+      section: new URLSearchParams(window.location.search).get('section') === 'account'
+        ? 'account'
+        : 'profile',
+    };
+  }
+  if (parts[0] === 'shelves' && parts[1] && parts.length === 2) {
+    return { view: 'shelf', shelfId: parts[1] };
+  }
+  if (parts[0] === 'series' && parts[1]) {
+    const sectionId = parts[2] === 'sections' && parts[3] ? parts[3] : null;
+    return { view: 'learn', seriesId: parts[1], sectionId };
+  }
+  return { view: 'home' };
+};
+
+const shelfPath = (shelfId: string) => `/shelves/${encodeURIComponent(shelfId)}`;
+const seriesPath = (seriesId: string, sectionId?: string | null) => (
+  sectionId
+    ? `/series/${encodeURIComponent(seriesId)}/sections/${encodeURIComponent(sectionId)}`
+    : `/series/${encodeURIComponent(seriesId)}`
+);
+
+const updateBrowserLocation = (path: string, mode: 'push' | 'replace' | 'none') => {
+  if (mode === 'none') return;
+  const current = `${window.location.pathname}${window.location.search}`;
+  if (current === path) return;
+  window.history[mode === 'push' ? 'pushState' : 'replaceState']({}, '', path);
+};
+
 const GENERATION_STAGE_LABELS: Record<string, string> = {
   queued: '正在等待开始',
   teaching_blueprint: '正在准备学习内容',
@@ -124,7 +170,7 @@ export default function App() {
   const [localPassword, setLocalPassword] = useState('');
   const [showLocalPassword, setShowLocalPassword] = useState(false);
   const [data, setData] = useState<Bootstrap | null>(null);
-  const [view, setView] = useState<View>(() => window.location.pathname === '/profile' ? 'profile' : 'home');
+  const [view, setView] = useState<View>(() => routeFromLocation().view);
   const [shelf, setShelf] = useState<Shelf | null>(null);
   const [series, setSeries] = useState<Series | null>(null);
   const [section, setSection] = useState<Section | null>(null);
@@ -147,6 +193,9 @@ export default function App() {
   const chapterGenerationRequests = useRef(new Set<string>());
   const userMenuRef = useRef<HTMLDivElement | null>(null);
   const lastViewedSection = useRef('');
+  const restoreLocationRef = useRef<() => Promise<void>>(async () => undefined);
+  const routeRequestVersion = useRef(0);
+  const routeInitializedForUser = useRef('');
 
   const hasActiveDailyMode = () => Boolean(
     data?.dailyMode?.active
@@ -193,6 +242,7 @@ export default function App() {
 
   useEffect(() => {
     const clearUserState = () => {
+      routeInitializedForUser.current = '';
       setAuth(null);
       setData(null);
       setShelf(null);
@@ -206,15 +256,7 @@ export default function App() {
     api.setUnauthorizedHandler(clearUserState);
     telemetry.start();
     void initializeAuth();
-    const handleHistory = () => {
-      const nextView: View = window.location.pathname === '/profile' ? 'profile' : 'home';
-      setView(nextView);
-      setProfileSection(new URLSearchParams(window.location.search).get('section') === 'account' ? 'account' : 'profile');
-      setShowUserMenu(false);
-      setShelf(null);
-      setSeries(null);
-      setSection(null);
-    };
+    const handleHistory = () => { void restoreLocationRef.current(); };
     window.addEventListener('popstate', handleHistory);
     return () => window.removeEventListener('popstate', handleHistory);
   }, []);
@@ -371,8 +413,12 @@ export default function App() {
     }
   };
 
-  const openShelf = (value: Shelf) => {
+  const openShelf = (value: Shelf, historyMode: 'push' | 'replace' | 'none' = 'push') => {
+    if (historyMode !== 'none') routeRequestVersion.current += 1;
+    updateBrowserLocation(shelfPath(value.id), historyMode);
     setShelf(value);
+    setSeries(null);
+    setSection(null);
     setView('shelf');
   };
 
@@ -410,10 +456,12 @@ export default function App() {
     window.history.replaceState({}, '', '/');
   };
 
-  const goHome = () => {
-    if (window.location.pathname !== '/') window.history.pushState({}, '', '/');
+  const showHome = (historyMode: 'push' | 'replace' | 'none') => {
+    if (historyMode !== 'none') routeRequestVersion.current += 1;
+    updateBrowserLocation('/', historyMode);
     setShowUserMenu(false);
     setView('home');
+    setShelf(null);
     setSeries(null);
     setSection(null);
     setActivityDailyMode(null);
@@ -424,7 +472,10 @@ export default function App() {
       .catch((reason) => setError(reason instanceof Error ? reason.message : '主页刷新失败'));
   };
 
+  const goHome = () => showHome('push');
+
   const openProfileCenter = (nextSection: 'profile' | 'account' = 'profile') => {
+    routeRequestVersion.current += 1;
     const nextUrl = nextSection === 'account' ? '/profile?section=account' : '/profile';
     if (`${window.location.pathname}${window.location.search}` !== nextUrl) window.history.pushState({}, '', nextUrl);
     setProfileSection(nextSection);
@@ -449,7 +500,11 @@ export default function App() {
     return value;
   };
 
-  const loadSection = async (sectionId: string) => {
+  const loadSection = async (
+    sectionId: string,
+    historyMode: 'push' | 'replace' | 'none' = 'push',
+  ) => {
+    if (series) updateBrowserLocation(seriesPath(series.id, sectionId), historyMode);
     if (!hasActiveDailyMode()) {
       setPendingSectionId(sectionId);
       setDailyModeDialogOpen(true);
@@ -528,6 +583,7 @@ export default function App() {
             ? task.result.targetSectionId
             : firstUsableSection(refreshed);
           if (targetSectionId) {
+            updateBrowserLocation(seriesPath(refreshed.id, targetSectionId), 'replace');
             setSection(await openAndTrackSection(targetSectionId));
           }
           return true;
@@ -537,6 +593,7 @@ export default function App() {
           setSeries(refreshed);
           const fallbackSectionId = firstUsableSection(refreshed);
           if (fallbackSectionId) {
+            updateBrowserLocation(seriesPath(refreshed.id, fallbackSectionId), 'replace');
             setSection(await openAndTrackSection(fallbackSectionId));
           }
           setError('第一节暂时没有准备完成。目录已经保存，可以从第一章重新尝试。');
@@ -555,8 +612,17 @@ export default function App() {
     }
   };
 
-  const openSeries = async (seriesId: string) => {
+  const openSeries = async (
+    seriesId: string,
+    requestedSectionId: string | null = null,
+    historyMode: 'push' | 'replace' | 'none' = 'push',
+  ) => {
     const value = await run('正在进入学习空间…', () => api.series(seriesId));
+    if (historyMode !== 'none') routeRequestVersion.current += 1;
+    updateBrowserLocation(seriesPath(seriesId, requestedSectionId), historyMode);
+    setShelf(data?.shelves.find((item) => (
+      item.series.some((candidate) => candidate.id === seriesId)
+    )) || null);
     setSeries(value);
     setView('learn');
     if (
@@ -574,9 +640,25 @@ export default function App() {
         ),
       ))
       : false;
-    const initial = resumeBelongsToSeries ? resumeSection! : firstUsableSection(value);
-    if (initial) await loadSection(initial);
-    else setSection(null);
+    const requestedBelongsToSeries = requestedSectionId
+      ? value.books.some((book) => book.chapters.some(
+        (chapter) => chapter.sections.some(
+          (item) => item.id === requestedSectionId && item.status !== 'locked',
+        ),
+      ))
+      : false;
+    const initial = requestedBelongsToSeries
+      ? requestedSectionId!
+      : resumeBelongsToSeries
+        ? resumeSection!
+        : firstUsableSection(value);
+    if (initial) {
+      updateBrowserLocation(
+        seriesPath(value.id, initial),
+        historyMode === 'none' ? 'none' : 'replace',
+      );
+      await loadSection(initial, 'none');
+    } else setSection(null);
   };
 
   const refreshSeries = async () => {
@@ -685,6 +767,100 @@ export default function App() {
       }
     }
   };
+
+  const restoreLocation = async () => {
+    if (!data) return;
+    const requestVersion = ++routeRequestVersion.current;
+    const route = routeFromLocation();
+    setShowUserMenu(false);
+    setError('');
+    if (route.view === 'home') {
+      setView('home');
+      setShelf(null);
+      setSeries(null);
+      setSection(null);
+      return;
+    }
+    if (route.view === 'profile') {
+      setProfileSection(route.section);
+      setView('profile');
+      setShelf(null);
+      setSeries(null);
+      setSection(null);
+      return;
+    }
+    if (route.view === 'shelf') {
+      const targetShelf = data.shelves.find((item) => item.id === route.shelfId);
+      if (!targetShelf) {
+        updateBrowserLocation('/', 'replace');
+        setView('home');
+        setShelf(null);
+        setSeries(null);
+        setSection(null);
+        setError('这个书架不存在，或当前账号无权访问。');
+        return;
+      }
+      openShelf(targetShelf, 'none');
+      return;
+    }
+
+    setBusy('正在恢复上次浏览位置…');
+    try {
+      const restoredSeries = await api.series(route.seriesId);
+      if (requestVersion !== routeRequestVersion.current) return;
+      const restoredShelf = data.shelves.find((item) => (
+        item.series.some((candidate) => candidate.id === restoredSeries.id)
+      )) || null;
+      setShelf(restoredShelf);
+      setSeries(restoredSeries);
+      setView('learn');
+      if (!route.sectionId) {
+        setSection(null);
+        if (
+          restoredSeries.initializationTask
+          && !['failed', 'succeeded'].includes(restoredSeries.initializationTask.status)
+        ) {
+          void monitorInitialSection(restoredSeries);
+        }
+        return;
+      }
+      const sectionCanOpen = restoredSeries.books.some((book) => book.chapters.some(
+        (chapter) => chapter.sections.some(
+          (item) => item.id === route.sectionId && item.status !== 'locked',
+        ),
+      ));
+      if (!sectionCanOpen) {
+        updateBrowserLocation(seriesPath(restoredSeries.id), 'replace');
+        setSection(null);
+        setError('这个小节尚未解锁，已返回当前系列目录。');
+        return;
+      }
+      const restoredSection = await openAndTrackSection(route.sectionId);
+      if (requestVersion === routeRequestVersion.current) setSection(restoredSection);
+    } catch (reason) {
+      if (requestVersion !== routeRequestVersion.current) return;
+      updateBrowserLocation('/', 'replace');
+      setView('home');
+      setShelf(null);
+      setSeries(null);
+      setSection(null);
+      setError(reason instanceof Error ? reason.message : '无法恢复这个浏览位置。');
+    } finally {
+      if (requestVersion === routeRequestVersion.current) setBusy('');
+    }
+  };
+
+  restoreLocationRef.current = restoreLocation;
+
+  useEffect(() => {
+    if (!auth || !data) {
+      if (!auth) routeInitializedForUser.current = '';
+      return;
+    }
+    if (routeInitializedForUser.current === auth.user.id) return;
+    routeInitializedForUser.current = auth.user.id;
+    void restoreLocationRef.current();
+  }, [auth?.user.id, data]);
 
   if (exitReceipt) {
     return <AccountExitReceiptPage receipt={exitReceipt} onClose={() => setExitReceipt(null)} />;
@@ -970,6 +1146,7 @@ export default function App() {
             onBack={goHome}
             onCreate={async (body, idempotencyKey) => {
               const value = await run('AI 正在规划系列…', () => api.createPlan({ ...body, shelfId: shelf.id }, idempotencyKey));
+              updateBrowserLocation(seriesPath(value.id), 'push');
               setSeries(value);
               setSection(null);
               setView('learn');
@@ -983,7 +1160,10 @@ export default function App() {
                 const refreshedShelf = refreshed.shelves.find((item) => item.id === shelf.id) || null;
                 setData(refreshed);
                 setShelf(refreshedShelf);
-                if (!refreshedShelf) setView('home');
+                if (!refreshedShelf) {
+                  updateBrowserLocation('/', 'replace');
+                  setView('home');
+                }
               });
             }}
           />
@@ -1097,6 +1277,10 @@ export default function App() {
                 if (deletingLastBook) {
                   setSeries(null);
                   setSection(null);
+                  updateBrowserLocation(
+                    refreshedShelf ? shelfPath(refreshedShelf.id) : '/',
+                    'replace',
+                  );
                   setView(refreshedShelf ? 'shelf' : 'home');
                   return;
                 }
@@ -3007,6 +3191,7 @@ function LearningWorkspace({
         onDeleteBook={onDeleteBook}
       />
       <ReaderPanel
+        series={series}
         section={section}
         dailyMode={dailyMode}
         directoryHidden={directoryHidden}
@@ -3397,6 +3582,7 @@ function SectionTreeButton({
 }
 
 function ReaderPanel({
+  series,
   section,
   dailyMode,
   directoryHidden,
@@ -3414,6 +3600,7 @@ function ReaderPanel({
   onRefreshSeries,
   onFeedbackBlock,
 }: {
+  series: Series;
   section: Section | null;
   dailyMode: DailyMode;
   directoryHidden: boolean;
@@ -3558,17 +3745,14 @@ function ReaderPanel({
 
   if (!section) {
     return (
-      <main className="reader-panel empty-reader">
+      <main className="reader-panel route-preview-reader">
         <ReaderPanelToggles
           directoryHidden={directoryHidden}
           qaHidden={qaHidden}
           onToggleDirectory={onToggleDirectory}
           onToggleQa={onToggleQa}
         />
-        <span className="empty-symbol">S</span>
-        <p className="eyebrow">选择左侧目录开始</p>
-        <h1>今天，学清楚一个问题。</h1>
-        <p>完成一节、通过验证、留下笔记。下一节会在掌握后自动解锁。</p>
+        <SeriesRoutePreview series={series} />
       </main>
     );
   }
@@ -3644,6 +3828,7 @@ function ReaderPanel({
           <Quiz
             key={section.quiz.id}
             section={section}
+            onUpgrade={() => setRegenerationConfirmOpen(true)}
             onSectionChange={onSectionChange}
             onRefreshSeries={onRefreshSeries}
             onSelectSection={onSelectSection}
@@ -3723,6 +3908,79 @@ function ReaderPanel({
         </button>
       )}
     </main>
+  );
+}
+
+function SeriesRoutePreview({ series }: { series: Series }) {
+  const taskStatus = series.initializationTask?.status;
+  const totalMinutes = series.books.reduce(
+    (total, book) => total + book.estimatedMinutes,
+    0,
+  );
+  const firstBook = series.books[0];
+  const firstChapter = firstBook?.chapters[0];
+  const statusCopy = taskStatus === 'failed'
+    ? '第一节这次没有准备完成，目录和学习路线已经保存。'
+    : taskStatus === 'pending'
+      ? '第一节正在排队，完成后会自动打开。'
+      : taskStatus === 'running'
+        ? '正文与验证题正在一起生成并检查，完成后会自动打开。'
+        : '选择左侧已经解锁的小节开始学习。';
+  return (
+    <div className="route-preview-scroll">
+      <header className="route-preview-hero">
+        <div className={`route-preparation-state ${taskStatus || 'ready'}`}>
+          <i aria-hidden="true" />
+          <span>{taskStatus === 'failed' ? '第一节需要重新准备' : taskStatus ? '第一节正在准备' : '学习路线已就绪'}</span>
+        </div>
+        <p className="eyebrow">你的学习路线</p>
+        <h1>{series.title}</h1>
+        <p>{series.rationale}</p>
+        <div className="route-preview-meta" aria-label="学习路线概览">
+          <span><b>{series.books.length}</b> 本书</span>
+          <span><b>{series.books.reduce((total, book) => total + book.chapters.length, 0)}</b> 章</span>
+          <span><b>{Math.max(1, Math.round(totalMinutes / 60))}</b> 小时预计投入</span>
+        </div>
+      </header>
+
+      <section className="route-opening-note">
+        <span className="route-opening-mark" aria-hidden="true">起</span>
+        <div>
+          <small>从这里开始</small>
+          <h2>{firstChapter?.title || firstBook?.title || '第一节'}</h2>
+          <p>{firstChapter?.objective || statusCopy}</p>
+          <em>{statusCopy}</em>
+        </div>
+      </section>
+
+      <section className="route-book-sequence" aria-label="全系列书目与章节">
+        {series.books.map((book) => (
+          <article className="route-book" key={book.id}>
+            <div className="route-book-spine" aria-hidden="true">
+              <span>{String(book.position).padStart(2, '0')}</span>
+            </div>
+            <div className="route-book-body">
+              <header>
+                <div>
+                  <small>第 {book.position} 本 · 约 {Math.max(1, Math.round(book.estimatedMinutes / 60))} 小时</small>
+                  <h2>{book.title}</h2>
+                </div>
+                <span>{book.position === 1 ? '即将开始' : '后续路径'}</span>
+              </header>
+              <p>{book.description}</p>
+              <ol>
+                {book.chapters.map((chapter) => (
+                  <li key={chapter.id}>
+                    <b>第 {chapter.position} 章</b>
+                    <span>{chapter.title}</span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          </article>
+        ))}
+      </section>
+    </div>
   );
 }
 
@@ -4026,6 +4284,7 @@ function normalizeTableMarkdown(content: string): string {
 
 function Quiz({
   section,
+  onUpgrade,
   onSectionChange,
   onRefreshSeries,
   onSelectSection,
@@ -4033,6 +4292,7 @@ function Quiz({
   onSubmissionComplete,
 }: {
   section: Section;
+  onUpgrade: () => void;
   onSectionChange: (section: Section) => void;
   onRefreshSeries: () => Promise<void>;
   onSelectSection: (id: string) => Promise<Section>;
@@ -4414,8 +4674,13 @@ function Quiz({
       <p className="quiz-draft-note">单选题只能选择一个答案，多选题可选择多个；切回正文查阅时，当前作答会自动保留。</p>
       {quizGovernanceBlocked && (
         <aside className="quiz-governance-notice" role="alert">
-          <b>这套验证题暂时不可用</b>
-          <p>系统不会展示或接受作答，请重新准备后再试。</p>
+          <b>这节内容需要升级后才能验证</b>
+          <p>这是旧版本内容，原题不会被直接当作新的学习证据。升级会重新准备正文与验证题，已有成绩不会被覆盖。</p>
+          {section.bestScore === 0 && section.totalScore === 0 && (
+            <button className="secondary-button" type="button" onClick={onUpgrade}>
+              升级本节内容与验证
+            </button>
+          )}
         </aside>
       )}
       {quizGovernanceBlocked ? null : result ? (

@@ -168,6 +168,7 @@ export type AiRuntime = {
   configured:boolean;
   model:string;
   providerModel:string;
+  fallbackModels:string[];
   baseUrl:string;
   apiKeyStored:boolean;
   ephemeral:boolean;

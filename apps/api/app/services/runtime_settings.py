@@ -7,7 +7,7 @@ from pathlib import Path
 class RuntimeSettingsStore:
     """Server-only persistence for the locally selected AI runtime."""
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, path: Path):
         self.path = path
@@ -19,7 +19,8 @@ class RuntimeSettingsStore:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
             raise RuntimeError("本机 AI 配置损坏，无法安全启动") from error
-        if payload.get("schemaVersion") != self.SCHEMA_VERSION:
+        schema_version = payload.get("schemaVersion")
+        if schema_version not in {1, self.SCHEMA_VERSION}:
             raise RuntimeError("本机 AI 配置版本不受支持")
         mode = payload.get("mode")
         protocol = payload.get("providerProtocol")
@@ -41,7 +42,25 @@ class RuntimeSettingsStore:
             "provider_protocol": protocol,
             "api_mode": api_mode,
             "reasoning_mode": reasoning_mode,
+            "fallbacks": list(payload.get("fallbackModels") or []),
         }
+        for fallback in values["fallbacks"]:
+            if not isinstance(fallback, dict) or not str(fallback.get("model") or ""):
+                raise RuntimeError("本机 AI 备用模型配置无效")
+            if fallback.get("providerProtocol", "openai") not in {"openai", "anthropic"}:
+                raise RuntimeError("本机 AI 备用模型协议无效")
+            if fallback.get("apiMode") not in {
+                "responses", "chat_completions", "messages"
+            }:
+                raise RuntimeError("本机 AI 备用模型接口形态无效")
+            if fallback.get("reasoningMode") not in {
+                "optional", "required", "disabled"
+            }:
+                raise RuntimeError("本机 AI 备用模型推理模式无效")
+            if not isinstance(fallback.get("apiKey", ""), str):
+                raise RuntimeError("本机 AI 备用模型密钥配置无效")
+            if not isinstance(fallback.get("baseUrl", ""), str):
+                raise RuntimeError("本机 AI 备用模型地址配置无效")
         if not values["provider_model"]:
             raise RuntimeError("本机 AI 配置模型名称为空")
         if mode == "provider" and not values["api_key"]:
@@ -60,6 +79,7 @@ class RuntimeSettingsStore:
             "providerProtocol": capabilities.protocol,
             "apiMode": capabilities.api_mode,
             "reasoningMode": capabilities.reasoning_mode,
+            "fallbackModels": runtime.get("fallbacks", []),
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary_name = tempfile.mkstemp(
