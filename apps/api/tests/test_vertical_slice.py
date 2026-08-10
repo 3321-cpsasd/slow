@@ -2412,6 +2412,19 @@ def create_series(client):
     return client.post("/api/plans", json={"shelfId":"shelf_technology","topic":"Kubernetes","role":"技术人员","experience":"会 Docker","depth":"deep"}).json()
 
 
+def test_shelf_topics_are_rebuilt_from_confirmed_series(client):
+    series = create_series(client)
+
+    shelf = client.get("/api/bootstrap").json()["shelves"][0]
+    assert shelf["domain"] == ""
+    assert shelf["specialty"] == ""
+    assert shelf["tags"] == ["Kubernetes"]
+
+    assert client.delete(f"/api/series/{series['id']}").status_code == 204
+    rebuilt = client.get("/api/bootstrap").json()["shelves"][0]
+    assert rebuilt["tags"] == []
+
+
 def test_plan_creation_persists_and_exposes_immutable_mission(client):
     series = create_series(client)
 

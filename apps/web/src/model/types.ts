@@ -16,7 +16,7 @@ export type Series = {
   initializationTask?:LearningTask|null;
 };
 export type Shelf = { id:string; name:string; domain:string; specialty:string; tags:string[]; series:Series[] };
-export type ShelfCreateInput = { name:string; domain:string; specialty:string; tags:string[] };
+export type ShelfCreateInput = { name:string };
 export type ResumePosition = {
   learningRunId:string;
   sectionId:string;

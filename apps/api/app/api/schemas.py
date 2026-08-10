@@ -13,10 +13,20 @@ class ApiModel(BaseModel):
 
 
 class ShelfCreate(ApiModel):
+    model_config = ConfigDict(
+        alias_generator=camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
     name: str = Field(min_length=1, max_length=100)
-    domain: str = Field(default="", max_length=100)
-    specialty: str = Field(default="", max_length=120)
-    tags: list[str] = Field(default_factory=list, max_length=12)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str):
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("书架名称不能为空")
+        return normalized
 
 
 class PlanCreate(ApiModel):

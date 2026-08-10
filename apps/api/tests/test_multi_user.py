@@ -371,14 +371,14 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
 
     missing_csrf = client.post(
         "/api/shelves",
-        json={"name": "新书架", "domain": "测试"},
+        json={"name": "新书架"},
     )
     assert missing_csrf.status_code == 403
     assert missing_csrf.json()["code"] == "CSRF_INVALID"
 
     created = client.post(
         "/api/shelves",
-        json={"name": "新书架", "domain": "测试"},
+        json={"name": "新书架"},
         headers={"X-CSRF-Token": me["csrfToken"]},
     )
     assert created.status_code == 201
@@ -564,9 +564,9 @@ def test_fashion_to_ux_account_has_its_own_profile_and_rejects_wrong_password(
     assert len(bootstrap.json()["shelves"]) == 1
     shelf = bootstrap.json()["shelves"][0]
     assert shelf["name"] == persona.shelf_name
-    assert shelf["domain"] == persona.domain
-    assert shelf["specialty"] == persona.specialty
-    assert shelf["tags"] == list(persona.tags)
+    assert shelf["domain"] == ""
+    assert shelf["specialty"] == ""
+    assert shelf["tags"] == []
 
 
 def test_fashion_to_ux_persona_targets_information_visualization_for_product_design():

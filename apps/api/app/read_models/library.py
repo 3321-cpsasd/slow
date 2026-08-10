@@ -15,6 +15,7 @@ from ..infrastructure.tables import (
     Chapter,
     ChapterPractice,
     ChapterProgress,
+    LearningPlan,
     LearningRun,
     Section,
     SectionProgress,
@@ -79,6 +80,24 @@ class LibraryReadModel:
         by_shelf = defaultdict(list)
         for row in built:
             by_shelf[row.pop("_shelfId")].append(row)
+        classification_rows = self.db.execute(
+            select(Series.shelf_id, LearningPlan.topic)
+            .join(LearningPlan, LearningPlan.id == Series.plan_id)
+            .join(Book, Book.series_id == Series.id)
+            .join(Shelf, Shelf.id == Series.shelf_id)
+            .where(
+                Shelf.user_id == self.user_id,
+                Series.deleted_at.is_(None),
+                Book.deleted_at.is_(None),
+                Book.outline_status == "confirmed",
+            )
+            .order_by(LearningPlan.created_at, Series.id, Book.position)
+        ).all()
+        topics_by_shelf = defaultdict(list)
+        for shelf_id, topic in classification_rows:
+            normalized = " ".join((topic or "").split())
+            if normalized and normalized not in topics_by_shelf[shelf_id]:
+                topics_by_shelf[shelf_id].append(normalized)
         return {
             "user": {
                 "id": self.user_id,
@@ -88,9 +107,9 @@ class LibraryReadModel:
                 {
                     "id": shelf.id,
                     "name": shelf.name,
-                    "domain": shelf.domain,
-                    "specialty": shelf.specialty,
-                    "tags": _load(shelf.tags_json, []),
+                    "domain": "",
+                    "specialty": "",
+                    "tags": topics_by_shelf[shelf.id][:4],
                     "series": by_shelf[shelf.id],
                 }
                 for shelf in shelves

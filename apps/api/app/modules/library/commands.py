@@ -58,9 +58,9 @@ class CatalogCommandService:
             id=_uid("shelf"),
             user_id=self.user_id,
             name=body.name,
-            domain=body.domain,
-            specialty=body.specialty,
-            tags_json=_dump(body.tags),
+            domain="",
+            specialty="",
+            tags_json="[]",
             origin="user_created",
         )
         self.db.add(row)

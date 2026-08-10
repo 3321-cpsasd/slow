@@ -12,6 +12,7 @@ import type {
   AuthState,
   Block,
   Book,
+  BookReplanProposal,
   Bootstrap,
   AccountExitReceipt,
   PrivacyState,
@@ -178,6 +179,8 @@ export default function App() {
   const [error, setError] = useState('');
   const [showAiSettings, setShowAiSettings] = useState(false);
   const [feedbackTarget, setFeedbackTarget] = useState<FeedbackTarget | null>(null);
+  const [bookReplan, setBookReplan] = useState<{ book: Book; proposal: BookReplanProposal } | null>(null);
+  const [learningQaOpen, setLearningQaOpen] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [exitReceipt, setExitReceipt] = useState<AccountExitReceipt | null>(null);
   const [profileSection, setProfileSection] = useState<'profile' | 'account'>(() => (
@@ -766,18 +769,7 @@ export default function App() {
       '正在根据你最近的学习情况调整下一本书…',
       () => api.replanBook(book.id),
     );
-    const outline = proposal.chapters
-      .map((chapter, index) => `${index + 1}. ${chapter.title}：${chapter.objective}`)
-      .join('\n');
-    const confirmed = window.confirm(
-      `系统根据你最近的学习情况调整了下一本书。\n\n${outline}\n\n确认后即可按这份目录开始学习。`,
-    );
-    if (!confirmed) return;
-    await run(
-      '正在确认新章节目录…',
-      () => api.confirmBookReplan(book.id, proposal.proposalId),
-    );
-    await refreshSeries();
+    setBookReplan({ book, proposal });
   };
 
   const generateSection = async (sectionId: string) => {
@@ -1027,21 +1019,15 @@ export default function App() {
             {!authChecked && <div className="auth-inline-status">正在确认登录状态…</div>}
             {error && <div className="auth-inline-error">{error}</div>}
 
-            <div className="auth-trust-list">
-              <div><i>✓</i><span><b>密码不会保存在浏览器</b><small>{usesCredentials ? '登录后只保留安全的登录状态' : 'Slow 不接收身份提供商密码'}</small></span></div>
-              <div><i>✓</i><span><b>学习数据属于当前账号</b><small>书架和学习记录不会与其他账号混合</small></span></div>
-              <div><i>✓</i><span><b>随时安全退出</b><small>退出后当前登录立即失效</small></span></div>
-            </div>
-
-            <small className="auth-disclaimer">
-              {isDemo
-                ? '体验内容会明确标记，并与正式账号数据分开。'
-                : isLocal
-                  ? '本地账号仅用于开发和场景验证，生产环境会拒绝启用。'
-                  : isPassword
-                    ? '账号仅由内测管理员创建，不开放公开注册。'
-                  : `登录将在${providerName}页面完成，Slow 不接收你的密码。`}
-            </small>
+            {(isDemo || isLocal || isPassword) && (
+              <small className="auth-disclaimer">
+                {isDemo
+                  ? '体验内容会明确标记，并与正式账号数据分开。'
+                  : isLocal
+                    ? '本地账号仅用于开发和场景验证，生产环境会拒绝启用。'
+                    : '账号仅由内测管理员创建，不开放公开注册。'}
+              </small>
+            )}
             {authConfig?.privacyNotice && (
               <details className="auth-privacy-brief">
                 <summary>内测隐私与数据说明</summary>
@@ -1251,11 +1237,12 @@ export default function App() {
                 {data?.milestoneDashboard.path?.seriesId === series.id
                   && (data.milestoneDashboard.path.status === 'proposed' || !data.milestoneDashboard.path.goalAligned) && (
                   <div className="path-confirm-alert" role="status">
+                    <i className="path-confirm-mark" aria-hidden="true">✓</i>
                     <span>
-                      <b>{data.milestoneDashboard.path.goalAligned ? '确认这条学习路径' : '学习画像已更新'}</b>
+                      <b>{data.milestoneDashboard.path.goalAligned ? '学习路径待确认' : '你的学习目标有变化'}</b>
                       <small>{data.milestoneDashboard.path.goalAligned
                         ? '确认后，这个系列会按当前目标记录里程碑。'
-                        : '请检查这个系列是否仍然符合你的最新目标。'}</small>
+                        : '如果这个系列仍适合你，可以继续沿用当前路径。'}</small>
                     </span>
                     <button
                       className="secondary-button"
@@ -1264,7 +1251,7 @@ export default function App() {
                         setData(await api.bootstrap());
                       }}
                     >
-                      {data.milestoneDashboard.path.goalAligned ? '确认路径' : '按新目标重新确认'}
+                      {data.milestoneDashboard.path.goalAligned ? '确认路径' : '继续沿用'}
                     </button>
                   </div>
                 )}
@@ -1355,10 +1342,25 @@ export default function App() {
                   block,
                 });
               }}
+              onQaVisibilityChange={setLearningQaOpen}
             />
           </>
         )}
       </main>
+      {bookReplan && (
+        <BookReplanDialog
+          book={bookReplan.book}
+          proposal={bookReplan.proposal}
+          onClose={() => setBookReplan(null)}
+          onConfirm={async () => {
+            await run(
+              '正在确认新章节目录…',
+              () => api.confirmBookReplan(bookReplan.book.id, bookReplan.proposal.proposalId),
+            );
+            await refreshSeries();
+          }}
+        />
+      )}
       {showDailyModeDialog && data?.dailyMode && (
         <DailyModeDialog
           state={data.dailyMode}
@@ -1369,13 +1371,15 @@ export default function App() {
       {AI_RUNTIME_SETTINGS_ENABLED && showAiSettings && (
         <AiSettingsDialog onClose={() => setShowAiSettings(false)} />
       )}
-      <button
-        className="global-feedback-tab"
-        aria-label="反馈产品问题或建议"
-        onClick={() => setFeedbackTarget({ scope: 'global' })}
-      >
-        <span aria-hidden="true">✦</span> 反馈
-      </button>
+      {!(view === 'learn' && learningQaOpen) && (
+        <button
+          className="global-feedback-tab"
+          aria-label="反馈产品问题或建议"
+          onClick={() => setFeedbackTarget({ scope: 'global' })}
+        >
+          <span aria-hidden="true">✦</span> 反馈
+        </button>
+      )}
       {feedbackTarget && (
         <FeedbackDialog
           target={feedbackTarget}
@@ -1384,6 +1388,230 @@ export default function App() {
           onRefreshSeries={refreshSeries}
           onClose={() => setFeedbackTarget(null)}
         />
+      )}
+    </div>
+  );
+}
+
+function BookReplanDialog({
+  book,
+  proposal,
+  onClose,
+  onConfirm,
+}: {
+  book: Book;
+  proposal: BookReplanProposal;
+  onClose: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const dialogRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    dialogRef.current?.focus();
+    const handleKeys = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !confirming) {
+        onClose();
+        return;
+      }
+      if (event.key !== 'Tab' || !dialogRef.current) return;
+      const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>('button:not(:disabled)'));
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialogRef.current)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', handleKeys);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener('keydown', handleKeys);
+    };
+  }, [confirming, onClose]);
+
+  return (
+    <div
+      className="confirm-backdrop book-replan-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !confirming) onClose();
+      }}
+    >
+      <section
+        ref={dialogRef}
+        className="book-replan-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="book-replan-title"
+        tabIndex={-1}
+      >
+        <header className="book-replan-heading">
+          <div>
+            <p className="eyebrow">下一本书 · 目录预览</p>
+            <h2 id="book-replan-title">开始《{book.title}》前，先看一眼新目录</h2>
+            <p>内容已结合你最近的学习表现调整。采用后，这本书会按下面的章节顺序展开。</p>
+          </div>
+          <button className="dialog-close" type="button" aria-label="关闭目录预览" disabled={confirming} onClick={onClose}>×</button>
+        </header>
+
+        <ol className="book-replan-outline">
+          {proposal.chapters.map((chapter, index) => (
+            <li key={`${chapter.title}-${index}`}>
+              <span>{String(index + 1).padStart(2, '0')}</span>
+              <div>
+                <b>{chapter.title}</b>
+                <p>{chapter.objective}</p>
+              </div>
+            </li>
+          ))}
+        </ol>
+
+        <footer className="dialog-actions">
+          <button className="quiet-button" type="button" disabled={confirming} onClick={onClose}>稍后再说</button>
+          <button
+            className="primary-button"
+            type="button"
+            disabled={confirming}
+            onClick={async () => {
+              setConfirming(true);
+              let confirmed = false;
+              try {
+                await onConfirm();
+                confirmed = true;
+              } finally {
+                setConfirming(false);
+              }
+              if (confirmed) onClose();
+            }}
+          >
+            {confirming ? '正在采用…' : '采用这份目录'}
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function FeedbackTypeDropdown({
+  options,
+  value,
+  disabled,
+  onChange,
+}: {
+  options: string[][];
+  value: string;
+  disabled: boolean;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const selectedIndex = Math.max(0, options.findIndex(([optionValue]) => optionValue === value));
+  const selectedLabel = options[selectedIndex]?.[1] || '';
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOutside = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setOpen(false);
+      triggerRef.current?.focus();
+    };
+    document.addEventListener('mousedown', closeOutside);
+    document.addEventListener('keydown', closeOnEscape);
+    const focusFrame = window.requestAnimationFrame(() => optionRefs.current[selectedIndex]?.focus());
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.removeEventListener('mousedown', closeOutside);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [open, selectedIndex]);
+
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+
+  const moveFocus = (index: number) => {
+    const nextIndex = (index + options.length) % options.length;
+    optionRefs.current[nextIndex]?.focus();
+  };
+
+  const choose = (optionValue: string) => {
+    onChange(optionValue);
+    setOpen(false);
+    window.requestAnimationFrame(() => triggerRef.current?.focus());
+  };
+
+  return (
+    <div className={`feedback-select-control ${open ? 'is-open' : ''}`} ref={rootRef}>
+      <button
+        ref={triggerRef}
+        className="feedback-select-trigger"
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={`反馈类型：${selectedLabel}`}
+        disabled={disabled}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={(event) => {
+          if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
+          event.preventDefault();
+          setOpen(true);
+        }}
+      >
+        <span>{selectedLabel}</span>
+        <i aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="feedback-select-menu" role="listbox" aria-label="反馈类型">
+          {options.map(([optionValue, label], index) => {
+            const selected = optionValue === value;
+            return (
+              <button
+                ref={(node) => { optionRefs.current[index] = node; }}
+                className={`feedback-select-option ${selected ? 'selected' : ''}`}
+                type="button"
+                role="option"
+                aria-selected={selected}
+                tabIndex={-1}
+                key={optionValue}
+                onClick={() => choose(optionValue)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    choose(optionValue);
+                  } else if (event.key === 'ArrowDown') {
+                    event.preventDefault();
+                    moveFocus(index + 1);
+                  } else if (event.key === 'ArrowUp') {
+                    event.preventDefault();
+                    moveFocus(index - 1);
+                  } else if (event.key === 'Home') {
+                    event.preventDefault();
+                    moveFocus(0);
+                  } else if (event.key === 'End') {
+                    event.preventDefault();
+                    moveFocus(options.length - 1);
+                  } else if (event.key === 'Tab') {
+                    setOpen(false);
+                  }
+                }}
+              >
+                <span className="feedback-select-indicator" aria-hidden="true">{selected ? '✓' : ''}</span>
+                <span>{label}</span>
+              </button>
+            );
+          })}
+        </div>
       )}
     </div>
   );
@@ -1440,7 +1668,7 @@ function FeedbackDialog({
     returnFocusRef.current = activeElement instanceof HTMLElement ? activeElement : null;
     const initialFocus = target.scope === 'global'
       ? dialog?.querySelector<HTMLElement>('textarea')
-      : dialog?.querySelector<HTMLElement>('input[type="radio"]:checked');
+      : dialog?.querySelector<HTMLElement>('.feedback-select-trigger');
     (initialFocus || dialog)?.focus();
 
     const handleDialogKeys = (event: KeyboardEvent) => {
@@ -1450,7 +1678,7 @@ function FeedbackDialog({
       }
       if (event.key !== 'Tab' || !dialog) return;
       const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
-        'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])',
+        'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])',
       )).filter((element) => !element.hasAttribute('hidden'));
       if (focusable.length === 0) {
         event.preventDefault();
@@ -1584,23 +1812,15 @@ function FeedbackDialog({
           </div>
         )}
         <form onSubmit={submit}>
-          {!submitted && <fieldset disabled={submitting}>
-            <legend>这次想反馈什么？</legend>
-            <div className="feedback-type-grid">
-              {options.map(([value, label]) => (
-                <label className={feedbackType === value ? 'selected' : ''} key={value}>
-                  <input
-                    type="radio"
-                    name="feedback-type"
-                    value={value}
-                    checked={feedbackType === value}
-                    onChange={() => setFeedbackType(value)}
-                  />
-                  {label}
-                </label>
-              ))}
-            </div>
-          </fieldset>}
+          {!submitted && <div className="feedback-type-select">
+            <span>这次想反馈什么？</span>
+            <FeedbackTypeDropdown
+              options={options}
+              value={feedbackType}
+              disabled={submitting}
+              onChange={setFeedbackType}
+            />
+          </div>}
           {!submitted && <label className="feedback-message-label">
             {target.scope === 'content_block' ? '补充说明（可选）' : '具体说说'}
             <textarea
@@ -1829,8 +2049,8 @@ function AiSettingsDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-function shelfDescriptor(shelf: Pick<Shelf, 'domain' | 'specialty'>) {
-  return [shelf.domain, shelf.specialty].filter(Boolean).join(' · ');
+function shelfDescriptor(shelf: Pick<Shelf, 'tags'>) {
+  return shelf.tags.slice(0, 2).join(' · ');
 }
 
 function bookProgressDetails(book: Book) {
@@ -2007,7 +2227,6 @@ function Home({
     <section className={`library-dashboard mode-${dailyMode}`}>
       <header className="library-hero">
         <div className="library-hero-copy">
-          <p className="library-kicker">知行书架 · Personal library</p>
           <h1>把正在学的，<br /><em>放回眼前。</em></h1>
           <p>{dailyMode === 'fast'
             ? '先用几分钟抓住一个关键判断；正式验证仍沿用同一份教材与标准。'
@@ -2129,10 +2348,9 @@ function Home({
               </div>
             </div>
           ) : (
-            <div className="review-empty-state">
+            <div className="review-empty-state review-clear-state">
               <span>今日已清空</span>
               <h2>没有到期的复习</h2>
-              <p>完成测验后，薄弱概念会按间隔自动回到这里。到期时可直接开始，不需要先打开队列。</p>
             </div>
           )}
           <div className="review-cadence" aria-label="复习间隔">
@@ -2153,7 +2371,6 @@ function Home({
             <p>按领域归档</p>
             <h2 id="library-catalog-title">我的书架</h2>
           </div>
-          <p>每个书架保存该领域的教材、练习和学习进度。</p>
         </header>
 
         <div className="library-shelf-grid">
@@ -2200,7 +2417,7 @@ function Home({
             <span className="shelf-card-content">
               <span className="shelf-card-heading">
                 <span>
-                  <small>{shelfDescriptor(item) || '未设置领域说明'}</small>
+                  <small>{shelfDescriptor(item) || '等待第一套教材归纳'}</small>
                   <strong>{item.name}</strong>
                 </span>
                 <em>{item.series.length} 个系列 · {itemBookCount} 本教材</em>
@@ -2815,9 +3032,6 @@ function ShelfCreateDialog({
   onCreate: (body: ShelfCreateInput) => Promise<void>;
 }) {
   const [name, setName] = useState('');
-  const [domain, setDomain] = useState('');
-  const [specialty, setSpecialty] = useState('');
-  const [tags, setTags] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
 
@@ -2829,29 +3043,13 @@ function ShelfCreateDialog({
     return () => document.removeEventListener('keydown', closeOnEscape);
   }, [onClose, submitting]);
 
-  const parsedTags = Array.from(new Set(
-    tags
-      .split(/[,，]/)
-      .map((item) => item.trim())
-      .filter(Boolean),
-  ));
-
   const send = async (event: FormEvent) => {
     event.preventDefault();
     if (submitting) return;
-    if (parsedTags.length > 12) {
-      setFormError('主题标签最多填写 12 个');
-      return;
-    }
     setSubmitting(true);
     setFormError('');
     try {
-      await onCreate({
-        name: name.trim(),
-        domain: domain.trim(),
-        specialty: specialty.trim(),
-        tags: parsedTags,
-      });
+      await onCreate({ name: name.trim() });
     } catch (reason) {
       setFormError(reason instanceof Error ? reason.message : '书架创建失败，请稍后重试');
       setSubmitting(false);
@@ -2873,22 +3071,11 @@ function ShelfCreateDialog({
       >
         <div className="shelf-create-heading">
           <div>
-            <p className="eyebrow">建立一个学习领域</p>
+            <p className="eyebrow">新建学习空间</p>
             <h2 id="shelf-create-title">创建书架</h2>
-            <p>书架用于集中保存同一领域的教材、练习和学习进度。</p>
+            <p>先给书架一个名字。学习方向和主题会随着教材自动整理。</p>
           </div>
           <button className="dialog-close" aria-label="关闭创建书架" disabled={submitting} onClick={onClose}>×</button>
-        </div>
-
-        <div className="shelf-create-nameplate" aria-label="书架铭牌预览">
-          <span>{(name.trim() || '新').slice(0, 1)}</span>
-          <div>
-            <small>书架铭牌预览</small>
-            <b>{name.trim() || '新书架'}</b>
-            {(domain.trim() || specialty.trim()) && (
-              <em>{[domain.trim(), specialty.trim()].filter(Boolean).join(' · ')}</em>
-            )}
-          </div>
         </div>
 
         <form className="shelf-create-form" onSubmit={send}>
@@ -2900,39 +3087,13 @@ function ShelfCreateDialog({
               maxLength={100}
               disabled={submitting}
               value={name}
-              onChange={(event) => setName(event.target.value)}
-            />
-          </label>
-          <label>
-            学习领域（可选）
-            <input
-              maxLength={100}
-              disabled={submitting}
-              value={domain}
-              onChange={(event) => setDomain(event.target.value)}
-            />
-          </label>
-          <label>
-            细分方向（可选）
-            <input
-              maxLength={120}
-              disabled={submitting}
-              value={specialty}
-              onChange={(event) => setSpecialty(event.target.value)}
-            />
-          </label>
-          <label>
-            主题标签（可选）
-            <input
-              maxLength={240}
-              disabled={submitting}
-              value={tags}
+              placeholder="例如：技术、产品设计、经济学"
               onChange={(event) => {
-                setTags(event.target.value);
+                setName(event.target.value);
                 setFormError('');
               }}
             />
-            <small>最多 12 个，方便以后查找和整理。</small>
+            <small>加入教材后，书架会自动显示学习方向和主题。</small>
           </label>
           {formError && <p className="shelf-create-error" role="alert">{formError}</p>}
           <div className="dialog-actions">
@@ -2984,7 +3145,6 @@ function ShelfPage({
       <div className="title-row">
         <div>
           <h1>{shelf.name}</h1>
-          <p className="lead">选择一个系列继续学习，或规划新的学习主题。</p>
         </div>
         <button className="primary-button" onClick={() => setShowPlan(!showPlan)}>＋ 创建学习系列</button>
       </div>
@@ -3180,6 +3340,7 @@ function LearningWorkspace({
   onRefreshSeries,
   onDeleteBook,
   onFeedbackBlock,
+  onQaVisibilityChange,
 }: {
   series: Series;
   section: Section | null;
@@ -3196,22 +3357,42 @@ function LearningWorkspace({
   onRefreshSeries: () => Promise<void>;
   onDeleteBook: (bookId: string) => Promise<void>;
   onFeedbackBlock: (block: Block) => void;
+  onQaVisibilityChange: (open: boolean) => void;
 }) {
   const [selectedBlockId, setSelectedBlockId] = useState('');
   const [selectedQuote, setSelectedQuote] = useState<TextQuote | null>(null);
   const [compactLayout, setCompactLayout] = useState(() => window.matchMedia('(max-width: 900px)').matches);
+  const [auxiliaryExclusive, setAuxiliaryExclusive] = useState(() => window.matchMedia('(max-width: 1180px)').matches);
   const [directoryHidden, setDirectoryHidden] = useState(() => window.matchMedia('(max-width: 900px)').matches);
-  const [qaHidden, setQaHidden] = useState(() => window.matchMedia('(max-width: 900px)').matches);
+  const [qaHidden, setQaHidden] = useState(true);
 
   useEffect(() => {
-    const media = window.matchMedia('(max-width: 900px)');
-    const adaptPanels = (event: MediaQueryListEvent) => {
-      setCompactLayout(event.matches);
-      setDirectoryHidden(event.matches);
-      setQaHidden(event.matches);
+    onQaVisibilityChange(!qaHidden);
+  }, [onQaVisibilityChange, qaHidden]);
+
+  useEffect(() => () => onQaVisibilityChange(false), [onQaVisibilityChange]);
+
+  useEffect(() => {
+    const compactMedia = window.matchMedia('(max-width: 900px)');
+    const exclusiveMedia = window.matchMedia('(max-width: 1180px)');
+    const adaptPanels = () => {
+      const compact = compactMedia.matches;
+      const exclusive = exclusiveMedia.matches;
+      setCompactLayout(compact);
+      setAuxiliaryExclusive(exclusive);
+      if (compact) {
+        setDirectoryHidden(true);
+        setQaHidden(true);
+      } else if (exclusive) {
+        setDirectoryHidden(true);
+      }
     };
-    media.addEventListener('change', adaptPanels);
-    return () => media.removeEventListener('change', adaptPanels);
+    compactMedia.addEventListener('change', adaptPanels);
+    exclusiveMedia.addEventListener('change', adaptPanels);
+    return () => {
+      compactMedia.removeEventListener('change', adaptPanels);
+      exclusiveMedia.removeEventListener('change', adaptPanels);
+    };
   }, []);
 
   useEffect(() => {
@@ -3226,11 +3407,11 @@ function LearningWorkspace({
     setSelectedQuote(null);
   };
   const toggleDirectory = () => {
-    if (compactLayout && directoryHidden) setQaHidden(true);
+    if ((compactLayout || auxiliaryExclusive) && directoryHidden) setQaHidden(true);
     setDirectoryHidden((hidden) => !hidden);
   };
   const toggleQa = () => {
-    if (compactLayout && qaHidden) setDirectoryHidden(true);
+    if ((compactLayout || auxiliaryExclusive) && qaHidden) setDirectoryHidden(true);
     setQaHidden((hidden) => !hidden);
   };
 
@@ -3274,6 +3455,8 @@ function LearningWorkspace({
         onQuote={(quote) => {
           setSelectedBlockId(quote.blockId);
           setSelectedQuote(quote);
+          if (compactLayout || auxiliaryExclusive) setDirectoryHidden(true);
+          setQaHidden(false);
         }}
         onGenerate={() => section && onGenerateSection(section.id)}
         onRegenerate={() => (section ? onRegenerateSection(section.id) : Promise.resolve())}
@@ -3382,7 +3565,7 @@ function DirectoryPanel({
   return (
     <aside className="directory-panel" id="course-directory-panel" aria-label="课程目录" hidden={hidden}>
       <div className="directory-heading">
-        <button className="panel-drawer-close" aria-label="关闭目录" onClick={onClose}>×</button>
+        <button className="panel-collapse-button" aria-label="收起目录" onClick={onClose}>收起</button>
         <span className="panel-label">目录</span>
         <h2>{series.title}</h2>
         <div className="series-progress">
@@ -4067,26 +4250,50 @@ function ReaderPanelToggles({
 }) {
   return (
     <>
-      <button
-        className={`reader-rail-toggle directory-toggle ${directoryHidden ? 'is-collapsed' : ''}`}
-        aria-controls="course-directory-panel"
-        aria-expanded={!directoryHidden}
-        aria-label={directoryHidden ? '显示目录' : '隐藏目录'}
-        title={directoryHidden ? '显示目录' : '隐藏目录'}
-        onClick={onToggleDirectory}
-      >
-        {directoryHidden ? '›' : '‹'}
-      </button>
-      <button
-        className={`reader-rail-toggle qa-toggle ${qaHidden ? 'is-collapsed' : ''}`}
-        aria-controls="section-qa-panel"
-        aria-expanded={!qaHidden}
-        aria-label={qaHidden ? '显示答疑' : '隐藏答疑'}
-        title={qaHidden ? '显示答疑' : '隐藏答疑'}
-        onClick={onToggleQa}
-      >
-        {qaHidden ? '‹' : '›'}
-      </button>
+      {directoryHidden && (
+        <button
+          className="reader-directory-trigger"
+          aria-controls="course-directory-panel"
+          aria-expanded={false}
+          onClick={onToggleDirectory}
+        >
+          目录
+        </button>
+      )}
+      {!directoryHidden && (
+        <button
+          className="reader-rail-toggle directory-toggle"
+          aria-controls="course-directory-panel"
+          aria-expanded={true}
+          aria-label="收起目录"
+          title="收起目录"
+          onClick={onToggleDirectory}
+        >
+          ‹
+        </button>
+      )}
+      {qaHidden && (
+        <button
+          className="reader-qa-trigger"
+          aria-controls="section-qa-panel"
+          aria-expanded={false}
+          onClick={onToggleQa}
+        >
+          Ask AI
+        </button>
+      )}
+      {!qaHidden && (
+        <button
+          className="reader-rail-toggle qa-toggle"
+          aria-controls="section-qa-panel"
+          aria-expanded={true}
+          aria-label="收起答疑"
+          title="收起答疑"
+          onClick={onToggleQa}
+        >
+          ›
+        </button>
+      )}
     </>
   );
 }
@@ -4234,7 +4441,7 @@ function LessonContent({
         <h3>{section.status === 'completed' ? '你的验证结果已经保存。' : '现在，验证你是否真正理解。'}</h3>
         <p>{section.status === 'completed'
           ? '可以随时回看作答结果、错题解析和对应的正文依据。'
-          : '完成选择题并达到及格线，才会解锁下一节；满分后还会开放“深入讨论”。'}</p>
+          : '完成选择题：及格解锁下一节，满分解锁隐藏关卡。'}</p>
         <button className="primary-button" onClick={onStartQuiz}>
           {section.status === 'completed' ? '查看验证结果' : '开始验证'} <i>→</i>
         </button>
@@ -5762,8 +5969,10 @@ function QaPanel({
   return (
     <aside className="qa-panel" id="section-qa-panel" aria-label="本节答疑" hidden={hidden}>
       <div className="qa-heading">
-        <button className="panel-drawer-close" aria-label="关闭答疑" onClick={onClose}>×</button>
-        <span className="panel-label">答疑</span>
+        <div>
+          <span className="panel-label">答疑</span>
+          <button className="panel-collapse-button" aria-label="收起答疑" onClick={onClose}>收起</button>
+        </div>
         <h2>围绕当前小节追问</h2>
         <p>{dailyMode === 'fast' ? '先结论、后三点；答疑不会影响学习进度。' : '答疑独立保存，不会打断正文阅读。'}</p>
       </div>
@@ -5775,10 +5984,9 @@ function QaPanel({
         </div>
       ) : (
         <>
-          <div className="anchor-card">
-            <span>当前锚点</span>
-            <b>{selectedBlock?.heading || '请选择正文段落'}</b>
-            <select value={effectiveBlockId} onChange={(event) => onAnchor(event.target.value)}>
+          <div className="qa-context-bar">
+            <span>当前段落</span>
+            <select aria-label="当前答疑段落" value={effectiveBlockId} onChange={(event) => onAnchor(event.target.value)}>
               {section.content.blocks.map((block, index) => (
                 <option value={block.id} key={block.id}>{index + 1}. {block.heading}</option>
               ))}

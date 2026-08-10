@@ -275,6 +275,18 @@ def test_disable_and_password_reset_revoke_all_user_sessions(tmp_path):
         )
         assert completed.status_code == 200
         assert client.get("/api/bootstrap").json()["shelves"] == []
+        rejected_metadata = client.post(
+            "/api/shelves",
+            headers={"X-CSRF-Token": logged_in.json()["csrfToken"]},
+            json={"name": "旧版书架", "domain": "不再接受手填分类"},
+        )
+        assert rejected_metadata.status_code == 400
+        rejected_blank_name = client.post(
+            "/api/shelves",
+            headers={"X-CSRF-Token": logged_in.json()["csrfToken"]},
+            json={"name": "   "},
+        )
+        assert rejected_blank_name.status_code == 400
         created = client.post(
             "/api/shelves",
             headers={"X-CSRF-Token": logged_in.json()["csrfToken"]},
@@ -282,6 +294,8 @@ def test_disable_and_password_reset_revoke_all_user_sessions(tmp_path):
         )
         assert created.status_code == 201
         assert created.json()["domain"] == ""
+        assert created.json()["specialty"] == ""
+        assert created.json()["tags"] == []
         shelf_id = created.json()["id"]
 
         new_password = "A-New-Beta-Password-2026"
