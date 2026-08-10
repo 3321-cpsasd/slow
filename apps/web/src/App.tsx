@@ -4096,14 +4096,16 @@ function selectFastBlocks(blocks: Block[]) {
   const add = (block?: Block) => {
     if (block && !selected.some((item) => item.id === block.id)) selected.push(block);
   };
+
+  // Fast view must be materially shorter than the 5–9 block lesson body.
+  // Keep the answer and its failure boundary; the full mechanism, example and
+  // practice remain one click away in the complete text.
   add(blocks.find((block) => block.role === 'conclusion'));
-  add(blocks.find((block) => block.role === 'mechanism'));
-  add(blocks.find((block) => block.role === 'example'));
   add(blocks.find((block) => block.role === 'boundary'));
   blocks.forEach((block) => {
-    if (selected.length < 4) add(block);
+    if (selected.length < 2) add(block);
   });
-  return selected.slice(0, 4);
+  return selected.slice(0, 2);
 }
 
 function LessonContent({
@@ -4187,7 +4189,7 @@ function LessonContent({
         <aside className="fast-view-notice">
           <div>
             <span>FAST VIEW · 快速浏览</span>
-            <b>{showCompleteFast ? '已展开完整正文' : `保留 ${fastBlocks.length} 个关键段落`}</b>
+            <b>{showCompleteFast ? '已展开完整正文' : `只看结论与边界 · ${fastBlocks.length} 个关键段落`}</b>
             <p>这里只调整呈现密度。快速浏览不会计为完成；通过验证后才会记录进度。</p>
           </div>
           <button type="button" onClick={() => setShowCompleteFast((shown) => !shown)}>
