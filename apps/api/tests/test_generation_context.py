@@ -168,7 +168,7 @@ def test_context_pack_propagates_profile_mission_depth_and_attempt():
         assert plan_context["operation"] == "plan"
         assert plan_context["learner"]["planRole"] == "猎头顾问"
         assert plan_context["learner"]["planExperience"].startswith("能阅读技术简历")
-        assert plan_context["policy"]["depthPolicy"]["label"] == "深度学习"
+        assert plan_context["policy"]["depthPolicy"]["label"] == "深入理解"
 
         chapter_context = ai.requests["chapter"][0]["generationContext"]
         assert chapter_context["operation"] == "chapter"

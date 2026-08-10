@@ -1523,8 +1523,22 @@ button:disabled { cursor: not-allowed; }
 }
 .plan-form fieldset { border: 0; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 8px; }
 .plan-form legend { width: 100%; margin-bottom: 7px; font-weight: 650; }
-.plan-form fieldset button { border: 1px solid #d7d9d3; background: #f8f8f5; padding: 8px 11px; border-radius: 8px; }
+.plan-form fieldset button {
+  display: flex;
+  flex: 1 1 150px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  border: 1px solid #d7d9d3;
+  background: #f8f8f5;
+  padding: 10px 12px;
+  border-radius: 8px;
+  text-align: left;
+}
+.plan-form fieldset button span { font-weight: 650; }
+.plan-form fieldset button small { color: var(--muted); font-size: 10px; line-height: 1.45; }
 .plan-form fieldset button.selected { border-color: #6f987f; background: var(--green-soft); color: var(--green); }
+.plan-form fieldset button.selected small { color: inherit; opacity: .78; }
 .plan-form-error { flex-basis: 100%; margin: 2px 0 0; color: var(--danger); font-size: 11px; font-weight: 500; }
 
 .learning-workspace {

@@ -2837,6 +2837,11 @@ function TrashIcon({ size = 16 }: { size?: number }) {
 }
 
 function PlanForm({ profile, submit }: { profile: LearningProfile; submit: (body: object, idempotencyKey: string) => Promise<void> }) {
+  const depthOptions = [
+    { value: 'overview', label: '快速了解', description: '建立基本认识，抓住核心概念' },
+    { value: 'deep', label: '深入理解', description: '理解原理、边界和典型应用' },
+    { value: 'mastery', label: '掌握运用', description: '能够独立迁移，并通过复习巩固' },
+  ];
   const [topic, setTopic] = useState('');
   const [background, setBackground] = useState(profile.profession);
   const [experience, setExperience] = useState(profile.experience || '暂无直接经验，希望从当前基础开始建立理解。');
@@ -2883,7 +2888,7 @@ function PlanForm({ profile, submit }: { profile: LearningProfile; submit: (body
       </label>
       <fieldset disabled={submitting} aria-describedby={formError ? 'plan-depth-error' : undefined}>
         <legend>目标深度</legend>
-        {[['overview', '简单了解'], ['deep', '深度学习'], ['mastery', '掌握路径']].map(([value, label]) => (
+        {depthOptions.map(({ value, label, description }) => (
           <button
             type="button"
             className={depth === value ? 'selected' : ''}
@@ -2894,7 +2899,8 @@ function PlanForm({ profile, submit }: { profile: LearningProfile; submit: (body
             }}
             key={value}
           >
-            {label}
+            <span>{label}</span>
+            <small>{description}</small>
           </button>
         ))}
         {formError && <p className="plan-form-error" id="plan-depth-error" role="alert">{formError}</p>}
