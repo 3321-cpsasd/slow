@@ -1233,6 +1233,10 @@ def create_app(
     @app.post("/api/sections/{section_id}/ask")
     async def ask(section_id: str, body: AskRequest, s: SlowService = Depends(service)): return await s.ask(section_id, body)
 
+    @app.get("/api/sections/{section_id}/qa/history")
+    def qa_history(section_id: str, s: SlowService = Depends(service)):
+        return s.qa_history(section_id)
+
     @app.post("/api/sections/{section_id}/ask/stream")
     async def ask_stream(section_id: str, body: AskRequest, s: SlowService = Depends(service)):
         context = s.prepare_ask(section_id, body)

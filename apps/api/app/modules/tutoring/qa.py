@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from datetime import timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -51,6 +52,106 @@ class QaService:
         self.uid = uid
         self.dump = dump
         self.load = load
+
+    def history(self, section_id: str):
+        """Return persisted Ask AI history for the user's active learning run.
+
+        Reading history is deliberately side-effect free: opening a section that
+        has never used Ask AI must not create an empty QA session.
+        """
+        section_context = self.contexts.resolve_section(
+            user_id=self.user_id,
+            section_id=section_id,
+        )
+        learning_run = self.progress.active_run(section_context.series.id)
+        session = self.db.scalar(
+            select(QaSession).where(
+                QaSession.section_id == section_id,
+                QaSession.user_id == self.user_id,
+                QaSession.learning_run_id == learning_run.id,
+            )
+        )
+        if not session:
+            return {
+                "sectionId": section_id,
+                "lastThreadId": None,
+                "threads": [],
+            }
+
+        threads = self.db.scalars(
+            select(QaThread)
+            .where(QaThread.session_id == session.id)
+            .order_by(QaThread.created_at, QaThread.thread_id)
+        ).all()
+        messages = self.db.scalars(
+            select(QaMessage)
+            .where(QaMessage.session_id == session.id)
+            .order_by(QaMessage.created_at, QaMessage.id)
+        ).all()
+        messages_by_thread: dict[str, list[dict]] = {
+            thread.thread_id: [] for thread in threads
+        }
+        for message in messages:
+            # A message without its thread is inconsistent persisted state. Do
+            # not fabricate a user-visible thread from an orphaned row.
+            if message.thread_id not in messages_by_thread:
+                continue
+            messages_by_thread[message.thread_id].append(
+                {
+                    "id": message.id,
+                    "blockId": message.block_id,
+                    "role": message.role,
+                    "content": message.content,
+                    "createdAt": message.created_at.isoformat(),
+                }
+            )
+
+        # Older rows were inserted as a user/assistant pair without an
+        # explicit causal timestamp. SQLAlchemy may flush same-table rows in
+        # primary-key order, so the assistant row can receive the earlier
+        # default timestamp. Each saved turn is exactly one adjacent pair;
+        # normalize that pair for a stable, conversational history view.
+        for thread_id, thread_messages in messages_by_thread.items():
+            ordered_messages: list[dict] = []
+            for position in range(0, len(thread_messages), 2):
+                pair = thread_messages[position : position + 2]
+                if {item["role"] for item in pair} == {"user", "assistant"}:
+                    pair = sorted(
+                        pair,
+                        key=lambda item: 0 if item["role"] == "user" else 1,
+                    )
+                ordered_messages.extend(pair)
+            messages_by_thread[thread_id] = ordered_messages
+
+        thread_ids = {thread.thread_id for thread in threads}
+        memory = self.load(session.memory_json, {}) or {}
+        last_thread_id = memory.get("lastThread")
+        if last_thread_id not in thread_ids:
+            last_thread_id = (
+                max(
+                    threads,
+                    key=lambda thread: (thread.updated_at, thread.thread_id),
+                ).thread_id
+                if threads
+                else None
+            )
+
+        return {
+            "sectionId": section_id,
+            "lastThreadId": last_thread_id,
+            "threads": [
+                {
+                    "threadId": thread.thread_id,
+                    "summary": thread.summary,
+                    "relation": thread.classification,
+                    "corrected": thread.corrected,
+                    "createdAt": thread.created_at.isoformat(),
+                    "updatedAt": thread.updated_at.isoformat(),
+                    "messages": messages_by_thread[thread.thread_id],
+                }
+                for thread in threads
+            ],
+        }
 
     def prepare(self, section_id: str, body):
         section_context = self.contexts.resolve_section(
@@ -226,6 +327,7 @@ class QaService:
         thread_summary = thread_summary.strip() or answer.strip()[:240]
         thread.summary = thread_summary
         thread.updated_at = now()
+        user_message_created_at = now()
         self.db.add_all(
             [
                 QaMessage(
@@ -235,6 +337,7 @@ class QaService:
                     block_id=body.block_id,
                     role="user",
                     content=body.question,
+                    created_at=user_message_created_at,
                 ),
                 QaMessage(
                     id=self.uid("msg"),
@@ -243,6 +346,7 @@ class QaService:
                     block_id=body.block_id,
                     role="assistant",
                     content=answer,
+                    created_at=user_message_created_at + timedelta(microseconds=1),
                 ),
             ]
         )

@@ -1357,6 +1357,9 @@ class SlowService:
     def prepare_ask(self, section_id, body):
         return self.qa_service.prepare(section_id, body)
 
+    def qa_history(self, section_id):
+        return self.qa_service.history(section_id)
+
     def _save_qa_answer(
         self,
         context,

@@ -197,7 +197,15 @@ export type FeedbackRepairResult = {
   contentBlockId:string;
   replayed:boolean;
 };
-export type Question = { prompt:string; options:string[]; core:boolean; objective:string; assessmentTargetId?:string; selectionMode:'single'|'multiple' };
+export type Question = {
+  prompt:string;
+  options:string[];
+  core:boolean;
+  objective:string;
+  assessmentTargetId?:string;
+  evidenceBlockIds?:string[];
+  selectionMode:'single'|'multiple';
+};
 export type QuizGovernance = {
   decisionId:string;
   scope:string;
@@ -404,4 +412,25 @@ export type QaCorrection = {
   targetThreadId:string;
   classification:'follow_up';
   corrected:boolean;
+};
+export type QaHistoryMessage = {
+  id:string;
+  blockId:string;
+  role:'user'|'assistant';
+  content:string;
+  createdAt:string;
+};
+export type QaHistoryThread = {
+  threadId:string;
+  summary:string;
+  relation:'follow_up'|'new_question';
+  corrected:boolean;
+  createdAt:string;
+  updatedAt:string;
+  messages:QaHistoryMessage[];
+};
+export type QaHistory = {
+  sectionId:string;
+  lastThreadId:string|null;
+  threads:QaHistoryThread[];
 };
