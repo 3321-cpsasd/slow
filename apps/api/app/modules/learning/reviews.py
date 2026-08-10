@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import re
+from typing import ClassVar
 from uuid import uuid4
 
 from sqlalchemy import func, select
@@ -49,6 +50,65 @@ from .review_assignments import (
     select_daily_reviews,
     transition_assignment,
 )
+
+
+_REVIEW_BLOCK_ROLE_COMPATIBILITY = {
+    "core_instruction": "conclusion",
+    "prerequisite_scaffold": "transition",
+    "comparison": "example",
+    "application": "example",
+    "transfer": "example",
+    "summary": "conclusion",
+}
+
+
+class _ReviewGenerationContent(GeneratedContent):
+    enforce_standard_sentence_endings: ClassVar[bool] = False
+
+
+def _content_for_review_generation(content: ContentVersion) -> GeneratedContent:
+    """Project published lesson blocks into the legacy quiz-generation view.
+
+    ContentVersion stores the authoritative published v2 block payload.  The
+    delayed-review quiz generator still consumes the smaller GeneratedContent
+    contract, so only the fields it needs are copied across this boundary.
+    """
+
+    blocks = _load(content.blocks_json, [])
+    projected_blocks = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            raise AppError(
+                "复习所需的教材内容暂时不可用，请稍后重试",
+                code="REVIEW_CONTENT_UNAVAILABLE",
+                status=409,
+                retryable=True,
+            )
+        role = str(block.get("role", ""))
+        kind = str(block.get("kind", ""))
+        projected_blocks.append({
+            "id": block.get("id", ""),
+            "version": block.get("version", 1),
+            "kind": "text" if kind in {"bullet_list", "ordered_steps"} else kind,
+            "role": _REVIEW_BLOCK_ROLE_COMPATIBILITY.get(role, role),
+            "heading": block.get("heading", ""),
+            "content": block.get("content", ""),
+            "source_indexes": block.get("source_indexes", []),
+            "assessment_objectives": block.get("assessment_objectives", []),
+        })
+    try:
+        return _ReviewGenerationContent.model_validate({
+            "confidence": content.confidence,
+            "sources": _load(content.sources_json, []),
+            "blocks": projected_blocks,
+        })
+    except ValueError as error:
+        raise AppError(
+            "复习所需的教材内容暂时不可用，请稍后重试",
+            code="REVIEW_CONTENT_UNAVAILABLE",
+            status=409,
+            retryable=True,
+        ) from error
 
 
 def _uid(prefix: str) -> str:
@@ -420,11 +480,7 @@ class ReviewAssignmentService:
         if not prior_quiz or not content or not section or not target:
             raise AppError("复习来源链不完整", code="REVIEW_SOURCE_MISSING", status=409)
         prior = self._question_for_target(prior_quiz, target.id)
-        generated_content = GeneratedContent.model_validate({
-            "confidence": content.confidence,
-            "sources": _load(content.sources_json, []),
-            "blocks": _load(content.blocks_json, []),
-        })
+        generated_content = _content_for_review_generation(content)
         request = {
                 "id": section.id,
                 "title": section.title,
