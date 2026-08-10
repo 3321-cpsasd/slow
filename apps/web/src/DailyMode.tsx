@@ -20,15 +20,33 @@ const formatExpiry = (expiresAt: string | null) => {
   }).format(new Date(expiresAt));
 };
 
+const sameCalendarDay = (left: Date, right: Date) => (
+  left.getFullYear() === right.getFullYear()
+  && left.getMonth() === right.getMonth()
+  && left.getDate() === right.getDate()
+);
+
 const previewExpiry = (duration: DailyModeDuration) => {
-  const expiresAt = new Date();
+  const now = new Date();
+  const expiresAt = new Date(now);
   if (duration === 'today') expiresAt.setHours(23, 59, 59, 999);
   else expiresAt.setHours(expiresAt.getHours() + Number.parseInt(duration, 10));
-  return `保持至今天 ${new Intl.DateTimeFormat('zh-CN', {
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const dayLabel = sameCalendarDay(expiresAt, now)
+    ? '今天'
+    : sameCalendarDay(expiresAt, tomorrow)
+      ? '明天'
+      : new Intl.DateTimeFormat('zh-CN', {
+          month: 'numeric',
+          day: 'numeric',
+        }).format(expiresAt);
+  const time = new Intl.DateTimeFormat('zh-CN', {
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
-  }).format(expiresAt)}`;
+  }).format(expiresAt);
+  return `保持至${dayLabel} ${time}`;
 };
 
 export function DailyModeHeader({

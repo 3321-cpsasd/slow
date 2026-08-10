@@ -196,6 +196,7 @@ export default function App() {
   const restoreLocationRef = useRef<() => Promise<void>>(async () => undefined);
   const routeRequestVersion = useRef(0);
   const routeInitializedForUser = useRef('');
+  const initialSectionMonitorVersion = useRef(0);
 
   const hasActiveDailyMode = () => Boolean(
     data?.dailyMode?.active
@@ -496,8 +497,7 @@ export default function App() {
     setProfileSection(nextSection);
   };
 
-  const openAndTrackSection = async (sectionId: string) => {
-    const value = await api.openSection(sectionId);
+  const applyOpenedSection = (value: Section, sectionId: string) => {
     setActivityDailyMode(
       value.dailyModeAtStart
       || data?.dailyMode?.dailyMode
@@ -506,6 +506,11 @@ export default function App() {
     );
     setDailyModeExpiredDuringActivity(false);
     void api.updateResume(sectionId).catch(() => undefined);
+  };
+
+  const openAndTrackSection = async (sectionId: string) => {
+    const value = await api.openSection(sectionId);
+    applyOpenedSection(value, sectionId);
     return value;
   };
 
@@ -576,48 +581,78 @@ export default function App() {
   const monitorInitialSection = async (value: Series) => {
     const initialTask = value.initializationTask;
     if (!initialTask || initialTask.status === 'failed') return false;
+    const monitorVersion = ++initialSectionMonitorVersion.current;
+    const navigationVersion = routeRequestVersion.current;
+    const busyLabel = '正在准备第一节，完成后自动打开…';
+    const isCurrent = () => {
+      const route = routeFromLocation();
+      return monitorVersion === initialSectionMonitorVersion.current
+        && navigationVersion === routeRequestVersion.current
+        && route.view === 'learn'
+        && route.seriesId === value.id;
+    };
     setPreparingInitialSection(true);
-    setBusy('正在准备第一节，完成后自动打开…');
+    setBusy(busyLabel);
     setError('');
     try {
       let task = initialTask;
       for (let poll = 0; poll < 360; poll += 1) {
+        if (!isCurrent()) return false;
         if (!['succeeded', 'failed'].includes(task.status)) {
           task = await api.learningTask(task.taskId);
+          if (!isCurrent()) return false;
         }
         if (task.status === 'succeeded') {
           const refreshed = await api.series(value.id);
-          setSeries(refreshed);
+          if (!isCurrent()) return false;
           const targetSectionId = typeof task.result?.targetSectionId === 'string'
             ? task.result.targetSectionId
             : firstUsableSection(refreshed);
+          let openedSection: Section | null = null;
           if (targetSectionId) {
+            openedSection = await api.openSection(targetSectionId);
+            if (!isCurrent()) return false;
+          }
+          setSeries(refreshed);
+          if (targetSectionId && openedSection) {
             updateBrowserLocation(seriesPath(refreshed.id, targetSectionId), 'replace');
-            setSection(await openAndTrackSection(targetSectionId));
+            applyOpenedSection(openedSection, targetSectionId);
+            setSection(openedSection);
           }
           return true;
         }
         if (task.status === 'failed') {
           const refreshed = await api.series(value.id);
-          setSeries(refreshed);
+          if (!isCurrent()) return false;
           const fallbackSectionId = firstUsableSection(refreshed);
+          let openedSection: Section | null = null;
           if (fallbackSectionId) {
+            openedSection = await api.openSection(fallbackSectionId);
+            if (!isCurrent()) return false;
+          }
+          setSeries(refreshed);
+          if (fallbackSectionId && openedSection) {
             updateBrowserLocation(seriesPath(refreshed.id, fallbackSectionId), 'replace');
-            setSection(await openAndTrackSection(fallbackSectionId));
+            applyOpenedSection(openedSection, fallbackSectionId);
+            setSection(openedSection);
           }
           setError('第一节暂时没有准备完成。目录已经保存，可以从第一章重新尝试。');
           return true;
         }
         await new Promise((resolve) => window.setTimeout(resolve, 1000));
       }
-      setError('第一节仍在准备，可以稍后重新进入本书查看。');
+      if (isCurrent()) setError('第一节仍在准备，可以稍后重新进入本书查看。');
       return true;
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '无法读取第一节准备状态。');
+      if (isCurrent()) {
+        setError(reason instanceof Error ? reason.message : '无法读取第一节准备状态。');
+      }
       return true;
     } finally {
-      setPreparingInitialSection(false);
-      setBusy('');
+      if (monitorVersion === initialSectionMonitorVersion.current) {
+        setPreparingInitialSection(false);
+        setBusy((current) => current === busyLabel ? '' : current);
+      }
     }
   };
 
@@ -626,8 +661,11 @@ export default function App() {
     requestedSectionId: string | null = null,
     historyMode: 'push' | 'replace' | 'none' = 'push',
   ) => {
+    const requestVersion = historyMode === 'none'
+      ? routeRequestVersion.current
+      : ++routeRequestVersion.current;
     const value = await run('正在进入学习空间…', () => api.series(seriesId));
-    if (historyMode !== 'none') routeRequestVersion.current += 1;
+    if (requestVersion !== routeRequestVersion.current) return;
     updateBrowserLocation(seriesPath(seriesId, requestedSectionId), historyMode);
     setShelf(data?.shelves.find((item) => (
       item.series.some((candidate) => candidate.id === seriesId)

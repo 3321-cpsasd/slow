@@ -93,45 +93,55 @@ def build_provider_adapter(
 def fallback_model_profiles(config: dict) -> list[dict]:
     configured = config.get("fallbacks")
     if configured:
-        return list(configured)
-    if (
+        profiles = list(configured)
+    elif (
         config.get("provider_protocol") != "openai"
         or "aliyuncs.com" not in str(config.get("base_url") or "")
     ):
-        return []
-    profiles = []
-    for model in (
-        item.strip()
-        for item in settings.ai_fallback_models.split(",")
-        if item.strip()
-    ):
-        profiles.append({
-            "model": model,
-            "providerProtocol": "openai",
-            "apiMode": (
-                "responses"
-                if model == "qwen3.8-max-preview"
-                else "chat_completions"
-            ),
-            "reasoningMode": (
-                "required" if model == "kimi/kimi-k3" else "optional"
-            ),
-            "apiKey": (
-                settings.qwen38_api_key
-                if model == "qwen3.8-max-preview"
-                else settings.kimi_k3_api_key
-                if model == "kimi/kimi-k3"
-                else ""
-            ),
-            "baseUrl": (
-                settings.qwen38_base_url
-                if model == "qwen3.8-max-preview"
-                else settings.kimi_k3_base_url
-                if model == "kimi/kimi-k3"
-                else ""
-            ),
-        })
-    return profiles
+        profiles = []
+    else:
+        profiles = []
+        for model in (
+            item.strip()
+            for item in settings.ai_fallback_models.split(",")
+            if item.strip()
+        ):
+            profiles.append({
+                "model": model,
+                "providerProtocol": "openai",
+                "apiMode": (
+                    "responses"
+                    if model == "qwen3.8-max-preview"
+                    else "chat_completions"
+                ),
+                "reasoningMode": (
+                    "required" if model == "kimi/kimi-k3" else "optional"
+                ),
+                "apiKey": (
+                    settings.qwen38_api_key
+                    if model == "qwen3.8-max-preview"
+                    else settings.kimi_k3_api_key
+                    if model == "kimi/kimi-k3"
+                    else ""
+                ),
+                "baseUrl": (
+                    settings.qwen38_base_url
+                    if model == "qwen3.8-max-preview"
+                    else settings.kimi_k3_base_url
+                    if model == "kimi/kimi-k3"
+                    else ""
+                ),
+            })
+    primary_model = str(config.get("provider_model") or "").strip()
+    normalized = []
+    seen = set()
+    for profile in profiles:
+        model = str(profile.get("model") or "").strip()
+        if not model or model == primary_model or model in seen:
+            continue
+        seen.add(model)
+        normalized.append({**profile, "model": model})
+    return normalized
 
 
 def build_runtime_adapter(config: dict):

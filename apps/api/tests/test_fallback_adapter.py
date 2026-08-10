@@ -105,3 +105,33 @@ def test_fallback_adapter_does_not_bypass_nonretryable_failure():
         asyncio.run(adapter.generate_lesson({}))
 
     assert fallback.outcomes == [{"candidate": 1}]
+
+
+def test_fallback_adapter_replaces_prior_trace_on_unexpected_failure():
+    primary = StubAdapter(
+        "primary",
+        [{"candidate": 1}, RuntimeError("unexpected adapter failure")],
+    )
+    adapter = FallbackAiAdapter([primary])
+
+    async def run():
+        first_result = await adapter.generate_lesson({})
+        first_trace = adapter.fallback_trace()
+        with pytest.raises(RuntimeError, match="unexpected adapter failure"):
+            await adapter.generate_lesson({})
+        return first_result, first_trace, adapter.fallback_trace()
+
+    first_result, first_trace, failure_trace = asyncio.run(run())
+
+    assert first_result == {"candidate": 1}
+    assert first_trace == [
+        {"model": "primary", "outcome": "succeeded"}
+    ]
+    assert failure_trace == [
+        {
+            "model": "primary",
+            "outcome": "failed",
+            "errorCode": "RuntimeError",
+            "retryable": False,
+        }
+    ]

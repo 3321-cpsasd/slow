@@ -4,7 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.ai.port import ProviderCapabilities
-from app.main import create_app
+from app.main import create_app, fallback_model_profiles
 from app.services.attachment_storage import LocalAttachmentStorage
 from app.services.runtime_settings import RuntimeSettingsStore
 from app.services.source_verifier import AcceptingSourceVerifier
@@ -58,6 +58,34 @@ def test_runtime_settings_round_trip_with_private_file_permissions(tmp_path):
     ]
     assert restored["fallbacks"][0]["apiKey"] == "fallback-server-only-secret"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_fallback_profiles_exclude_primary_model_and_duplicates():
+    profiles = fallback_model_profiles({
+        "provider_model": "qwen3.8-max-preview",
+        "fallbacks": [
+            {
+                "model": "qwen3.8-max-preview",
+                "providerProtocol": "openai",
+                "apiMode": "responses",
+                "reasoningMode": "optional",
+            },
+            {
+                "model": "kimi/kimi-k3",
+                "providerProtocol": "openai",
+                "apiMode": "chat_completions",
+                "reasoningMode": "required",
+            },
+            {
+                "model": "kimi/kimi-k3",
+                "providerProtocol": "openai",
+                "apiMode": "chat_completions",
+                "reasoningMode": "required",
+            },
+        ],
+    })
+
+    assert [item["model"] for item in profiles] == ["kimi/kimi-k3"]
 
 
 def test_app_restores_saved_runtime_without_returning_the_key(tmp_path):

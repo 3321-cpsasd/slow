@@ -91,6 +91,9 @@ class FallbackAiAdapter:
         candidate_validator: Callable | None = None,
         **kwargs,
     ):
+        self._fallback_trace.set(())
+        self._structured_trace.set(())
+        self._last_model.set(self.adapters[0].model)
         attempts: list[dict] = []
         structured: list[dict] = []
         last_error: AiError | None = None
@@ -137,6 +140,20 @@ class FallbackAiAdapter:
                 })
                 if not error.retryable or index + 1 >= len(self.adapters):
                     break
+            except BaseException as error:
+                structured.extend([
+                    {**item, "model": adapter.model, "fallbackIndex": index}
+                    for item in adapter.structured_trace()
+                ])
+                attempts.append({
+                    "model": adapter.model,
+                    "outcome": "failed",
+                    "errorCode": safe_error_code(error),
+                    "retryable": False,
+                })
+                self._fallback_trace.set(tuple(attempts))
+                self._structured_trace.set(tuple(structured))
+                raise
         self._fallback_trace.set(tuple(attempts))
         self._structured_trace.set(tuple(structured))
         if last_error:
