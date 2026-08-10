@@ -3816,11 +3816,12 @@ class DuplicateRetryAi(FakeAi):
         return await super().lesson(request, memory, None)
 
 
-def test_duplicate_retry_questions_are_rejected_and_observable():
+def test_duplicate_retry_questions_are_reordered_and_published():
     with TestClient(create_app("sqlite+pysqlite:///:memory:", DuplicateRetryAi(), AcceptingSourceVerifier())) as duplicate:
         series = create_series(duplicate)
         chapter = duplicate.post(f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate").json()
         section = duplicate.post(f"/api/sections/{chapter['sections'][0]['id']}/generate").json()
+        original_questions = section["quiz"]["questions"]
         failed = duplicate.post(f"/api/sections/{section['id']}/quiz", json={"quizSetId":section["quiz"]["id"],"answers":[[] for _ in section["quiz"]["questions"]]})
         assert failed.status_code == 200
         remediation_task = next(
@@ -3829,10 +3830,29 @@ def test_duplicate_retry_questions_are_rejected_and_observable():
             if task["type"] == "remediation_generation"
         )
         task = wait_for_task(duplicate, remediation_task["taskId"])
-        assert task["status"] == "failed"
-        assert task["errorCode"] == "QUIZ_NOT_NOVEL"
+        assert task["status"] == "succeeded"
         state = duplicate.get(f"/api/sections/{section['id']}").json()
-        assert state["generation"]["status"] == "failed" and state["generation"]["errorCode"] == "QUIZ_NOT_NOVEL"
+        assert state["quiz"]["generation"] == 2
+        assert all(
+            replacement["options"] != original["options"]
+            for replacement, original in zip(
+                state["quiz"]["questions"],
+                original_questions,
+                strict=True,
+            )
+        )
+        with duplicate.app.state.sessions() as db:
+            exhausted = db.get(LearningTask, remediation_task["taskId"])
+            exhausted.status = "failed"
+            exhausted.error_code = "QUIZ_NOT_NOVEL"
+            exhausted.attempt_count = exhausted.max_attempts
+            db.commit()
+        reset = duplicate.post(
+            f"/api/learning-tasks/{remediation_task['taskId']}/retry"
+        )
+        assert reset.status_code == 200
+        assert reset.json()["status"] == "pending"
+        assert reset.json()["maxAttempts"] == 6
 
 
 def test_source_code_requires_immutable_matching_github_ref():

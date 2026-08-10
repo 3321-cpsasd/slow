@@ -115,6 +115,117 @@ def test_valid_candidate_passes_without_repair():
     assert validated.block_by_key["b1"].assessment_target_ids == ["target_core"]
 
 
+@pytest.mark.parametrize(
+    "explanation",
+    [
+        "选项3需要或语义，因此无法表达。",
+        "第 3 个选项需要或语义，因此无法表达。",
+        "C 项需要或语义，因此无法表达。",
+        "Option C requires OR semantics.",
+    ],
+)
+def test_option_position_dependent_explanation_is_rejected(explanation):
+    value = candidate()
+    value.questions[0].explanation = explanation
+
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(spec(), value)
+
+    assert raised.value.code == "ASSESSMENT_EXPLANATION_POSITION_DEPENDENT"
+    assert raised.value.location == {
+        "itemKey": "q1",
+        "rule": "positional_option_reference",
+        "schemaVersion": "generated_lesson_slot_candidate_v5",
+    }
+
+
+def test_single_answer_explanation_cannot_hedge_multiple_valid_options():
+    value = candidate()
+    value.questions[0].explanation = (
+        "实际上另外两种需求也无法表达，但这是最佳答案，因为它更典型。"
+    )
+
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(spec(), value)
+
+    assert raised.value.code == "ASSESSMENT_SINGLE_ANSWER_AMBIGUOUS"
+    assert raised.value.location["rule"] == "hedged_single_answer"
+
+
+def test_explanation_can_name_option_content_after_reordering():
+    value = candidate()
+    value.questions[0].explanation = (
+        "“使用稳定目标 ID”满足正文要求；只匹配标题或忽略契约都不成立。"
+    )
+
+    validate_lesson_candidate(spec(), value)
+
+
+def test_long_text_requires_authored_paragraph_breaks():
+    value = candidate()
+    value.blocks[0].content = "这是一个需要逐层解释的较长机制段落。" * 18
+
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(spec(), value)
+
+    assert raised.value.code == "CONTENT_BLOCK_LAYOUT_INVALID"
+    assert raised.value.location == {
+        "blockKey": "b1",
+        "kind": "text",
+        "rule": "long_single_paragraph",
+        "schemaVersion": "generated_lesson_slot_candidate_v5",
+        "characterCount": len(value.blocks[0].content),
+        "paragraphCount": 1,
+    }
+
+    value.blocks[0].content = (
+        "这是第一段，用来说明问题、对象、约束和可观察结果。" * 6
+        + "\n\n"
+        + "这是第二段，用来继续解释机制、判断依据和适用边界。" * 6
+    )
+    validate_lesson_candidate(spec(), value)
+
+
+def test_explicit_list_and_step_kinds_require_matching_gfm_structure():
+    bullets = candidate()
+    bullets.blocks[0].kind = "bullet_list"
+    bullets.blocks[0].content = "先比较四个稳定对象：\n\n- 对象 A 满足资源条件。\n- 对象 B 缺少必要资源。\n- 对象 C 标签不匹配。\n- 对象 D 缺少容忍配置。\n\n这些条件共同决定最终结果。"
+    validate_lesson_candidate(spec(), bullets)
+
+    missing_bullet = candidate()
+    missing_bullet.blocks[0].kind = "bullet_list"
+    missing_bullet.blocks[0].content = "这一段声称存在多个并列项目，但正文没有提供任何 Markdown 列表结构，因此不能按列表块发布。"
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(spec(), missing_bullet)
+    assert raised.value.code == "CONTENT_BLOCK_LAYOUT_INVALID"
+    assert raised.value.location["rule"] == "list_items_missing"
+
+    steps = candidate()
+    steps.blocks[0].kind = "ordered_steps"
+    steps.blocks[0].content = "判断过程依次进行：\n\n1. 先检查资源是否足够。\n2. 再检查标签是否匹配。\n3. 最后检查污点是否被容忍。"
+    validate_lesson_candidate(spec(), steps)
+
+
+def test_text_cannot_silently_carry_a_list_and_table_must_be_complete():
+    disguised = candidate()
+    disguised.blocks[0].content = "下面是判断依据：\n\n- 第一项依据说明。\n- 第二项依据说明。\n\n根据以上依据完成判断。"
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(spec(), disguised)
+    assert raised.value.location["rule"] == "declared_kind_mismatch"
+
+    table = candidate()
+    table.blocks[0].kind = "table"
+    table.blocks[0].content = "| 环节 | 主要作用 |\n| --- | --- |\n| 应用 | 组织用户任务 |\n| 模型 | 提供推理能力 |"
+    validate_lesson_candidate(spec(), table)
+
+    incomplete = candidate()
+    incomplete.blocks[0].kind = "table"
+    incomplete.blocks[0].content = "| 环节 | 主要作用 |\n| 应用 | 组织用户任务 |\n| 模型 | 提供推理能力 |"
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(spec(), incomplete)
+    assert raised.value.location["rule"] == "table_divider_invalid"
+
+
 def _grounded_spec():
     value = spec()
     targets = [
@@ -296,9 +407,10 @@ def test_atomic_publisher_normalizes_explicit_bindings_and_rolls_back():
 
 
 class V2FakeAi(FakeAi):
-    def __init__(self, *, invalid_target=False):
+    def __init__(self, *, invalid_target=False, invalid_layout=False):
         self.lesson_generation_calls = 0
         self.invalid_target = invalid_target
+        self.invalid_layout = invalid_layout
 
     async def generate_lesson(self, lesson_spec):
         self.lesson_generation_calls += 1
@@ -323,7 +435,11 @@ class V2FakeAi(FakeAi):
                         "outside_contract" if self.invalid_target and index == 1 else target_id
                     ],
                     heading=f"正文块 {index}",
-                    content="这一正文块完整解释当前目标的机制、判断依据与适用边界，并为绑定题目提供直接证据。",
+                    content=(
+                        "这是一个没有任何分段的较长正文块。" * 20
+                        if self.invalid_layout and index == 1
+                        else "这一正文块完整解释当前目标的机制、判断依据与适用边界，并为绑定题目提供直接证据。"
+                    ),
                 )
             )
         questions = []
@@ -406,6 +522,25 @@ def test_v2_route_rejects_unbound_content_before_formal_persistence():
             assert db.scalar(select(func.count()).select_from(QuizSet)) == 0
 
 
+def test_v2_route_rejects_invalid_layout_before_formal_persistence():
+    ai = V2FakeAi(invalid_layout=True)
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            ai,
+            AcceptingSourceVerifier(),
+        )
+    ) as client:
+        series = create_series(client)
+        task = wait_for_task(client, series["initializationTask"]["taskId"])
+        with client.app.state.sessions() as db:
+            run = db.scalar(select(GenerationRun).order_by(GenerationRun.started_at.desc()))
+            assert task["status"] == "failed"
+            assert run.error_code == "CONTENT_BLOCK_LAYOUT_INVALID"
+            assert db.scalar(select(func.count()).select_from(ContentVersion)) == 0
+            assert db.scalar(select(func.count()).select_from(QuizSet)) == 0
+
+
 def test_legacy_content_never_claims_current_boundary_validation():
     ai = V2FakeAi()
     with TestClient(
@@ -431,7 +566,7 @@ def test_legacy_content_never_claims_current_boundary_validation():
         legacy = client.get(f"/api/sections/{section_id}").json()
         assert legacy["content"]["boundaryValidation"] == {
             "status": "legacy",
-            "ruleVersion": "lesson_candidate_gate_v4",
+            "ruleVersion": "lesson_candidate_gate_v6",
         }
 
 

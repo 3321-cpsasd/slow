@@ -779,9 +779,15 @@ async def generate_legacy_section(
                         question.objective = previous["objective"]
                         question.core = previous.get("core", False)
                         question.difficulty = "standard"
+                if retry:
+                    self._reorder_exact_remediation_duplicates(
+                        prior,
+                        quiz_result.questions,
+                    )
                 previous_quiz_rejection = self._questions_novelty_issue(
                     prior,
                     [item.model_dump() for item in quiz_result.questions],
+                    allow_option_reorder_only=retry,
                 ) if (retry or regenerate) else None
                 if not previous_quiz_rejection:
                     break
@@ -810,6 +816,11 @@ async def generate_legacy_section(
                     prior,
                 )
                 assert_lesson_content_quality(lesson)
+                if retry:
+                    self._reorder_exact_remediation_duplicates(
+                        prior,
+                        lesson.questions,
+                    )
                 self._renew_generation_lease(resource_key, owner_id)
                 ai_harness_trace = self._ai_harness_trace()
                 if not external_sources_allowed:
@@ -827,6 +838,7 @@ async def generate_legacy_section(
                     if not (retry or regenerate) or self._questions_are_novel(
                         prior,
                         [item.model_dump() for item in lesson.questions],
+                        allow_option_reorder_only=retry,
                     ):
                         break
                     lesson = None
@@ -891,6 +903,7 @@ async def generate_legacy_section(
                 if not (retry or regenerate) or self._questions_are_novel(
                     prior,
                     [item.model_dump() for item in lesson.questions],
+                    allow_option_reorder_only=retry,
                 ):
                     break
                 lesson = None
@@ -901,7 +914,13 @@ async def generate_legacy_section(
             "review_lesson_alignment",
             None,
         )
-        if callable(alignment_reviewer):
+        # Remediation intentionally teaches only the failed targets from the
+        # frozen quiz attempt.  The legacy reviewer evaluates against the full
+        # section contract, so applying it here rejects valid partial
+        # remediation as if it were an incomplete replacement lesson.  The
+        # remediation publisher below still enforces the deterministic target,
+        # evidence-lineage, structure, and atomic-publication gates.
+        if callable(alignment_reviewer) and not retry:
             update_generation_stage(
                 "semantic_alignment_review",
                 **memory_trace,

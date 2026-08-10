@@ -228,11 +228,22 @@ LESSON_ANCHOR_RELATIONS = Literal[
 ]
 
 
+LESSON_BLOCK_KINDS = Literal[
+    "text",
+    "bullet_list",
+    "ordered_steps",
+    "code",
+    "formula",
+    "table",
+    "diagram",
+]
+
+
 class GeneratedLessonBlock(StrictModel):
     """A candidate-local block. Database identity is assigned only at publish."""
 
     block_key: str = Field(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
-    kind: Literal["text", "code", "formula", "table", "diagram"]
+    kind: LESSON_BLOCK_KINDS
     role: LESSON_BLOCK_ROLES
     relation_to_anchor: LESSON_ANCHOR_RELATIONS
     assessment_target_ids: list[str] = Field(default_factory=list, max_length=8)
@@ -324,7 +335,7 @@ class GeneratedLessonSlotBlock(StrictModel):
             r"PREREQUISITE|TRANSITION)$"
         )
     )
-    kind: Literal["text", "code", "formula", "table", "diagram"]
+    kind: LESSON_BLOCK_KINDS
     heading: str = Field(min_length=1, max_length=160)
     content: str = Field(min_length=40, max_length=16000)
     claim_version_ids: list[str] = Field(default_factory=list, max_length=8)

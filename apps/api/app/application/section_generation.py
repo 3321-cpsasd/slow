@@ -937,10 +937,53 @@ class SectionGenerationCoordinator:
         value = trace()
         return value if isinstance(value, list) else []
 
-    def _questions_are_novel(self, prior, current):
-        return self._questions_novelty_issue(prior, current) is None
+    def _questions_are_novel(
+        self,
+        prior,
+        current,
+        *,
+        allow_option_reorder_only=False,
+    ):
+        return self._questions_novelty_issue(
+            prior,
+            current,
+            allow_option_reorder_only=allow_option_reorder_only,
+        ) is None
 
-    def _questions_novelty_issue(self, prior, current):
+    def _reorder_exact_remediation_duplicates(self, prior, questions):
+        """Deterministically change presentation without changing meaning."""
+        if not prior or len(prior) != len(questions):
+            return
+        prior_by_objective = {}
+        for item in prior:
+            prior_by_objective.setdefault(item["objective"], []).append(item)
+        for position, question in enumerate(questions):
+            options = list(question.options)
+            if len(options) < 2:
+                continue
+            exact_copy = any(
+                normalized(question.prompt) == normalized(old["prompt"])
+                and [normalized(option) for option in options]
+                == [normalized(option) for option in old["options"]]
+                for old in prior_by_objective.get(question.objective, [])
+            )
+            if not exact_copy:
+                continue
+            shift = (position % (len(options) - 1)) + 1
+            order = list(range(shift, len(options))) + list(range(shift))
+            old_to_new = {old: new for new, old in enumerate(order)}
+            question.options = [options[index] for index in order]
+            question.correct = sorted(
+                old_to_new[index] for index in question.correct
+            )
+
+    def _questions_novelty_issue(
+        self,
+        prior,
+        current,
+        *,
+        allow_option_reorder_only=False,
+    ):
         if not prior:
             return "prior_questions_missing"
         if len(prior) != len(current):
@@ -952,17 +995,27 @@ class SectionGenerationCoordinator:
             prior_by_objective.setdefault(item["objective"], []).append(item)
         for question in current:
             candidates = prior_by_objective.get(question["objective"], [])
-            if any(
-                normalized(question["prompt"]) == normalized(old["prompt"])
-                for old in candidates
-            ):
-                return "prompt_duplicate"
-            if any(
-                {normalized(option) for option in question["options"]}
-                == {normalized(option) for option in old["options"]}
-                for old in candidates
-            ):
-                return "options_duplicate"
+            if allow_option_reorder_only:
+                if any(
+                    normalized(question["prompt"]) == normalized(old["prompt"])
+                    and [normalized(option) for option in question["options"]]
+                    == [normalized(option) for option in old["options"]]
+                    for old in candidates
+                ):
+                    return "question_duplicate"
+            else:
+                if any(
+                    normalized(question["prompt"])
+                    == normalized(old["prompt"])
+                    for old in candidates
+                ):
+                    return "prompt_duplicate"
+                if any(
+                    {normalized(option) for option in question["options"]}
+                    == {normalized(option) for option in old["options"]}
+                    for old in candidates
+                ):
+                    return "options_duplicate"
             if question.get("difficulty", "standard") != "standard":
                 return "difficulty_mismatch"
         return None

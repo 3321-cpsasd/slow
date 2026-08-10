@@ -166,9 +166,9 @@ Learning Contract 必须在正文生成之前冻结。生成器不能创建目�
     },
     {
       "slot": "SHARED_EXAMPLE",
-      "kind": "text",
+      "kind": "bullet_list",
       "heading": "把判断放进真实场景",
-      "content": "……"
+      "content": "先观察几个稳定对象：\n\n- 对象 A 满足条件。\n- 对象 B 缺少条件。\n\n再比较它们产生的结果。"
     }
   ],
   "questions": [
@@ -196,6 +196,10 @@ Learning Contract 必须在正文生成之前冻结。生成器不能创建目�
 - `assessment_eligible`、目标规范文案、必需性和 `core` 等权威字段由服务端根据冻结契约派生，不信任模型布尔值；
 - 共享与支撑槽位不直接获得考核目标；只有 `Tn_CORE` 获得同序目标绑定；
 - 服务端展开是版本化槽位协议的权威派生，不是对模型自由文本的猜测或修复；计划外、缺失或重复槽位整批失败；
+- `kind` 是模型对主要展示结构的显式声明：普通段落使用 `text`，稳定并列项使用
+  `bullet_list`，有先后顺序的过程使用 `ordered_steps`，稳定二维对照使用 `table`；
+- 服务端确定性检查声明类型与 GFM 结构是否一致，并限制未分段长正文和过长段落；该检查只验证结构，
+  不按自然语言猜测模型原本想使用的表现形式，也不在服务端或前端修复候选；
 - 反馈触发完整重生成时，模型必须返回真正替代旧块的
   `feedback_replacement_slot`；服务端再把冻结的旧 `source_block_id` 与新槽位展开出的
   `replacement_block_key` 显式绑定。非反馈生成该字段必须为空。
@@ -213,6 +217,7 @@ Learning Contract 必须在正文生成之前冻结。生成器不能创建目�
 | --- | --- | --- |
 | 候选结果满足版本化 JSON Schema | 整批失败 | `GENERATION_SCHEMA_INVALID` |
 | 正文块局部 Key 唯一且合法 | 整批失败 | `CONTENT_BLOCK_KEY_INVALID` |
+| 正文块声明类型、GFM 结构与长文本分段满足版本化排版规则 | 整批失败 | `CONTENT_BLOCK_LAYOUT_INVALID` |
 | 正文块绑定目标全部属于冻结契约 | 整批失败 | `CONTENT_ASSESSMENT_TARGET_UNBOUND` |
 | 题目目标属于冻结契约 | 整批失败 | `ASSESSMENT_TARGET_UNBOUND` |
 | 题目引用的正文块存在 | 整批失败 | `ASSESSMENT_EVIDENCE_BLOCK_UNBOUND` |
@@ -388,6 +393,8 @@ publish_atomically()
 实现完成前至少覆盖：
 
 - 一次生成只发生一次物理模型调用；
+- 长正文未分段、列表或步骤类型与 GFM 结构不一致、表格不完整时整批失败；
+- 合格的短段落、并列列表、有序步骤和完整表格可以通过同一确定性门禁；
 - 正文绑定契约外目标时整批失败；
 - 题目引用契约外目标时整批失败；
 - 题目引用不存在的正文块时整批失败；

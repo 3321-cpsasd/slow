@@ -266,6 +266,10 @@ def test_context_pack_propagates_profile_mission_depth_and_attempt():
         assert remediation_context["learningState"]["attempt"]["answers"]
         assert remediation_context["learningState"]["attempt"]["scoringResults"]
         assert remediation_context["learner"]["planRole"] == "猎头顾问"
+        assert not any(
+            request.get("remediationStrategy")
+            for request in ai.requests["alignment"]
+        )
 
         with client.app.state.sessions() as db:
             contract = db.scalar(select(LearningContractVersion))

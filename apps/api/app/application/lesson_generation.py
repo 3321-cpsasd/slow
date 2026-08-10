@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -31,9 +32,9 @@ from ..modules.learning.assessment_items import publish_assessment_item_versions
 
 
 LESSON_GENERATION_PIPELINE_VERSION = "lesson_generation_v2"
-LESSON_GENERATION_SCHEMA_VERSION = "generated_lesson_slot_candidate_v4"
-LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_slot_prompt_v5"
-LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v4"
+LESSON_GENERATION_SCHEMA_VERSION = "generated_lesson_slot_candidate_v5"
+LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_slot_prompt_v7"
+LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v6"
 LESSON_CONTEXT_POLICY_VERSION = "lesson_generation_context_v2"
 AI_CONTENT_LABEL_SCHEMA_VERSION = "ai_content_label_v2"
 
@@ -75,11 +76,11 @@ class LessonGenerationSpec(LessonSpecModel):
         default=LESSON_GENERATION_PIPELINE_VERSION,
         alias="pipelineVersion",
     )
-    schema_version: Literal["generated_lesson_slot_candidate_v4"] = Field(
+    schema_version: Literal["generated_lesson_slot_candidate_v5"] = Field(
         default=LESSON_GENERATION_SCHEMA_VERSION,
         alias="schemaVersion",
     )
-    prompt_version: Literal["lesson_generation_slot_prompt_v5"] = Field(
+    prompt_version: Literal["lesson_generation_slot_prompt_v7"] = Field(
         default=LESSON_GENERATION_PROMPT_VERSION,
         alias="promptVersion",
     )
@@ -155,6 +156,216 @@ def _reject(code: str, message: str, **location: Any) -> None:
     raise CandidateValidationFailure(code, message, location)
 
 
+_BULLET_ITEM_RE = re.compile(r"^\s*[-+*]\s+\S")
+_ORDERED_ITEM_RE = re.compile(r"^\s*\d+[.)]\s+\S")
+_TABLE_DIVIDER_CELL_RE = re.compile(r"^:?-{3,}:?$")
+_LONG_TEXT_MIN_CHARS = 240
+_MAX_PROSE_PARAGRAPH_CHARS = 360
+_POSITIONAL_OPTION_REFERENCE_PATTERNS = (
+    re.compile(r"选项\s*(?:[A-Fa-f]|[1-6一二三四五六])(?![A-Za-z0-9])"),
+    re.compile(r"第\s*(?:[1-6一二三四五六])\s*(?:个|项)?\s*选项"),
+    re.compile(r"(?:^|[，。；：、\s])(?:[A-Fa-f])\s*项(?!目)"),
+    re.compile(r"\b(?:option|choice)\s*[A-Fa-f1-6]\b", re.IGNORECASE),
+)
+_HEDGED_SINGLE_ANSWER_RE = re.compile(
+    r"最佳答案|最优答案|最合适(?:的)?答案|更(?:典型|明确|明显|合适)"
+)
+
+
+def _layout_reject(block, rule: str, message: str, **details: Any) -> None:
+    _reject(
+        "CONTENT_BLOCK_LAYOUT_INVALID",
+        message,
+        blockKey=block.block_key,
+        kind=block.kind,
+        rule=rule,
+        schemaVersion=LESSON_GENERATION_SCHEMA_VERSION,
+        **details,
+    )
+
+
+def _paragraphs(content: str) -> list[str]:
+    return [
+        re.sub(r"\s+", " ", item).strip()
+        for item in re.split(r"\n\s*\n", content)
+        if item.strip()
+    ]
+
+
+def _table_cells(line: str) -> list[str]:
+    normalized = line.strip()
+    if normalized.startswith("|"):
+        normalized = normalized[1:]
+    if normalized.endswith("|"):
+        normalized = normalized[:-1]
+    return [cell.strip() for cell in normalized.split("|")]
+
+
+def _validate_lesson_block_layout(block) -> None:
+    """Fail closed on authored layout; never repair or infer semantic structure."""
+
+    content = block.content.replace("\r\n", "\n").replace("\r", "\n").strip()
+    lines = content.splitlines()
+    nonempty_lines = [line for line in lines if line.strip()]
+    if not nonempty_lines:
+        _layout_reject(block, "empty_content", "正文块没有可发布内容")
+
+    first_line = re.sub(r"^#{1,6}\s+", "", nonempty_lines[0].strip())
+    if first_line == block.heading.strip():
+        _layout_reject(
+            block,
+            "heading_repeated",
+            "正文块在内容中重复了标题",
+        )
+
+    bullet_lines = [line for line in nonempty_lines if _BULLET_ITEM_RE.match(line)]
+    ordered_lines = [line for line in nonempty_lines if _ORDERED_ITEM_RE.match(line)]
+
+    if block.kind == "text":
+        if bullet_lines or ordered_lines:
+            _layout_reject(
+                block,
+                "declared_kind_mismatch",
+                "普通正文块不能包含列表结构；必须声明明确的列表或步骤类型",
+            )
+        if any("|" in line for line in nonempty_lines[1:]) and any(
+            all(_TABLE_DIVIDER_CELL_RE.match(cell) for cell in _table_cells(line))
+            for line in nonempty_lines
+            if "|" in line
+        ):
+            _layout_reject(
+                block,
+                "declared_kind_mismatch",
+                "普通正文块不能包含表格结构；必须声明 table 类型",
+            )
+        paragraphs = _paragraphs(content)
+        character_count = len(content)
+        if character_count >= _LONG_TEXT_MIN_CHARS and len(paragraphs) < 2:
+            _layout_reject(
+                block,
+                "long_single_paragraph",
+                "较长正文必须按意思分段并保留空行",
+                characterCount=character_count,
+                paragraphCount=len(paragraphs),
+            )
+        for position, paragraph in enumerate(paragraphs, 1):
+            if len(paragraph) > _MAX_PROSE_PARAGRAPH_CHARS:
+                _layout_reject(
+                    block,
+                    "paragraph_too_long",
+                    "正文段落过长，必须拆分为更易阅读的短段落",
+                    paragraphPosition=position,
+                    characterCount=len(paragraph),
+                )
+        return
+
+    if block.kind in {"bullet_list", "ordered_steps"}:
+        expected_lines = bullet_lines if block.kind == "bullet_list" else ordered_lines
+        conflicting_lines = ordered_lines if block.kind == "bullet_list" else bullet_lines
+        if len(expected_lines) < 2:
+            _layout_reject(
+                block,
+                "list_items_missing",
+                "列表或步骤块必须包含至少两个与声明类型一致的条目",
+                itemCount=len(expected_lines),
+            )
+        if conflicting_lines:
+            _layout_reject(
+                block,
+                "mixed_list_types",
+                "同一个列表块不能混用并列列表与有序步骤",
+            )
+        prose_runs: list[str] = []
+        current: list[str] = []
+        for line in lines:
+            if not line.strip() or _BULLET_ITEM_RE.match(line) or _ORDERED_ITEM_RE.match(line):
+                if current:
+                    prose_runs.append(" ".join(current))
+                    current = []
+                continue
+            # Indented lines are Markdown continuations of the preceding item.
+            if line[:1].isspace():
+                continue
+            current.append(line.strip())
+        if current:
+            prose_runs.append(" ".join(current))
+        for position, paragraph in enumerate(prose_runs, 1):
+            if len(paragraph) > _MAX_PROSE_PARAGRAPH_CHARS:
+                _layout_reject(
+                    block,
+                    "paragraph_too_long",
+                    "列表前后的说明段落过长",
+                    paragraphPosition=position,
+                    characterCount=len(paragraph),
+                )
+        return
+
+    if block.kind == "table":
+        table_lines = [line for line in nonempty_lines if "|" in line]
+        divider_indexes = [
+            index
+            for index, line in enumerate(table_lines)
+            if len(_table_cells(line)) >= 2
+            and all(
+                _TABLE_DIVIDER_CELL_RE.match(cell)
+                for cell in _table_cells(line)
+            )
+        ]
+        if len(divider_indexes) != 1:
+            _layout_reject(
+                block,
+                "table_divider_invalid",
+                "表格块必须包含一行完整的 GFM 表头分隔行",
+            )
+        divider_index = divider_indexes[0]
+        if divider_index < 1 or divider_index >= len(table_lines) - 1:
+            _layout_reject(
+                block,
+                "table_rows_missing",
+                "表格块必须同时包含表头和至少一行数据",
+            )
+        column_count = len(_table_cells(table_lines[divider_index]))
+        relevant_rows = table_lines[divider_index - 1 :]
+        if any(len(_table_cells(line)) != column_count for line in relevant_rows):
+            _layout_reject(
+                block,
+                "table_column_count_mismatch",
+                "表格每一行的列数必须一致",
+                columnCount=column_count,
+            )
+
+
+def _validate_question_explanation(question) -> None:
+    """Reject explanations whose meaning can change when options are reordered."""
+
+    positional_pattern = next(
+        (
+            pattern.pattern
+            for pattern in _POSITIONAL_OPTION_REFERENCE_PATTERNS
+            if pattern.search(question.explanation)
+        ),
+        None,
+    )
+    if positional_pattern:
+        _reject(
+            "ASSESSMENT_EXPLANATION_POSITION_DEPENDENT",
+            "题目解析不能引用会在发布前变化的选项位置",
+            itemKey=question.item_key,
+            rule="positional_option_reference",
+            schemaVersion=LESSON_GENERATION_SCHEMA_VERSION,
+        )
+    if len(question.correct) == 1 and _HEDGED_SINGLE_ANSWER_RE.search(
+        question.explanation
+    ):
+        _reject(
+            "ASSESSMENT_SINGLE_ANSWER_AMBIGUOUS",
+            "单选题解析不能用最佳或更典型等措辞掩盖多个成立选项",
+            itemKey=question.item_key,
+            rule="hedged_single_answer",
+            schemaVersion=LESSON_GENERATION_SCHEMA_VERSION,
+        )
+
+
 def validate_lesson_candidate(
     spec: LessonGenerationSpec,
     candidate: GeneratedLessonCandidate,
@@ -178,6 +389,7 @@ def validate_lesson_candidate(
     }
     block_by_key: dict[str, Any] = {}
     for block in candidate.blocks:
+        _validate_lesson_block_layout(block)
         if block.block_key in block_by_key:
             _reject(
                 "CONTENT_BLOCK_KEY_INVALID",
@@ -280,6 +492,7 @@ def validate_lesson_candidate(
     item_keys: set[str] = set()
     assessed_target_ids: set[str] = set()
     for question in candidate.questions:
+        _validate_question_explanation(question)
         if question.item_key in item_keys:
             _reject(
                 "ASSESSMENT_ITEM_INVALID",
