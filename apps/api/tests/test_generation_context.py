@@ -156,6 +156,7 @@ def test_context_pack_propagates_profile_mission_depth_and_attempt():
                     "explanationDensity": "thorough",
                     "formatPreferences": ["worked_example", "diagram"],
                     "interactionRhythm": "balanced",
+                    "dailyModePromptEnabled": False,
                 },
                 ensure_ascii=False,
             )

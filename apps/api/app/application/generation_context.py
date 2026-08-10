@@ -36,6 +36,22 @@ from ..modules.curriculum.baselines import CurriculumBaselineService
 from ..modules.knowledge.context import KnowledgeContextBuilder
 
 
+PEDAGOGICAL_PREFERENCE_KEYS = {
+    "openingStyle",
+    "explanationDensity",
+    "formatPreferences",
+    "interactionRhythm",
+}
+
+
+def _pedagogical_preferences(value: Any) -> dict[str, Any]:
+    return {
+        key: item
+        for key, item in (value.items() if isinstance(value, dict) else ())
+        if key in PEDAGOGICAL_PREFERENCE_KEYS
+    }
+
+
 def _load(value: str, default):
     try:
         return json.loads(value) if value else default
@@ -170,7 +186,9 @@ class GenerationContextBuilder:
             "experience": profile.experience if profile else "",
             "weeklyMinutes": profile.weekly_minutes if profile else 0,
             "targetDate": profile.target_date if profile else "",
-            "preferences": _load(profile.preferences_json, {}) if profile else {},
+            "preferences": _pedagogical_preferences(
+                _load(profile.preferences_json, {}) if profile else {}
+            ),
         }
         adopted = _load(mission.learner_context_json, {}) if mission else {}
         submitted = plan_input or {}
@@ -197,6 +215,9 @@ class GenerationContextBuilder:
         ):
             if adopted.get(key) not in (None, "", []):
                 baseline[alias] = adopted[key]
+        baseline["preferences"] = _pedagogical_preferences(
+            baseline["preferences"]
+        )
         if plan and plan.purpose:
             baseline["purpose"] = plan.purpose
         if submitted.get("purpose"):

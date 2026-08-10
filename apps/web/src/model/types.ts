@@ -50,6 +50,7 @@ export type LearningPreferences = {
   explanationDensity:'auto'|'concise'|'balanced'|'thorough';
   formatPreferences:('diagram'|'worked_example'|'code'|'table'|'analogy')[];
   interactionRhythm:'auto'|'low_interruption'|'balanced'|'frequent_checkins';
+  dailyModePromptEnabled:boolean;
 };
 export type LearningProfile = {
   profession:string;

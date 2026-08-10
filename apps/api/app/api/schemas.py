@@ -165,6 +165,7 @@ class LearningPreferences(ApiModel):
     interaction_rhythm: Literal[
         "auto", "low_interruption", "balanced", "frequent_checkins"
     ] = "auto"
+    daily_mode_prompt_enabled: bool = Field(default=True, strict=True)
 
 
 class ProfileDraftUpdate(ApiModel):

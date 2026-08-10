@@ -38,6 +38,7 @@ DEFAULT_LEARNING_PREFERENCES = {
     "explanationDensity": "auto",
     "formatPreferences": [],
     "interactionRhythm": "auto",
+    "dailyModePromptEnabled": True,
 }
 PREFERENCE_VALUES = {
     "openingStyle": {"auto", "problem_first", "example_first", "concept_first"},
@@ -243,6 +244,10 @@ class ProfileService:
             "explanationDensity": ("explanationDensity", "explanation_density"),
             "formatPreferences": ("formatPreferences", "format_preferences"),
             "interactionRhythm": ("interactionRhythm", "interaction_rhythm"),
+            "dailyModePromptEnabled": (
+                "dailyModePromptEnabled",
+                "daily_mode_prompt_enabled",
+            ),
         }
         for key in ("openingStyle", "explanationDensity", "interactionRhythm"):
             candidate = next(
@@ -260,6 +265,16 @@ class ProfileService:
             for item in dict.fromkeys(formats if isinstance(formats, list) else [])
             if item in PREFERENCE_VALUES["formatPreferences"]
         ][:5]
+        prompt_enabled = next(
+            (
+                value.get(alias)
+                for alias in aliases["dailyModePromptEnabled"]
+                if value.get(alias) is not None
+            ),
+            True,
+        )
+        if isinstance(prompt_enabled, bool):
+            result["dailyModePromptEnabled"] = prompt_enabled
         return result
 
     def _profile_view(self, profile: UserProfile | None) -> dict:

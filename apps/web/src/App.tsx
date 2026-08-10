@@ -203,6 +203,8 @@ export default function App() {
     && new Date(data.dailyMode.expiresAt).getTime() > Date.now(),
   );
 
+  const dailyModePromptEnabled = data?.profile.preferences.dailyModePromptEnabled ?? true;
+
   const loadAuthenticatedState = async () => {
     const value = await api.authMe();
     setAuth(value);
@@ -351,7 +353,9 @@ export default function App() {
     const state = data?.dailyMode;
     if (!state) return;
     if (!state.active || !state.expiresAt) {
-      if (!(view === 'learn' && section && activityDailyMode)) setDailyModeDialogOpen(true);
+      if (dailyModePromptEnabled && !(view === 'learn' && section && activityDailyMode)) {
+        setDailyModeDialogOpen(true);
+      }
       return;
     }
     const expire = () => {
@@ -369,7 +373,7 @@ export default function App() {
       } : current);
       if (view === 'learn' && section && activityDailyMode) {
         setDailyModeExpiredDuringActivity(true);
-      } else {
+      } else if (dailyModePromptEnabled) {
         setDailyModeDialogOpen(true);
       }
     };
@@ -380,7 +384,7 @@ export default function App() {
     }
     const timer = window.setTimeout(expire, Math.min(remaining, 2_147_000_000));
     return () => window.clearTimeout(timer);
-  }, [data?.dailyMode?.version, data?.dailyMode?.active, data?.dailyMode?.expiresAt, view, section?.id, activityDailyMode]);
+  }, [data?.dailyMode?.version, data?.dailyMode?.active, data?.dailyMode?.expiresAt, dailyModePromptEnabled, view, section?.id, activityDailyMode]);
 
   const run = async <T,>(label: string, action: () => Promise<T>) => {
     setBusy(label);
@@ -466,7 +470,7 @@ export default function App() {
     setSection(null);
     setActivityDailyMode(null);
     setDailyModeExpiredDuringActivity(false);
-    if (!hasActiveDailyMode()) setDailyModeDialogOpen(true);
+    if (dailyModePromptEnabled && !hasActiveDailyMode()) setDailyModeDialogOpen(true);
     void api.bootstrap()
       .then(setData)
       .catch((reason) => setError(reason instanceof Error ? reason.message : '主页刷新失败'));
@@ -494,7 +498,12 @@ export default function App() {
 
   const openAndTrackSection = async (sectionId: string) => {
     const value = await api.openSection(sectionId);
-    setActivityDailyMode(value.dailyModeAtStart || data?.dailyMode?.dailyMode || 'slow');
+    setActivityDailyMode(
+      value.dailyModeAtStart
+      || data?.dailyMode?.dailyMode
+      || data?.dailyMode?.lastDailyMode
+      || 'slow',
+    );
     setDailyModeExpiredDuringActivity(false);
     void api.updateResume(sectionId).catch(() => undefined);
     return value;
@@ -505,7 +514,7 @@ export default function App() {
     historyMode: 'push' | 'replace' | 'none' = 'push',
   ) => {
     if (series) updateBrowserLocation(seriesPath(series.id, sectionId), historyMode);
-    if (!hasActiveDailyMode()) {
+    if (dailyModePromptEnabled && !hasActiveDailyMode()) {
       setPendingSectionId(sectionId);
       setDailyModeDialogOpen(true);
       if (section) return section;
@@ -1032,6 +1041,7 @@ export default function App() {
 
   const showDailyModeDialog = Boolean(
     data?.dailyMode
+    && dailyModePromptEnabled
     && (
       dailyModeDialogOpen
       || (
@@ -1067,7 +1077,12 @@ export default function App() {
           {data?.dailyMode && (
             <DailyModeHeader
               state={data.dailyMode}
-              effectiveMode={activityDailyMode || data.dailyMode.dailyMode}
+              effectiveMode={
+                activityDailyMode
+                || data.dailyMode.dailyMode
+                || data.dailyMode.lastDailyMode
+                || 'slow'
+              }
               expiredInActivity={dailyModeExpiredDuringActivity}
               busy={dailyModeBusy}
               onActivate={activateDailyMode}
@@ -2373,6 +2388,7 @@ const DEFAULT_LEARNING_PREFERENCES: LearningPreferences = {
   explanationDensity: 'auto',
   formatPreferences: [],
   interactionRhythm: 'auto',
+  dailyModePromptEnabled: true,
 };
 
 const PROFILE_PREFERENCE_OPTIONS = {
@@ -2450,6 +2466,9 @@ function ProfileCenterPage({
   const [explanationDensity, setExplanationDensity] = useState(initialPreferences.explanationDensity);
   const [formatPreferences, setFormatPreferences] = useState(initialPreferences.formatPreferences);
   const [interactionRhythm, setInteractionRhythm] = useState(initialPreferences.interactionRhythm);
+  const [dailyModePromptEnabled, setDailyModePromptEnabled] = useState(
+    initialPreferences.dailyModePromptEnabled ?? true,
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
@@ -2483,9 +2502,10 @@ function ProfileCenterPage({
           explanationDensity,
           formatPreferences,
           interactionRhythm,
+          dailyModePromptEnabled,
         },
       });
-      setMessage('学习画像已保存，只会影响之后生成或调整的教材。');
+      setMessage('学习设置已保存。弹窗偏好立即生效，教材表达偏好只影响之后生成或调整的内容。');
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '学习画像保存失败');
     } finally {
@@ -2520,7 +2540,7 @@ function ProfileCenterPage({
 
         <div className="profile-sidebar-ledger">
           <span>当前学习设置</span><b>已保存</b>
-          <small>修改只影响之后的教材。</small>
+          <small>体验设置立即生效；教材偏好影响后续内容。</small>
         </div>
         <button type="button" className="profile-back-button" onClick={onBack}><span aria-hidden="true">←</span> 返回书架</button>
       </aside>
@@ -2530,7 +2550,7 @@ function ProfileCenterPage({
           <header className="profile-page-heading">
             <p className="eyebrow">学习画像</p>
             <h1 id="profile-center-title">让教材始终认识<br />现在的你。</h1>
-            <p>这是所有书架共用的学习设置。修改只影响之后生成或调整的教材，已经完成的学习记录不会改变。</p>
+            <p>这是所有书架共用的学习设置。学习节奏设置会立即生效；教材表达偏好只影响之后生成或调整的内容，已经完成的学习记录不会改变。</p>
           </header>
 
           <fieldset className="profile-field-group">
@@ -2625,6 +2645,18 @@ function ProfileCenterPage({
 
           <fieldset className="profile-field-group">
             <legend>学习节奏</legend>
+            <label className="profile-toggle-row">
+              <span>
+                <b>进入学习前询问 Fast / Slow 模式</b>
+                <small>关闭后不再自动弹出选择窗口；会沿用上次模式，没有历史选择时使用 Slow。页头仍可随时切换。</small>
+              </span>
+              <input
+                type="checkbox"
+                role="switch"
+                checked={dailyModePromptEnabled}
+                onChange={(event) => setDailyModePromptEnabled(event.target.checked)}
+              />
+            </label>
             <div className="profile-two-columns">
               <label>每周投入
                 <select value={weeklyMinutes} onChange={(event) => setWeeklyMinutes(Number(event.target.value))}>

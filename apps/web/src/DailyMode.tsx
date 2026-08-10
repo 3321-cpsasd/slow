@@ -10,12 +10,25 @@ const DURATIONS: { value: DailyModeDuration; label: string }[] = [
 
 const modeName = (mode: DailyMode) => mode === 'fast' ? 'Fast' : 'Slow';
 
+const modePartner = (mode: DailyMode) => mode === 'fast' ? '兔子' : '乌龟';
+
 const formatExpiry = (expiresAt: string | null) => {
   if (!expiresAt) return '等待选择时间';
   return new Intl.DateTimeFormat('zh-CN', {
     hour: '2-digit',
     minute: '2-digit',
   }).format(new Date(expiresAt));
+};
+
+const previewExpiry = (duration: DailyModeDuration) => {
+  const expiresAt = new Date();
+  if (duration === 'today') expiresAt.setHours(23, 59, 59, 999);
+  else expiresAt.setHours(expiresAt.getHours() + Number.parseInt(duration, 10));
+  return `保持至今天 ${new Intl.DateTimeFormat('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(expiresAt)}`;
 };
 
 export function DailyModeHeader({
@@ -82,14 +95,12 @@ export function DailyModeHeader({
           'header_toggle',
         )}
       >
-        <span aria-hidden="true">{mode === 'fast' ? '兔' : '龟'}</span>
         <b>{modeName(mode)}</b>
         <i aria-hidden="true">↔</i>
       </button>
       {popoverOpen && (
         <section className="daily-mode-popover" role="dialog" aria-label="调整模式持续时间">
-          <b>这次学多久？</b>
-          <p>自然到期不会打断正在进行的小节。</p>
+          <b>保持当前模式</b>
           <div role="radiogroup" aria-label="持续时间">
             {DURATIONS.map((item) => (
               <button
@@ -108,6 +119,7 @@ export function DailyModeHeader({
               </button>
             ))}
           </div>
+          <p>选择后从现在重新计算有效期，不打断当前活动。</p>
         </section>
       )}
     </div>
@@ -123,15 +135,14 @@ export function DailyModeDialog({
   busy: boolean;
   onActivate: (mode: DailyMode, duration: DailyModeDuration, source: 'dialog') => Promise<void>;
 }) {
-  const [selectedMode, setSelectedMode] = useState<DailyMode | null>(state.lastDailyMode);
+  const [selectedMode, setSelectedMode] = useState<DailyMode | null>(null);
   const [duration, setDuration] = useState<DailyModeDuration>(state.duration || '1h');
-  const titleRef = useRef<HTMLHeadingElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    titleRef.current?.focus();
+    dialogRef.current?.focus();
     const trapFocus = (event: KeyboardEvent) => {
       if (event.key !== 'Tab') return;
       const focusable = Array.from(
@@ -140,7 +151,7 @@ export function DailyModeDialog({
       if (!focusable.length) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
-      if (event.shiftKey && (document.activeElement === first || document.activeElement === titleRef.current)) {
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialogRef.current)) {
         event.preventDefault();
         last.focus();
       } else if (!event.shiftKey && document.activeElement === last) {
@@ -163,84 +174,121 @@ export function DailyModeDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby="daily-mode-title"
+        tabIndex={-1}
       >
-        <header>
-          <p>DAILY MODE · 今天怎么学</p>
-          <h2 id="daily-mode-title" ref={titleRef} tabIndex={-1}>把这一段时间，交给龟还是兔？</h2>
-          <span>教材与验证标准不变，只改变你此刻看到的节奏。</span>
+        <header className="daily-mode-dialog-header">
+          <p>CHOOSE YOUR PACE</p>
+          <h2 id="daily-mode-title">这次，跟谁一起出发？</h2>
         </header>
 
         <div className="daily-mode-versus" role="radiogroup" aria-label="学习模式">
+          <span className="daily-mode-versus-line" aria-hidden="true" />
+          <span className="daily-mode-versus-mark" aria-hidden="true">VS</span>
+
           <button
             type="button"
             role="radio"
             aria-checked={selectedMode === 'fast'}
-            className={`daily-mode-card fast ${selectedMode === 'fast' ? 'selected' : ''}`}
+            data-mode="fast"
+            className={`daily-mode-fighter fast ${selectedMode === 'fast' ? 'selected' : ''}`}
             onClick={() => setSelectedMode('fast')}
+            onKeyDown={(event) => {
+              if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+              event.preventDefault();
+              const nextMode: DailyMode = 'slow';
+              setSelectedMode(nextMode);
+              dialogRef.current?.querySelector<HTMLButtonElement>(`[data-mode="${nextMode}"]`)?.focus();
+            }}
           >
-            <span className="daily-mode-animal" aria-hidden="true">兔</span>
-            <small>3–5 MIN · 碎片时间</small>
-            <h3>Fast</h3>
-            <p>从同一篇正文中挑出关键段落，先抓住结论、机制与一个可迁移判断。</p>
-            <ul>
-              <li>通勤、户外、临时空档</li>
-              <li>短回答与低摩擦互动</li>
-              <li>快速浏览本身不计为完成</li>
-            </ul>
+            <span className="daily-mode-fighter-top">
+              <span className="daily-mode-code">FAST</span>
+              <span className="daily-mode-radio-mark" aria-hidden="true" />
+            </span>
+            <span className="daily-mode-mascot-stage" aria-hidden="true">
+              <img className="daily-mode-mascot rabbit" src="/study-mode-rabbit.png" alt="" />
+            </span>
+            <span className="daily-mode-fighter-copy">
+              <span className="daily-mode-details">
+                <span className="daily-mode-use-case"><small>适合</small><span>通勤 · 户外 · 碎片时间</span></span>
+                <span className="daily-mode-study-time"><small>单节约</small><b>3–5 分钟</b></span>
+              </span>
+            </span>
           </button>
-
-          <div className="daily-mode-versus-mark" aria-hidden="true">VS</div>
 
           <button
             type="button"
             role="radio"
             aria-checked={selectedMode === 'slow'}
-            className={`daily-mode-card slow ${selectedMode === 'slow' ? 'selected' : ''}`}
+            data-mode="slow"
+            className={`daily-mode-fighter deep ${selectedMode === 'slow' ? 'selected' : ''}`}
             onClick={() => setSelectedMode('slow')}
+            onKeyDown={(event) => {
+              if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+              event.preventDefault();
+              const nextMode: DailyMode = 'fast';
+              setSelectedMode(nextMode);
+              dialogRef.current?.querySelector<HTMLButtonElement>(`[data-mode="${nextMode}"]`)?.focus();
+            }}
           >
-            <span className="daily-mode-animal" aria-hidden="true">龟</span>
-            <small>10–20 MIN · 完整小节</small>
-            <h3>Slow</h3>
-            <p>完整阅读结论、因果机制、例子、边界与练习连接，建立可验证的理解。</p>
-            <ul>
-              <li>安静、可持续投入的时段</li>
-              <li>完整正文与展开式答疑</li>
-              <li>进入同一套正式测验</li>
-            </ul>
+            <span className="daily-mode-fighter-top">
+              <span className="daily-mode-code">SLOW</span>
+              <span className="daily-mode-radio-mark" aria-hidden="true" />
+            </span>
+            <span className="daily-mode-mascot-stage" aria-hidden="true">
+              <img className="daily-mode-mascot turtle" src="/study-mode-turtle.png" alt="" />
+            </span>
+            <span className="daily-mode-fighter-copy">
+              <span className="daily-mode-details">
+                <span className="daily-mode-use-case"><small>适合</small><span>安静环境 · 时间完整 · 方便专注</span></span>
+                <span className="daily-mode-study-time"><small>单节约</small><b>10–20 分钟</b></span>
+              </span>
+            </span>
           </button>
         </div>
 
-        <div className="daily-mode-duration">
-          <div>
-            <b>保持多久</b>
-            <span>到期只影响下一项活动</span>
+        <footer className="daily-mode-footer">
+          <div className="daily-mode-duration">
+            <label>保持这次选择</label>
+            <div role="radiogroup" aria-label="模式持续时间">
+              {DURATIONS.map((item) => (
+                <button
+                  key={item.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={duration === item.value}
+                  data-duration={item.value}
+                  className={duration === item.value ? 'selected' : ''}
+                  onClick={() => setDuration(item.value)}
+                  onKeyDown={(event) => {
+                    if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+                    event.preventDefault();
+                    const currentIndex = DURATIONS.findIndex((candidate) => candidate.value === item.value);
+                    const direction = ['ArrowRight', 'ArrowDown'].includes(event.key) ? 1 : -1;
+                    const next = DURATIONS[(currentIndex + direction + DURATIONS.length) % DURATIONS.length];
+                    setDuration(next.value);
+                    dialogRef.current?.querySelector<HTMLButtonElement>(`[data-duration="${next.value}"]`)?.focus();
+                  }}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+            <span className="daily-mode-expiry-preview">{previewExpiry(duration)}</span>
           </div>
-          <div role="radiogroup" aria-label="模式持续时间">
-            {DURATIONS.map((item) => (
-              <button
-                key={item.value}
-                type="button"
-                role="radio"
-                aria-checked={duration === item.value}
-                className={duration === item.value ? 'selected' : ''}
-                onClick={() => setDuration(item.value)}
-              >
-                {item.label}
-              </button>
-            ))}
+          <div className="daily-mode-footer-action">
+            <button
+              type="button"
+              disabled={!selectedMode || busy}
+              onClick={() => selectedMode && void onActivate(selectedMode, duration, 'dialog')}
+            >
+              {busy
+                ? '正在同步…'
+                : selectedMode
+                  ? `和${modePartner(selectedMode)}以 ${modeName(selectedMode)} 模式开始`
+                  : '先选一位学习搭档'}
+              <span aria-hidden="true">→</span>
+            </button>
           </div>
-        </div>
-
-        <footer>
-          <p><b>同一份教材，同一套验证。</b> Fast / Slow 不会改变题目、答案或通过要求。</p>
-          <button
-            type="button"
-            disabled={!selectedMode || busy}
-            onClick={() => selectedMode && void onActivate(selectedMode, duration, 'dialog')}
-          >
-            {busy ? '正在同步…' : selectedMode ? `以 ${modeName(selectedMode)} 开始` : '先选择一种模式'}
-            {!busy && selectedMode && <span aria-hidden="true">→</span>}
-          </button>
         </footer>
       </section>
     </div>
