@@ -1,6 +1,6 @@
 """Section generation orchestration extracted from the application facade.
 
-This module owns the v2 one-call coordinator and lazily delegates the isolated
+This module owns the versioned one-call coordinator and lazily delegates the isolated
 legacy remediation/test pipeline. SlowService supplies only shared application
 collaborators and read-model callbacks.
 """
@@ -48,6 +48,7 @@ from .lesson_generation import (
     publish_lesson_candidate,
     validate_lesson_candidate,
 )
+from .lesson_composition import resolve_lesson_composition_policy
 
 
 CONTENT_COMPLIANCE_RULE_VERSION = "content_compliance_v1"
@@ -302,7 +303,7 @@ class SectionGenerationCoordinator:
                 False,
             ):
                 raise AppError(
-                    "当前 AI 适配器不支持 lesson_generation_v2；拒绝回退旧链路",
+                    "当前 AI 适配器不支持版本化正文生成；拒绝回退旧链路",
                     code="LESSON_GENERATION_V2_UNSUPPORTED",
                     status=500,
                 )
@@ -361,6 +362,31 @@ class SectionGenerationCoordinator:
                     code="FEEDBACK_CONTRACT_MISSING",
                     status=409,
                 )
+        if regenerate and not regeneration_feedback:
+            active_binding = self.db.scalar(
+                select(LearningRunSectionBinding).where(
+                    LearningRunSectionBinding.learning_run_id == learning_run.id,
+                    LearningRunSectionBinding.user_id == self.user_id,
+                    LearningRunSectionBinding.section_id == section.id,
+                )
+            )
+            bound_contract = (
+                self.db.get(
+                    LearningContractVersion,
+                    active_binding.learning_contract_version_id,
+                )
+                if active_binding
+                else None
+            )
+            if (
+                bound_contract
+                and bound_contract.section_id == section.id
+                and bound_contract.mission_version_id == mission_version.id
+            ):
+                # Migrated readers can be frozen to a provisional M1 contract.
+                # Regenerate against that exact contract so the resulting V2
+                # content/quiz pair can atomically replace the old binding.
+                contract = bound_contract
         contract = contract or ensure_learning_contract(
             self.db,
             section,
@@ -372,7 +398,10 @@ class SectionGenerationCoordinator:
             section_context.chapter,
             section_context.book,
         )
-        if section_progress.status == "locked":
+        if (
+            section_progress.status == "locked"
+            and not isinstance(self.scope, WorkerExecutionContext)
+        ):
             raise AppError("小节未解锁", code="SECTION_LOCKED", status=403)
         if (
             section_progress.status == "preparing"
@@ -562,6 +591,18 @@ class SectionGenerationCoordinator:
                 )
             )
         learner = context_payload["learner"]
+        section_spec = {
+            "id": section.id,
+            "title": section.title,
+            "question": section.question,
+            "bookTitle": section_context.book.title,
+            "chapterTitle": section_context.chapter.title,
+            "chapterObjective": section_context.chapter.objective,
+        }
+        composition_policy = resolve_lesson_composition_policy(
+            section=section_spec,
+            targets=target_payloads,
+        )
         spec = LessonGenerationSpec(
             generationMode=(
                 "demo" if getattr(self.ai, "configured", True) is False else "model_only"
@@ -579,14 +620,7 @@ class SectionGenerationCoordinator:
                     "preferences",
                 )
             },
-            section={
-                "id": section.id,
-                "title": section.title,
-                "question": section.question,
-                "bookTitle": section_context.book.title,
-                "chapterTitle": section_context.chapter.title,
-                "chapterObjective": section_context.chapter.objective,
-            },
+            section=section_spec,
             learningContractVersionId=contract.id,
             learningContractVersion=contract.version,
             targets=[
@@ -606,6 +640,7 @@ class SectionGenerationCoordinator:
                 )
                 for item in target_payloads
             ],
+            compositionPolicy=composition_policy,
             neighborBoundaries=neighbors,
             relevantMastery=[
                 item
@@ -636,13 +671,16 @@ class SectionGenerationCoordinator:
                     "promptVersion": LESSON_GENERATION_PROMPT_VERSION,
                     "schemaVersion": LESSON_GENERATION_SCHEMA_VERSION,
                     "contextPolicyVersion": LESSON_CONTEXT_POLICY_VERSION,
+                    "compositionPolicy": composition_policy,
                     "contextHash": spec.context_hash(),
                     "contractVersionId": contract.id,
                     "knowledgeContext": (
                         context_pack.knowledge_context.audit_manifest()
                     ),
                     "generationMode": spec.generation_mode,
-                    "physicalCallBudget": 1,
+                    "physicalCallBudget": len(
+                        getattr(self.ai, "models", [getattr(self.ai, "model", "")])
+                    ),
                     "regenerate": regenerate,
                     **(
                         {"feedbackId": regeneration_feedback.get("feedbackId")}
@@ -655,8 +693,21 @@ class SectionGenerationCoordinator:
         self.db.add(run)
         self.db.commit()
         try:
-            candidate = await self.ai.generate_lesson(spec.payload())
+            validated_generator = getattr(
+                self.ai,
+                "generate_lesson_validated",
+                None,
+            )
+            candidate = (
+                await validated_generator(
+                    spec.payload(),
+                    lambda item: validate_lesson_candidate(spec, item),
+                )
+                if callable(validated_generator)
+                else await self.ai.generate_lesson(spec.payload())
+            )
             self._renew_generation_lease(resource_key, owner_id)
+            run.model = getattr(self.ai, "last_model", run.model)
             run.status = "validating"
             run.trace_json = dump(
                 {
@@ -665,6 +716,11 @@ class SectionGenerationCoordinator:
                     "candidateBlockCount": len(candidate.blocks),
                     "candidateQuestionCount": len(candidate.questions),
                     "aiHarness": self._ai_harness_trace(),
+                    "modelAttempts": (
+                        self.ai.fallback_trace()
+                        if callable(getattr(self.ai, "fallback_trace", None))
+                        else [{"model": run.model, "outcome": "succeeded"}]
+                    ),
                 }
             )
             self.db.commit()
@@ -791,6 +847,11 @@ class SectionGenerationCoordinator:
             operation_id = run.id
             failed_run = self.db.get(GenerationRun, operation_id)
             if failed_run:
+                failed_run.model = getattr(
+                    self.ai,
+                    "last_model",
+                    failed_run.model,
+                )
                 failed_run.status = "failed"
                 failed_run.error_code = safe_error_code(error)
                 failed_run.error_message = (
@@ -803,6 +864,11 @@ class SectionGenerationCoordinator:
                     {
                         **load(failed_run.trace_json, {}),
                         "stage": "failed",
+                        "modelAttempts": (
+                            self.ai.fallback_trace()
+                            if callable(getattr(self.ai, "fallback_trace", None))
+                            else []
+                        ),
                         **(
                             {"validationDetails": error.details}
                             if isinstance(error, AppError) and error.details
@@ -937,10 +1003,53 @@ class SectionGenerationCoordinator:
         value = trace()
         return value if isinstance(value, list) else []
 
-    def _questions_are_novel(self, prior, current):
-        return self._questions_novelty_issue(prior, current) is None
+    def _questions_are_novel(
+        self,
+        prior,
+        current,
+        *,
+        allow_option_reorder_only=False,
+    ):
+        return self._questions_novelty_issue(
+            prior,
+            current,
+            allow_option_reorder_only=allow_option_reorder_only,
+        ) is None
 
-    def _questions_novelty_issue(self, prior, current):
+    def _reorder_exact_remediation_duplicates(self, prior, questions):
+        """Deterministically change presentation without changing meaning."""
+        if not prior or len(prior) != len(questions):
+            return
+        prior_by_objective = {}
+        for item in prior:
+            prior_by_objective.setdefault(item["objective"], []).append(item)
+        for position, question in enumerate(questions):
+            options = list(question.options)
+            if len(options) < 2:
+                continue
+            exact_copy = any(
+                normalized(question.prompt) == normalized(old["prompt"])
+                and [normalized(option) for option in options]
+                == [normalized(option) for option in old["options"]]
+                for old in prior_by_objective.get(question.objective, [])
+            )
+            if not exact_copy:
+                continue
+            shift = (position % (len(options) - 1)) + 1
+            order = list(range(shift, len(options))) + list(range(shift))
+            old_to_new = {old: new for new, old in enumerate(order)}
+            question.options = [options[index] for index in order]
+            question.correct = sorted(
+                old_to_new[index] for index in question.correct
+            )
+
+    def _questions_novelty_issue(
+        self,
+        prior,
+        current,
+        *,
+        allow_option_reorder_only=False,
+    ):
         if not prior:
             return "prior_questions_missing"
         if len(prior) != len(current):
@@ -952,17 +1061,27 @@ class SectionGenerationCoordinator:
             prior_by_objective.setdefault(item["objective"], []).append(item)
         for question in current:
             candidates = prior_by_objective.get(question["objective"], [])
-            if any(
-                normalized(question["prompt"]) == normalized(old["prompt"])
-                for old in candidates
-            ):
-                return "prompt_duplicate"
-            if any(
-                {normalized(option) for option in question["options"]}
-                == {normalized(option) for option in old["options"]}
-                for old in candidates
-            ):
-                return "options_duplicate"
+            if allow_option_reorder_only:
+                if any(
+                    normalized(question["prompt"]) == normalized(old["prompt"])
+                    and [normalized(option) for option in question["options"]]
+                    == [normalized(option) for option in old["options"]]
+                    for old in candidates
+                ):
+                    return "question_duplicate"
+            else:
+                if any(
+                    normalized(question["prompt"])
+                    == normalized(old["prompt"])
+                    for old in candidates
+                ):
+                    return "prompt_duplicate"
+                if any(
+                    {normalized(option) for option in question["options"]}
+                    == {normalized(option) for option in old["options"]}
+                    for old in candidates
+                ):
+                    return "options_duplicate"
             if question.get("difficulty", "standard") != "standard":
                 return "difficulty_mismatch"
         return None

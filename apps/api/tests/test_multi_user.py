@@ -283,6 +283,7 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
         "explanationDensity": "auto",
         "formatPreferences": [],
         "interactionRhythm": "auto",
+        "dailyModePromptEnabled": True,
     }
     assert resumed.json()["required"] is True
 
@@ -300,6 +301,20 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
     assert invalid_preferences.status_code == 400
     assert invalid_preferences.json()["code"] == "INVALID_REQUEST"
 
+    invalid_daily_mode_prompt = client.post(
+        "/api/onboarding/profile/complete",
+        headers={"X-CSRF-Token": me["csrfToken"]},
+        json={
+            "profession": "产品设计师",
+            "stage": "foundation",
+            "purpose": "系统学习信息可视化并用于作品集",
+            "domains": ["信息可视化"],
+            "preferences": {"dailyModePromptEnabled": "false"},
+        },
+    )
+    assert invalid_daily_mode_prompt.status_code == 400
+    assert invalid_daily_mode_prompt.json()["code"] == "INVALID_REQUEST"
+
     completed = client.post(
         "/api/onboarding/profile/complete",
         headers={"X-CSRF-Token": me["csrfToken"]},
@@ -314,6 +329,7 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
                 "explanationDensity": "thorough",
                 "formatPreferences": ["worked_example", "diagram"],
                 "interactionRhythm": "balanced",
+                "dailyModePromptEnabled": False,
             },
         },
     )
@@ -324,6 +340,7 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
         "explanationDensity": "thorough",
         "formatPreferences": ["worked_example", "diagram"],
         "interactionRhythm": "balanced",
+        "dailyModePromptEnabled": False,
     }
     with client.app.state.sessions() as db:
         profile = db.get(UserProfile, me["user"]["id"])
@@ -339,6 +356,7 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
         )
         assert profile.version == 1
         assert json.loads(profile.preferences_json)["openingStyle"] == "problem_first"
+        assert json.loads(profile.preferences_json)["dailyModePromptEnabled"] is False
         assert revision.source == "self_report"
         assert json.loads(revision.snapshot_json)["preferences"]["formatPreferences"] == [
             "worked_example",
@@ -353,14 +371,14 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
 
     missing_csrf = client.post(
         "/api/shelves",
-        json={"name": "新书架", "domain": "测试"},
+        json={"name": "新书架"},
     )
     assert missing_csrf.status_code == 403
     assert missing_csrf.json()["code"] == "CSRF_INVALID"
 
     created = client.post(
         "/api/shelves",
-        json={"name": "新书架", "domain": "测试"},
+        json={"name": "新书架"},
         headers={"X-CSRF-Token": me["csrfToken"]},
     )
     assert created.status_code == 201
@@ -546,9 +564,9 @@ def test_fashion_to_ux_account_has_its_own_profile_and_rejects_wrong_password(
     assert len(bootstrap.json()["shelves"]) == 1
     shelf = bootstrap.json()["shelves"][0]
     assert shelf["name"] == persona.shelf_name
-    assert shelf["domain"] == persona.domain
-    assert shelf["specialty"] == persona.specialty
-    assert shelf["tags"] == list(persona.tags)
+    assert shelf["domain"] == ""
+    assert shelf["specialty"] == ""
+    assert shelf["tags"] == []
 
 
 def test_fashion_to_ux_persona_targets_information_visualization_for_product_design():

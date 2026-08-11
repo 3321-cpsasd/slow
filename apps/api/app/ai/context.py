@@ -245,21 +245,21 @@ class GenerationContextPack(ContextModel):
 
 DEPTH_POLICIES: dict[str, dict[str, Any]] = {
     "overview": {
-        "label": "简单了解",
+        "label": "快速了解",
         "scope": "只覆盖建立方向感所需的核心对象、用途与关键边界",
         "requiredDimensions": ["recognition", "mechanism"],
         "practiceMode": "guided",
         "retentionRequired": False,
     },
     "deep": {
-        "label": "深度学习",
+        "label": "深入理解",
         "scope": "覆盖机制、相近概念比较、边界判断与典型应用",
         "requiredDimensions": ["mechanism", "boundary", "application"],
         "practiceMode": "applied",
         "retentionRequired": False,
     },
     "mastery": {
-        "label": "掌握路径",
+        "label": "掌握运用",
         "scope": "覆盖机制、边界、迁移、开放实践与延迟保持",
         "requiredDimensions": ["mechanism", "boundary", "transfer", "retention"],
         "practiceMode": "independent",

@@ -215,22 +215,27 @@ def test_openai_chat_repairs_invalid_schema_with_validation_feedback():
 
 
 def _lesson_candidate_json():
+    slots = (
+        ("T1_CORE", "core_instruction", ""),
+        ("T2_CORE", "core_instruction", ""),
+        ("T3_CORE", "core_instruction", ""),
+        ("S1", "empirical_case", "hypothetical_example"),
+        ("S2", "comparison", ""),
+        ("S3", "boundary", "counterexample"),
+        ("S4", "synthesis", ""),
+    )
     blocks = [
         {
             "slot": slot,
             "kind": "text",
+            "primary_role": role,
+            "teaching_moves": ["direct_explanation"] if slot.endswith("_CORE") else [],
+            "case_kind": case_kind,
+            "case_key": f"case_{slot.lower()}" if case_kind else "",
             "heading": f"正文块 {slot}",
             "content": "这一正文块完整解释当前目标的机制、判断依据与适用边界，并为测验提供直接证据。学习者可以据此复述因果链并检查反例。",
         }
-        for slot in (
-            "T1_CORE",
-            "T2_CORE",
-            "T3_CORE",
-            "SHARED_EXAMPLE",
-            "BOUNDARY",
-            "PRACTICE",
-            "SUMMARY",
-        )
+        for slot, role, case_kind in slots
     ]
     questions = [
         {
@@ -261,7 +266,7 @@ def _lesson_candidate_json():
 
 def _lesson_spec():
     return {
-        "pipelineVersion": "lesson_generation_v2",
+        "pipelineVersion": "lesson_generation_v3",
         "learningContractVersionId": "contract_1",
         "section": {"id": "section_1", "question": "为什么需要稳定绑定？"},
         "targets": [
@@ -284,6 +289,10 @@ def _lesson_spec():
             ],
         },
         "feedback": {},
+        "compositionPolicy": {
+            "profile": "social_empirical",
+            "recommendedRoles": ["mechanism", "empirical_case", "comparison"],
+        },
     }
 
 
@@ -314,14 +323,115 @@ def test_openai_chat_lesson_v2_uses_exactly_one_physical_call():
     assert calls[0]["extra_body"] == {"enable_thinking": False}
     assert calls[0]["max_tokens"] == 12000
     request_payload = json.loads(calls[0]["messages"][1]["content"])
+    assert "content 始终是可被 GFM 正确解析的 Markdown" in calls[0]["messages"][0]["content"]
+    assert "kind 只是主要展示方式的提示" in calls[0]["messages"][0]["content"]
+    assert "不得为了匹配 kind 或职责人为拆块" in calls[0]["messages"][0]["content"]
+    assert "若两个以上选项成立" in calls[0]["messages"][0]["content"]
+    assert "选项 1/2/3/4" in calls[0]["messages"][0]["content"]
     assert [
         item["allowedClaimVersionIds"]
         for item in request_payload["serverSlotPlan"]["targetSlots"]
     ] == [["claim_1"], ["claim_2"], ["claim_3"]]
-    assert request_payload["serverSlotPlan"]["optionalBlockSlots"] == ["TRANSITION"]
+    assert request_payload["serverSlotPlan"]["supportSlotPattern"] == "S1..S99"
+    assert request_payload["serverSlotPlan"]["recommendedSupportRoles"] == [
+        "mechanism", "empirical_case", "comparison"
+    ]
     assert trace[0]["schema"] == "GeneratedLessonSlotCandidate"
     assert trace[0]["attempts"] == 1
     assert trace[0]["repairAttempts"] == 0
+
+
+def test_kimi_k3_lesson_keeps_required_thinking_mode():
+    async def run():
+        adapter = OpenAiAdapter(
+            "",
+            "kimi/kimi-k3",
+            capabilities=ProviderCapabilities(
+                protocol="openai",
+                api_mode="chat_completions",
+                structured_output=True,
+                streaming=True,
+                reasoning_mode="required",
+            ),
+        )
+        observed = {}
+
+        async def fake_chat_parse_once(
+            _schema,
+            _developer,
+            _payload,
+            _tokens,
+            *,
+            reasoning_mode_override=None,
+        ):
+            observed["reasoning_mode"] = reasoning_mode_override
+            return _lesson_candidate_json()
+
+        adapter._chat_parse_once = fake_chat_parse_once
+        await adapter.generate_lesson(_lesson_spec())
+        return observed
+
+    assert asyncio.run(run())["reasoning_mode"] == "required"
+
+
+def test_qwen38_lesson_uses_controlled_thinking_mode():
+    async def run():
+        adapter = OpenAiAdapter(
+            "",
+            "qwen3.8-max-preview",
+            capabilities=ProviderCapabilities(
+                protocol="openai",
+                api_mode="chat_completions",
+                structured_output=True,
+                streaming=True,
+                reasoning_mode="required",
+            ),
+        )
+        observed = {}
+
+        async def fake_chat_parse_once(
+            _schema,
+            _developer,
+            _payload,
+            _tokens,
+            *,
+            reasoning_mode_override=None,
+        ):
+            observed["reasoning_mode"] = reasoning_mode_override
+            return _lesson_candidate_json()
+
+        adapter._chat_parse_once = fake_chat_parse_once
+        await adapter.generate_lesson(_lesson_spec())
+        return observed
+
+    assert asyncio.run(run())["reasoning_mode"] == "required"
+
+
+def test_openai_chat_lesson_maps_provider_failures_for_fallback_routing():
+    async def run():
+        adapter = OpenAiAdapter(
+            "",
+            "test-model",
+            capabilities=ProviderCapabilities(
+                protocol="openai",
+                api_mode="chat_completions",
+                structured_output=True,
+                streaming=True,
+                reasoning_mode="optional",
+            ),
+        )
+
+        async def fail(*_args, **_kwargs):
+            raise FakeProviderError(status_code=503)
+
+        adapter._chat_parse_once = fail
+        with pytest.raises(AiError) as raised:
+            await adapter.generate_lesson(_lesson_spec())
+        return raised.value
+
+    error = asyncio.run(run())
+    assert error.code == "AI_PROVIDER_UNAVAILABLE"
+    assert error.retryable is True
 
 
 def test_openai_chat_lesson_v2_does_not_repair_an_invalid_candidate():

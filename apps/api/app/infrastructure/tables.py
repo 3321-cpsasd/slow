@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
@@ -28,6 +29,50 @@ class User(Base):
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class UserDailyModeState(Base):
+    """Current, rebuildable daily learning-mode projection for one user."""
+
+    __tablename__ = "user_daily_mode_states"
+    user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id"), primary_key=True
+    )
+    daily_mode: Mapped[str] = mapped_column(String(16), index=True)
+    duration: Mapped[str] = mapped_column(String(16))
+    timezone: Mapped[str] = mapped_column(String(64))
+    activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class DailyModeEvent(Base):
+    """Append-only authority for user-initiated daily-mode changes."""
+
+    __tablename__ = "daily_mode_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "idempotency_key",
+            name="uq_daily_mode_events_user_idempotency",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    previous_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    daily_mode: Mapped[str] = mapped_column(String(16), index=True)
+    duration: Mapped[str] = mapped_column(String(16))
+    timezone: Mapped[str] = mapped_column(String(64))
+    source: Mapped[str] = mapped_column(String(32), index=True)
+    activated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    state_version: Mapped[int] = mapped_column(Integer)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
 
 
 class UserFeedback(Base):
@@ -137,6 +182,74 @@ class UserProfileRevision(Base):
     )
 
 
+class LearningPreferenceEvidence(Base):
+    """Append-only evidence used to rebuild inferred teaching preferences."""
+
+    __tablename__ = "learning_preference_evidence"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "event_id",
+            name="uq_learning_preference_evidence_user_event",
+        ),
+        Index(
+            "ix_learning_preference_evidence_user_time",
+            "user_id",
+            "occurred_at",
+        ),
+        Index(
+            "uq_learning_preference_evidence_user_terminal_request",
+            "user_id",
+            "terminal_request_key",
+            unique=True,
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    event_id: Mapped[str] = mapped_column(String(128))
+    request_event_id: Mapped[str] = mapped_column(String(128), default="")
+    terminal_request_key: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
+    section_id: Mapped[str] = mapped_column(String, index=True)
+    shelf_id: Mapped[str] = mapped_column(String, index=True)
+    content_version_id: Mapped[str] = mapped_column(String, default="")
+    block_id: Mapped[str] = mapped_column(String, default="")
+    block_kind: Mapped[str] = mapped_column(String(32), default="text")
+    style: Mapped[str] = mapped_column(String(32), index=True)
+    signal: Mapped[str] = mapped_column(String(24), index=True)
+    dimensions_json: Mapped[str] = mapped_column(Text, default="{}")
+    extraction_confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    extractor_version: Mapped[str] = mapped_column(String(32), default="preset_v1")
+    request_hash: Mapped[str] = mapped_column(String(64))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
+class PersonalBlockPresentation(Base):
+    """A reversible user-local reading layer over an immutable published block."""
+
+    __tablename__ = "personal_block_presentations"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "content_version_id", "block_id",
+            name="uq_personal_block_presentations_user_block",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    content_version_id: Mapped[str] = mapped_column(ForeignKey("content_versions.id"), index=True)
+    block_id: Mapped[str] = mapped_column(String, index=True)
+    replacement_content: Mapped[str] = mapped_column(Text)
+    source_qa_message_id: Mapped[str] = mapped_column(ForeignKey("qa_messages.id"))
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class UserOnboarding(Base):
     __tablename__ = "user_onboardings"
     __table_args__ = (
@@ -191,6 +304,12 @@ class LocalCredential(Base):
     )
     username: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(Text)
+    registration_source: Mapped[str] = mapped_column(
+        String(32), default="unspecified", index=True
+    )
+    registration_quota_date: Mapped[str | None] = mapped_column(
+        String(10), nullable=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
     failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(
@@ -208,6 +327,47 @@ class LocalCredential(Base):
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AlphaRegistrationQuota(Base):
+    """Atomic daily counter for self-service Alpha registrations."""
+
+    __tablename__ = "alpha_registration_quotas"
+    quota_date: Mapped[str] = mapped_column(String(10), primary_key=True)
+    used_count: Mapped[int] = mapped_column(Integer, default=0)
+    limit_snapshot: Mapped[int] = mapped_column(Integer)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AccountRecoveryCode(Base):
+    """Versioned recovery proof for a password account; raw codes are never stored."""
+
+    __tablename__ = "account_recovery_codes"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "version",
+            name="uq_account_recovery_codes_user_version",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    code_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    used_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class AuthSession(Base):
@@ -1240,6 +1400,11 @@ class ContentBlockVersion(Base):
     block_version: Mapped[int] = mapped_column(Integer, default=1)
     format_kind: Mapped[str] = mapped_column(String(24))
     semantic_role: Mapped[str] = mapped_column(String(32), index=True)
+    teaching_moves_json: Mapped[str] = mapped_column(Text, default="[]")
+    case_kind: Mapped[str] = mapped_column(String(32), default="", index=True)
+    case_key: Mapped[str] = mapped_column(String(64), default="")
+    relation_to_anchor: Mapped[str] = mapped_column(String(32), default="")
+    reader_priority: Mapped[str] = mapped_column(String(16), default="normal")
     heading: Mapped[str] = mapped_column(Text, default="")
     content: Mapped[str] = mapped_column(Text)
     source_indexes_json: Mapped[str] = mapped_column(Text, default="[]")
@@ -1770,6 +1935,10 @@ class AssessmentObservation(Base):
             "question_index",
             name="uq_assessment_observations_attempt_question",
         ),
+        UniqueConstraint(
+            "evidence_key",
+            name="uq_assessment_observations_evidence_key",
+        ),
         ForeignKeyConstraint(
             ["learning_run_id", "user_id"],
             ["learning_runs.id", "learning_runs.user_id"],
@@ -1783,7 +1952,9 @@ class AssessmentObservation(Base):
     )
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
-    attempt_id: Mapped[str] = mapped_column(ForeignKey("quiz_attempts.id"), index=True)
+    attempt_id: Mapped[str | None] = mapped_column(
+        ForeignKey("quiz_attempts.id"), nullable=True, index=True
+    )
     quiz_set_id: Mapped[str | None] = mapped_column(
         ForeignKey("quiz_sets.id"), nullable=True, index=True
     )
@@ -1793,14 +1964,20 @@ class AssessmentObservation(Base):
     content_version_id: Mapped[str | None] = mapped_column(
         ForeignKey("content_versions.id"), nullable=True, index=True
     )
-    scoring_result_id: Mapped[str] = mapped_column(
-        ForeignKey("scoring_results.id"), index=True
+    scoring_result_id: Mapped[str | None] = mapped_column(
+        ForeignKey("scoring_results.id"), nullable=True, index=True
     )
     assessment_target_id: Mapped[str] = mapped_column(
         ForeignKey("assessment_targets.id"), index=True
     )
-    question_index: Mapped[int] = mapped_column(Integer)
+    question_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     correct: Mapped[bool] = mapped_column(Boolean)
+    source_type: Mapped[str] = mapped_column(
+        String(32), default="choice_quiz", server_default="choice_quiz", index=True
+    )
+    evidence_key: Mapped[str | None] = mapped_column(
+        String(96), nullable=True
+    )
     assistance_mode: Mapped[str] = mapped_column(
         String(32), default="unassisted_initial"
     )
@@ -2119,6 +2296,7 @@ class QaSession(Base):
     content_version_id: Mapped[str | None] = mapped_column(
         ForeignKey("content_versions.id"), nullable=True, index=True
     )
+    daily_mode: Mapped[str] = mapped_column(String(16), default="slow")
     memory_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
@@ -2130,6 +2308,18 @@ class QaMessage(Base):
     block_id: Mapped[str] = mapped_column(String)
     role: Mapped[str] = mapped_column(String(16))
     content: Mapped[str] = mapped_column(Text)
+    preference_request_event_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, index=True
+    )
+    explanation_style: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )
+    explanation_block_kind: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )
+    request_source: Mapped[str] = mapped_column(
+        String(32), default="ask_ai"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -2365,6 +2555,130 @@ class AskMeSession(Base):
     entries_json: Mapped[str] = mapped_column(Text, default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AskMeDiscussionSession(Base):
+    __tablename__ = "ask_me_discussion_sessions"
+    __table_args__ = (
+        UniqueConstraint(
+            "learning_run_id",
+            "section_id",
+            "user_id",
+            name="uq_ask_me_discussion_sessions_run_section_user",
+        ),
+        ForeignKeyConstraint(
+            ["learning_run_id", "user_id"],
+            ["learning_runs.id", "learning_runs.user_id"],
+            name="fk_ask_me_discussion_sessions_run_user",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    learning_run_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_runs.id"), index=True
+    )
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    learning_contract_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), nullable=True, index=True
+    )
+    content_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("content_versions.id"), nullable=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    active_topic_id: Mapped[str] = mapped_column(String, default="")
+    pending_turn_id: Mapped[str] = mapped_column(String, default="")
+    schema_version: Mapped[str] = mapped_column(String(40), default="ask_me_v2")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    ended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class AskMeDiscussionTopic(Base):
+    __tablename__ = "ask_me_discussion_topics"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id",
+            "position",
+            name="uq_ask_me_discussion_topics_position",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("ask_me_discussion_sessions.id"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(300))
+    purpose: Mapped[str] = mapped_column(Text)
+    dimension: Mapped[str] = mapped_column(String(32), index=True)
+    assessment_target_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
+    current_prompt: Mapped[str] = mapped_column(Text)
+    turn_count: Mapped[int] = mapped_column(Integer, default=0)
+    evidence_recorded: Mapped[bool] = mapped_column(Boolean, default=False)
+    final_assessment_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AskMeDiscussionTurnRecord(Base):
+    __tablename__ = "ask_me_discussion_turns"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "idempotency_key",
+            name="uq_ask_me_discussion_turns_user_idempotency",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("ask_me_discussion_sessions.id"), index=True
+    )
+    topic_id: Mapped[str] = mapped_column(
+        ForeignKey("ask_me_discussion_topics.id"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    turn_index: Mapped[int] = mapped_column(Integer)
+    prompt: Mapped[str] = mapped_column(Text)
+    answer: Mapped[str] = mapped_column(Text)
+    evaluation: Mapped[str] = mapped_column(String(24), default="")
+    feedback_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(24), default="processing", index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    response_json: Mapped[str] = mapped_column(Text, default="")
+    error_code: Mapped[str] = mapped_column(String(80), default="")
+    lease_token: Mapped[str] = mapped_column(
+        String(160), default="", server_default=""
+    )
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AskMeDiscussionCommand(Base):
+    __tablename__ = "ask_me_discussion_commands"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "idempotency_key",
+            name="uq_ask_me_discussion_commands_user_idempotency",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("ask_me_discussion_sessions.id"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    command_type: Mapped[str] = mapped_column(String(32), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    response_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class ChapterPractice(Base):

@@ -30,9 +30,9 @@ from .contracts import ensure_learning_contract
 SCORING_RULE_VERSION = "choice_exact_v2"
 QUALIFICATION_RULE_VERSION = "evidence_v2"
 GATE_RULE_VERSION = "gate_v2"
-BKT_PARAMETER_VERSION = "bkt_v1"
-MASTERY_RULE_VERSION = "mastery_v2"
-REVIEW_RULE_VERSION = "review_v2"
+BKT_PARAMETER_VERSION = "bkt_multimodal_v2"
+MASTERY_RULE_VERSION = "mastery_v3"
+REVIEW_RULE_VERSION = "review_v3"
 RETENTION_WINDOW = timedelta(days=1)
 QUALIFIED_STATUSES_BY_FAMILY = {
     "gate": frozenset({"eligible"}),
@@ -280,6 +280,31 @@ def _episode_passed(observations: list[AssessmentObservation]) -> bool:
     )
 
 
+def _observation_outcome(observation: AssessmentObservation) -> str:
+    if observation.source_type in {"ask_me", "ask_me_topic"}:
+        evaluation = str(_load(observation.payload_json, {}).get("evaluation", ""))
+        if evaluation in {"strong", "partial", "weak"}:
+            return evaluation
+    return "strong" if observation.correct else "weak"
+
+
+def _mastery_episode_outcome(
+    observations: list[AssessmentObservation],
+) -> str:
+    oral_outcomes = [
+        _observation_outcome(item)
+        for item in observations
+        if item.source_type in {"ask_me", "ask_me_topic"}
+    ]
+    if oral_outcomes:
+        if "weak" in oral_outcomes:
+            return "weak"
+        if all(outcome == "strong" for outcome in oral_outcomes):
+            return "strong"
+        return "partial"
+    return "strong" if _episode_passed(observations) else "weak"
+
+
 def _sync_gate(
     db: Session,
     *,
@@ -352,14 +377,22 @@ def _sync_knowledge_and_review(
     last_episode_at: datetime | None = None
     for items in episodes:
         event_at = max(_utc(item.created_at) for item in items)
-        correct = _episode_passed(items)
+        outcome = _mastery_episode_outcome(items)
+        correct = outcome == "strong"
         assisted = any(item.assistance_mode == "assisted_immediate" for item in items)
-        prior = _posterior(
-            prior,
-            correct,
-            guess=0.5 if assisted else 0.25,
-            slip=0.12,
-        )
+        if outcome == "partial":
+            prior = _posterior(prior, True, guess=0.48, slip=0.25)
+        elif outcome == "weak" and any(
+            item.source_type in {"ask_me", "ask_me_topic"} for item in items
+        ):
+            prior = _posterior(prior, False, guess=0.4, slip=0.4)
+        else:
+            prior = _posterior(
+                prior,
+                correct,
+                guess=0.5 if assisted else 0.25,
+                slip=0.12,
+            )
         unassisted_review = all(
             item.assistance_mode == "unassisted_review" for item in items
         )
@@ -377,7 +410,9 @@ def _sync_knowledge_and_review(
             claim_status = "retained" if retention_rounds >= 2 else "verified_delayed"
         elif correct and claim_status not in {"verified_delayed", "retained"}:
             claim_status = "verified_immediate"
-        elif not correct:
+        elif outcome == "partial" and claim_status == "unobserved":
+            claim_status = "learning"
+        elif outcome == "weak":
             claim_status = (
                 "contradicted"
                 if required and claim_status != "unobserved"
@@ -409,7 +444,8 @@ def _sync_knowledge_and_review(
     state.updated_at = now()
 
     assert last_episode is not None and last_episode_at is not None
-    correct = _episode_passed(last_episode)
+    latest_outcome = _mastery_episode_outcome(last_episode)
+    correct = latest_outcome == "strong"
     if not review:
         review = ReviewState(
             id=_uid("review_state"),
@@ -732,6 +768,13 @@ def _record_qualification_events(
     )
     statuses = (
         {
+            "gate": ("ineligible", "optional oral assessment cannot rewrite the section gate"),
+            "mastery": ("eligible_grouped", "contract-bound oral assessment updates mastery once"),
+            "retention": ("ineligible", "same-session oral assessment is not delayed retention evidence"),
+        }
+        if qualification_profile == "ask_me"
+        else
+        {
             "gate": ("ineligible", "delayed review cannot rewrite the section gate"),
             "mastery": ("ineligible", "review quiz is not governance-qualified for mastery"),
             "retention": ("ineligible", "review quiz is not governance-qualified for retention"),
@@ -770,6 +813,113 @@ def _record_qualification_events(
             reason=reason,
             rule_version=QUALIFICATION_RULE_VERSION,
         ))
+
+
+def record_ask_me_assessment_facts(
+    db: Session,
+    *,
+    learning_run_id: str,
+    user_id: str,
+    section_id: str,
+    learning_contract_version_id: str,
+    content_version_id: str | None,
+    assessment_target_ids: list[str],
+    source_type: str,
+    source_id: str,
+    evaluation: str,
+    dimension: str,
+    payload: dict,
+) -> list[AssessmentObservation]:
+    """Append contract-bound oral evidence without granting progression rights."""
+
+    if source_type not in {"ask_me", "ask_me_topic"}:
+        raise AppError(
+            "口试证据类型无效",
+            code="ASK_ME_EVIDENCE_TYPE_INVALID",
+            status=409,
+        )
+    if evaluation not in {"strong", "partial", "weak"}:
+        raise AppError(
+            "口试评估结果无效",
+            code="ASK_ME_EVIDENCE_EVALUATION_INVALID",
+            status=409,
+        )
+    if not source_id or not dimension or not learning_contract_version_id:
+        raise AppError(
+            "口试证据缺少版本化来源",
+            code="ASK_ME_EVIDENCE_LINEAGE_MISSING",
+            status=409,
+        )
+    contract_target_ids = set(db.scalars(
+        select(LearningContractAssessmentTarget.assessment_target_id).where(
+            LearningContractAssessmentTarget.contract_version_id
+            == learning_contract_version_id
+        )
+    ))
+    requested_target_ids = list(dict.fromkeys(assessment_target_ids))
+    if len(requested_target_ids) != 1 or not set(requested_target_ids).issubset(
+        contract_target_ids
+    ):
+        raise AppError(
+            "每条口试证据必须且只能绑定一个契约目标",
+            code="ASK_ME_EVIDENCE_TARGET_BOUNDARY_INVALID",
+            status=409,
+        )
+
+    observations: list[AssessmentObservation] = []
+    episode_id = f"{source_type}:{source_id}"
+    for target_id in requested_target_ids:
+        evidence_key = hashlib.sha256(
+            f"{source_type}:{source_id}:{target_id}".encode()
+        ).hexdigest()
+        existing = db.scalar(
+            select(AssessmentObservation).where(
+                AssessmentObservation.evidence_key == evidence_key
+            )
+        )
+        if existing:
+            observations.append(existing)
+            continue
+        observation = AssessmentObservation(
+            id=_uid("observation"),
+            learning_run_id=learning_run_id,
+            user_id=user_id,
+            section_id=section_id,
+            attempt_id=None,
+            quiz_set_id=None,
+            learning_contract_version_id=learning_contract_version_id,
+            content_version_id=content_version_id,
+            scoring_result_id=None,
+            assessment_target_id=target_id,
+            question_index=None,
+            correct=evaluation == "strong",
+            source_type=source_type,
+            evidence_key=evidence_key,
+            assistance_mode="unassisted_oral",
+            learning_episode_id=episode_id,
+            equivalence_group_id=hashlib.sha256(
+                f"{episode_id}:{dimension}".encode()
+            ).hexdigest(),
+            qualification_at_creation="eligible_grouped",
+            qualification_rule_version=QUALIFICATION_RULE_VERSION,
+            payload_json=_dump({
+                **payload,
+                "evaluation": evaluation,
+                "dimension": dimension,
+                "sourceType": source_type,
+                "sourceId": source_id,
+            }),
+        )
+        db.add(observation)
+        db.flush()
+        _record_qualification_events(
+            db,
+            observation,
+            qualification_profile="ask_me",
+        )
+        observations.append(observation)
+    rebuild_assessment_projections(db, user_id=user_id)
+    return observations
 
 
 def record_scoring_facts(
@@ -845,6 +995,8 @@ def record_scoring_facts(
             assessment_target_id=target_id,
             question_index=index,
             correct=bool(result["correct"]),
+            source_type="choice_quiz",
+            evidence_key=None,
             assistance_mode=assistance_mode,
             learning_episode_id=episode_id,
             equivalence_group_id=str(question.get("equivalenceGroupId", "")),

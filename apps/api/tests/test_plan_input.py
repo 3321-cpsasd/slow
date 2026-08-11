@@ -30,15 +30,10 @@ def test_plan_rejects_blank_learning_background():
         plan_input(role="")
 
 
-def test_evaluation_input_maps_background_and_preserves_custom_shelf():
+def test_evaluation_input_maps_background_and_preserves_custom_shelf_name():
     value = validated_evaluation_input(
         {
-            "shelf": {
-                "name": "交互设计",
-                "domain": "设计学",
-                "specialty": "交互设计转型",
-                "tags": ["信息可视化", "作品集"],
-            },
+            "shelf": {"name": "交互设计"},
             "topic": "平面的信息可视化",
             "background": "大三，有服装设计经验，但是电脑小白",
             "experience": "0",
@@ -49,7 +44,7 @@ def test_evaluation_input_maps_background_and_preserves_custom_shelf():
 
     assert value["role"] == "大三，有服装设计经验，但是电脑小白"
     assert value["shelfId"] == "<created-for-evaluation>"
-    assert value["shelf"]["domain"] == "设计学"
+    assert value["shelf"] == {"name": "交互设计"}
 
 
 def test_evaluation_input_rejects_empty_custom_payload():

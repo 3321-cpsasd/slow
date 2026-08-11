@@ -13,10 +13,20 @@ class ApiModel(BaseModel):
 
 
 class ShelfCreate(ApiModel):
+    model_config = ConfigDict(
+        alias_generator=camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
     name: str = Field(min_length=1, max_length=100)
-    domain: str = Field(default="", max_length=100)
-    specialty: str = Field(default="", max_length=120)
-    tags: list[str] = Field(default_factory=list, max_length=12)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str):
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("书架名称不能为空")
+        return normalized
 
 
 class PlanCreate(ApiModel):
@@ -72,6 +82,39 @@ class PasswordLogin(ApiModel):
     password: SecretStr = Field(min_length=8, max_length=200)
 
 
+class PasswordRegistration(ApiModel):
+    username: str = Field(min_length=3, max_length=80)
+    password: SecretStr = Field(min_length=12, max_length=200)
+    password_confirm: SecretStr = Field(min_length=12, max_length=200)
+    alpha_code: SecretStr | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def passwords_match(self):
+        if self.password.get_secret_value() != self.password_confirm.get_secret_value():
+            raise ValueError("两次输入的密码不一致")
+        return self
+
+
+class PasswordRecoveryReset(ApiModel):
+    username: str = Field(min_length=3, max_length=80)
+    recovery_code: SecretStr = Field(min_length=20, max_length=100)
+    new_password: SecretStr = Field(min_length=12, max_length=200)
+    new_password_confirm: SecretStr = Field(min_length=12, max_length=200)
+
+    @model_validator(mode="after")
+    def passwords_match(self):
+        if (
+            self.new_password.get_secret_value()
+            != self.new_password_confirm.get_secret_value()
+        ):
+            raise ValueError("两次输入的新密码不一致")
+        return self
+
+
+class RecoveryCodeRotate(ApiModel):
+    current_password: SecretStr = Field(min_length=8, max_length=200)
+
+
 class PrivacyConsentCreate(ApiModel):
     privacy_accepted: bool = Field(alias="privacyAccepted")
     trial_accepted: bool = Field(alias="trialAccepted")
@@ -82,6 +125,19 @@ class AccountExitCreate(ApiModel):
     reason: str = Field(default="", max_length=500)
 
 
+class DailyModeUpdate(ApiModel):
+    model_config = ConfigDict(
+        alias_generator=camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+    daily_mode: Literal["fast", "slow"]
+    duration: Literal["1h", "3h", "6h", "today"]
+    timezone: str = Field(min_length=1, max_length=64)
+    source: Literal["dialog", "header_toggle", "duration_adjustment"]
+
+
 ProductEventName = Literal[
     "home_viewed",
     "shelf_viewed",
@@ -90,6 +146,9 @@ ProductEventName = Literal[
     "section_viewed",
     "quiz_viewed",
     "feedback_opened",
+    "explanation_style_requested",
+    "explanation_style_feedback",
+    "explanation_style_remembered",
     "active_reading_60s",
     "frontend_error",
 ]
@@ -152,6 +211,30 @@ class LearningPreferences(ApiModel):
     interaction_rhythm: Literal[
         "auto", "low_interruption", "balanced", "frequent_checkins"
     ] = "auto"
+    daily_mode_prompt_enabled: bool = Field(default=True, strict=True)
+
+
+class LearningPreferenceEvidenceCreate(ApiModel):
+    event_id: str = Field(min_length=8, max_length=128)
+    request_event_id: str | None = Field(default=None, min_length=8, max_length=128)
+    section_id: str = Field(min_length=1, max_length=160)
+    content_version_id: str = Field(min_length=1, max_length=160)
+    block_id: str = Field(min_length=1, max_length=160)
+    block_kind: Literal["text", "bullet_list", "ordered_steps", "diagram", "table", "code", "formula"]
+    style: Literal["worked_example", "diagram", "analogy", "derivation", "precise", "concise", "custom"]
+    signal: Literal["requested", "helpful", "unclear"]
+    custom_instruction: str | None = Field(default=None, max_length=240)
+
+
+class PersonalPresentationAdopt(ApiModel):
+    event_id: str = Field(min_length=8, max_length=128)
+    request_event_id: str = Field(min_length=8, max_length=128)
+    content_version_id: str = Field(min_length=1, max_length=160)
+    block_id: str = Field(min_length=1, max_length=160)
+    block_kind: Literal["text", "bullet_list", "ordered_steps", "diagram", "table", "code", "formula"]
+    style: Literal["worked_example", "diagram", "analogy", "derivation", "precise", "concise", "custom"]
+    thread_id: str = Field(min_length=1, max_length=160)
+    answer_message_id: str = Field(min_length=1, max_length=160)
 
 
 class ProfileDraftUpdate(ApiModel):
@@ -189,6 +272,26 @@ class AskRequest(ApiModel):
     question: str = Field(min_length=1, max_length=3000)
     thread_id: str | None = None
     force_relation: Literal["follow_up", "new_question"] | None = None
+    preference_request_event_id: str | None = Field(default=None, max_length=128)
+    explanation_style: Literal[
+        "worked_example", "diagram", "analogy", "derivation", "precise",
+        "concise", "custom",
+    ] | None = None
+    explanation_block_kind: Literal[
+        "text", "bullet_list", "ordered_steps", "diagram", "table", "code",
+        "formula",
+    ] | None = None
+
+    @model_validator(mode="after")
+    def validate_explanation_lineage(self):
+        values = (
+            self.preference_request_event_id,
+            self.explanation_style,
+            self.explanation_block_kind,
+        )
+        if any(values) and not all(values):
+            raise ValueError("讲法请求的偏好元数据必须完整")
+        return self
 
 
 class QaClassificationUpdate(ApiModel):
@@ -253,6 +356,19 @@ class FeedbackCreate(ApiModel):
 
 class AskMeReply(ApiModel):
     answer: str = Field(default="", max_length=3000)
+
+
+class AskMeDiscussionTurnCreate(ApiModel):
+    session_id: str = Field(min_length=1, max_length=160)
+    topic_id: str = Field(min_length=1, max_length=160)
+    expected_revision: int = Field(ge=0)
+    answer: str = Field(min_length=1, max_length=3000)
+
+
+class AskMeDiscussionAction(ApiModel):
+    session_id: str = Field(min_length=1, max_length=160)
+    expected_revision: int = Field(ge=0)
+    action: Literal["next_topic", "pause", "resume", "finish"]
 
 
 class AttachmentSubmit(ApiModel):

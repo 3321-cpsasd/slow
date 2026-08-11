@@ -9,25 +9,14 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 
-CONTENT_GOVERNANCE_RULE_VERSION = "content_governance_v1"
+CONTENT_GOVERNANCE_RULE_VERSION = "content_governance_v2"
 
-ContentRole = Literal[
-    "conclusion",
-    "mechanism",
-    "example",
-    "boundary",
-    "practice",
-    "transition",
-]
+ContentRole = str
 PublicationMode = Literal["formal", "experimental"]
 
-REQUIRED_SEMANTIC_ROLES = frozenset(
-    {"conclusion", "mechanism", "example", "boundary", "practice"}
-)
 STRICT_CLAIM_KINDS = frozenset(
     {"core_conclusion", "boundary", "assessable_fact"}
 )
-STRICT_BLOCK_ROLES = frozenset({"conclusion", "boundary"})
 SUPPORTING_RELATIONS = frozenset({"supports", "defines"})
 VERIFIED_SUPPORT_STATUSES = frozenset({"verified", "cross_source"})
 CLOSED_GAP_STATUSES = frozenset({"resolved", "closed"})
@@ -39,6 +28,8 @@ class ContentBlockInput:
     role: ContentRole
     assessment_target_ids: tuple[str, ...] = ()
     assessment_eligible: bool = False
+    factuality_class: str = "unspecified"
+    case_kind: str = ""
 
 
 @dataclass(frozen=True)
@@ -138,7 +129,8 @@ def _strict_claim(
     return bool(
         claim.explicitly_assessable
         or claim.kind in STRICT_CLAIM_KINDS
-        or (block and block.role in STRICT_BLOCK_ROLES)
+        or (block and block.assessment_eligible)
+        or (block and block.case_kind in {"empirical_case", "primary_source_case"})
     )
 
 
@@ -182,17 +174,6 @@ def _content_reasons(candidate: ContentGovernanceInput) -> list[GovernanceReason
             )
         )
 
-    present_roles = {block.role for block in candidate.blocks}
-    missing_roles = sorted(REQUIRED_SEMANTIC_ROLES - present_roles)
-    if missing_roles:
-        reasons.append(
-            GovernanceReason(
-                code="SEMANTIC_CLOSURE_INCOMPLETE",
-                message="正文缺少必要的语义职责块。",
-                subject_ids=tuple(missing_roles),
-            )
-        )
-
     duplicate_claim_ids = _duplicates(claim.id for claim in candidate.claims)
     if duplicate_claim_ids:
         reasons.append(
@@ -222,7 +203,11 @@ def _content_reasons(candidate: ContentGovernanceInput) -> list[GovernanceReason
         strict_claims = [
             claim for claim in block_claims if _strict_claim(claim, blocks_by_id)
         ]
-        if block.role in STRICT_BLOCK_ROLES and not strict_claims:
+        requires_claim = (
+            block.assessment_eligible
+            or block.case_kind in {"empirical_case", "primary_source_case"}
+        )
+        if requires_claim and not strict_claims:
             strict_blocks_without_claim.append(block.id)
         if block.assessment_eligible and not any(
             claim.explicitly_assessable or claim.kind == "assessable_fact"
@@ -233,7 +218,7 @@ def _content_reasons(candidate: ContentGovernanceInput) -> list[GovernanceReason
         reasons.append(
             GovernanceReason(
                 code="STRICT_CLAIM_MISSING",
-                message="结论与边界块必须声明可追溯的原子主张。",
+                message="可考核正文和真实案例必须声明可追溯的原子主张。",
                 subject_ids=tuple(sorted(strict_blocks_without_claim)),
             )
         )

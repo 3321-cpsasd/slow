@@ -78,10 +78,10 @@ def spec(*, second_required=False, feedback=None):
 def candidate():
     roles = [
         ("core_instruction", "core", ["target_core"]),
-        ("mechanism", "mechanism", ["target_core"]),
-        ("comparison", "comparison", ["target_boundary"]),
-        ("boundary", "boundary", ["target_boundary"]),
-        ("practice", "practice", ["target_core"]),
+        ("core_instruction", "core", ["target_boundary"]),
+        ("comparison", "comparison", []),
+        ("boundary", "boundary", []),
+        ("practice", "practice", []),
     ]
     blocks = [
         GeneratedLessonBlock(
@@ -113,6 +113,109 @@ def candidate():
 def test_valid_candidate_passes_without_repair():
     validated = validate_lesson_candidate(spec(), candidate())
     assert validated.block_by_key["b1"].assessment_target_ids == ["target_core"]
+
+
+@pytest.mark.parametrize(
+    "explanation",
+    [
+        "选项3需要或语义，因此无法表达。",
+        "第 3 个选项需要或语义，因此无法表达。",
+        "C 项需要或语义，因此无法表达。",
+        "Option C requires OR semantics.",
+    ],
+)
+def test_option_position_dependent_explanation_is_rejected(explanation):
+    value = candidate()
+    value.questions[0].explanation = explanation
+
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(spec(), value)
+
+    assert raised.value.code == "ASSESSMENT_EXPLANATION_POSITION_DEPENDENT"
+    assert raised.value.location == {
+        "itemKey": "q1",
+        "rule": "positional_option_reference",
+        "schemaVersion": "generated_lesson_composition_candidate_v7",
+    }
+
+
+def test_single_answer_explanation_cannot_hedge_multiple_valid_options():
+    value = candidate()
+    value.questions[0].explanation = (
+        "实际上另外两种需求也无法表达，但这是最佳答案，因为它更典型。"
+    )
+
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(spec(), value)
+
+    assert raised.value.code == "ASSESSMENT_SINGLE_ANSWER_AMBIGUOUS"
+    assert raised.value.location["rule"] == "hedged_single_answer"
+
+
+def test_explanation_can_name_option_content_after_reordering():
+    value = candidate()
+    value.questions[0].explanation = (
+        "“使用稳定目标 ID”满足正文要求；只匹配标题或忽略契约都不成立。"
+    )
+
+    validate_lesson_candidate(spec(), value)
+
+
+def test_long_text_requires_authored_paragraph_breaks():
+    value = candidate()
+    value.blocks[0].content = "这是一个需要逐层解释的较长机制段落。" * 18
+
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(spec(), value)
+
+    assert raised.value.code == "CONTENT_BLOCK_LAYOUT_INVALID"
+    assert raised.value.location == {
+        "blockKey": "b1",
+        "kind": "text",
+        "rule": "long_single_paragraph",
+        "schemaVersion": "generated_lesson_composition_candidate_v7",
+        "characterCount": len(value.blocks[0].content),
+        "paragraphCount": 1,
+    }
+
+    value.blocks[0].content = (
+        "这是第一段，用来说明问题、对象、约束和可观察结果。" * 6
+        + "\n\n"
+        + "这是第二段，用来继续解释机制、判断依据和适用边界。" * 6
+    )
+    validate_lesson_candidate(spec(), value)
+
+
+def test_standard_blocks_accept_mixed_gfm_regardless_of_presentation_hint():
+    markdown_samples = {
+        "text": (
+            "下面是判断依据：\n\n"
+            "- 第一项依据说明。\n"
+            "- 第二项依据说明。\n\n"
+            "1. 先观察条件。\n"
+            "2. 再判断结果。"
+        ),
+        "bullet_list": "这一块以连贯段落解释机制；展示提示不应成为内容格式门禁。",
+        "ordered_steps": (
+            "步骤之间也可以补充并列条件：\n\n"
+            "- 条件一必须成立。\n"
+            "- 条件二必须成立。"
+        ),
+        "table": (
+            "先用一句话建立比较背景。\n\n"
+            "| 环节 | 主要作用 |\n"
+            "| --- | --- |\n"
+            "| 应用 | 组织用户任务 |\n"
+            "| 模型 | 提供推理能力 |\n\n"
+            "表格之后可以继续解释结论。"
+        ),
+    }
+
+    for kind, content in markdown_samples.items():
+        value = candidate()
+        value.blocks[0].kind = kind
+        value.blocks[0].content = content
+        validate_lesson_candidate(spec(), value)
 
 
 def _grounded_spec():
@@ -152,11 +255,11 @@ def _grounded_spec():
 def test_grounded_candidate_requires_explicit_in_scope_claim_ids():
     value = candidate()
     for block in value.blocks:
-        block.claim_version_ids = [
-            "claim_core"
-            if block.assessment_target_ids == ["target_core"]
-            else "claim_boundary"
-        ]
+        block.claim_version_ids = (
+            [] if block.role == "practice" else
+            ["claim_core"] if block.assessment_target_ids == ["target_core"] else
+            ["claim_boundary"]
+        )
     validate_lesson_candidate(_grounded_spec(), value)
 
     missing = candidate()
@@ -287,7 +390,10 @@ def test_atomic_publisher_normalizes_explicit_bindings_and_rolls_back():
         )
         assert published.content.publication_status == "published"
         assert published.quiz.publication_status == "published"
-        assert db.scalar(select(func.count()).select_from(ContentBlockAssessmentTarget)) == 5
+        payload = published.content.blocks_json
+        assert '"teachingMoves"' in payload
+        assert '"readerPriority":"essential"' in payload
+        assert db.scalar(select(func.count()).select_from(ContentBlockAssessmentTarget)) == 2
         assert db.scalar(select(func.count()).select_from(AssessmentItemVersion)) == 4
         assert db.scalar(select(func.count()).select_from(AssessmentItemEvidenceBlock)) == 4
         db.rollback()
@@ -296,23 +402,24 @@ def test_atomic_publisher_normalizes_explicit_bindings_and_rolls_back():
 
 
 class V2FakeAi(FakeAi):
-    def __init__(self, *, invalid_target=False):
+    def __init__(self, *, invalid_target=False, invalid_layout=False):
         self.lesson_generation_calls = 0
+        self.generated_section_ids = []
         self.invalid_target = invalid_target
+        self.invalid_layout = invalid_layout
 
     async def generate_lesson(self, lesson_spec):
         self.lesson_generation_calls += 1
+        self.generated_section_ids.append(lesson_spec["section"]["id"])
         targets = lesson_spec["targets"]
         blocks = []
         roles = [
-            ("core_instruction", "core"),
-            ("mechanism", "mechanism"),
-            ("comparison", "comparison"),
-            ("boundary", "boundary"),
-            ("practice", "practice"),
+            *[("core_instruction", "core", target["assessmentTargetId"]) for target in targets],
+            ("comparison", "comparison", ""),
+            ("boundary", "boundary", ""),
+            ("practice", "practice", ""),
         ]
-        for index, (role, relation) in enumerate(roles, 1):
-            target_id = targets[(index - 1) % len(targets)]["assessmentTargetId"]
+        for index, (role, relation, target_id) in enumerate(roles, 1):
             blocks.append(
                 GeneratedLessonBlock(
                     block_key=f"b{index}",
@@ -321,19 +428,20 @@ class V2FakeAi(FakeAi):
                     relation_to_anchor=relation,
                     assessment_target_ids=[
                         "outside_contract" if self.invalid_target and index == 1 else target_id
-                    ],
+                    ] if target_id else [],
                     heading=f"正文块 {index}",
-                    content="这一正文块完整解释当前目标的机制、判断依据与适用边界，并为绑定题目提供直接证据。",
+                    content=(
+                        "这是一个没有任何分段的较长正文块。" * 20
+                        if self.invalid_layout and index == 1
+                        else "这一正文块完整解释当前目标的机制、判断依据与适用边界，并为绑定题目提供直接证据。"
+                    ),
                 )
             )
         questions = []
         for index in range(4):
-            target = targets[index % len(targets)]
-            block = next(
-                item
-                for item in blocks
-                if target["assessmentTargetId"] in item.assessment_target_ids
-            )
+            target_index = index % len(targets)
+            target = targets[target_index]
+            block = blocks[target_index]
             questions.append(
                 GeneratedLessonQuestion(
                     item_key=f"q{index + 1}",
@@ -354,7 +462,7 @@ class V2FakeAi(FakeAi):
                     source_block_id=feedback["blockId"],
                     # Deliberately map the first old block to the last new block
                     # so the integration test proves identity is not positional.
-                    replacement_block_key="b5",
+                    replacement_block_key=blocks[-1].block_key,
                 )
                 if feedback
                 else None
@@ -378,13 +486,17 @@ def test_default_v2_route_uses_one_model_call_and_publishes_both_artifacts():
         lesson = client.get(f"/api/sections/{section_id}").json()
 
         assert task["status"] == "succeeded"
-        assert ai.lesson_generation_calls == 1
+        assert ai.generated_section_ids.count(section_id) == 1
         assert lesson["content"]["publicationStatus"] == "published"
         assert lesson["content"]["boundaryValidation"]["status"] == "passed"
         assert lesson["quiz"]["publicationStatus"] == "published"
         assert lesson["generation"]["trace"]["physicalCallBudget"] == 1
         with client.app.state.sessions() as db:
-            assert db.scalar(select(func.count()).select_from(AssessmentItemVersion)) == 4
+            assert db.scalar(
+                select(func.count()).select_from(AssessmentItemVersion).where(
+                    AssessmentItemVersion.quiz_set_id == lesson["quiz"]["id"],
+                )
+            ) == 4
 
 
 def test_v2_route_rejects_unbound_content_before_formal_persistence():
@@ -402,6 +514,25 @@ def test_v2_route_rejects_unbound_content_before_formal_persistence():
             run = db.scalar(select(GenerationRun).order_by(GenerationRun.started_at.desc()))
             assert task["status"] == "failed"
             assert run.error_code == "CONTENT_ASSESSMENT_TARGET_UNBOUND"
+            assert db.scalar(select(func.count()).select_from(ContentVersion)) == 0
+            assert db.scalar(select(func.count()).select_from(QuizSet)) == 0
+
+
+def test_v2_route_rejects_invalid_layout_before_formal_persistence():
+    ai = V2FakeAi(invalid_layout=True)
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            ai,
+            AcceptingSourceVerifier(),
+        )
+    ) as client:
+        series = create_series(client)
+        task = wait_for_task(client, series["initializationTask"]["taskId"])
+        with client.app.state.sessions() as db:
+            run = db.scalar(select(GenerationRun).order_by(GenerationRun.started_at.desc()))
+            assert task["status"] == "failed"
+            assert run.error_code == "CONTENT_BLOCK_LAYOUT_INVALID"
             assert db.scalar(select(func.count()).select_from(ContentVersion)) == 0
             assert db.scalar(select(func.count()).select_from(QuizSet)) == 0
 
@@ -431,7 +562,7 @@ def test_legacy_content_never_claims_current_boundary_validation():
         legacy = client.get(f"/api/sections/{section_id}").json()
         assert legacy["content"]["boundaryValidation"] == {
             "status": "legacy",
-            "ruleVersion": "lesson_candidate_gate_v4",
+            "ruleVersion": "lesson_candidate_gate_v11",
         }
 
 
@@ -562,7 +693,7 @@ def test_v2_feedback_creates_a_new_atomic_content_and_quiz_version():
         events = sse_events(streamed)
         done = next(payload for event, payload in events if event == "done")
         replacement = client.get(f"/api/sections/{section_id}").json()
-        assert done["contentBlockId"] == replacement["content"]["blocks"][4]["id"]
+        assert done["contentBlockId"] == replacement["content"]["blocks"][-1]["id"]
         assert done["contentBlockId"] != replacement["content"]["blocks"][0]["id"]
         replay = sse_events(
             client.post(f"/api/feedback/{submitted.json()['id']}/repair/stream")
@@ -570,7 +701,7 @@ def test_v2_feedback_creates_a_new_atomic_content_and_quiz_version():
         replay_done = next(payload for event, payload in replay if event == "done")
         assert replay_done["replayed"] is True
         assert replay_done["contentBlockId"] == done["contentBlockId"]
-        assert ai.lesson_generation_calls == 2
+        assert ai.generated_section_ids.count(section_id) == 2
         assert replacement["content"]["version"] == 2
         assert replacement["content"]["id"] != original["content"]["id"]
         assert replacement["quiz"]["id"] != original["quiz"]["id"]

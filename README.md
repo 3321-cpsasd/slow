@@ -104,8 +104,8 @@ PYTHONPATH=apps/api .venv/bin/python apps/api/import_curriculum_baseline.py \
 
 ### 邀请制内测账号
 
-生产内测使用 `APP_MODE=production` 与 `AUTH_MODE=password`。应用不提供公开注册；
-首次部署并完成迁移后，由管理员在 API 容器中创建账号：
+生产内测使用 `APP_MODE=production` 与 `AUTH_MODE=password`。默认不开放注册；
+首次部署并完成迁移后，可继续由管理员在 API 容器中创建账号：
 
 ```bash
 ./create-demo-user.sh
@@ -124,6 +124,21 @@ Compose 配置自动创建 `slow-demo` 加五位随机数的账号，并生成�
 创建和重置命令默认生成随机密码；也可使用 `--prompt-password` 安全输入自定密码。
 禁用账号或重置密码会撤销该用户的全部现有 Session。默认 Session 最长 7 天，
 连续 24 小时未使用则过期。
+
+需要开放无邮箱 Alpha 注册时，在生产环境设置：
+
+```bash
+REGISTRATION_MODE=alpha
+ALPHA_REGISTRATION_CODE=请使用独立高熵访问码
+ALPHA_REGISTRATION_DAILY_LIMIT=100
+```
+
+新用户使用访问码创建用户名和密码，随后会收到仅展示一次的恢复码。恢复码
+是无邮箱账号的自助重置凭证；服务端只保存其哈希。恢复成功后旧密码、旧恢复码
+和全部现有 Session 都会失效，并生成新的恢复码。已登录用户验证当前密码后，也可以
+在“账号与数据”中生成新的恢复码；生成后旧恢复码立即失效。`REGISTRATION_MODE=closed`
+可随时停止新注册，不影响已有账号登录和恢复。`open` 模式不要求访问码，当前
+Alpha 阶段不建议启用。
 
 上线前如确实需要管理员重复查看分发密码，可在**非生产环境**显式设置
 `PASSWORD_ESCROW_ENABLED=true`。创建或重置后的密码会写入独立的 `0600` 文件，

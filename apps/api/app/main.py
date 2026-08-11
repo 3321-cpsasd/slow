@@ -11,6 +11,7 @@ from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from .auth.context import Principal, UserScope, demo_user_scope
 from .auth.profile import ProfileService
@@ -18,22 +19,27 @@ from .auth.privacy import PrivacyService, privacy_notice
 from .auth.local import LocalCredentialService
 from .auth.oidc import OidcClient
 from .auth.password import PasswordCredentialService
+from .auth.recovery import AccountRecoveryService
+from .auth.registration import claim_alpha_registration
 from .auth.service import IdentityService, OidcStateService, SessionService, token_hash
 from .ai.openai_adapter import OpenAiAdapter
 from .ai.anthropic_adapter import AnthropicAdapter
+from .ai.fallback_adapter import FallbackAiAdapter
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, FeedbackCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ReviewSubmit, ShelfCreate
+from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceEvidenceCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ResumeUpdate, ReviewSubmit, ShelfCreate
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
 from .demo_personas import LOCAL_DEMO_PERSONAS
 from .infrastructure.database import build_database
-from .infrastructure.tables import Base, LearningTask, QuizAttempt, Remediation, User
+from .infrastructure.tables import Base, LearningTask, QuizAttempt, Remediation, User, now
 from .modules.learning.tasks import claim_task, heartbeat_task, recoverable_task_ids
 from .modules.feedback.service import FeedbackService
 from .modules.telemetry.service import ProductEventService
+from .modules.library.context import ActiveLearningContextResolver
+from .modules.preferences.service import LearningPreferenceService, PersonalPresentationService
 from .services.source_verifier import ModelOnlySourcePolicy
 from .services.attachment_storage import LocalAttachmentStorage
 from .services.runtime_settings import RuntimeSettingsStore
@@ -86,7 +92,108 @@ def build_provider_adapter(
         model,
         base_url,
         capabilities=capabilities,
+        request_timeout_seconds=settings.ai_request_timeout_seconds,
     )
+
+
+def fallback_model_profiles(config: dict) -> list[dict]:
+    enabled_bundled_models = {
+        item.strip()
+        for item in settings.ai_fallback_models.split(",")
+        if item.strip()
+    }
+    configured = config.get("fallbacks")
+    if configured:
+        profiles = list(configured)
+    elif (
+        config.get("provider_protocol") != "openai"
+        or "aliyuncs.com" not in str(config.get("base_url") or "")
+    ):
+        profiles = []
+    else:
+        profiles = []
+        for model in (
+            item.strip()
+            for item in settings.ai_fallback_models.split(",")
+            if item.strip()
+        ):
+            profiles.append({
+                "model": model,
+                "providerProtocol": "openai",
+                "apiMode": (
+                    "responses"
+                    if model == "qwen3.8-max-preview"
+                    else "chat_completions"
+                ),
+                "reasoningMode": (
+                    "required" if model == "kimi/kimi-k3" else "optional"
+                ),
+                "apiKey": (
+                    settings.qwen38_api_key
+                    if model == "qwen3.8-max-preview"
+                    else settings.kimi_k3_api_key
+                    if model == "kimi/kimi-k3"
+                    else ""
+                ),
+                "baseUrl": (
+                    settings.qwen38_base_url
+                    if model == "qwen3.8-max-preview"
+                    else settings.kimi_k3_base_url
+                    if model == "kimi/kimi-k3"
+                    else ""
+                ),
+            })
+    primary_model = str(config.get("provider_model") or "").strip()
+    normalized = []
+    seen = set()
+    for profile in profiles:
+        model = str(profile.get("model") or "").strip()
+        if (
+            model in {"qwen3.8-max-preview", "kimi/kimi-k3"}
+            and model not in enabled_bundled_models
+        ):
+            continue
+        if not model or model == primary_model or model in seen:
+            continue
+        seen.add(model)
+        normalized_profile = {**profile, "model": model}
+        if model == "qwen3.8-max-preview":
+            # This endpoint defaults to unbounded thinking in Responses mode.
+            # Use the compatible chat path so Slow can enforce a small,
+            # controlled thinking budget and still receive final JSON content.
+            normalized_profile.update({
+                "apiMode": "chat_completions",
+                "reasoningMode": "required",
+            })
+        normalized.append(normalized_profile)
+    return normalized
+
+
+def build_runtime_adapter(config: dict):
+    primary_capabilities = provider_capabilities(config)
+    primary = build_provider_adapter(
+        config["api_key"],
+        config["provider_model"],
+        config["base_url"],
+        primary_capabilities,
+    )
+    adapters = [primary]
+    for fallback in fallback_model_profiles(config):
+        model = str(fallback["model"])
+        if model == config["provider_model"]:
+            continue
+        fallback_config = {
+            "provider_protocol": fallback.get("providerProtocol", "openai"),
+            "api_mode": fallback["apiMode"],
+            "reasoning_mode": fallback["reasoningMode"],
+        }
+        adapters.append(build_provider_adapter(
+            fallback.get("apiKey") or config["api_key"],
+            model,
+            fallback.get("baseUrl") or config["base_url"],
+            provider_capabilities(fallback_config),
+        ))
+    return FallbackAiAdapter(adapters) if len(adapters) > 1 else primary
 
 
 def managed_source_verifier(adapter):
@@ -105,16 +212,40 @@ def create_app(
     *,
     auth_mode: str | None = None,
     app_mode: str | None = None,
+    registration_mode: str | None = None,
+    alpha_registration_code: str | None = None,
+    alpha_registration_daily_limit: int | None = None,
     oidc_client=None,
 ):
     effective_auth_mode = auth_mode or settings.auth_mode
     effective_app_mode = app_mode or settings.app_mode
+    effective_registration_mode = registration_mode or settings.registration_mode
+    effective_alpha_registration_code = (
+        settings.alpha_registration_code
+        if alpha_registration_code is None
+        else alpha_registration_code
+    )
+    effective_alpha_registration_daily_limit = (
+        settings.alpha_registration_daily_limit
+        if alpha_registration_daily_limit is None
+        else alpha_registration_daily_limit
+    )
     if effective_app_mode == "production" and effective_auth_mode == "demo":
         raise RuntimeError("Production mode cannot use demo authentication")
     if effective_app_mode == "production" and effective_auth_mode == "local":
         raise RuntimeError("Production mode cannot use local authentication")
     if effective_app_mode == "production" and settings.password_escrow_enabled:
         raise RuntimeError("Production mode cannot enable password escrow")
+    if (
+        effective_registration_mode != "closed"
+        and effective_auth_mode != "password"
+    ):
+        raise RuntimeError("Registration requires password authentication")
+    if (
+        effective_registration_mode == "alpha"
+        and not effective_alpha_registration_code
+    ):
+        raise RuntimeError("Alpha registration requires an access code")
     engine, sessions = build_database(database_url or settings.database_url)
     usage_recorder = AiUsageRecorder(sessions)
     if runtime_settings_path is False:
@@ -139,8 +270,10 @@ def create_app(
             else settings.openai_api_mode
         ),
         "reasoning_mode": settings.openai_reasoning_mode,
+        "fallbacks": [],
     }
     configured_runtime = saved_runtime or environment_runtime
+    configured_runtime["fallbacks"] = fallback_model_profiles(configured_runtime)
     configured_capabilities = provider_capabilities(configured_runtime)
     if ai is not None:
         adapter = ai
@@ -154,15 +287,11 @@ def create_app(
                 "capabilities",
                 DEFAULT_PROVIDER_CAPABILITIES,
             ),
+            "fallbacks": [],
         }
     else:
         adapter = (
-            build_provider_adapter(
-                configured_runtime["api_key"],
-                configured_runtime["provider_model"],
-                configured_runtime["base_url"],
-                configured_capabilities,
-            )
+            build_runtime_adapter(configured_runtime)
             if configured_runtime["mode"] == "provider"
             else LocalDemoAdapter()
         )
@@ -172,6 +301,7 @@ def create_app(
             "base_url": configured_runtime["base_url"],
             "provider_model": configured_runtime["provider_model"],
             "capabilities": configured_capabilities,
+            "fallbacks": configured_runtime["fallbacks"],
         }
     if hasattr(adapter, "set_usage_recorder"):
         adapter.set_usage_recorder(usage_recorder)
@@ -319,6 +449,11 @@ def create_app(
     )
     app.state.auth_mode = effective_auth_mode
     app.state.app_mode = effective_app_mode
+    app.state.registration_mode = effective_registration_mode
+    app.state.alpha_registration_code = effective_alpha_registration_code
+    app.state.alpha_registration_daily_limit = (
+        effective_alpha_registration_daily_limit
+    )
     app.state.oidc = configured_oidc
 
     @app.exception_handler(AppError)
@@ -404,6 +539,7 @@ def create_app(
         consent_exempt_paths = {
             "/api/auth/me",
             "/api/auth/logout",
+            "/api/auth/password/recovery-code/rotate",
             "/api/privacy",
             "/api/privacy/consent",
             "/api/account/exit",
@@ -446,6 +582,9 @@ def create_app(
             "configured": bool(request.app.state.ai.configured),
             "model": request.app.state.ai.model,
             "providerModel": runtime["provider_model"],
+            "fallbackModels": [
+                item["model"] for item in runtime.get("fallbacks", [])
+            ],
             "baseUrl": runtime["base_url"],
             "apiKeyStored": bool(runtime["api_key"]),
             "ephemeral": request.app.state.runtime_store is None,
@@ -508,8 +647,15 @@ def create_app(
 
     @app.get("/api/auth/config")
     def auth_config(request: Request):
+        registration_mode = (
+            request.app.state.registration_mode
+            if request.app.state.auth_mode == "password"
+            else "closed"
+        )
         response = {
             "mode": request.app.state.auth_mode,
+            "registrationMode": registration_mode,
+            "registrationCodeRequired": registration_mode == "alpha",
             "providerName": (
                 settings.oidc_provider_name
                 if request.app.state.auth_mode == "oidc"
@@ -557,22 +703,15 @@ def create_app(
         )
         return response
 
-    def password_login_response(
+    def password_user_response(
         request: Request,
-        body: PasswordLogin,
+        user: User,
         session: Session,
         *,
         mode: str,
+        status_code: int = 200,
+        extra: dict | None = None,
     ):
-        credential_service = (
-            LocalCredentialService(session)
-            if mode == "local"
-            else PasswordCredentialService(session)
-        )
-        user = credential_service.authenticate(
-            username=body.username,
-            password=body.password.get_secret_value(),
-        )
         session_service = SessionService(
             session,
             ttl_seconds=settings.session_ttl_seconds,
@@ -596,7 +735,7 @@ def create_app(
                 )
             ),
         ).ensure_user()
-        response = JSONResponse({
+        payload = {
             "authenticated": True,
             "mode": mode,
             "user": {"id": user.id, "name": user.name},
@@ -605,7 +744,10 @@ def create_app(
                 required=privacy_required(request)
             ),
             "onboarding": ProfileService(session, user.id).state(),
-        })
+        }
+        if extra:
+            payload.update(extra)
+        response = JSONResponse(payload, status_code=status_code)
         set_session_cookies(
             response,
             request,
@@ -613,6 +755,29 @@ def create_app(
             csrf_token=csrf_token,
         )
         return response
+
+    def password_login_response(
+        request: Request,
+        body: PasswordLogin,
+        session: Session,
+        *,
+        mode: str,
+    ):
+        credential_service = (
+            LocalCredentialService(session)
+            if mode == "local"
+            else PasswordCredentialService(session)
+        )
+        user = credential_service.authenticate(
+            username=body.username,
+            password=body.password.get_secret_value(),
+        )
+        return password_user_response(
+            request,
+            user,
+            session,
+            mode=mode,
+        )
 
     @app.post("/api/auth/password/login")
     def password_auth_login(
@@ -632,6 +797,121 @@ def create_app(
             session,
             mode="password",
         )
+
+    @app.post("/api/auth/password/register")
+    def password_auth_register(
+        request: Request,
+        body: PasswordRegistration,
+        session: Session = Depends(db),
+    ):
+        if (
+            request.app.state.auth_mode != "password"
+            or request.app.state.registration_mode == "closed"
+        ):
+            raise AppError(
+                "Alpha 注册当前未开放",
+                code="REGISTRATION_NOT_AVAILABLE",
+                status=404,
+            )
+        if request.app.state.registration_mode == "alpha":
+            supplied_code = (
+                body.alpha_code.get_secret_value() if body.alpha_code else ""
+            )
+            if not hmac.compare_digest(
+                request.app.state.alpha_registration_code,
+                supplied_code,
+            ):
+                raise AppError(
+                    "Alpha 访问码无效",
+                    code="ALPHA_ACCESS_CODE_INVALID",
+                    status=403,
+                )
+        quota_date = now().date().isoformat()
+        password = body.password.get_secret_value()
+        try:
+            if request.app.state.registration_mode == "alpha":
+                claim_alpha_registration(
+                    session,
+                    quota_date=quota_date,
+                    daily_limit=request.app.state.alpha_registration_daily_limit,
+                )
+            user = PasswordCredentialService(session).create_account(
+                username=body.username,
+                display_name=body.username.strip(),
+                password=password,
+                registration_source=(
+                    "alpha_self_service"
+                    if request.app.state.registration_mode == "alpha"
+                    else "open_self_service"
+                ),
+                registration_quota_date=(
+                    quota_date
+                    if request.app.state.registration_mode == "alpha"
+                    else None
+                ),
+                commit=False,
+            )
+            recovery_code = AccountRecoveryService(session).issue(
+                user_id=user.id,
+                commit=False,
+            )
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        return password_user_response(
+            request,
+            user,
+            session,
+            mode="password",
+            status_code=201,
+            extra={"recoveryCode": recovery_code},
+        )
+
+    @app.post("/api/auth/password/recover")
+    def password_auth_recover(
+        request: Request,
+        body: PasswordRecoveryReset,
+        session: Session = Depends(db),
+    ):
+        if request.app.state.auth_mode != "password":
+            raise AppError(
+                "当前未启用正式账号密码登录",
+                code="PASSWORD_AUTH_NOT_ENABLED",
+                status=404,
+            )
+        replacement = AccountRecoveryService(session).reset_password(
+            username=body.username,
+            recovery_code=body.recovery_code.get_secret_value(),
+            new_password=body.new_password.get_secret_value(),
+        )
+        return {
+            "reset": True,
+            "recoveryCode": replacement,
+        }
+
+    @app.post("/api/auth/password/recovery-code/rotate")
+    def rotate_password_recovery_code(
+        request: Request,
+        body: RecoveryCodeRotate,
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        if request.app.state.auth_mode != "password":
+            raise AppError(
+                "当前账号不使用恢复码",
+                code="ACCOUNT_RECOVERY_NOT_AVAILABLE",
+                status=404,
+            )
+        PasswordCredentialService(session).verify_current_password(
+            user_id=scope.user_id,
+            password=body.current_password.get_secret_value(),
+        )
+        return {
+            "recoveryCode": AccountRecoveryService(session).issue(
+                user_id=scope.user_id,
+            )
+        }
 
     @app.post("/api/auth/local/login")
     def local_auth_login(
@@ -805,6 +1085,65 @@ def create_app(
     ):
         return ProductEventService(session, scope.user_id).append(body.events)
 
+    @app.post("/api/learning-preferences/evidence", status_code=202)
+    def record_learning_preference_evidence(
+        body: LearningPreferenceEvidenceCreate,
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        ProfileService(session, scope.user_id).require_complete()
+        context = ActiveLearningContextResolver(session).resolve_section(
+            user_id=scope.user_id,
+            section_id=body.section_id,
+        )
+        return LearningPreferenceService(session, scope.user_id).record(
+            body,
+            shelf_id=context.shelf.id,
+        )
+
+    @app.post("/api/sections/{section_id}/personal-presentation", status_code=201)
+    def adopt_personal_presentation(
+        section_id: str,
+        body: PersonalPresentationAdopt,
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        ProfileService(session, scope.user_id).require_complete()
+        context = ActiveLearningContextResolver(session).resolve_section(
+            user_id=scope.user_id,
+            section_id=section_id,
+        )
+        override = PersonalPresentationService(session, scope.user_id).adopt(
+            body,
+            section_id=section_id,
+        )
+        projection = LearningPreferenceService(
+            session, scope.user_id
+        ).record_adoption(
+            body,
+            section_id=section_id,
+            shelf_id=context.shelf.id,
+            presentation=override,
+        )
+        return {"id": override.id, "status": "active", "projection": projection}
+
+    @app.delete("/api/sections/{section_id}/personal-presentation/{block_id}", status_code=204)
+    def restore_personal_presentation(
+        section_id: str,
+        block_id: str,
+        content_version_id: str = Query(alias="contentVersionId"),
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        ActiveLearningContextResolver(session).resolve_section(
+            user_id=scope.user_id,
+            section_id=section_id,
+        )
+        PersonalPresentationService(session, scope.user_id).restore(
+            content_version_id=content_version_id,
+            block_id=block_id,
+        )
+
     @app.post("/api/auth/logout", status_code=204)
     def auth_logout(
         request: Request,
@@ -902,16 +1241,33 @@ def create_app(
                 streaming=True,
                 reasoning_mode=body.reasoning_mode,
             )
-            candidate = build_provider_adapter(
-                api_key,
-                body.model.strip(),
-                base_url,
-                capabilities,
+            fallback_profiles = (
+                current.get("fallbacks", [])
+                if base_url == current.get("base_url")
+                else []
             )
+            candidate_runtime = {
+                "api_key": api_key,
+                "base_url": base_url,
+                "provider_model": body.model.strip(),
+                "provider_protocol": body.provider_protocol,
+                "api_mode": body.api_mode,
+                "reasoning_mode": body.reasoning_mode,
+                "fallbacks": fallback_profiles,
+            }
+            candidate_runtime["fallbacks"] = fallback_model_profiles(
+                candidate_runtime
+            )
+            candidate = build_runtime_adapter(candidate_runtime)
             if hasattr(candidate, "set_usage_recorder"):
                 candidate.set_usage_recorder(request.app.state.ai_usage_recorder)
             try:
-                await candidate.check_connection()
+                primary_check = getattr(
+                    candidate,
+                    "check_primary_connection",
+                    candidate.check_connection,
+                )
+                await primary_check()
             except Exception:
                 await candidate.close()
                 raise AppError("连接验证失败，请检查 API Key、Base URL 和模型名称", code="AI_RUNTIME_CONNECTION_FAILED", status=400)
@@ -921,6 +1277,7 @@ def create_app(
                 "base_url": base_url,
                 "provider_model": body.model.strip(),
                 "capabilities": capabilities,
+                "fallbacks": candidate_runtime["fallbacks"],
             }
         if request.app.state.runtime_store:
             try:
@@ -988,6 +1345,18 @@ def create_app(
 
     @app.get("/api/bootstrap")
     def bootstrap(s: SlowService = Depends(service)): return s.bootstrap()
+
+    @app.get("/api/daily-mode")
+    def daily_mode(s: SlowService = Depends(service)):
+        return s.daily_mode()
+
+    @app.put("/api/daily-mode")
+    def update_daily_mode(
+        body: DailyModeUpdate,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return s.update_daily_mode(body, idempotency_key)
 
     @app.post("/api/feedback", status_code=201)
     async def submit_feedback(
@@ -1154,6 +1523,10 @@ def create_app(
     @app.post("/api/sections/{section_id}/generate")
     async def generate_section(section_id: str, s: SlowService = Depends(service)): return await s.generate_section(section_id)
 
+    @app.post("/api/sections/{section_id}/prepare")
+    async def prepare_section(section_id: str, s: SlowService = Depends(service)):
+        return await s.prepare_section(section_id)
+
     @app.post("/api/sections/{section_id}/regenerate")
     async def regenerate_section(section_id: str, s: SlowService = Depends(service)):
         return await s.generate_section(section_id, regenerate=True)
@@ -1221,6 +1594,10 @@ def create_app(
     @app.post("/api/sections/{section_id}/ask")
     async def ask(section_id: str, body: AskRequest, s: SlowService = Depends(service)): return await s.ask(section_id, body)
 
+    @app.get("/api/sections/{section_id}/qa/history")
+    def qa_history(section_id: str, s: SlowService = Depends(service)):
+        return s.qa_history(section_id)
+
     @app.post("/api/sections/{section_id}/ask/stream")
     async def ask_stream(section_id: str, body: AskRequest, s: SlowService = Depends(service)):
         context = s.prepare_ask(section_id, body)
@@ -1249,6 +1626,43 @@ def create_app(
 
     @app.post("/api/sections/{section_id}/ask-me")
     async def ask_me(section_id: str, body: AskMeReply, s: SlowService = Depends(service)): return await s.ask_me(section_id, body.answer)
+
+    @app.get("/api/sections/{section_id}/ask-me/discussion")
+    def ask_me_discussion(section_id: str, s: SlowService = Depends(service)):
+        return s.ask_me_discussion(section_id)
+
+    @app.post("/api/sections/{section_id}/ask-me/discussion")
+    def start_ask_me_discussion(
+        section_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return s.start_ask_me_discussion(section_id)
+
+    @app.post("/api/sections/{section_id}/ask-me/discussion/turns")
+    async def submit_ask_me_discussion_turn(
+        section_id: str,
+        body: AskMeDiscussionTurnCreate,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return await s.submit_ask_me_discussion_turn(
+            section_id,
+            body,
+            idempotency_key,
+        )
+
+    @app.post("/api/sections/{section_id}/ask-me/discussion/actions")
+    def apply_ask_me_discussion_action(
+        section_id: str,
+        body: AskMeDiscussionAction,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return s.apply_ask_me_discussion_action(
+            section_id,
+            body,
+            idempotency_key,
+        )
 
     @app.get("/api/chapters/{chapter_id}/practice")
     def practice(chapter_id: str, s: SlowService = Depends(service)): return s.chapter_practice(chapter_id)

@@ -17,9 +17,11 @@ TASK_TYPES = {
     "note_generation",
     "remediation_generation",
     "next_section_preload",
+    "section_lookahead_preload",
 }
 PRELOAD_TASK_TYPES = {"initial_book_preload", "next_section_preload"}
-MANUAL_PRELOAD_RETRY_BUDGET = 3
+MANUALLY_EXTENSIBLE_TASK_TYPES = PRELOAD_TASK_TYPES | {"remediation_generation"}
+MANUAL_TASK_RETRY_BUDGET = 3
 
 
 def _load(value: str, default=None):
@@ -323,7 +325,7 @@ def reset_failed_task(db: Session, task: LearningTask) -> LearningTask:
             status=409,
         )
     if task.attempt_count >= task.max_attempts:
-        if task.task_type not in PRELOAD_TASK_TYPES:
+        if task.task_type not in MANUALLY_EXTENSIBLE_TASK_TYPES:
             raise AppError(
                 "学习任务已达到最大重试次数",
                 code="LEARNING_TASK_RETRY_EXHAUSTED",
@@ -331,7 +333,7 @@ def reset_failed_task(db: Session, task: LearningTask) -> LearningTask:
             )
         # Preserve the cumulative attempt count and extend the audited budget
         # instead of resetting history when a user explicitly retries.
-        task.max_attempts = task.attempt_count + MANUAL_PRELOAD_RETRY_BUDGET
+        task.max_attempts = task.attempt_count + MANUAL_TASK_RETRY_BUDGET
     task.status = "pending"
     task.error_code = ""
     task.error_message = ""
@@ -357,7 +359,7 @@ def task_view(task: LearningTask) -> dict:
             task.status == "failed"
             and (
                 task.attempt_count < task.max_attempts
-                or task.task_type in PRELOAD_TASK_TYPES
+                or task.task_type in MANUALLY_EXTENSIBLE_TASK_TYPES
             )
         ),
         "errorCode": task.error_code or None,

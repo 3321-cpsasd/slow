@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -30,10 +31,10 @@ from ..infrastructure.tables import (
 from ..modules.learning.assessment_items import publish_assessment_item_versions
 
 
-LESSON_GENERATION_PIPELINE_VERSION = "lesson_generation_v2"
-LESSON_GENERATION_SCHEMA_VERSION = "generated_lesson_slot_candidate_v4"
-LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_slot_prompt_v4"
-LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v4"
+LESSON_GENERATION_PIPELINE_VERSION = "lesson_generation_v3"
+LESSON_GENERATION_SCHEMA_VERSION = "generated_lesson_composition_candidate_v7"
+LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_composition_prompt_v10"
+LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v11"
 LESSON_CONTEXT_POLICY_VERSION = "lesson_generation_context_v2"
 AI_CONTENT_LABEL_SCHEMA_VERSION = "ai_content_label_v2"
 
@@ -60,6 +61,37 @@ class LessonTargetSpec(LessonSpecModel):
     verification_policy: str = Field(alias="verificationPolicy")
 
 
+class LessonCasePolicy(LessonSpecModel):
+    minimum_distinct_cases: int = Field(ge=0, le=6, alias="minimumDistinctCases")
+    preferred_kinds: list[str] = Field(default_factory=list, max_length=6, alias="preferredKinds")
+
+
+class LessonCompositionPolicy(LessonSpecModel):
+    schema_version: Literal["lesson_composition_policy_v1"] = Field(alias="schemaVersion")
+    resolver_version: Literal[
+        "contract_epistemic_resolver_v1", "contract_epistemic_resolver_v2"
+    ] = Field(alias="resolverVersion")
+    profile: Literal[
+        "generic_conceptual",
+        "formal_quantitative",
+        "technical_procedural",
+        "scientific_causal",
+        "historical_evidentiary",
+        "textual_argumentative",
+        "social_empirical",
+        "normative_case_analysis",
+    ]
+    basis: Literal["frozen_contract_deterministic_inference"]
+    matched_signals: list[str] = Field(default_factory=list, max_length=6, alias="matchedSignals")
+    knowledge_form: str = Field(alias="knowledgeForm", min_length=1, max_length=80)
+    learning_operation: str = Field(alias="learningOperation", min_length=1, max_length=80)
+    evidence_forms: list[str] = Field(alias="evidenceForms", min_length=1, max_length=8)
+    recommended_roles: list[str] = Field(alias="recommendedRoles", max_length=12)
+    recommended_teaching_moves: list[str] = Field(alias="recommendedTeachingMoves", max_length=12)
+    case_policy: LessonCasePolicy = Field(alias="casePolicy")
+    minimum_blocks: int = Field(ge=2, le=12, alias="minimumBlocks")
+    maximum_blocks: int = Field(ge=2, le=12, alias="maximumBlocks")
+
 class NeighborBoundary(LessonSpecModel):
     direction: Literal["previous", "next"]
     section_id: str = Field(alias="sectionId")
@@ -71,15 +103,15 @@ class NeighborBoundary(LessonSpecModel):
 class LessonGenerationSpec(LessonSpecModel):
     """Small, versioned, server-owned input to the one physical model call."""
 
-    pipeline_version: Literal["lesson_generation_v2"] = Field(
+    pipeline_version: Literal["lesson_generation_v3"] = Field(
         default=LESSON_GENERATION_PIPELINE_VERSION,
         alias="pipelineVersion",
     )
-    schema_version: Literal["generated_lesson_slot_candidate_v4"] = Field(
+    schema_version: Literal["generated_lesson_composition_candidate_v7"] = Field(
         default=LESSON_GENERATION_SCHEMA_VERSION,
         alias="schemaVersion",
     )
-    prompt_version: Literal["lesson_generation_slot_prompt_v4"] = Field(
+    prompt_version: Literal["lesson_generation_composition_prompt_v10"] = Field(
         default=LESSON_GENERATION_PROMPT_VERSION,
         alias="promptVersion",
     )
@@ -96,6 +128,26 @@ class LessonGenerationSpec(LessonSpecModel):
     learning_contract_version_id: str = Field(alias="learningContractVersionId")
     learning_contract_version: int = Field(alias="learningContractVersion")
     targets: list[LessonTargetSpec] = Field(min_length=1, max_length=8)
+    composition_policy: LessonCompositionPolicy = Field(
+        default_factory=lambda: LessonCompositionPolicy.model_validate(
+            {
+                "schemaVersion": "lesson_composition_policy_v1",
+                "resolverVersion": "contract_epistemic_resolver_v2",
+                "profile": "generic_conceptual",
+                "basis": "frozen_contract_deterministic_inference",
+                "matchedSignals": [],
+                "knowledgeForm": "concept_or_system",
+                "learningOperation": "explain_and_apply",
+                "evidenceForms": ["conceptual_reasoning"],
+                "recommendedRoles": ["mechanism", "example", "boundary", "practice"],
+                "recommendedTeachingMoves": ["direct_explanation", "illustrate"],
+                "casePolicy": {"minimumDistinctCases": 0, "preferredKinds": []},
+                "minimumBlocks": 2,
+                "maximumBlocks": 12,
+            }
+        ),
+        alias="compositionPolicy",
+    )
     neighbor_boundaries: list[NeighborBoundary] = Field(
         default_factory=list,
         max_length=2,
@@ -134,7 +186,7 @@ class LessonGenerationSpec(LessonSpecModel):
         return _hash(self.payload())
 
 
-@dataclass(frozen=True)
+@dataclass
 class CandidateValidationFailure(Exception):
     code: str
     message: str
@@ -155,6 +207,136 @@ def _reject(code: str, message: str, **location: Any) -> None:
     raise CandidateValidationFailure(code, message, location)
 
 
+_GFM_BLOCK_RE = re.compile(
+    r"^\s*(?:[-+*]\s+\S|\d+[.)]\s+\S|#{1,6}\s+\S|>\s+\S|```|~~~)"
+)
+_GFM_TABLE_DIVIDER_RE = re.compile(
+    r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$"
+)
+_LONG_TEXT_MIN_CHARS = 240
+_MAX_PROSE_PARAGRAPH_CHARS = 360
+_POSITIONAL_OPTION_REFERENCE_PATTERNS = (
+    re.compile(r"选项\s*(?:[A-Fa-f]|[1-6一二三四五六])(?![A-Za-z0-9])"),
+    re.compile(r"第\s*(?:[1-6一二三四五六])\s*(?:个|项)?\s*选项"),
+    re.compile(r"(?:^|[，。；：、\s])(?:[A-Fa-f])\s*项(?!目)"),
+    re.compile(r"\b(?:option|choice)\s*[A-Fa-f1-6]\b", re.IGNORECASE),
+)
+_HEDGED_SINGLE_ANSWER_RE = re.compile(
+    r"最佳答案|最优答案|最合适(?:的)?答案|更(?:典型|明确|明显|合适)"
+)
+_READER_HIGHLIGHT_ROLES = frozenset({
+    "worked_example", "empirical_case", "primary_source", "evidence_analysis",
+    "counterexample", "boundary",
+})
+
+
+def _reader_priority(role: str) -> str:
+    if role == "core_instruction":
+        return "essential"
+    if role in _READER_HIGHLIGHT_ROLES:
+        return "highlight"
+    return "normal"
+
+
+def _layout_reject(block, rule: str, message: str, **details: Any) -> None:
+    _reject(
+        "CONTENT_BLOCK_LAYOUT_INVALID",
+        message,
+        blockKey=block.block_key,
+        kind=block.kind,
+        rule=rule,
+        schemaVersion=LESSON_GENERATION_SCHEMA_VERSION,
+        **details,
+    )
+
+
+def _paragraphs(content: str) -> list[str]:
+    return [
+        re.sub(r"\s+", " ", item).strip()
+        for item in re.split(r"\n\s*\n", content)
+        if item.strip()
+    ]
+
+
+def _validate_lesson_block_layout(block) -> None:
+    """Validate publishability without treating a presentation hint as authority."""
+
+    content = block.content.replace("\r\n", "\n").replace("\r", "\n").strip()
+    lines = content.splitlines()
+    nonempty_lines = [line for line in lines if line.strip()]
+    if not nonempty_lines:
+        _layout_reject(block, "empty_content", "正文块没有可发布内容")
+
+    first_line = re.sub(r"^#{1,6}\s+", "", nonempty_lines[0].strip())
+    if first_line == block.heading.strip():
+        _layout_reject(
+            block,
+            "heading_repeated",
+            "正文块在内容中重复了标题",
+        )
+
+    # ``content`` is always GFM Markdown. ``kind`` is only a presentation hint,
+    # so a prose block may freely contain lists, steps, tables, or a mixture.
+    # Pure long-form prose still needs authored paragraph breaks for readability.
+    has_authored_gfm_structure = any(
+        _GFM_BLOCK_RE.match(line) or _GFM_TABLE_DIVIDER_RE.match(line)
+        for line in nonempty_lines
+    )
+    if has_authored_gfm_structure:
+        return
+
+    paragraphs = _paragraphs(content)
+    character_count = len(content)
+    if character_count >= _LONG_TEXT_MIN_CHARS and len(paragraphs) < 2:
+        _layout_reject(
+            block,
+            "long_single_paragraph",
+            "较长正文必须按意思分段并保留空行",
+            characterCount=character_count,
+            paragraphCount=len(paragraphs),
+        )
+    for position, paragraph in enumerate(paragraphs, 1):
+        if len(paragraph) > _MAX_PROSE_PARAGRAPH_CHARS:
+            _layout_reject(
+                block,
+                "paragraph_too_long",
+                "正文段落过长，必须拆分为更易阅读的短段落",
+                paragraphPosition=position,
+                characterCount=len(paragraph),
+            )
+
+
+def _validate_question_explanation(question) -> None:
+    """Reject explanations whose meaning can change when options are reordered."""
+
+    positional_pattern = next(
+        (
+            pattern.pattern
+            for pattern in _POSITIONAL_OPTION_REFERENCE_PATTERNS
+            if pattern.search(question.explanation)
+        ),
+        None,
+    )
+    if positional_pattern:
+        _reject(
+            "ASSESSMENT_EXPLANATION_POSITION_DEPENDENT",
+            "题目解析不能引用会在发布前变化的选项位置",
+            itemKey=question.item_key,
+            rule="positional_option_reference",
+            schemaVersion=LESSON_GENERATION_SCHEMA_VERSION,
+        )
+    if len(question.correct) == 1 and _HEDGED_SINGLE_ANSWER_RE.search(
+        question.explanation
+    ):
+        _reject(
+            "ASSESSMENT_SINGLE_ANSWER_AMBIGUOUS",
+            "单选题解析不能用最佳或更典型等措辞掩盖多个成立选项",
+            itemKey=question.item_key,
+            rule="hedged_single_answer",
+            schemaVersion=LESSON_GENERATION_SCHEMA_VERSION,
+        )
+
+
 def validate_lesson_candidate(
     spec: LessonGenerationSpec,
     candidate: GeneratedLessonCandidate,
@@ -168,6 +350,45 @@ def validate_lesson_candidate(
             contractVersion=spec.learning_contract_version,
         )
 
+    block_count = len(candidate.blocks)
+    if block_count < spec.composition_policy.minimum_blocks:
+        _reject(
+            "CONTENT_COMPOSITION_MINIMUM_BLOCKS",
+            "正文块数量低于编排策略的最低要求",
+            minimumBlocks=spec.composition_policy.minimum_blocks,
+            actualBlocks=block_count,
+        )
+    if block_count > spec.composition_policy.maximum_blocks:
+        _reject(
+            "CONTENT_COMPOSITION_MAXIMUM_BLOCKS",
+            "正文块数量超过编排策略的上限",
+            maximumBlocks=spec.composition_policy.maximum_blocks,
+            actualBlocks=block_count,
+        )
+    case_kind_by_key: dict[str, str] = {}
+    for block in candidate.blocks:
+        if not block.case_kind:
+            continue
+        existing_kind = case_kind_by_key.setdefault(block.case_key, block.case_kind)
+        if existing_kind != block.case_kind:
+            _reject(
+                "CONTENT_CASE_IDENTITY_CONFLICT",
+                "同一案例身份声明了不同的案例类型",
+                caseKey=block.case_key,
+                expectedCaseKind=existing_kind,
+                actualCaseKind=block.case_kind,
+            )
+    case_count = len(case_kind_by_key)
+    if case_count < spec.composition_policy.case_policy.minimum_distinct_cases:
+        _reject(
+            "CONTENT_COMPOSITION_CASES_MISSING",
+            "正文案例数量低于编排策略的最低要求",
+            minimumDistinctCases=(
+                spec.composition_policy.case_policy.minimum_distinct_cases
+            ),
+            actualCases=case_count,
+        )
+
     target_by_id = {item.assessment_target_id: item for item in spec.targets}
     contract_target_ids = set(target_by_id)
     knowledge_ready = spec.knowledge_context.get("status") == "ready"
@@ -178,6 +399,7 @@ def validate_lesson_candidate(
     }
     block_by_key: dict[str, Any] = {}
     for block in candidate.blocks:
+        _validate_lesson_block_layout(block)
         if block.block_key in block_by_key:
             _reject(
                 "CONTENT_BLOCK_KEY_INVALID",
@@ -185,12 +407,25 @@ def validate_lesson_candidate(
                 blockKey=block.block_key,
             )
         block_by_key[block.block_key] = block
-        if block.role in {"prerequisite_scaffold", "transition"} and (
-            block.assessment_target_ids
-        ):
+        expected_case_kind = {
+            "worked_example": "worked_example",
+            "empirical_case": "empirical_case",
+            "primary_source": "primary_source_case",
+            "counterexample": "counterexample",
+        }.get(block.role)
+        if expected_case_kind and block.case_kind != expected_case_kind:
+            _reject(
+                "CONTENT_CASE_KIND_INVALID",
+                "案例职责必须声明匹配的案例真实性类型",
+                blockKey=block.block_key,
+                role=block.role,
+                expectedCaseKind=expected_case_kind,
+                actualCaseKind=block.case_kind,
+            )
+        if block.role != "core_instruction" and block.assessment_target_ids:
             _reject(
                 "CONTENT_ASSESSMENT_TARGET_UNBOUND",
-                "支撑性正文块不能声明可考核目标",
+                "只有核心依据块可以声明可考核目标",
                 blockKey=block.block_key,
                 assessmentTargetIds=block.assessment_target_ids,
                 contractVersion=spec.learning_contract_version,
@@ -212,7 +447,17 @@ def validate_lesson_candidate(
                 blockKey=block.block_key,
                 claimVersionIds=sorted(unknown_claim_ids),
             )
-        claim_required = block.role not in {"practice", "transition"}
+        if block.case_kind in {"empirical_case", "primary_source_case"} and not block.claim_version_ids:
+            _reject(
+                "CONTENT_CASE_EVIDENCE_MISSING",
+                "实证案例和原始材料案例必须绑定允许的知识主张",
+                blockKey=block.block_key,
+                caseKind=block.case_kind,
+            )
+        claim_required = (
+            block.role not in {"practice", "transition"}
+            and block.case_kind not in {"hypothetical_example", "learner_transfer"}
+        )
         if knowledge_ready and claim_required and not block.claim_version_ids:
             _reject(
                 "CONTENT_KNOWLEDGE_CLAIM_MISSING",
@@ -280,6 +525,7 @@ def validate_lesson_candidate(
     item_keys: set[str] = set()
     assessed_target_ids: set[str] = set()
     for question in candidate.questions:
+        _validate_question_explanation(question)
         if question.item_key in item_keys:
             _reject(
                 "ASSESSMENT_ITEM_INVALID",
@@ -320,6 +566,22 @@ def validate_lesson_candidate(
         for block in candidate.blocks
         for target_id in block.assessment_target_ids
     }
+    core_blocks_by_target: dict[str, list[str]] = {}
+    for block in candidate.blocks:
+        if block.role != "core_instruction":
+            continue
+        for target_id in block.assessment_target_ids:
+            core_blocks_by_target.setdefault(target_id, []).append(block.block_key)
+    for target in spec.targets:
+        core_blocks = core_blocks_by_target.get(target.assessment_target_id, [])
+        if len(core_blocks) != 1:
+            _reject(
+                "TARGET_CORE_BLOCK_CARDINALITY_INVALID",
+                "每个冻结目标必须且只能对应一个核心依据块",
+                assessmentTargetId=target.assessment_target_id,
+                blockKeys=core_blocks,
+                contractVersion=spec.learning_contract_version,
+            )
     for target in spec.targets:
         if not target.required:
             continue
@@ -404,6 +666,7 @@ def publish_lesson_candidate(
             validated.target_by_id[target_id].objective
             for target_id in block.assessment_target_ids
         ]
+        reader_priority = _reader_priority(block.role)
         payload = {
             "id": block_id,
             "version": content.version,
@@ -411,6 +674,10 @@ def publish_lesson_candidate(
             "kind": block.kind,
             "role": block.role,
             "relationToAnchor": block.relation_to_anchor,
+            "teachingMoves": block.teaching_moves,
+            "caseKind": block.case_kind,
+            "caseKey": block.case_key,
+            "readerPriority": reader_priority,
             "heading": block.heading,
             "content": block.content,
             "source_indexes": [],
@@ -427,6 +694,11 @@ def publish_lesson_candidate(
                 block_version=content.version,
                 format_kind=block.kind,
                 semantic_role=block.role,
+                teaching_moves_json=_dump(block.teaching_moves),
+                case_kind=block.case_kind,
+                case_key=block.case_key,
+                relation_to_anchor=block.relation_to_anchor,
+                reader_priority=reader_priority,
                 heading=block.heading,
                 content=block.content,
                 source_indexes_json="[]",
@@ -606,9 +878,9 @@ def publish_lesson_candidate(
                 actor_kind="generation_attempt",
                 actor_id=generation_run.id,
                 idempotency_key=(
-                    f"lesson-v2:content:{content.id}"
+                    f"lesson-v3:content:{content.id}"
                     if quiz_id is None
-                    else f"lesson-v2:quiz:{quiz.id}"
+                    else f"lesson-v3:quiz:{quiz.id}"
                 ),
             )
         )

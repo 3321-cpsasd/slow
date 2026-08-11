@@ -1,6 +1,7 @@
 import asyncio
 
 from .contracts import (
+    AskMeDiscussionTurn,
     AskMeTurn,
     ChoiceQuestion,
     ClaimSupportReview,
@@ -157,23 +158,17 @@ class LocalDemoAdapter:
 
     async def generate_lesson(self, spec):
         targets = spec["targets"]
-        roles = [
-            ("core_instruction", "core"),
-            ("mechanism", "mechanism"),
-            ("comparison", "comparison"),
-            ("boundary", "boundary"),
-            ("practice", "practice"),
-        ]
         blocks = []
-        for index, (role, relation) in enumerate(roles):
-            target = targets[index % len(targets)]
+        for index, target in enumerate(targets):
             blocks.append(
                 GeneratedLessonBlock(
                     block_key=f"b{index + 1}",
                     kind="text",
-                    role=role,
-                    relation_to_anchor=relation,
+                    role="core_instruction",
+                    relation_to_anchor="core",
                     assessment_target_ids=[target["assessmentTargetId"]],
+                    teaching_moves=["direct_explanation"],
+                    reader_priority="essential",
                     heading=f"{spec['section']['title']}：演示说明 {index + 1}",
                     content=(
                         f"这是围绕“{spec['section']['question']}”生成的本地演示教材块。"
@@ -182,21 +177,37 @@ class LocalDemoAdapter:
                     ),
                 )
             )
+        for role, relation, move, case_kind in (
+            ("mechanism", "mechanism", "explain_mechanism", ""),
+            ("practice", "practice", "guided_practice", "hypothetical_example"),
+        ):
+            position = len(blocks) + 1
+            blocks.append(
+                GeneratedLessonBlock(
+                    block_key=f"b{position}",
+                    kind="text",
+                    role=role,
+                    relation_to_anchor=relation,
+                    teaching_moves=[move],
+                    case_kind=case_kind,
+                    case_key=(f"demo_case_{position}" if case_kind else ""),
+                    heading=f"{spec['section']['title']}：演示支持 {position}",
+                    content=(
+                        f"这一段围绕“{spec['section']['question']}”提供不参与新增考核目标的支持说明。"
+                        "它帮助学习者连接核心依据、适用条件与后续练习，但不会扩大本节的验证范围。"
+                    ),
+                )
+            )
         question_count = max(4, min(5, len(targets)))
         questions = []
         for index in range(question_count):
             target_index = index % len(targets)
             target = targets[target_index]
-            evidence_index = next(
-                block_index
-                for block_index, block in enumerate(blocks)
-                if target["assessmentTargetId"] in block.assessment_target_ids
-            )
             questions.append(
                 GeneratedLessonQuestion(
                     item_key=f"q{index + 1}",
                     assessment_target_id=target["assessmentTargetId"],
-                    evidence_block_keys=[f"b{evidence_index + 1}"],
+                    evidence_block_keys=[f"b{target_index + 1}"],
                     prompt=f"关于“{target['objective']}”，哪一项符合本节演示正文？",
                     options=["忽略机制直接猜测", "依据机制和边界进行判断", "把示例当作普遍定律"],
                     correct=[1],
@@ -311,15 +322,25 @@ class LocalDemoAdapter:
 
     async def answer(self, request):
         requested = request.get("requestedThreadId")
+        mode_copy = (
+            "先给出一句结论，再列出两个可立即检查的要点。"
+            if request.get("dailyMode") == "fast"
+            else "沿着结论、机制和边界完整说明。"
+        )
         return ClassifiedAnswer(
             relation="follow_up" if requested else "new_question",
             thread_id=request.get("newThreadId") or requested,
-            answer="这是本地演示答疑：请回到锚定段落，对照机制、前提与边界逐项检查。",
+            answer=f"这是本地演示答疑：{mode_copy}",
             thread_summary="围绕锚定段落核对机制和边界",
         )
 
     async def answer_stream(self, request):
-        for chunk in ["这是本地演示答疑：", "请回到锚定段落，", "对照机制、前提与边界", "逐项检查。"]:
+        chunks = (
+            ["这是本地演示答疑：", "先给出一句结论，", "再列出两个可立即检查的要点。"]
+            if request.get("dailyMode") == "fast"
+            else ["这是本地演示答疑：", "请回到锚定段落，", "对照机制、前提与边界", "逐项检查。"]
+        )
+        for chunk in chunks:
             await asyncio.sleep(0.03)
             yield chunk
 
@@ -347,6 +368,46 @@ class LocalDemoAdapter:
             prompt=f"请用自己的话回答 {request['dimension']} 维度的问题，并给出一个可验证例子。",
             evaluation="partial" if answered else "not_evaluated",
             rationale="演示评估仅检查是否提交了自主回答。" if answered else "",
+        )
+
+    async def ask_me_discussion(self, request):
+        answer = str(request.get("previousAnswer", "")).strip()
+        topic = request.get("currentTopic") or {}
+        title = str(topic.get("title", "当前主题"))
+        if len(answer) >= 45:
+            evaluation = "strong"
+            correct_points = ["回答给出了较完整的判断，并尝试说明依据。"]
+            issues = []
+            suggestions = ["再补充一个会让当前判断失效的反例。"]
+            sufficient = "sufficient"
+        elif len(answer) >= 16:
+            evaluation = "partial"
+            correct_points = ["回答已经触及当前主题的关键对象。"]
+            issues = [{
+                "kind": "evidence_insufficient",
+                "answer_excerpt": answer[:80],
+                "explanation": "目前给出了判断，但支撑判断的可观察依据还不够具体。",
+            }]
+            suggestions = ["补充一个可以被第三方验证的业务或技术信号。"]
+            sufficient = "insufficient"
+        else:
+            evaluation = "weak"
+            correct_points = []
+            issues = [{
+                "kind": "reasoning_gap",
+                "answer_excerpt": answer[:80],
+                "explanation": "回答还没有把结论和判断依据连接起来。",
+            }]
+            suggestions = ["先写出你的结论，再说明你依据的两个具体信号。"]
+            sufficient = "insufficient"
+        return AskMeDiscussionTurn(
+            evaluation=evaluation,
+            correct_points=correct_points,
+            issues=issues,
+            suggestions=suggestions,
+            follow_up_prompt="什么证据会让你改变刚才的判断？",
+            follow_up_purpose="检查判断依据是否稳定，并探测可能遗漏的边界。",
+            topic_sufficiency=sufficient,
         )
 
     async def replan_book(self, request, memory):

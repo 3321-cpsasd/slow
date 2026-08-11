@@ -6,6 +6,11 @@ Slow 的重要变更记录在这里。本项目采用 [Keep a Changelog](https:/
 
 ## [Unreleased] · 未发布
 
+- Hardened recovery-code re-authentication with the existing password lockout policy, rejected conflicting case kinds for one stable case identity, and prevented stale preference-save responses from updating a newer explanation request.
+- 恢复码二次认证现已复用密码锁定策略；同一稳定案例身份若声明冲突类型将拒绝发布；过期的偏好保存响应也不会再改写新的讲法请求。
+- Serialized SQLite password verification with `BEGIN IMMEDIATE`, so concurrent failures cannot lose lockout increments when row-level locks are unavailable.
+- SQLite 密码校验现使用 `BEGIN IMMEDIATE` 串行化；在不支持行锁时，并发失败也不会丢失锁定计数。
+
 ### Added · 新增
 
 - Added ADR-0001 as the authoritative design for single-call lesson-and-quiz generation, deterministic Learning Contract gates, separated generation-attempt audit, and atomic publication of user-visible content.
@@ -56,6 +61,14 @@ Slow 的重要变更记录在这里。本项目采用 [Keep a Changelog](https:/
 
 ### Changed · 调整
 
+- Hardened learning-preference evidence with persisted QA request lineage, database-enforced single terminal outcomes, and exact server-side adoption checks that survive page refreshes.
+- 加固学习偏好证据链：持久化答疑请求来源，在数据库层保证每次讲法只有一个终态反馈，并让服务端采用校验在刷新后仍可精确追溯。
+- Made Alpha registration quotas atomic, source-scoped, and portable across SQLite/PostgreSQL; recovery-code rotation now requires the current password, and registration provenance is retained for audit.
+- 将 Alpha 注册额度改为原子、按来源计数并兼容 SQLite/PostgreSQL；恢复码轮换要求验证当前密码，并记录注册来源以供审计。
+- Replaced first-hit lesson classification with weighted, word-boundary-aware signals and enforced composition block and stable distinct-case minimums at the publication gate.
+- 将首个关键词命中的教材分类改为带字段权重和英文词边界的判定，并在发布门禁中基于稳定案例身份强制执行正文块与不同案例最低要求。
+- Replaced the fixed lesson-body slot template with versioned, contract-derived composition policies for formal, technical, scientific, historical, textual, social-empirical, normative, and general conceptual knowledge, while preserving paragraph-level management, deterministic evidence gates, and atomic publication.
+- 将固定正文槽位模板替换为从冻结学习契约确定性派生、可版本审计的跨知识类型编排策略；形式推导、技术过程、科学因果、历史证据、文本论证、社会实证、规范案例与通用概念可采用不同段落职责，同时保留段落级管理、证据门禁和原子发布。
 - Fixed the login startup race and the invalid response body previously emitted by the `204 No Content` logout endpoint.
 - 修复登录页启动竞态，以及退出接口在 `204 No Content` 响应中错误发送正文的问题。
 - Made the Web launcher portable, removed workstation paths from project context and historical/future evaluation reports, aligned the example model with the server default, and made production deployment explicitly opt-in.

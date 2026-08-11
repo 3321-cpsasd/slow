@@ -61,7 +61,7 @@ async function call<T>(path:string, init?:RequestInit):Promise<T>{
     throw new ApiError(
       apiUnavailable
         ? API_UNAVAILABLE_MESSAGE
-        : String(payload?.message || payload?.error || '请求失败'),
+        : String(payload?.message || '请求失败'),
       response.status,
       apiUnavailable ? 'API_UNREACHABLE' : String(payload?.code || 'UNKNOWN_ERROR'),
       Boolean(payload?.retryable),
@@ -75,7 +75,7 @@ async function streamQa(
   path:string,
   body:object,
   onDelta:(delta:string)=>void,
-):Promise<{sessionId:string;threadId:string;relation:string}>{
+):Promise<{sessionId:string;threadId:string;answerMessageId:string;relation:string}>{
   const response = await request(path, {
     method:'POST',
     headers:{
@@ -92,7 +92,7 @@ async function streamQa(
     throw new ApiError(
       !payload && response.status >= 500
         ? API_UNAVAILABLE_MESSAGE
-        : String(payload?.message || payload?.error || '答疑发送失败'),
+        : String(payload?.message || '答疑发送失败'),
       response.status,
       !payload && response.status >= 500
         ? 'API_UNREACHABLE'
@@ -105,7 +105,7 @@ async function streamQa(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  let completed:{sessionId:string;threadId:string;relation:string}|undefined;
+  let completed:{sessionId:string;threadId:string;answerMessageId:string;relation:string}|undefined;
   while(true){
     const {value,done} = await reader.read();
     buffer += decoder.decode(value,{stream:!done});
@@ -116,7 +116,7 @@ async function streamQa(
       const event = JSON.parse(line);
       if(event.type === 'delta') onDelta(event.delta);
       if(event.type === 'done') completed = event;
-      if(event.type === 'error') throw new Error(event.error || '答疑生成失败');
+      if(event.type === 'error') throw new Error('答疑暂时没有完成，请稍后重试');
     }
     if(done) break;
   }
@@ -140,7 +140,7 @@ async function streamFeedbackRepair(
     const text = await response.text();
     const payload = parsePayload(text);
     throw new ApiError(
-      String(payload?.message || payload?.error || '补救内容生成失败'),
+      String(payload?.message || '补救内容生成失败'),
       response.status,
       String(payload?.code || 'FEEDBACK_REPAIR_FAILED'),
       Boolean(payload?.retryable),
@@ -164,7 +164,7 @@ async function streamFeedbackRepair(
     if(eventType === 'done') completed = payload as import('../model/types').FeedbackRepairResult;
     if(eventType === 'error') {
       throw new ApiError(
-        String(payload.message || '补救内容生成失败'),
+        '补救内容暂时没有完成，请稍后重试',
         200,
         String(payload.code || 'FEEDBACK_REPAIR_FAILED'),
         Boolean(payload.retryable),
@@ -205,6 +205,32 @@ export const api = {
     csrfToken = state.csrfToken;
     return state;
   },
+  registerAccount:async(body:{
+    username:string;
+    password:string;
+    passwordConfirm:string;
+    alphaCode:string;
+  })=>{
+    const state = await call<import('../model/types').RegistrationResult>('/api/auth/password/register',{
+      method:'POST',
+      body:JSON.stringify(body),
+    });
+    csrfToken = state.csrfToken;
+    return state;
+  },
+  resetPasswordWithRecovery:(body:{
+    username:string;
+    recoveryCode:string;
+    newPassword:string;
+    newPasswordConfirm:string;
+  })=>call<import('../model/types').RecoveryResetResult>('/api/auth/password/recover',{
+    method:'POST',
+    body:JSON.stringify(body),
+  }),
+  rotateRecoveryCode:(currentPassword:string)=>call<{recoveryCode:string}>('/api/auth/password/recovery-code/rotate',{
+    method:'POST',
+    body:JSON.stringify({currentPassword}),
+  }),
   logout:async()=>{
     await call<void>('/api/auth/logout',{method:'POST'});
     csrfToken = '';
@@ -236,7 +262,27 @@ export const api = {
     method:'PUT',
     body:JSON.stringify(body),
   }),
+  recordPreferenceEvidence:(body:object)=>call<import('../model/types').LearningPreferenceProjection>('/api/learning-preferences/evidence',{
+    method:'POST',body:JSON.stringify(body),
+  }),
+  adoptPersonalPresentation:(sectionId:string,body:object)=>call<{id:string;status:'active';projection:import('../model/types').LearningPreferenceProjection}>(`/api/sections/${sectionId}/personal-presentation`,{
+    method:'POST',body:JSON.stringify(body),
+  }),
+  restorePersonalPresentation:(sectionId:string,blockId:string,contentVersionId:string)=>call<void>(`/api/sections/${sectionId}/personal-presentation/${blockId}?contentVersionId=${encodeURIComponent(contentVersionId)}`,{
+    method:'DELETE',
+  }),
   bootstrap:()=>call<import('../model/types').Bootstrap>('/api/bootstrap'),
+  dailyMode:()=>call<import('../model/types').DailyModeState>('/api/daily-mode'),
+  updateDailyMode:(body:{
+    dailyMode:import('../model/types').DailyMode;
+    duration:import('../model/types').DailyModeDuration;
+    timezone:string;
+    source:import('../model/types').DailyModeSource;
+  },idempotencyKey:string)=>call<import('../model/types').DailyModeState>('/api/daily-mode',{
+    method:'PUT',
+    headers:{'Idempotency-Key':idempotencyKey},
+    body:JSON.stringify(body),
+  }),
   submitFeedback:(body:object,idempotencyKey:string)=>call<import('../model/types').FeedbackReceipt>('/api/feedback',{
     method:'POST',
     headers:{'Idempotency-Key':idempotencyKey},
@@ -258,6 +304,7 @@ export const api = {
   section:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}`),
   openSection:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}/open`,{method:'POST'}),
   generateSection:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}/generate`,{method:'POST'}),
+  prepareSection:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}/prepare`,{method:'POST'}),
   regenerateSection:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}/regenerate`,{method:'POST'}),
   quiz:(id:string,quizSetId:string,answers:number[][],idempotencyKey:string)=>call<import('../model/types').QuizResult>(`/api/sections/${id}/quiz`,{
     method:'POST',
@@ -279,9 +326,26 @@ export const api = {
   learningTask:(id:string)=>call<import('../model/types').LearningTask>(`/api/learning-tasks/${id}`),
   retryLearningTask:(id:string)=>call<import('../model/types').LearningTask>(`/api/learning-tasks/${id}/retry`,{method:'POST'}),
   ask:(id:string,blockId:string,question:string,threadId?:string,forceRelation?:'follow_up'|'new_question')=>call<import('../model/types').QaAnswer>(`/api/sections/${id}/ask`,{method:'POST',body:JSON.stringify({blockId,question,threadId,forceRelation})}),
-  askStream:(id:string,blockId:string,question:string,onDelta:(delta:string)=>void,threadId?:string,forceRelation?:'follow_up'|'new_question')=>streamQa(`/api/sections/${id}/ask/stream`,{blockId,question,threadId,forceRelation},onDelta),
+  askStream:(id:string,blockId:string,question:string,onDelta:(delta:string)=>void,threadId?:string,forceRelation?:'follow_up'|'new_question',preference?:{
+    preferenceRequestEventId:string;
+    explanationStyle:'worked_example'|'diagram'|'analogy'|'derivation'|'precise'|'concise'|'custom';
+    explanationBlockKind:import('../model/types').Block['kind'];
+  })=>streamQa(`/api/sections/${id}/ask/stream`,{blockId,question,threadId,forceRelation,...preference},onDelta),
+  qaHistory:(id:string)=>call<import('../model/types').QaHistory>(`/api/sections/${id}/qa/history`),
   correctQa:(id:string,threadId:string,targetThreadId:string)=>call<import('../model/types').QaCorrection>(`/api/sections/${id}/qa/threads/${threadId}`,{method:'PATCH',body:JSON.stringify({relation:'follow_up',targetThreadId})}),
   askMe:(id:string,answer='')=>call<import('../model/types').AskMe>(`/api/sections/${id}/ask-me`,{method:'POST',body:JSON.stringify({answer})}),
+  askMeDiscussion:(id:string)=>call<import('../model/types').AskMeDiscussion|null>(`/api/sections/${id}/ask-me/discussion`),
+  startAskMeDiscussion:(id:string)=>call<import('../model/types').AskMeDiscussion>(`/api/sections/${id}/ask-me/discussion`,{method:'POST'}),
+  submitAskMeDiscussionTurn:(id:string,body:object,idempotencyKey:string)=>call<import('../model/types').AskMeDiscussion>(`/api/sections/${id}/ask-me/discussion/turns`,{
+    method:'POST',
+    headers:{'Idempotency-Key':idempotencyKey},
+    body:JSON.stringify(body),
+  }),
+  applyAskMeDiscussionAction:(id:string,body:object,idempotencyKey:string)=>call<import('../model/types').AskMeDiscussion>(`/api/sections/${id}/ask-me/discussion/actions`,{
+    method:'POST',
+    headers:{'Idempotency-Key':idempotencyKey},
+    body:JSON.stringify(body),
+  }),
   note:(id:string,content:object)=>call<import('../model/types').Note>(`/api/sections/${id}/note`,{method:'PATCH',body:JSON.stringify({content})}),
   noteReviewSupplement:(id:string,reviewEpisodeId:string,content:object)=>call<import('../model/types').Note>(`/api/sections/${id}/note/review-supplements`,{method:'POST',body:JSON.stringify({reviewEpisodeId,content})}),
   uploadPractice:(id:string,file:File)=>call<import('../model/types').Attachment>(`/api/chapters/${id}/practice/attachments`,{method:'POST',headers:{'Content-Type':file.type||'application/octet-stream','X-Filename':encodeURIComponent(file.name)},body:file}),

@@ -1,26 +1,42 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  FormEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { api } from './api/client';
+import { api, ApiError } from './api/client';
 import { telemetry } from './telemetry';
 import { ProfileOnboardingFlow } from './ProfileOnboardingFlow';
+import { DailyModeDialog, DailyModeHeader } from './DailyMode';
 import type {
-  AskMe,
+  AskMeDiscussion,
   AiRuntime,
   AuthConfig,
   AuthState,
   Block,
   Book,
+  BookReplanProposal,
   Bootstrap,
   AccountExitReceipt,
   PrivacyState,
+  RegistrationResult,
   Chapter,
   DueReviews,
+  DailyMode,
+  DailyModeDuration,
+  DailyModeSource,
   LearningTask,
   LearningProfile,
   LearningPreferences,
   Note as NoteType,
   NoteContent,
+  QaHistory,
   QuizResult,
   ReviewResult,
   ReviewSession,
@@ -33,8 +49,33 @@ import type {
 
 type View = 'home' | 'shelf' | 'learn' | 'profile';
 type ReaderTab = 'content' | 'quiz' | 'note';
+type AppRoute =
+  | { view: 'home' }
+  | { view: 'profile'; section: 'profile' | 'account' }
+  | { view: 'shelf'; shelfId: string }
+  | { view: 'learn'; seriesId: string; sectionId: string | null };
 type TextQuote = { text: string; blockId: string };
 type SelectionPopup = TextQuote & { top: number; left: number };
+type PresetExplanationStyle =
+  | 'worked_example'
+  | 'diagram'
+  | 'analogy'
+  | 'derivation'
+  | 'precise'
+  | 'concise';
+type ExplanationStyle = PresetExplanationStyle | 'custom';
+type ExplanationRequest = {
+  requestId: string;
+  blockId: string;
+  blockKind: Block['kind'];
+  style: ExplanationStyle;
+  label: string;
+  question: string;
+  displayQuestion: string;
+  evidenceEventId?: string;
+  preferenceStatus: 'saved' | 'unsaved' | 'saving';
+  customInstruction?: string;
+};
 type FeedbackTarget =
   | { scope: 'global' }
   | {
@@ -44,22 +85,132 @@ type FeedbackTarget =
       block: Block;
     };
 const AI_RUNTIME_SETTINGS_ENABLED = import.meta.env.VITE_INTERNAL_AI_SETTINGS === 'true';
+type AuthPanel = 'login' | 'register' | 'recover';
+
+function RecoveryCodePanel({
+  code,
+  renewed,
+  onContinue,
+}: {
+  code:string;
+  renewed:boolean;
+  onContinue:()=>void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const copyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  };
+  return (
+    <div className="recovery-code-panel">
+      <div className="recovery-key-mark" aria-hidden="true"><i /><i /><i /></div>
+      <p className="eyebrow">只展示这一次</p>
+      <h2>{renewed ? '新恢复码已生成' : '把备用钥匙收好'}</h2>
+      <p>
+        {renewed
+          ? '旧恢复码已经失效。请保存这份新恢复码，再使用新密码登录。'
+          : 'Slow 不绑定邮箱或手机。忘记密码时，这串恢复码是确认账号归属的唯一凭证。'}
+      </p>
+      <div className="recovery-code-value" aria-label="账号恢复码">{code}</div>
+      <button type="button" className="recovery-copy-button" onClick={() => void copyCode()}>
+        {copied ? '已复制恢复码' : '复制恢复码'}
+      </button>
+      <small>密码和恢复码同时遗失后，将无法自助恢复账号。</small>
+      <button type="button" className="auth-submit" onClick={onContinue}>
+        {renewed ? '返回登录' : '我已保存，继续'} <span>→</span>
+      </button>
+    </div>
+  );
+}
+
+function PasswordVisibilityToggle({
+  visible,
+  onToggle,
+}: {
+  visible:boolean;
+  onToggle:()=>void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={visible ? '隐藏密码' : '显示密码'}
+      aria-pressed={visible}
+      onClick={onToggle}
+    >
+      {visible ? (
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
+          <path d="m3 3 18 18M10.6 10.7a2 2 0 0 0 2.7 2.7M9.9 4.3A10.7 10.7 0 0 1 12 4c5.5 0 9 5.5 9 5.5a16 16 0 0 1-2.2 2.7M6.6 6.6C4.3 8.1 3 9.5 3 9.5S6.5 15 12 15c1 0 1.9-.2 2.7-.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      ) : (
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
+          <path d="M3 9.5S6.5 4 12 4s9 5.5 9 5.5S17.5 15 12 15 3 9.5 3 9.5Z" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
+          <circle cx="12" cy="9.5" r="2.5" stroke="currentColor" strokeWidth="1.7" />
+        </svg>
+      )}
+    </button>
+  );
+}
+
+const routeFromLocation = (): AppRoute => {
+  const parts = window.location.pathname.split('/').filter(Boolean).map((part) => {
+    try {
+      return decodeURIComponent(part);
+    } catch {
+      return part;
+    }
+  });
+  if (parts[0] === 'profile' && parts.length === 1) {
+    return {
+      view: 'profile',
+      section: new URLSearchParams(window.location.search).get('section') === 'account'
+        ? 'account'
+        : 'profile',
+    };
+  }
+  if (parts[0] === 'shelves' && parts[1] && parts.length === 2) {
+    return { view: 'shelf', shelfId: parts[1] };
+  }
+  if (parts[0] === 'series' && parts[1]) {
+    const sectionId = parts[2] === 'sections' && parts[3] ? parts[3] : null;
+    return { view: 'learn', seriesId: parts[1], sectionId };
+  }
+  return { view: 'home' };
+};
+
+const shelfPath = (shelfId: string) => `/shelves/${encodeURIComponent(shelfId)}`;
+const seriesPath = (seriesId: string, sectionId?: string | null) => (
+  sectionId
+    ? `/series/${encodeURIComponent(seriesId)}/sections/${encodeURIComponent(sectionId)}`
+    : `/series/${encodeURIComponent(seriesId)}`
+);
+
+const updateBrowserLocation = (path: string, mode: 'push' | 'replace' | 'none') => {
+  if (mode === 'none') return;
+  const current = `${window.location.pathname}${window.location.search}`;
+  if (current === path) return;
+  window.history[mode === 'push' ? 'pushState' : 'replaceState']({}, '', path);
+};
+
 const GENERATION_STAGE_LABELS: Record<string, string> = {
-  queued: '正在排队',
-  teaching_blueprint: '正在规划改写方案',
-  content_generation: '正在生成正文',
-  combined_generation: '正在生成正文与测验',
-  source_verification: '正在核验来源',
-  source_verification_degraded: '正在记录来源核验结果',
-  source_repair: '正在替换无法核验的来源',
-  source_repair_rejected: '正在重新检查来源',
-  quiz_generation: '正在生成测验',
-  semantic_alignment_review: '正在检查正文与测验是否一致',
-  semantic_alignment_rejected: '正文与测验检查未通过',
-  semantic_claim_verification: '正在核验关键结论',
-  persistence: '正在保存新版本',
+  queued: '正在等待开始',
+  teaching_blueprint: '正在准备学习内容',
+  content_generation: '正在准备学习内容',
+  combined_generation: '正在准备学习内容',
+  source_verification: '正在检查内容',
+  source_verification_degraded: '正在检查内容',
+  source_repair: '正在检查内容',
+  source_repair_rejected: '正在检查内容',
+  quiz_generation: '正在准备验证题',
+  semantic_alignment_review: '正在检查内容',
+  semantic_alignment_rejected: '正在检查内容',
+  semantic_claim_verification: '正在检查内容',
+  persistence: '正在完成',
   persisted: '已经完成',
-  failed: '生成未完成',
+  failed: '准备失败',
 };
 
 const formatElapsed = (milliseconds: number) => {
@@ -70,10 +221,102 @@ const formatElapsed = (milliseconds: number) => {
 
 type QaExchange = {
   id: string;
+  threadId?: string;
+  answerMessageId?: string;
+  blockId?: string;
   question: string;
   answer: string;
   relation: string;
   status: 'streaming' | 'done' | 'error';
+  explanationStyle?: ExplanationStyle;
+  preferenceRequestEventId?: string;
+  explanationBlockKind?: Block['kind'];
+  preferenceStatus?: 'saved' | 'unsaved';
+};
+
+const EXPLANATION_STYLE_OPTIONS: Record<PresetExplanationStyle, {
+  label: string;
+  prompt: string;
+}> = {
+  worked_example: {
+    label: '举个具体例子',
+    prompt: '请用一个具体、可观察或可计算的例子重新解释这一段，并说明例子中的对象、过程和结论。',
+  },
+  diagram: {
+    label: '画成关系图',
+    prompt: '请把这一段整理成清晰的文本图解或关系图，并在图后用两三句话解释关键关系。',
+  },
+  analogy: {
+    label: '打个贴切比方',
+    prompt: '请先用一个贴切、容易形成直觉的类比重新解释这一段，再说明这个类比在哪些地方会失效。',
+  },
+  derivation: {
+    label: '展开推导过程',
+    prompt: '请把这一段涉及的推理或公式一步步展开，不跳步骤，并说明每一步为什么成立。',
+  },
+  precise: {
+    label: '说得更严谨',
+    prompt: '请用准确的定义、成立条件和失效边界重新解释这一段，避免模糊表述。',
+  },
+  concise: {
+    label: '压缩成要点',
+    prompt: '请用一句结论和不超过三个要点简洁解释这一段，同时保留必要的成立条件。',
+  },
+};
+
+const explanationOptionsForBlock = (kind: Block['kind']) => {
+  const preferred: PresetExplanationStyle[] = kind === 'formula'
+    ? ['derivation', 'worked_example', 'precise', 'diagram', 'concise', 'analogy']
+    : kind === 'diagram' || kind === 'table'
+      ? ['worked_example', 'precise', 'concise', 'analogy', 'derivation', 'diagram']
+      : kind === 'code'
+        ? ['worked_example', 'derivation', 'precise', 'concise', 'diagram', 'analogy']
+        : ['worked_example', 'diagram', 'analogy', 'precise', 'derivation', 'concise'];
+  return preferred.map((style) => ({ style, ...EXPLANATION_STYLE_OPTIONS[style] }));
+};
+
+const qaQuestionForDisplay = (content: string) => {
+  const quotedQuestion = content.match(
+    /^请基于以下选中的正文回答。\n\n选中内容：[\s\S]*?\n\n问题：([\s\S]+)$/,
+  );
+  const question = quotedQuestion?.[1]?.trim() || content;
+  const preset = Object.values(EXPLANATION_STYLE_OPTIONS).find((option) => option.prompt === question);
+  if (preset) return preset.label;
+  return question.replace(/^请按这个要求重新解释当前段落：/, '按这个讲：');
+};
+
+const qaHistoryExchanges = (history: QaHistory): QaExchange[] => {
+  const exchanges: QaExchange[] = [];
+  history.threads.forEach((thread) => {
+    let activeExchange: QaExchange | undefined;
+    thread.messages.forEach((message) => {
+      if (message.role === 'user') {
+        activeExchange = {
+          id: message.id,
+          threadId: thread.threadId,
+          blockId: message.blockId,
+          question: qaQuestionForDisplay(message.content),
+          answer: '',
+          relation: thread.relation,
+          status: 'done',
+        };
+        exchanges.push(activeExchange);
+        return;
+      }
+      if (activeExchange) {
+        activeExchange.answer += message.content;
+        activeExchange.answerMessageId = message.id;
+        if (message.preferenceRequestEventId && message.explanationStyle && message.explanationBlockKind) {
+          activeExchange.preferenceRequestEventId = message.preferenceRequestEventId;
+          activeExchange.explanationStyle = message.explanationStyle;
+          activeExchange.explanationBlockKind = message.explanationBlockKind;
+        }
+      }
+    });
+  });
+  return exchanges.map((exchange) => exchange.answer
+    ? exchange
+    : { ...exchange, answer: '这次回答没有完整保存。', status: 'error' });
 };
 
 export default function App() {
@@ -83,8 +326,23 @@ export default function App() {
   const [localUsername, setLocalUsername] = useState('');
   const [localPassword, setLocalPassword] = useState('');
   const [showLocalPassword, setShowLocalPassword] = useState(false);
+  const [authPanel, setAuthPanel] = useState<AuthPanel>('login');
+  const [registrationUsername, setRegistrationUsername] = useState('');
+  const [registrationPassword, setRegistrationPassword] = useState('');
+  const [registrationPasswordConfirm, setRegistrationPasswordConfirm] = useState('');
+  const [showRegistrationPassword, setShowRegistrationPassword] = useState(false);
+  const [showRegistrationPasswordConfirm, setShowRegistrationPasswordConfirm] = useState(false);
+  const [alphaCode, setAlphaCode] = useState('');
+  const [registrationResult, setRegistrationResult] = useState<RegistrationResult | null>(null);
+  const [recoveryUsername, setRecoveryUsername] = useState('');
+  const [recoveryCode, setRecoveryCode] = useState('');
+  const [recoveryPassword, setRecoveryPassword] = useState('');
+  const [recoveryPasswordConfirm, setRecoveryPasswordConfirm] = useState('');
+  const [showRecoveryPassword, setShowRecoveryPassword] = useState(false);
+  const [showRecoveryPasswordConfirm, setShowRecoveryPasswordConfirm] = useState(false);
+  const [renewedRecoveryCode, setRenewedRecoveryCode] = useState('');
   const [data, setData] = useState<Bootstrap | null>(null);
-  const [view, setView] = useState<View>(() => window.location.pathname === '/profile' ? 'profile' : 'home');
+  const [view, setView] = useState<View>(() => routeFromLocation().view);
   const [shelf, setShelf] = useState<Shelf | null>(null);
   const [series, setSeries] = useState<Series | null>(null);
   const [section, setSection] = useState<Section | null>(null);
@@ -92,16 +350,35 @@ export default function App() {
   const [error, setError] = useState('');
   const [showAiSettings, setShowAiSettings] = useState(false);
   const [feedbackTarget, setFeedbackTarget] = useState<FeedbackTarget | null>(null);
+  const [bookReplan, setBookReplan] = useState<{ book: Book; proposal: BookReplanProposal } | null>(null);
+  const [learningQaOpen, setLearningQaOpen] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [exitReceipt, setExitReceipt] = useState<AccountExitReceipt | null>(null);
   const [profileSection, setProfileSection] = useState<'profile' | 'account'>(() => (
     new URLSearchParams(window.location.search).get('section') === 'account' ? 'account' : 'profile'
   ));
   const [preparingInitialSection, setPreparingInitialSection] = useState(false);
+  const [dailyModeDialogOpen, setDailyModeDialogOpen] = useState(false);
+  const [dailyModeBusy, setDailyModeBusy] = useState(false);
+  const [activityDailyMode, setActivityDailyMode] = useState<DailyMode | null>(null);
+  const [dailyModeExpiredDuringActivity, setDailyModeExpiredDuringActivity] = useState(false);
+  const [pendingSectionId, setPendingSectionId] = useState('');
   const [generatingChapterId, setGeneratingChapterId] = useState('');
   const chapterGenerationRequests = useRef(new Set<string>());
   const userMenuRef = useRef<HTMLDivElement | null>(null);
   const lastViewedSection = useRef('');
+  const restoreLocationRef = useRef<() => Promise<void>>(async () => undefined);
+  const routeRequestVersion = useRef(0);
+  const routeInitializedForUser = useRef('');
+  const initialSectionMonitorVersion = useRef(0);
+
+  const hasActiveDailyMode = () => Boolean(
+    data?.dailyMode?.active
+    && data.dailyMode.expiresAt
+    && new Date(data.dailyMode.expiresAt).getTime() > Date.now(),
+  );
+
+  const dailyModePromptEnabled = data?.profile.preferences.dailyModePromptEnabled ?? true;
 
   const loadAuthenticatedState = async () => {
     const value = await api.authMe();
@@ -142,12 +419,14 @@ export default function App() {
 
   useEffect(() => {
     const clearUserState = () => {
+      routeInitializedForUser.current = '';
       setAuth(null);
       setData(null);
       setShelf(null);
       setSeries(null);
       setSection(null);
       setView('home');
+      setAuthPanel('login');
       setShowUserMenu(false);
       window.history.replaceState({}, '', '/');
       setAuthChecked(true);
@@ -155,15 +434,7 @@ export default function App() {
     api.setUnauthorizedHandler(clearUserState);
     telemetry.start();
     void initializeAuth();
-    const handleHistory = () => {
-      const nextView: View = window.location.pathname === '/profile' ? 'profile' : 'home';
-      setView(nextView);
-      setProfileSection(new URLSearchParams(window.location.search).get('section') === 'account' ? 'account' : 'profile');
-      setShowUserMenu(false);
-      setShelf(null);
-      setSeries(null);
-      setSection(null);
-    };
+    const handleHistory = () => { void restoreLocationRef.current(); };
     window.addEventListener('popstate', handleHistory);
     return () => window.removeEventListener('popstate', handleHistory);
   }, []);
@@ -254,6 +525,43 @@ export default function App() {
     };
   }, [showUserMenu]);
 
+  useEffect(() => {
+    const state = data?.dailyMode;
+    if (!state) return;
+    if (!state.active || !state.expiresAt) {
+      if (dailyModePromptEnabled && !(view === 'learn' && section && activityDailyMode)) {
+        setDailyModeDialogOpen(true);
+      }
+      return;
+    }
+    const expire = () => {
+      setData((current) => current ? {
+        ...current,
+        dailyMode: {
+          ...current.dailyMode,
+          active: false,
+          dailyMode: null,
+          duration: null,
+          activatedAt: null,
+          expiresAt: null,
+          serverNow: new Date().toISOString(),
+        },
+      } : current);
+      if (view === 'learn' && section && activityDailyMode) {
+        setDailyModeExpiredDuringActivity(true);
+      } else if (dailyModePromptEnabled) {
+        setDailyModeDialogOpen(true);
+      }
+    };
+    const remaining = new Date(state.expiresAt).getTime() - Date.now();
+    if (remaining <= 0) {
+      expire();
+      return;
+    }
+    const timer = window.setTimeout(expire, Math.min(remaining, 2_147_000_000));
+    return () => window.clearTimeout(timer);
+  }, [data?.dailyMode?.version, data?.dailyMode?.active, data?.dailyMode?.expiresAt, dailyModePromptEnabled, view, section?.id, activityDailyMode]);
+
   const run = async <T,>(label: string, action: () => Promise<T>) => {
     setBusy(label);
     setError('');
@@ -285,8 +593,67 @@ export default function App() {
     }
   };
 
-  const openShelf = (value: Shelf) => {
+  const switchAuthPanel = (panel: AuthPanel) => {
+    setAuthPanel(panel);
+    setError('');
+    setRenewedRecoveryCode('');
+  };
+
+  const registerAlphaAccount = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy('正在创建账号…');
+    setError('');
+    try {
+      const state = await api.registerAccount({
+        username: registrationUsername,
+        password: registrationPassword,
+        passwordConfirm: registrationPasswordConfirm,
+        alphaCode,
+      });
+      setRegistrationResult(state);
+      setRegistrationPassword('');
+      setRegistrationPasswordConfirm('');
+      setShowRegistrationPassword(false);
+      setShowRegistrationPasswordConfirm(false);
+      setAlphaCode('');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '账号创建失败');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const resetPasswordWithRecoveryCode = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy('正在重置密码…');
+    setError('');
+    try {
+      const result = await api.resetPasswordWithRecovery({
+        username: recoveryUsername,
+        recoveryCode,
+        newPassword: recoveryPassword,
+        newPasswordConfirm: recoveryPasswordConfirm,
+      });
+      setRenewedRecoveryCode(result.recoveryCode);
+      setLocalUsername(recoveryUsername);
+      setRecoveryCode('');
+      setRecoveryPassword('');
+      setRecoveryPasswordConfirm('');
+      setShowRecoveryPassword(false);
+      setShowRecoveryPasswordConfirm(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '密码重置失败');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const openShelf = (value: Shelf, historyMode: 'push' | 'replace' | 'none' = 'push') => {
+    if (historyMode !== 'none') routeRequestVersion.current += 1;
+    updateBrowserLocation(shelfPath(value.id), historyMode);
     setShelf(value);
+    setSeries(null);
+    setSection(null);
     setView('shelf');
   };
 
@@ -301,6 +668,7 @@ export default function App() {
       setSeries(null);
       setSection(null);
       setView('home');
+      setAuthPanel('login');
       setShowUserMenu(false);
       window.history.replaceState({}, '', '/');
     }
@@ -324,18 +692,26 @@ export default function App() {
     window.history.replaceState({}, '', '/');
   };
 
-  const goHome = () => {
-    if (window.location.pathname !== '/') window.history.pushState({}, '', '/');
+  const showHome = (historyMode: 'push' | 'replace' | 'none') => {
+    if (historyMode !== 'none') routeRequestVersion.current += 1;
+    updateBrowserLocation('/', historyMode);
     setShowUserMenu(false);
     setView('home');
+    setShelf(null);
     setSeries(null);
     setSection(null);
+    setActivityDailyMode(null);
+    setDailyModeExpiredDuringActivity(false);
+    if (dailyModePromptEnabled && !hasActiveDailyMode()) setDailyModeDialogOpen(true);
     void api.bootstrap()
       .then(setData)
       .catch((reason) => setError(reason instanceof Error ? reason.message : '主页刷新失败'));
   };
 
+  const goHome = () => showHome('push');
+
   const openProfileCenter = (nextSection: 'profile' | 'account' = 'profile') => {
+    routeRequestVersion.current += 1;
     const nextUrl = nextSection === 'account' ? '/profile?section=account' : '/profile';
     if (`${window.location.pathname}${window.location.search}` !== nextUrl) window.history.pushState({}, '', nextUrl);
     setProfileSection(nextSection);
@@ -352,19 +728,82 @@ export default function App() {
     setProfileSection(nextSection);
   };
 
-  const openAndTrackSection = async (sectionId: string) => {
-    const value = await api.openSection(sectionId);
+  const applyOpenedSection = (value: Section, sectionId: string) => {
+    setActivityDailyMode(
+      value.dailyModeAtStart
+      || data?.dailyMode?.dailyMode
+      || data?.dailyMode?.lastDailyMode
+      || 'slow',
+    );
+    setDailyModeExpiredDuringActivity(false);
     void api.updateResume(sectionId).catch(() => undefined);
-    return value;
   };
 
-  const loadSection = async (sectionId: string) => {
+  const openAndTrackSection = async (sectionId: string) => {
+    try {
+      const value = await api.openSection(sectionId);
+      applyOpenedSection(value, sectionId);
+      return value;
+    } catch (reason) {
+      if (
+        reason instanceof ApiError
+        && reason.code === 'SECTION_CANDIDATE_INCOMPLETE'
+      ) {
+        // Opening is intentionally fail-closed until a complete content/quiz
+        // pair can be frozen. The read-only section view is still safe to show
+        // and contains the audited generation failure plus its retry action.
+        return api.section(sectionId);
+      }
+      throw reason;
+    }
+  };
+
+  const loadSection = async (
+    sectionId: string,
+    historyMode: 'push' | 'replace' | 'none' = 'push',
+  ) => {
+    if (series) updateBrowserLocation(seriesPath(series.id, sectionId), historyMode);
+    if (dailyModePromptEnabled && !hasActiveDailyMode()) {
+      setPendingSectionId(sectionId);
+      setDailyModeDialogOpen(true);
+      if (section) return section;
+    }
     const value = await run(
       '正在读取小节…',
       () => openAndTrackSection(sectionId),
     );
     setSection(value);
     return value;
+  };
+
+  const activateDailyMode = async (
+    mode: DailyMode,
+    duration: DailyModeDuration,
+    source: DailyModeSource,
+  ) => {
+    setDailyModeBusy(true);
+    setError('');
+    try {
+      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+      const updated = await api.updateDailyMode(
+        { dailyMode: mode, duration, timezone, source },
+        `daily-mode-${crypto.randomUUID()}`,
+      );
+      setData((current) => current ? { ...current, dailyMode: updated } : current);
+      if (source === 'header_toggle' && section) setActivityDailyMode(mode);
+      setDailyModeExpiredDuringActivity(false);
+      setDailyModeDialogOpen(false);
+      if (pendingSectionId) {
+        const target = pendingSectionId;
+        setPendingSectionId('');
+        const value = await openAndTrackSection(target);
+        setSection(value);
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '学习模式同步失败');
+    } finally {
+      setDailyModeBusy(false);
+    }
   };
 
   const firstUsableSection = (value: Series) => {
@@ -386,51 +825,95 @@ export default function App() {
   const monitorInitialSection = async (value: Series) => {
     const initialTask = value.initializationTask;
     if (!initialTask || initialTask.status === 'failed') return false;
+    const monitorVersion = ++initialSectionMonitorVersion.current;
+    const navigationVersion = routeRequestVersion.current;
+    const busyLabel = '准备中…';
+    const isCurrent = () => {
+      const route = routeFromLocation();
+      return monitorVersion === initialSectionMonitorVersion.current
+        && navigationVersion === routeRequestVersion.current
+        && route.view === 'learn'
+        && route.seriesId === value.id;
+    };
     setPreparingInitialSection(true);
-    setBusy('正在准备第一节，完成后自动打开…');
+    setBusy(busyLabel);
     setError('');
     try {
       let task = initialTask;
       for (let poll = 0; poll < 360; poll += 1) {
+        if (!isCurrent()) return false;
         if (!['succeeded', 'failed'].includes(task.status)) {
           task = await api.learningTask(task.taskId);
+          if (!isCurrent()) return false;
         }
         if (task.status === 'succeeded') {
           const refreshed = await api.series(value.id);
-          setSeries(refreshed);
+          if (!isCurrent()) return false;
           const targetSectionId = typeof task.result?.targetSectionId === 'string'
             ? task.result.targetSectionId
             : firstUsableSection(refreshed);
+          let openedSection: Section | null = null;
           if (targetSectionId) {
-            setSection(await openAndTrackSection(targetSectionId));
+            openedSection = await api.openSection(targetSectionId);
+            if (!isCurrent()) return false;
+          }
+          setSeries(refreshed);
+          if (targetSectionId && openedSection) {
+            updateBrowserLocation(seriesPath(refreshed.id, targetSectionId), 'replace');
+            applyOpenedSection(openedSection, targetSectionId);
+            setSection(openedSection);
           }
           return true;
         }
         if (task.status === 'failed') {
           const refreshed = await api.series(value.id);
-          setSeries(refreshed);
+          if (!isCurrent()) return false;
           const fallbackSectionId = firstUsableSection(refreshed);
+          let openedSection: Section | null = null;
           if (fallbackSectionId) {
-            setSection(await openAndTrackSection(fallbackSectionId));
+            openedSection = await api.openSection(fallbackSectionId);
+            if (!isCurrent()) return false;
           }
-          setError('第一节后台准备失败。目录已经保存，可以从第一章安全重试。');
+          setSeries(refreshed);
+          if (fallbackSectionId && openedSection) {
+            updateBrowserLocation(seriesPath(refreshed.id, fallbackSectionId), 'replace');
+            applyOpenedSection(openedSection, fallbackSectionId);
+            setSection(openedSection);
+          }
+          setError('第一节暂未准备完成，请重试。');
           return true;
         }
         await new Promise((resolve) => window.setTimeout(resolve, 1000));
       }
-      setError('第一节仍在后台准备，可以稍后重新进入本书查看。');
+      if (isCurrent()) setError('第一节仍在准备，可以稍后重新进入本书查看。');
       return true;
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '无法读取第一节准备状态。');
+      if (isCurrent()) {
+        setError(reason instanceof Error ? reason.message : '无法读取第一节准备状态。');
+      }
       return true;
     } finally {
-      setPreparingInitialSection(false);
-      setBusy('');
+      if (monitorVersion === initialSectionMonitorVersion.current) {
+        setPreparingInitialSection(false);
+        setBusy((current) => current === busyLabel ? '' : current);
+      }
     }
   };
 
-  const openSeries = async (seriesId: string) => {
+  const openSeries = async (
+    seriesId: string,
+    requestedSectionId: string | null = null,
+    historyMode: 'push' | 'replace' | 'none' = 'push',
+  ) => {
+    const requestVersion = historyMode === 'none'
+      ? routeRequestVersion.current
+      : ++routeRequestVersion.current;
     const value = await run('正在进入学习空间…', () => api.series(seriesId));
+    if (requestVersion !== routeRequestVersion.current) return;
+    updateBrowserLocation(seriesPath(seriesId, requestedSectionId), historyMode);
+    setShelf(data?.shelves.find((item) => (
+      item.series.some((candidate) => candidate.id === seriesId)
+    )) || null);
     setSeries(value);
     setView('learn');
     if (
@@ -448,9 +931,25 @@ export default function App() {
         ),
       ))
       : false;
-    const initial = resumeBelongsToSeries ? resumeSection! : firstUsableSection(value);
-    if (initial) await loadSection(initial);
-    else setSection(null);
+    const requestedBelongsToSeries = requestedSectionId
+      ? value.books.some((book) => book.chapters.some(
+        (chapter) => chapter.sections.some(
+          (item) => item.id === requestedSectionId && item.status !== 'locked',
+        ),
+      ))
+      : false;
+    const initial = requestedBelongsToSeries
+      ? requestedSectionId!
+      : resumeBelongsToSeries
+        ? resumeSection!
+        : firstUsableSection(value);
+    if (initial) {
+      updateBrowserLocation(
+        seriesPath(value.id, initial),
+        historyMode === 'none' ? 'none' : 'replace',
+      );
+      await loadSection(initial, 'none');
+    } else setSection(null);
   };
 
   const refreshSeries = async () => {
@@ -508,25 +1007,14 @@ export default function App() {
 
   const activateBook = async (book: Book) => {
     const proposal = await run(
-      '正在依据最新学习证据校准下一本书…',
+      '正在根据你最近的学习情况调整下一本书…',
       () => api.replanBook(book.id),
     );
-    const outline = proposal.chapters
-      .map((chapter, index) => `${index + 1}. ${chapter.title}：${chapter.objective}`)
-      .join('\n');
-    const confirmed = window.confirm(
-      `校准说明：${proposal.rationale}\n\n${outline}\n\n确认后将冻结这本书的新章节目录。`,
-    );
-    if (!confirmed) return;
-    await run(
-      '正在确认新章节目录…',
-      () => api.confirmBookReplan(book.id, proposal.proposalId),
-    );
-    await refreshSeries();
+    setBookReplan({ book, proposal });
   };
 
   const generateSection = async (sectionId: string) => {
-    const value = await run('正在核查来源并生成本节…', () => api.generateSection(sectionId));
+    const value = await run('正在准备并检查本节内容…', () => api.prepareSection(sectionId));
     setSection(value);
     await refreshSeries();
   };
@@ -546,7 +1034,7 @@ export default function App() {
     };
     timer = window.setTimeout(pollGeneration, 250);
     try {
-      const value = await run('正在重新生成并核验本节…', () => api.regenerateSection(sectionId));
+      const value = await run('正在重新准备并检查本节内容…', () => api.regenerateSection(sectionId));
       setSection(value);
       await refreshSeries();
     } finally {
@@ -560,6 +1048,100 @@ export default function App() {
     }
   };
 
+  const restoreLocation = async () => {
+    if (!data) return;
+    const requestVersion = ++routeRequestVersion.current;
+    const route = routeFromLocation();
+    setShowUserMenu(false);
+    setError('');
+    if (route.view === 'home') {
+      setView('home');
+      setShelf(null);
+      setSeries(null);
+      setSection(null);
+      return;
+    }
+    if (route.view === 'profile') {
+      setProfileSection(route.section);
+      setView('profile');
+      setShelf(null);
+      setSeries(null);
+      setSection(null);
+      return;
+    }
+    if (route.view === 'shelf') {
+      const targetShelf = data.shelves.find((item) => item.id === route.shelfId);
+      if (!targetShelf) {
+        updateBrowserLocation('/', 'replace');
+        setView('home');
+        setShelf(null);
+        setSeries(null);
+        setSection(null);
+        setError('这个书架不存在，或当前账号无权访问。');
+        return;
+      }
+      openShelf(targetShelf, 'none');
+      return;
+    }
+
+    setBusy('正在恢复上次浏览位置…');
+    try {
+      const restoredSeries = await api.series(route.seriesId);
+      if (requestVersion !== routeRequestVersion.current) return;
+      const restoredShelf = data.shelves.find((item) => (
+        item.series.some((candidate) => candidate.id === restoredSeries.id)
+      )) || null;
+      setShelf(restoredShelf);
+      setSeries(restoredSeries);
+      setView('learn');
+      if (!route.sectionId) {
+        setSection(null);
+        if (
+          restoredSeries.initializationTask
+          && !['failed', 'succeeded'].includes(restoredSeries.initializationTask.status)
+        ) {
+          void monitorInitialSection(restoredSeries);
+        }
+        return;
+      }
+      const sectionCanOpen = restoredSeries.books.some((book) => book.chapters.some(
+        (chapter) => chapter.sections.some(
+          (item) => item.id === route.sectionId && item.status !== 'locked',
+        ),
+      ));
+      if (!sectionCanOpen) {
+        updateBrowserLocation(seriesPath(restoredSeries.id), 'replace');
+        setSection(null);
+        setError('这个小节尚未解锁，已返回当前系列目录。');
+        return;
+      }
+      const restoredSection = await openAndTrackSection(route.sectionId);
+      if (requestVersion === routeRequestVersion.current) setSection(restoredSection);
+    } catch (reason) {
+      if (requestVersion !== routeRequestVersion.current) return;
+      updateBrowserLocation('/', 'replace');
+      setView('home');
+      setShelf(null);
+      setSeries(null);
+      setSection(null);
+      setError(reason instanceof Error ? reason.message : '无法恢复这个浏览位置。');
+    } finally {
+      if (requestVersion === routeRequestVersion.current) setBusy('');
+    }
+  };
+
+  restoreLocationRef.current = restoreLocation;
+
+  useEffect(() => {
+    if (!auth || !data) {
+      if (!auth) routeInitializedForUser.current = '';
+      return;
+    }
+    if (routeInitializedForUser.current === auth.user.id) return;
+    routeInitializedForUser.current = auth.user.id;
+    void restoreLocationRef.current();
+  }, [auth?.user.id, data]);
+
   if (exitReceipt) {
     return <AccountExitReceiptPage receipt={exitReceipt} onClose={() => setExitReceipt(null)} />;
   }
@@ -569,6 +1151,9 @@ export default function App() {
     const isLocal = authConfig?.mode === 'local';
     const isPassword = authConfig?.mode === 'password';
     const usesCredentials = isLocal || isPassword;
+    const registrationOpen = Boolean(
+      isPassword && authConfig?.registrationMode !== 'closed',
+    );
     const providerName = authConfig?.providerName || '统一身份账户';
     return (
       <div className="app-shell auth-shell">
@@ -580,125 +1165,297 @@ export default function App() {
           <section className="auth-story">
             <p className="eyebrow">YOUR PERSONAL LEARNING LIBRARY</p>
             <h1>把想学的，<br />变成真正学会的。</h1>
-            <p className="auth-lead">
-              Slow 把学习目标写成一套可以逐节阅读、验证和持续积累记忆的个人教材。
-            </p>
             <div className="auth-journey" aria-label="Slow 学习闭环">
-              <article><span>01</span><div><b>生成你的书</b><small>从目标到章节与小节</small></div></article>
-              <article><span>02</span><div><b>逐节学习验证</b><small>通过测验才继续前进</small></div></article>
-              <article><span>03</span><div><b>积累长期记忆</b><small>让下一本书真正了解你</small></div></article>
+              <article><span>01</span><div><b>生成你的书</b></div></article>
+              <article><span>02</span><div><b>逐节学习验证</b></div></article>
+              <article><span>03</span><div><b>持续学习</b></div></article>
             </div>
           </section>
 
-          <section className="auth-card" aria-busy={!authChecked}>
-            <div className={`auth-mode-badge ${isDemo || isLocal ? 'demo' : ''}`}>
-              <i />{isDemo ? '固定体验环境' : isLocal ? '本地多账号环境' : '受邀用户空间'}
-            </div>
-            <h2>{isDemo ? '进入体验书架' : usesCredentials ? '登录学习账号' : '欢迎回来'}</h2>
-            <p>
-              {isDemo
-                ? '无需配置第三方账号，使用本机固定体验身份查看完整学习闭环。'
-                : usesCredentials
-                  ? '输入邀请时收到的账号和密码，进入独立的个人学习书架。'
-                  : '登录后继续你的书架、学习记录与掌握画像。'}
-            </p>
-
-            {!authConfig && error ? (
-              <button className="auth-submit" onClick={() => void initializeAuth()}>
-                重新连接服务 <span>→</span>
-              </button>
-            ) : isDemo ? (
-              <button
-                className="auth-submit"
-                disabled={!authChecked}
-                onClick={async () => {
-                  sessionStorage.setItem('slow_demo_entered', 'true');
-                  await initializeAuth();
+          <section className={`auth-card auth-panel-${authPanel}`} aria-busy={Boolean(busy) || !authChecked}>
+            {registrationResult ? (
+              <RecoveryCodePanel
+                code={registrationResult.recoveryCode}
+                renewed={false}
+                onContinue={() => {
+                  setAuth(registrationResult);
+                  setData(null);
+                  setRegistrationResult(null);
                 }}
-              >
-                进入本地体验 <span>→</span>
-              </button>
-            ) : usesCredentials ? (
-              <form className="local-auth-form" onSubmit={(event) => void loginWithLocalAccount(event)}>
-                <label>
-                  账号
-                  <input
-                    autoComplete="username"
-                    value={localUsername}
-                    onChange={(event) => setLocalUsername(event.target.value)}
-                    placeholder="输入分配给你的账号"
-                    required
-                  />
-                </label>
-                <label>
-                  密码
-                  <span className="password-input">
-                    <input
-                      type={showLocalPassword ? 'text' : 'password'}
-                      autoComplete="current-password"
-                      value={localPassword}
-                      onChange={(event) => setLocalPassword(event.target.value)}
-                      placeholder={isPassword ? '输入你的密码' : '输入本地体验密码'}
-                      minLength={8}
-                      required
-                    />
+              />
+            ) : renewedRecoveryCode ? (
+              <RecoveryCodePanel
+                code={renewedRecoveryCode}
+                renewed
+                onContinue={() => switchAuthPanel('login')}
+              />
+            ) : (
+              <>
+                <div className={`auth-mode-badge ${isDemo || isLocal ? 'demo' : ''}`}>
+                  <i />{isDemo
+                    ? '固定体验环境'
+                    : isLocal
+                      ? '本地多账号环境'
+                      : registrationOpen
+                        ? 'ALPHA 开放注册'
+                        : '受邀用户空间'}
+                </div>
+
+                {registrationOpen && authPanel !== 'recover' && (
+                  <div className="auth-card-tabs" role="tablist" aria-label="账号入口">
                     <button
                       type="button"
-                      aria-label={showLocalPassword ? '隐藏密码' : '显示密码'}
-                      aria-pressed={showLocalPassword}
-                      onClick={() => setShowLocalPassword((visible) => !visible)}
-                    >
-                      {showLocalPassword ? (
-                        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
-                          <path d="m3 3 18 18M10.6 10.7a2 2 0 0 0 2.7 2.7M9.9 4.3A10.7 10.7 0 0 1 12 4c5.5 0 9 5.5 9 5.5a16 16 0 0 1-2.2 2.7M6.6 6.6C4.3 8.1 3 9.5 3 9.5S6.5 15 12 15c1 0 1.9-.2 2.7-.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                      ) : (
-                        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
-                          <path d="M3 9.5S6.5 4 12 4s9 5.5 9 5.5S17.5 15 12 15 3 9.5 3 9.5Z" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
-                          <circle cx="12" cy="9.5" r="2.5" stroke="currentColor" strokeWidth="1.7" />
-                        </svg>
-                      )}
+                      role="tab"
+                      aria-selected={authPanel === 'login'}
+                      onClick={() => switchAuthPanel('login')}
+                    >登录</button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={authPanel === 'register'}
+                      onClick={() => switchAuthPanel('register')}
+                    >创建账号</button>
+                  </div>
+                )}
+
+                <h2>{isDemo
+                  ? '进入体验书架'
+                  : authPanel === 'register'
+                    ? '领取你的学习账号'
+                    : authPanel === 'recover'
+                      ? '用恢复码重置密码'
+                      : usesCredentials
+                        ? '登录学习账号'
+                        : '欢迎回来'}</h2>
+                <p>{isDemo
+                  ? '无需配置第三方账号，使用本机固定体验身份查看完整学习闭环。'
+                  : authPanel === 'register'
+                    ? '无需邮箱或手机号。创建后请保存仅展示一次的账号恢复码。'
+                    : authPanel === 'recover'
+                      ? '输入注册时保存的恢复码。完成后，旧密码和旧恢复码都会失效。'
+                      : usesCredentials
+                        ? '输入账号和密码，回到你的书架、学习记录与复习安排。'
+                        : '登录后继续你的书架、学习记录与复习安排。'}</p>
+
+                {!authConfig && error ? (
+                  <button className="auth-submit" onClick={() => void initializeAuth()}>
+                    重新连接服务 <span>→</span>
+                  </button>
+                ) : isDemo ? (
+                  <button
+                    className="auth-submit"
+                    disabled={!authChecked}
+                    onClick={async () => {
+                      sessionStorage.setItem('slow_demo_entered', 'true');
+                      await initializeAuth();
+                    }}
+                  >
+                    进入本地体验 <span>→</span>
+                  </button>
+                ) : usesCredentials && authPanel === 'register' ? (
+                  <form className="local-auth-form" onSubmit={(event) => void registerAlphaAccount(event)}>
+                    <label>
+                      学习账号
+                      <input
+                        autoComplete="username"
+                        value={registrationUsername}
+                        onChange={(event) => setRegistrationUsername(event.target.value)}
+                        placeholder="3–80 个文字、字母或数字"
+                        minLength={3}
+                        maxLength={80}
+                        required
+                      />
+                    </label>
+                    {authConfig?.registrationCodeRequired && (
+                      <label>
+                        Alpha 访问码
+                        <input
+                          type="password"
+                          autoComplete="off"
+                          value={alphaCode}
+                          onChange={(event) => setAlphaCode(event.target.value)}
+                          placeholder="输入内测访问码"
+                          required
+                        />
+                      </label>
+                    )}
+                    <label>
+                      设置密码
+                      <span className="password-input">
+                        <input
+                          type={showRegistrationPassword ? 'text' : 'password'}
+                          autoComplete="new-password"
+                          value={registrationPassword}
+                          onChange={(event) => setRegistrationPassword(event.target.value)}
+                          placeholder="至少 12 个字符"
+                          minLength={12}
+                          required
+                        />
+                        <PasswordVisibilityToggle
+                          visible={showRegistrationPassword}
+                          onToggle={() => setShowRegistrationPassword((visible) => !visible)}
+                        />
+                      </span>
+                    </label>
+                    <label>
+                      再输入一次
+                      <span className="password-input">
+                        <input
+                          type={showRegistrationPasswordConfirm ? 'text' : 'password'}
+                          autoComplete="new-password"
+                          value={registrationPasswordConfirm}
+                          onChange={(event) => setRegistrationPasswordConfirm(event.target.value)}
+                          placeholder="确认你的密码"
+                          minLength={12}
+                          required
+                        />
+                        <PasswordVisibilityToggle
+                          visible={showRegistrationPasswordConfirm}
+                          onToggle={() => setShowRegistrationPasswordConfirm((visible) => !visible)}
+                        />
+                      </span>
+                    </label>
+                    <button className="auth-submit" type="submit" disabled={Boolean(busy)}>
+                      创建并进入书架 <span>→</span>
                     </button>
-                  </span>
-                </label>
-                <button className="auth-submit" type="submit" disabled={Boolean(busy)}>
-                  登录独立书架 <span>→</span>
-                </button>
-              </form>
-            ) : (
-              <button
-                className="auth-submit"
-                disabled={!authChecked}
-                onClick={() => api.login(`${window.location.pathname}${window.location.search}`)}
-              >
-                使用{providerName}继续 <span>→</span>
-              </button>
-            )}
+                  </form>
+                ) : usesCredentials && authPanel === 'recover' ? (
+                  <form className="local-auth-form" onSubmit={(event) => void resetPasswordWithRecoveryCode(event)}>
+                    <label>
+                      学习账号
+                      <input
+                        autoComplete="username"
+                        value={recoveryUsername}
+                        onChange={(event) => setRecoveryUsername(event.target.value)}
+                        placeholder="输入你的账号"
+                        required
+                      />
+                    </label>
+                    <label>
+                      恢复码
+                      <input
+                        autoComplete="off"
+                        value={recoveryCode}
+                        onChange={(event) => setRecoveryCode(event.target.value)}
+                        placeholder="SLOW-XXXX-XXXX-…"
+                        minLength={20}
+                        required
+                      />
+                    </label>
+                    <label>
+                      新密码
+                      <span className="password-input">
+                        <input
+                          type={showRecoveryPassword ? 'text' : 'password'}
+                          autoComplete="new-password"
+                          value={recoveryPassword}
+                          onChange={(event) => setRecoveryPassword(event.target.value)}
+                          placeholder="至少 12 个字符"
+                          minLength={12}
+                          required
+                        />
+                        <PasswordVisibilityToggle
+                          visible={showRecoveryPassword}
+                          onToggle={() => setShowRecoveryPassword((visible) => !visible)}
+                        />
+                      </span>
+                    </label>
+                    <label>
+                      确认新密码
+                      <span className="password-input">
+                        <input
+                          type={showRecoveryPasswordConfirm ? 'text' : 'password'}
+                          autoComplete="new-password"
+                          value={recoveryPasswordConfirm}
+                          onChange={(event) => setRecoveryPasswordConfirm(event.target.value)}
+                          placeholder="再次输入新密码"
+                          minLength={12}
+                          required
+                        />
+                        <PasswordVisibilityToggle
+                          visible={showRecoveryPasswordConfirm}
+                          onToggle={() => setShowRecoveryPasswordConfirm((visible) => !visible)}
+                        />
+                      </span>
+                    </label>
+                    <button className="auth-submit" type="submit" disabled={Boolean(busy)}>
+                      重置密码 <span>→</span>
+                    </button>
+                    <button type="button" className="auth-text-button" onClick={() => switchAuthPanel('login')}>
+                      ← 返回登录
+                    </button>
+                  </form>
+                ) : usesCredentials ? (
+                  <form className="local-auth-form" onSubmit={(event) => void loginWithLocalAccount(event)}>
+                    <label>
+                      账号
+                      <input
+                        autoComplete="username"
+                        value={localUsername}
+                        onChange={(event) => setLocalUsername(event.target.value)}
+                        placeholder={isPassword ? '输入你的学习账号' : '输入分配给你的账号'}
+                        required
+                      />
+                    </label>
+                    <label>
+                      密码
+                      <span className="password-input">
+                        <input
+                          type={showLocalPassword ? 'text' : 'password'}
+                          autoComplete="current-password"
+                          value={localPassword}
+                          onChange={(event) => setLocalPassword(event.target.value)}
+                          placeholder={isPassword ? '输入你的密码' : '输入本地体验密码'}
+                          minLength={8}
+                          required
+                        />
+                        <PasswordVisibilityToggle
+                          visible={showLocalPassword}
+                          onToggle={() => setShowLocalPassword((visible) => !visible)}
+                        />
+                      </span>
+                    </label>
+                    <button className="auth-submit" type="submit" disabled={Boolean(busy)}>
+                      登录独立书架 <span>→</span>
+                    </button>
+                    {isPassword && (
+                      <button type="button" className="auth-text-button" onClick={() => switchAuthPanel('recover')}>
+                        我有恢复码，需要重置密码
+                      </button>
+                    )}
+                  </form>
+                ) : (
+                  <button
+                    className="auth-submit"
+                    disabled={!authChecked}
+                    onClick={() => api.login(`${window.location.pathname}${window.location.search}`)}
+                  >
+                    使用{providerName}继续 <span>→</span>
+                  </button>
+                )}
 
-            {!authChecked && <div className="auth-inline-status">正在确认登录状态…</div>}
-            {error && <div className="auth-inline-error">{error}</div>}
+                {!authChecked && <div className="auth-inline-status">正在确认登录状态…</div>}
+                {error && <div className="auth-inline-error">{error}</div>}
 
-            <div className="auth-trust-list">
-              <div><i>✓</i><span><b>服务端安全会话</b><small>{usesCredentials ? '密码使用 Argon2id 哈希，浏览器只保留会话 Cookie' : '浏览器不保存身份提供商密码'}</small></span></div>
-              <div><i>✓</i><span><b>学习数据按用户隔离</b><small>书架、证据和画像仅属于你的账户</small></span></div>
-              <div><i>✓</i><span><b>随时安全退出</b><small>退出后服务端会话立即撤销</small></span></div>
-            </div>
-
-            <small className="auth-disclaimer">
-              {isDemo
-                ? '体验模式会被明确标记，不作为真实账号或真实认证证据。'
-                : isLocal
-                  ? '本地账号仅用于开发和场景验证，生产环境会拒绝启用。'
-                  : isPassword
-                    ? '账号仅由内测管理员创建，不开放公开注册。'
-                  : `登录将在${providerName}页面完成，Slow 不接收你的密码。`}
-            </small>
-            {authConfig?.privacyNotice && (
-              <details className="auth-privacy-brief">
-                <summary>内测隐私与数据说明</summary>
-                <p>{authConfig.privacyNotice.summary}</p>
-                <small>登录后、开始填写学习画像前，需要分别确认隐私告知与自愿参加内测。版本 {authConfig.privacyNotice.noticeVersion}</small>
-              </details>
+                {(isDemo || isLocal || isPassword) && (
+                  <small className="auth-disclaimer">
+                    {isDemo
+                      ? '体验内容会明确标记，并与正式账号数据分开。'
+                      : isLocal
+                        ? '本地账号仅用于开发和场景验证，生产环境会拒绝启用。'
+                        : registrationOpen
+                          ? 'Alpha 账号不绑定邮箱或手机号；请自行保存恢复码。'
+                          : '账号仅由内测管理员创建，当前不开放注册。'}
+                  </small>
+                )}
+                {authConfig?.privacyNotice && (
+                  <details className="auth-privacy-brief">
+                    <summary>内测隐私与数据说明</summary>
+                    <p>{authConfig.privacyNotice.summary}</p>
+                    <small>登录后、开始填写学习画像前，需要确认隐私告知与自愿参加内测。</small>
+                  </details>
+                )}
+              </>
             )}
           </section>
         </main>
@@ -728,6 +1485,18 @@ export default function App() {
     );
   }
 
+  const showDailyModeDialog = Boolean(
+    data?.dailyMode
+    && dailyModePromptEnabled
+    && (
+      dailyModeDialogOpen
+      || (
+        !data.dailyMode.active
+        && !(view === 'learn' && section && activityDailyMode)
+      )
+    ),
+  );
+
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -751,6 +1520,20 @@ export default function App() {
           <small>一步一步，学成自己的书</small>
         )}
         <div className="header-actions">
+          {data?.dailyMode && (
+            <DailyModeHeader
+              state={data.dailyMode}
+              effectiveMode={
+                activityDailyMode
+                || data.dailyMode.dailyMode
+                || data.dailyMode.lastDailyMode
+                || 'slow'
+              }
+              expiredInActivity={dailyModeExpiredDuringActivity}
+              busy={dailyModeBusy}
+              onActivate={activateDailyMode}
+            />
+          )}
           {busy && <span className="busy-indicator"><i />{busy}</span>}
           {AI_RUNTIME_SETTINGS_ENABLED && (
             <button className="quiet-button ai-settings-trigger" onClick={() => setShowAiSettings(true)}>
@@ -805,6 +1588,7 @@ export default function App() {
         {view === 'home' && (
           <Home
             data={data}
+            dailyMode={data?.dailyMode?.dailyMode || data?.dailyMode?.lastDailyMode || 'slow'}
             onOpen={openShelf}
             onContinue={openSeries}
             onCreate={async (body) => {
@@ -820,8 +1604,10 @@ export default function App() {
           <ShelfPage
             shelf={shelf}
             profile={data!.profile}
+            onBack={goHome}
             onCreate={async (body, idempotencyKey) => {
               const value = await run('AI 正在规划系列…', () => api.createPlan({ ...body, shelfId: shelf.id }, idempotencyKey));
+              updateBrowserLocation(seriesPath(value.id), 'push');
               setSeries(value);
               setSection(null);
               setView('learn');
@@ -835,7 +1621,10 @@ export default function App() {
                 const refreshedShelf = refreshed.shelves.find((item) => item.id === shelf.id) || null;
                 setData(refreshed);
                 setShelf(refreshedShelf);
-                if (!refreshedShelf) setView('home');
+                if (!refreshedShelf) {
+                  updateBrowserLocation('/', 'replace');
+                  setView('home');
+                }
               });
             }}
           />
@@ -857,6 +1646,7 @@ export default function App() {
               setData(await api.bootstrap());
             }}
             onLogout={logout}
+            onRotateRecoveryCode={async (currentPassword) => (await api.rotateRecoveryCode(currentPassword)).recoveryCode}
             privacy={auth.privacy}
             onRequestExit={requestAccountExit}
           />
@@ -870,11 +1660,12 @@ export default function App() {
                 {data?.milestoneDashboard.path?.seriesId === series.id
                   && (data.milestoneDashboard.path.status === 'proposed' || !data.milestoneDashboard.path.goalAligned) && (
                   <div className="path-confirm-alert" role="status">
+                    <i className="path-confirm-mark" aria-hidden="true">✓</i>
                     <span>
-                      <b>{data.milestoneDashboard.path.goalAligned ? '确认这条学习路径' : '学习画像已更新'}</b>
+                      <b>{data.milestoneDashboard.path.goalAligned ? '学习路径待确认' : '你的学习目标有变化'}</b>
                       <small>{data.milestoneDashboard.path.goalAligned
                         ? '确认后，这个系列会按当前目标记录里程碑。'
-                        : '请检查这个系列是否仍然符合你的最新目标。'}</small>
+                        : '如果这个系列仍适合你，可以继续沿用当前路径。'}</small>
                     </span>
                     <button
                       className="secondary-button"
@@ -883,7 +1674,7 @@ export default function App() {
                         setData(await api.bootstrap());
                       }}
                     >
-                      {data.milestoneDashboard.path.goalAligned ? '确认路径' : '按新目标重新确认'}
+                      {data.milestoneDashboard.path.goalAligned ? '确认路径' : '继续沿用'}
                     </button>
                   </div>
                 )}
@@ -901,9 +1692,8 @@ export default function App() {
                     succeeded: '已完成',
                   }[series.initializationTask.status]}：
                   {series.initializationTask.status === 'failed'
-                    ? series.initializationTask.errorMessage || series.initializationTask.errorCode || '未知错误'
-                    : '完成后会自动打开，不需要重复点击生成。'}
-                  {' '}（尝试 {series.initializationTask.attemptCount || 0}/{series.initializationTask.maxAttempts || 0}）
+                    ? '暂时没有准备完成，可以重新尝试。'
+                    : '准备中'}
                 </span>
                 {series.initializationTask.retryable && (
                   <button
@@ -911,7 +1701,7 @@ export default function App() {
                     disabled={preparingInitialSection}
                     onClick={retryInitialSection}
                   >
-                    {preparingInitialSection ? '正在重试…' : '安全重试第一节'}
+                    {preparingInitialSection ? '正在重试…' : '重新准备第一节'}
                   </button>
                 )}
               </div>
@@ -919,8 +1709,10 @@ export default function App() {
               </div>
             )}
             <LearningWorkspace
+              userId={auth.user.id}
               series={series}
               section={section}
+              dailyMode={activityDailyMode || data?.dailyMode?.dailyMode || 'slow'}
               onSelectSection={loadSection}
               onGenerateSection={generateSection}
               onRegenerateSection={regenerateSection}
@@ -949,6 +1741,10 @@ export default function App() {
                 if (deletingLastBook) {
                   setSeries(null);
                   setSection(null);
+                  updateBrowserLocation(
+                    refreshedShelf ? shelfPath(refreshedShelf.id) : '/',
+                    'replace',
+                  );
                   setView(refreshedShelf ? 'shelf' : 'home');
                   return;
                 }
@@ -970,20 +1766,44 @@ export default function App() {
                   block,
                 });
               }}
+              onQaVisibilityChange={setLearningQaOpen}
             />
           </>
         )}
       </main>
+      {bookReplan && (
+        <BookReplanDialog
+          book={bookReplan.book}
+          proposal={bookReplan.proposal}
+          onClose={() => setBookReplan(null)}
+          onConfirm={async () => {
+            await run(
+              '正在确认新章节目录…',
+              () => api.confirmBookReplan(bookReplan.book.id, bookReplan.proposal.proposalId),
+            );
+            await refreshSeries();
+          }}
+        />
+      )}
+      {showDailyModeDialog && data?.dailyMode && (
+        <DailyModeDialog
+          state={data.dailyMode}
+          busy={dailyModeBusy}
+          onActivate={activateDailyMode}
+        />
+      )}
       {AI_RUNTIME_SETTINGS_ENABLED && showAiSettings && (
         <AiSettingsDialog onClose={() => setShowAiSettings(false)} />
       )}
-      <button
-        className="global-feedback-tab"
-        aria-label="反馈产品问题或建议"
-        onClick={() => setFeedbackTarget({ scope: 'global' })}
-      >
-        <span aria-hidden="true">✦</span> 反馈
-      </button>
+      {!(view === 'learn' && learningQaOpen) && (
+        <button
+          className="global-feedback-tab"
+          aria-label="反馈产品问题或建议"
+          onClick={() => setFeedbackTarget({ scope: 'global' })}
+        >
+          <span aria-hidden="true">✦</span> 反馈
+        </button>
+      )}
       {feedbackTarget && (
         <FeedbackDialog
           target={feedbackTarget}
@@ -992,6 +1812,229 @@ export default function App() {
           onRefreshSeries={refreshSeries}
           onClose={() => setFeedbackTarget(null)}
         />
+      )}
+    </div>
+  );
+}
+
+function BookReplanDialog({
+  book,
+  proposal,
+  onClose,
+  onConfirm,
+}: {
+  book: Book;
+  proposal: BookReplanProposal;
+  onClose: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const dialogRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    dialogRef.current?.focus();
+    const handleKeys = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !confirming) {
+        onClose();
+        return;
+      }
+      if (event.key !== 'Tab' || !dialogRef.current) return;
+      const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>('button:not(:disabled)'));
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialogRef.current)) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener('keydown', handleKeys);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener('keydown', handleKeys);
+    };
+  }, [confirming, onClose]);
+
+  return (
+    <div
+      className="confirm-backdrop book-replan-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !confirming) onClose();
+      }}
+    >
+      <section
+        ref={dialogRef}
+        className="book-replan-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="book-replan-title"
+        tabIndex={-1}
+      >
+        <header className="book-replan-heading">
+          <div>
+            <p className="eyebrow">下一本书 · 目录预览</p>
+            <h2 id="book-replan-title">开始《{book.title}》前，先看一眼新目录</h2>
+          </div>
+          <button className="dialog-close" type="button" aria-label="关闭目录预览" disabled={confirming} onClick={onClose}>×</button>
+        </header>
+
+        <ol className="book-replan-outline">
+          {proposal.chapters.map((chapter, index) => (
+            <li key={`${chapter.title}-${index}`}>
+              <span>{String(index + 1).padStart(2, '0')}</span>
+              <div>
+                <b>{chapter.title}</b>
+                <p>{chapter.objective}</p>
+              </div>
+            </li>
+          ))}
+        </ol>
+
+        <footer className="dialog-actions">
+          <button className="quiet-button" type="button" disabled={confirming} onClick={onClose}>稍后再说</button>
+          <button
+            className="primary-button"
+            type="button"
+            disabled={confirming}
+            onClick={async () => {
+              setConfirming(true);
+              let confirmed = false;
+              try {
+                await onConfirm();
+                confirmed = true;
+              } finally {
+                setConfirming(false);
+              }
+              if (confirmed) onClose();
+            }}
+          >
+            {confirming ? '正在采用…' : '采用这份目录'}
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function FeedbackTypeDropdown({
+  options,
+  value,
+  disabled,
+  onChange,
+}: {
+  options: string[][];
+  value: string;
+  disabled: boolean;
+  onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const selectedIndex = Math.max(0, options.findIndex(([optionValue]) => optionValue === value));
+  const selectedLabel = options[selectedIndex]?.[1] || '';
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOutside = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setOpen(false);
+      triggerRef.current?.focus();
+    };
+    document.addEventListener('mousedown', closeOutside);
+    document.addEventListener('keydown', closeOnEscape);
+    const focusFrame = window.requestAnimationFrame(() => optionRefs.current[selectedIndex]?.focus());
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.removeEventListener('mousedown', closeOutside);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [open, selectedIndex]);
+
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
+
+  const moveFocus = (index: number) => {
+    const nextIndex = (index + options.length) % options.length;
+    optionRefs.current[nextIndex]?.focus();
+  };
+
+  const choose = (optionValue: string) => {
+    onChange(optionValue);
+    setOpen(false);
+    window.requestAnimationFrame(() => triggerRef.current?.focus());
+  };
+
+  return (
+    <div className={`feedback-select-control ${open ? 'is-open' : ''}`} ref={rootRef}>
+      <button
+        ref={triggerRef}
+        className="feedback-select-trigger"
+        type="button"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={`反馈类型：${selectedLabel}`}
+        disabled={disabled}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={(event) => {
+          if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
+          event.preventDefault();
+          setOpen(true);
+        }}
+      >
+        <span>{selectedLabel}</span>
+        <i aria-hidden="true" />
+      </button>
+      {open && (
+        <div className="feedback-select-menu" role="listbox" aria-label="反馈类型">
+          {options.map(([optionValue, label], index) => {
+            const selected = optionValue === value;
+            return (
+              <button
+                ref={(node) => { optionRefs.current[index] = node; }}
+                className={`feedback-select-option ${selected ? 'selected' : ''}`}
+                type="button"
+                role="option"
+                aria-selected={selected}
+                tabIndex={-1}
+                key={optionValue}
+                onClick={() => choose(optionValue)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === ' ') {
+                    event.preventDefault();
+                    choose(optionValue);
+                  } else if (event.key === 'ArrowDown') {
+                    event.preventDefault();
+                    moveFocus(index + 1);
+                  } else if (event.key === 'ArrowUp') {
+                    event.preventDefault();
+                    moveFocus(index - 1);
+                  } else if (event.key === 'Home') {
+                    event.preventDefault();
+                    moveFocus(0);
+                  } else if (event.key === 'End') {
+                    event.preventDefault();
+                    moveFocus(options.length - 1);
+                  } else if (event.key === 'Tab') {
+                    setOpen(false);
+                  }
+                }}
+              >
+                <span className="feedback-select-indicator" aria-hidden="true">{selected ? '✓' : ''}</span>
+                <span>{label}</span>
+              </button>
+            );
+          })}
+        </div>
       )}
     </div>
   );
@@ -1048,7 +2091,7 @@ function FeedbackDialog({
     returnFocusRef.current = activeElement instanceof HTMLElement ? activeElement : null;
     const initialFocus = target.scope === 'global'
       ? dialog?.querySelector<HTMLElement>('textarea')
-      : dialog?.querySelector<HTMLElement>('input[type="radio"]:checked');
+      : dialog?.querySelector<HTMLElement>('.feedback-select-trigger');
     (initialFocus || dialog)?.focus();
 
     const handleDialogKeys = (event: KeyboardEvent) => {
@@ -1058,7 +2101,7 @@ function FeedbackDialog({
       }
       if (event.key !== 'Tab' || !dialog) return;
       const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
-        'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])',
+        'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])',
       )).filter((element) => !element.hasAttribute('hidden'));
       if (focusable.length === 0) {
         event.preventDefault();
@@ -1093,7 +2136,7 @@ function FeedbackDialog({
     setRepairText('');
     setStatus('');
     try {
-      const result = await api.streamFeedbackRepair(
+      await api.streamFeedbackRepair(
         feedbackId,
         (delta) => setRepairText((current) => current + delta),
       );
@@ -1101,7 +2144,7 @@ function FeedbackDialog({
         const updated = await api.section(target.sectionId);
         onSectionChange(updated);
         await onRefreshSeries();
-        setStatus(`已应用为第 ${result.contentVersion} 版正文。`);
+        setStatus('已替换');
       }
     } catch (reason) {
       setRepairFailed(true);
@@ -1138,7 +2181,7 @@ function FeedbackDialog({
       const receipt = await api.submitFeedback(payload, submissionRef.current.key);
       setSubmitted(true);
       if (target.scope === 'global') {
-        setStatus('已收到。我们会把它放进下一次反馈整理。');
+        setStatus('已收到。');
         closeTimerRef.current = window.setTimeout(() => onCloseRef.current(), 900);
         return;
       }
@@ -1149,12 +2192,12 @@ function FeedbackDialog({
         return;
       }
       const blockedMessages: Record<string, string> = {
-        FEEDBACK_CONTENT_VERSION_STALE: '反馈已保存，但当前正文已有更新版本；请刷新后在新版本上再次反馈。',
-        SECTION_CONTENT_MISSING: '反馈已保存，但这段正文已经不可用；请刷新后再试。',
+        FEEDBACK_CONTENT_VERSION_STALE: '当前正文已更新；请刷新后再反馈一次。',
+        SECTION_CONTENT_MISSING: '这段正文已不可用；请刷新后再试。',
       };
       setStatus(
         blockedMessages[regeneration.reasonCode || '']
-        || '反馈已保存，但这段正文现在无法补救。',
+        || '这段正文暂时无法补救。',
       );
       setSubmitting(false);
     } catch (reason) {
@@ -1192,23 +2235,15 @@ function FeedbackDialog({
           </div>
         )}
         <form onSubmit={submit}>
-          {!submitted && <fieldset disabled={submitting}>
-            <legend>这次想反馈什么？</legend>
-            <div className="feedback-type-grid">
-              {options.map(([value, label]) => (
-                <label className={feedbackType === value ? 'selected' : ''} key={value}>
-                  <input
-                    type="radio"
-                    name="feedback-type"
-                    value={value}
-                    checked={feedbackType === value}
-                    onChange={() => setFeedbackType(value)}
-                  />
-                  {label}
-                </label>
-              ))}
-            </div>
-          </fieldset>}
+          {!submitted && <div className="feedback-type-select">
+            <span>这次想反馈什么？</span>
+            <FeedbackTypeDropdown
+              options={options}
+              value={feedbackType}
+              disabled={submitting}
+              onChange={setFeedbackType}
+            />
+          </div>}
           {!submitted && <label className="feedback-message-label">
             {target.scope === 'content_block' ? '补充说明（可选）' : '具体说说'}
             <textarea
@@ -1303,7 +2338,7 @@ function AiSettingsDialog({ onClose }: { onClose: () => void }) {
       setMessage(
         value.mode === 'demo'
           ? '已保存并切换到本地演示模式。'
-          : `已保存并切换到 ${value.model}，重启后会自动恢复。`,
+          : `已切换到 ${value.model}。`,
       );
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : '切换失败');
@@ -1421,7 +2456,7 @@ function AiSettingsDialog({ onClose }: { onClose: () => void }) {
           <p className="runtime-warning">
             {runtime?.ephemeral
               ? '当前环境不提供持久化存储；重启后会恢复服务器环境变量中的配置。'
-              : '配置仅保存在本机服务端，浏览器无法读取 API Key；API 重启后会自动恢复。'}
+              : '配置仅保存在本机服务端，浏览器无法读取 API Key。'}
             保存前会先验证连接，失败时继续使用旧配置。
           </p>
           {message && <p className="runtime-message" role="status">{message}</p>}
@@ -1437,17 +2472,56 @@ function AiSettingsDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-function shelfDescriptor(shelf: Pick<Shelf, 'domain' | 'specialty'>) {
-  return [shelf.domain, shelf.specialty].filter(Boolean).join(' · ');
+function shelfDescriptor(shelf: Pick<Shelf, 'tags'>) {
+  return shelf.tags.slice(0, 2).join(' · ');
+}
+
+function bookProgressDetails(book: Book) {
+  const completedChapters = book.chapters.filter((chapter) => chapter.status === 'completed').length;
+  const sections = book.chapters.flatMap((chapter) => chapter.sections);
+  const completedSections = sections.filter((section) => section.status === 'completed').length;
+  return {
+    completedChapters,
+    totalChapters: book.chapters.length,
+    completedSections,
+    totalSections: sections.length,
+  };
+}
+
+function bookProgressLabel(book: Book, isCurrent: boolean) {
+  if (book.status === 'completed') return '已完成';
+  if (book.status === 'locked') return '未解锁';
+  if (book.outlineStatus === 'draft') return '待确认';
+  if (isCurrent || book.progress > 0) return '学习中';
+  return '待开始';
+}
+
+function nextBookSection(book: Book) {
+  for (const chapter of book.chapters) {
+    const section = chapter.sections.find((item) => item.status !== 'locked' && item.status !== 'completed');
+    if (section) return { chapter, section };
+  }
+  return null;
+}
+
+function bookContainsSection(book: Book, sectionId: string | null | undefined) {
+  return Boolean(
+    sectionId
+    && book.chapters.some((chapter) => (
+      chapter.sections.some((section) => section.id === sectionId)
+    )),
+  );
 }
 
 function Home({
   data,
+  dailyMode,
   onOpen,
   onContinue,
   onCreate,
 }: {
   data: Bootstrap | null;
+  dailyMode: DailyMode;
   onOpen: (shelf: Shelf) => void;
   onContinue: (seriesId: string) => Promise<void>;
   onCreate: (body: ShelfCreateInput) => Promise<void>;
@@ -1573,12 +2647,10 @@ function Home({
   };
 
   return (
-    <section className="library-dashboard">
+    <section className={`library-dashboard mode-${dailyMode}`}>
       <header className="library-hero">
         <div className="library-hero-copy">
-          <p className="library-kicker">知行书架 · Personal library</p>
           <h1>把正在学的，<br /><em>放回眼前。</em></h1>
-          <p>这里不是藏书统计，而是你的学习入口。先继续今天的一节，再回到所属领域查看完整路径。</p>
         </div>
         <div className="library-hero-aside">
           <p className="library-summary">
@@ -1590,11 +2662,11 @@ function Home({
         </div>
       </header>
 
-      <div className="library-focus-grid">
+      <div className={`library-focus-grid ${dailyMode === 'fast' && currentReview ? 'fast-review-first' : ''}`}>
         <article className={`library-focus-card today-focus-card ${dashboard?.today ? '' : 'is-empty'}`}>
           <header>
             <span className="focus-card-label">今天从这里继续</span>
-            {dashboard?.today && <small>约 {dashboard.today.estimatedMinutes} 分钟</small>}
+            {dashboard?.today && <small>{dailyMode === 'fast' ? '快速视图 · 约 3–5 分钟' : `约 ${dashboard.today.estimatedMinutes} 分钟`}</small>}
           </header>
           {dashboard?.today ? (
             <>
@@ -1616,7 +2688,6 @@ function Home({
           ) : (
             <div className="focus-empty-copy">
               <h2>先放入一本真正想学的书。</h2>
-              <p>创建书架与教材后，下一节会固定出现在这里。</p>
               <button onClick={() => setShowCreate(true)}>创建第一个书架 <span aria-hidden="true">→</span></button>
             </div>
           )}
@@ -1624,14 +2695,13 @@ function Home({
 
         <article className="library-focus-card review-focus-card">
           <header>
-            <span className="focus-card-label">待复习</span>
+            <span className="focus-card-label">{dailyMode === 'fast' && currentReview ? 'Fast 模式优先 · 待复习' : '待复习'}</span>
             <small>跨书架</small>
           </header>
           {reviewBusy ? (
             <div className="review-empty-state" aria-live="polite">
               <span>正在同步</span>
               <h2>{reviewBusy}</h2>
-              <p>复习分配与学习画像都由服务端确认。</p>
             </div>
           ) : reviewError ? (
             <div className="review-empty-state review-error-state" role="alert">
@@ -1642,9 +2712,8 @@ function Home({
             </div>
           ) : reviewResult ? (
             <div className="review-result-state" aria-live="polite">
-              <span>{reviewResult.passed ? '保持验证完成' : '已记录本次表现'}</span>
+              <span>{reviewResult.passed ? '已完成' : '完成本次复习'}</span>
               <h2>{reviewResult.score} / {reviewResult.total}</h2>
-              <p>这次结果已作为延迟复习证据候选保存，不会覆盖原小节测验。</p>
               <button onClick={continueReviewQueue}>
                 {pendingReviews.length ? '继续下一项' : '完成今日复习'} <span aria-hidden="true">→</span>
               </button>
@@ -1685,7 +2754,6 @@ function Home({
             <div className="review-ready-state">
               <span>{pendingReviews.length} 项到期</span>
               <h2>{currentReview.objective}</h2>
-              <p>系统会生成一道与原题实质不同的题，检查间隔一段时间后是否仍能独立判断。</p>
               <div className="review-ready-actions">
                 <button onClick={() => void startDueReview()}>
                   {currentReview.status === 'started' ? '继续复习' : '开始复习'} <span aria-hidden="true">→</span>
@@ -1696,10 +2764,9 @@ function Home({
               </div>
             </div>
           ) : (
-            <div className="review-empty-state">
+            <div className="review-empty-state review-clear-state">
               <span>今日已清空</span>
               <h2>没有到期的复习</h2>
-              <p>完成测验后，薄弱概念会按间隔自动回到这里。到期时可直接开始，不需要先打开队列。</p>
             </div>
           )}
           <div className="review-cadence" aria-label="复习间隔">
@@ -1720,19 +2787,38 @@ function Home({
             <p>按领域归档</p>
             <h2 id="library-catalog-title">我的书架</h2>
           </div>
-          <p>每个书架保存该领域的教材、学习记录与掌握证据。</p>
         </header>
 
         <div className="library-shelf-grid">
         {data && data.shelves.length === 0 && (
           <div className="empty-library-message">
             <span>还没有书架</span>
-            <small>从一个明确的领域开始，把教材、测验与掌握证据放在一起。</small>
+            <small>从一个明确的领域开始，把教材、练习和学习进度放在一起。</small>
             <button className="primary-button" onClick={() => setShowCreate(true)}>创建第一个书架</button>
           </div>
         )}
         {data?.shelves.map((item, shelfIndex) => {
           const itemBookCount = item.series.reduce((total, itemSeries) => total + itemSeries.books.length, 0);
+          const featuredSeries = item.series.find((itemSeries) => itemSeries.id === dashboard?.today?.seriesId)
+            || item.series.find((itemSeries) => itemSeries.progress > 0 && itemSeries.progress < 100)
+            || item.series[0]
+            || null;
+          const featuredBook = featuredSeries?.books.find((book) => (
+            featuredSeries.id === dashboard?.today?.seriesId
+            && bookContainsSection(book, dashboard.today.sectionId)
+          ))
+            || featuredSeries?.books.find((book) => book.progress > 0 && book.status !== 'completed')
+            || featuredSeries?.books.find((book) => book.status !== 'locked' && book.status !== 'completed')
+            || featuredSeries?.books[0]
+            || null;
+          const featuredBookDetails = featuredBook ? bookProgressDetails(featuredBook) : null;
+          const featuredNextSection = featuredBook ? nextBookSection(featuredBook) : null;
+          const isTodayBook = Boolean(
+            featuredSeries
+            && featuredBook
+            && featuredSeries.id === dashboard?.today?.seriesId
+            && bookContainsSection(featuredBook, dashboard.today.sectionId),
+          );
           return (
           <button
             className="library-shelf-card"
@@ -1747,7 +2833,7 @@ function Home({
             <span className="shelf-card-content">
               <span className="shelf-card-heading">
                 <span>
-                  <small>{shelfDescriptor(item) || '未设置领域说明'}</small>
+                  <small>{shelfDescriptor(item) || '等待第一套教材归纳'}</small>
                   <strong>{item.name}</strong>
                 </span>
                 <em>{item.series.length} 个系列 · {itemBookCount} 本教材</em>
@@ -1759,29 +2845,82 @@ function Home({
                 </span>
               )}
 
-              <span className="shelf-series-list">
-                {item.series.slice(0, 3).map((itemSeries) => (
-                  <span className="shelf-series-row" key={itemSeries.id}>
+              {featuredSeries && featuredBook && featuredBookDetails ? (
+                <span className="shelf-current-book">
+                  <span className="current-book-topline">
                     <span>
-                      <b>{itemSeries.title}</b>
-                      <small>{itemSeries.books.length} 本教材</small>
+                      <b>{isTodayBook ? '正在学习' : '当前教材'}</b>
+                      <small>
+                        系列 {String(item.series.findIndex((candidate) => candidate.id === featuredSeries.id) + 1).padStart(2, '0')}
+                        {' · '}第 {featuredBook.position} 本
+                      </small>
                     </span>
-                    <span className="series-progress-value">{itemSeries.progress}%</span>
-                    <span className="series-progress-track" aria-hidden="true">
-                      <i style={{ width: `${itemSeries.progress}%` }} />
-                    </span>
+                    <em className={`current-book-status is-${featuredBook.status}`}>
+                      {bookProgressLabel(featuredBook, isTodayBook)}
+                    </em>
                   </span>
-                ))}
-                {item.series.length === 0 && (
-                  <span className="shelf-series-empty">还没有教材系列，进入书架开始规划。</span>
-                )}
-                {item.series.length > 3 && (
-                  <span className="more-series">另有 {item.series.length - 3} 个系列</span>
-                )}
-              </span>
+
+                  <strong className="current-book-title">{featuredBook.title}</strong>
+                  <span className="current-book-series">
+                    <small>所属系列</small>
+                    <span>{featuredSeries.title}</span>
+                  </span>
+
+                  <span className="current-book-progress-row">
+                    <span>
+                      {featuredBookDetails.totalChapters > 0
+                        ? `${featuredBookDetails.completedChapters}/${featuredBookDetails.totalChapters} 章`
+                        : '章节待确认'}
+                      {featuredBookDetails.totalSections > 0
+                        ? ` · ${featuredBookDetails.completedSections}/${featuredBookDetails.totalSections} 节完成`
+                        : ''}
+                    </span>
+                    <b>{featuredBook.progress}%</b>
+                  </span>
+                  <span
+                    className="current-book-progress-track"
+                    role="progressbar"
+                    aria-label={`第 ${featuredBook.position} 本《${featuredBook.title}》进度`}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={featuredBook.progress}
+                  >
+                    <i style={{ width: `${featuredBook.progress}%` }} />
+                  </span>
+                  {featuredBookDetails.totalChapters > 0 && (
+                    <span className="current-book-chapters" aria-hidden="true">
+                      {featuredBook.chapters.map((chapter) => (
+                        <i
+                          className={chapter.status === 'completed'
+                            ? 'is-complete'
+                            : chapter.status === 'locked'
+                              ? 'is-locked'
+                              : 'is-current'}
+                          key={chapter.id}
+                        />
+                      ))}
+                    </span>
+                  )}
+
+                  {(isTodayBook || featuredNextSection) && (
+                    <span className="current-book-next">
+                      <small>{isTodayBook ? '下一节' : '从这里开始'}</small>
+                      <span>
+                        <b>{isTodayBook ? dashboard!.today!.chapterTitle : featuredNextSection!.chapter.title}</b>
+                        <i aria-hidden="true">/</i>
+                        <strong>{isTodayBook ? dashboard!.today!.sectionTitle : featuredNextSection!.section.title}</strong>
+                      </span>
+                    </span>
+                  )}
+                </span>
+              ) : (
+                <span className="shelf-current-empty">
+                  <b>还没有正在学习的教材</b>
+                </span>
+              )}
 
               <span className="shelf-card-action">
-                打开书架 <i aria-hidden="true">→</i>
+                {featuredBook ? '继续这本' : '打开书架'} <i aria-hidden="true">→</i>
               </span>
             </span>
           </button>
@@ -1845,7 +2984,7 @@ function PrivacyConsentGate({
           <p>{privacy.summary}</p>
           <div className="privacy-version-stamp">
             <span>告知版本</span><b>{privacy.noticeVersion}</b>
-            <small>同意会按版本单独留痕；未来内容变化时会重新询问。</small>
+            <small>未来告知内容发生变化时，我们会重新询问。</small>
           </div>
         </section>
 
@@ -1893,11 +3032,11 @@ function AccountExitReceiptPage({ receipt, onClose }: { receipt: AccountExitRece
         <span className="exit-receipt-mark" aria-hidden="true">✓</span>
         <p className="eyebrow">退出申请已登记</p>
         <h1>当前会话已经撤销。</h1>
-        <p>Slow 已停止这个账号的新写入。运营者应在 <b>{due}</b> 前完成活动数据库中的删除或去标识化。</p>
+        <p>Slow 已停止这个账号的新写入。主要数据将在 <b>{due}</b> 前删除或去标识化。</p>
         <dl>
           <div><dt>申请编号</dt><dd>{receipt.requestId}</dd></div>
-          <div><dt>处理状态</dt><dd>待运营者处理</dd></div>
-          <div><dt>备份副本</dt><dd>受限轮转，14 日清除目标</dd></div>
+          <div><dt>处理状态</dt><dd>删除处理中</dd></div>
+          <div><dt>备份数据</dt><dd>预计 14 日内清除</dd></div>
         </dl>
         <p className="exit-receipt-note">请保存申请编号。如需撤回申请，请通过邀请消息的原渠道联系运营者。</p>
         <button className="primary-button" type="button" onClick={onClose}>返回登录页</button>
@@ -1919,23 +3058,24 @@ const DEFAULT_LEARNING_PREFERENCES: LearningPreferences = {
   explanationDensity: 'auto',
   formatPreferences: [],
   interactionRhythm: 'auto',
+  dailyModePromptEnabled: true,
 };
 
 const PROFILE_PREFERENCE_OPTIONS = {
   openingStyle: [
-    ['auto', '由内容决定', '根据本节问题自动选择'],
+    ['auto', '无特别偏好', ''],
     ['problem_first', '问题先行', '先抛出需要解决的问题'],
     ['example_first', '例子先行', '先从一个具体场景进入'],
     ['concept_first', '概念先行', '先建立准确的定义与框架'],
   ],
   explanationDensity: [
-    ['auto', '由内容决定', '按知识难度自动调整'],
+    ['auto', '无特别偏好', ''],
     ['concise', '更精炼', '减少铺垫，保留关键推理'],
     ['balanced', '适中', '解释与节奏保持平衡'],
     ['thorough', '更充分', '多展开机制、边界与反例'],
   ],
   interactionRhythm: [
-    ['auto', '由内容决定', '按学习任务自动安排'],
+    ['auto', '无特别偏好', ''],
     ['low_interruption', '连续阅读', '少打断，集中到段尾练习'],
     ['balanced', '适度停顿', '在关键转折处确认理解'],
     ['frequent_checkins', '频繁确认', '用更多短问题检查跟进'],
@@ -1969,6 +3109,7 @@ function ProfileCenterPage({
   onBack,
   onSave,
   onLogout,
+  onRotateRecoveryCode,
   privacy,
   onRequestExit,
 }: {
@@ -1981,6 +3122,7 @@ function ProfileCenterPage({
   onBack: () => void;
   onSave: (body: object) => Promise<void>;
   onLogout: () => Promise<void>;
+  onRotateRecoveryCode: (currentPassword: string) => Promise<string>;
   privacy: PrivacyState;
   onRequestExit: (confirmation: string, reason: string) => Promise<void>;
 }) {
@@ -1996,6 +3138,9 @@ function ProfileCenterPage({
   const [explanationDensity, setExplanationDensity] = useState(initialPreferences.explanationDensity);
   const [formatPreferences, setFormatPreferences] = useState(initialPreferences.formatPreferences);
   const [interactionRhythm, setInteractionRhythm] = useState(initialPreferences.interactionRhythm);
+  const [dailyModePromptEnabled, setDailyModePromptEnabled] = useState(
+    initialPreferences.dailyModePromptEnabled ?? true,
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
@@ -2003,6 +3148,10 @@ function ProfileCenterPage({
   const [exitConfirmation, setExitConfirmation] = useState('');
   const [exitReason, setExitReason] = useState('');
   const [exitSubmitting, setExitSubmitting] = useState(false);
+  const [recoveryCodeBusy, setRecoveryCodeBusy] = useState(false);
+  const [renewedRecoveryCode, setRenewedRecoveryCode] = useState('');
+  const [recoveryPassword, setRecoveryPassword] = useState('');
+  const [recoveryError, setRecoveryError] = useState('');
 
   const domains = useMemo(() => parseProfileDomains(domainText), [domainText]);
 
@@ -2029,9 +3178,10 @@ function ProfileCenterPage({
           explanationDensity,
           formatPreferences,
           interactionRhythm,
+          dailyModePromptEnabled,
         },
       });
-      setMessage(`已保存为学习画像 V${profile.version + 1}。已有测验与掌握证据保持不变。`);
+      setMessage('已保存');
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '学习画像保存失败');
     } finally {
@@ -2065,8 +3215,7 @@ function ProfileCenterPage({
         </nav>
 
         <div className="profile-sidebar-ledger">
-          <span>当前画像版本</span><b>V{profile.version}</b>
-          <small>每次自述修改都会留下新版本。</small>
+          <span>当前学习设置</span><b>已保存</b>
         </div>
         <button type="button" className="profile-back-button" onClick={onBack}><span aria-hidden="true">←</span> 返回书架</button>
       </aside>
@@ -2076,7 +3225,6 @@ function ProfileCenterPage({
           <header className="profile-page-heading">
             <p className="eyebrow">学习画像</p>
             <h1 id="profile-center-title">让教材始终认识<br />现在的你。</h1>
-            <p>这是所有书架共用的学习设置。修改会形成新版本，但不会改写已经产生的测验、笔记与掌握证据。</p>
           </header>
 
           <fieldset className="profile-field-group">
@@ -2097,7 +3245,6 @@ function ProfileCenterPage({
             <legend>学习方向</legend>
             <label>目标领域
               <input required maxLength={240} value={domainText} onChange={(event) => setDomainText(event.target.value)} placeholder="用逗号分隔，最多 6 个" />
-              <small>当前识别：{domains.length ? domains.join(' · ') : '尚未填写'}</small>
             </label>
             <label>我最终想获得的能力
               <textarea required maxLength={1000} value={purpose} onChange={(event) => setPurpose(event.target.value)} />
@@ -2109,7 +3256,6 @@ function ProfileCenterPage({
 
           <fieldset className="profile-field-group">
             <legend>教材表达偏好</legend>
-            <p className="profile-preference-intro">这些选项只在多个正确、有效的教学方案之间排序。若图表或类比并不适合当前知识，教材仍会选择更清楚的文字或其他形式。</p>
 
             <div className="profile-preference-section">
               <span className="profile-preference-label">怎样进入一个新问题</span>
@@ -2117,7 +3263,7 @@ function ProfileCenterPage({
                 {PROFILE_PREFERENCE_OPTIONS.openingStyle.map(([value, label, note]) => (
                   <label className={openingStyle === value ? 'selected' : ''} key={value}>
                     <input type="radio" name="opening-style" value={value} checked={openingStyle === value} onChange={() => setOpeningStyle(value)} />
-                    <span><b>{label}</b><small>{note}</small></span>
+                    <span><b>{label}</b>{note && <small>{note}</small>}</span>
                   </label>
                 ))}
               </div>
@@ -2129,7 +3275,7 @@ function ProfileCenterPage({
                 {PROFILE_PREFERENCE_OPTIONS.explanationDensity.map(([value, label, note]) => (
                   <label className={explanationDensity === value ? 'selected' : ''} key={value}>
                     <input type="radio" name="explanation-density" value={value} checked={explanationDensity === value} onChange={() => setExplanationDensity(value)} />
-                    <span><b>{label}</b><small>{note}</small></span>
+                    <span><b>{label}</b>{note && <small>{note}</small>}</span>
                   </label>
                 ))}
               </div>
@@ -2162,7 +3308,7 @@ function ProfileCenterPage({
                 {PROFILE_PREFERENCE_OPTIONS.interactionRhythm.map(([value, label, note]) => (
                   <label className={interactionRhythm === value ? 'selected' : ''} key={value}>
                     <input type="radio" name="interaction-rhythm" value={value} checked={interactionRhythm === value} onChange={() => setInteractionRhythm(value)} />
-                    <span><b>{label}</b><small>{note}</small></span>
+                    <span><b>{label}</b>{note && <small>{note}</small>}</span>
                   </label>
                 ))}
               </div>
@@ -2171,6 +3317,17 @@ function ProfileCenterPage({
 
           <fieldset className="profile-field-group">
             <legend>学习节奏</legend>
+            <label className="profile-toggle-row">
+              <span>
+                <b>进入学习前询问 Fast / Slow 模式</b>
+              </span>
+              <input
+                type="checkbox"
+                role="switch"
+                checked={dailyModePromptEnabled}
+                onChange={(event) => setDailyModePromptEnabled(event.target.checked)}
+              />
+            </label>
             <div className="profile-two-columns">
               <label>每周投入
                 <select value={weeklyMinutes} onChange={(event) => setWeeklyMinutes(Number(event.target.value))}>
@@ -2188,7 +3345,6 @@ function ProfileCenterPage({
             </div>
           </fieldset>
 
-          <div className="profile-version-note"><span>版本化自述</span><p>保存后，相关学习系列会在各自页面提示你重新确认路径。</p></div>
           {error && <p className="profile-flow-error" role="alert">{error}</p>}
           {message && <p className="profile-save-message" role="status">{message}</p>}
           <footer>
@@ -2200,7 +3356,6 @@ function ProfileCenterPage({
           <header className="profile-page-heading">
             <p className="eyebrow">账号与数据</p>
             <h1 id="account-page-title">一个账号，<br />一套学习记录。</h1>
-            <p>书架、阅读位置、测验证据和画像版本都绑定到当前账号，不会与其他用户混合。</p>
           </header>
 
           <div className="account-summary-card">
@@ -2209,34 +3364,67 @@ function ProfileCenterPage({
             <dl>
               <div><dt>书架</dt><dd>{stats.shelves}</dd></div>
               <div><dt>学习系列</dt><dd>{stats.series}</dd></div>
-              <div><dt>画像版本</dt><dd>V{profile.version}</dd></div>
+              <div><dt>学习设置</dt><dd>已保存</dd></div>
             </dl>
           </div>
 
           <div className="account-policy-grid">
             <article>
               <span>数据归属</span>
-              <h3>学习事实属于当前账号</h3>
-              <p>书架、答题记录、复习状态和掌握证据均由服务端按用户隔离。</p>
+              <h3>学习记录属于当前账号</h3>
             </article>
             <article>
               <span>登录安全</span>
               <h3>浏览器只保存安全会话</h3>
               <p>{mode === 'local' || mode === 'password'
-                ? '密码不会写入浏览器存储，退出后服务端会话立即撤销。'
+                ? '密码不会写入浏览器存储，退出后当前登录立即失效。'
                 : '身份由登录服务确认，Slow 不接收身份提供商密码。'}</p>
             </article>
             <article>
               <span>内测同意</span>
-              <h3>当前告知已留下版本记录</h3>
-              <p>版本 {privacy.noticeVersion} · {privacy.acceptedAt
+              <h3>当前隐私告知已确认</h3>
+              <p>{privacy.noticeVersion} · {privacy.acceptedAt
                 ? new Date(privacy.acceptedAt).toLocaleDateString('zh-CN')
                 : '当前环境无需同意'}</p>
             </article>
           </div>
 
+          {mode === 'password' && (
+            <section className="account-recovery-panel">
+              <div>
+                <span>账号恢复</span>
+                <h3>恢复码</h3>
+                <p>生成后，旧恢复码立即失效。</p>
+                {renewedRecoveryCode && <code>{renewedRecoveryCode}</code>}
+                {recoveryError && <p className="account-recovery-error" role="alert">{recoveryError}</p>}
+              </div>
+              <div className="account-recovery-action">
+                <label>当前密码
+                  <input
+                    type="password"
+                    autoComplete="current-password"
+                    value={recoveryPassword}
+                    onChange={(event) => setRecoveryPassword(event.target.value)}
+                  />
+                </label>
+                <button type="button" disabled={recoveryCodeBusy || !recoveryPassword} onClick={async () => {
+                  setRecoveryCodeBusy(true);
+                  setRecoveryError('');
+                  try {
+                    setRenewedRecoveryCode(await onRotateRecoveryCode(recoveryPassword));
+                    setRecoveryPassword('');
+                  } catch (reason) {
+                    setRecoveryError(reason instanceof Error ? reason.message : '恢复码生成失败');
+                  } finally {
+                    setRecoveryCodeBusy(false);
+                  }
+                }}>{recoveryCodeBusy ? '正在生成…' : renewedRecoveryCode ? '重新生成' : '生成新的恢复码'}</button>
+              </div>
+            </section>
+          )}
+
           <section className="account-exit-panel">
-            <div><h3>退出当前账号</h3><p>退出不会删除任何书架或学习记录，下次登录后可继续。</p></div>
+            <div><h3>退出当前账号</h3></div>
             <button type="button" disabled={saving} onClick={() => void onLogout()}>退出账号</button>
           </section>
 
@@ -2244,7 +3432,7 @@ function ProfileCenterPage({
             <div className="account-deletion-copy">
               <span>不可撤销操作</span>
               <h3>退出试点并申请删除数据</h3>
-              <p>提交后会立即撤销全部会话、停用账号并停止新写入。运营者应在 7 日内处理活动数据库；备份副本进入受限轮转，当前试点以 14 日为清除目标。</p>
+              <p>提交后会立即退出所有设备并停用账号。主要数据将在 7 日内删除或去标识化，备份数据预计在 14 日内清除。</p>
             </div>
             {!showExitRequest ? (
               <button type="button" className="account-deletion-open" onClick={() => setShowExitRequest(true)}>开始退出申请</button>
@@ -2291,9 +3479,6 @@ function ShelfCreateDialog({
   onCreate: (body: ShelfCreateInput) => Promise<void>;
 }) {
   const [name, setName] = useState('');
-  const [domain, setDomain] = useState('');
-  const [specialty, setSpecialty] = useState('');
-  const [tags, setTags] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState('');
 
@@ -2305,29 +3490,13 @@ function ShelfCreateDialog({
     return () => document.removeEventListener('keydown', closeOnEscape);
   }, [onClose, submitting]);
 
-  const parsedTags = Array.from(new Set(
-    tags
-      .split(/[,，]/)
-      .map((item) => item.trim())
-      .filter(Boolean),
-  ));
-
   const send = async (event: FormEvent) => {
     event.preventDefault();
     if (submitting) return;
-    if (parsedTags.length > 12) {
-      setFormError('主题标签最多填写 12 个');
-      return;
-    }
     setSubmitting(true);
     setFormError('');
     try {
-      await onCreate({
-        name: name.trim(),
-        domain: domain.trim(),
-        specialty: specialty.trim(),
-        tags: parsedTags,
-      });
+      await onCreate({ name: name.trim() });
     } catch (reason) {
       setFormError(reason instanceof Error ? reason.message : '书架创建失败，请稍后重试');
       setSubmitting(false);
@@ -2349,22 +3518,10 @@ function ShelfCreateDialog({
       >
         <div className="shelf-create-heading">
           <div>
-            <p className="eyebrow">建立一个学习领域</p>
+            <p className="eyebrow">新建学习空间</p>
             <h2 id="shelf-create-title">创建书架</h2>
-            <p>书架用于归拢同一领域的书、学习记录和概念掌握证据。</p>
           </div>
           <button className="dialog-close" aria-label="关闭创建书架" disabled={submitting} onClick={onClose}>×</button>
-        </div>
-
-        <div className="shelf-create-nameplate" aria-label="书架铭牌预览">
-          <span>{(name.trim() || '新').slice(0, 1)}</span>
-          <div>
-            <small>书架铭牌预览</small>
-            <b>{name.trim() || '新书架'}</b>
-            {(domain.trim() || specialty.trim()) && (
-              <em>{[domain.trim(), specialty.trim()].filter(Boolean).join(' · ')}</em>
-            )}
-          </div>
         </div>
 
         <form className="shelf-create-form" onSubmit={send}>
@@ -2376,39 +3533,12 @@ function ShelfCreateDialog({
               maxLength={100}
               disabled={submitting}
               value={name}
-              onChange={(event) => setName(event.target.value)}
-            />
-          </label>
-          <label>
-            学习领域（可选）
-            <input
-              maxLength={100}
-              disabled={submitting}
-              value={domain}
-              onChange={(event) => setDomain(event.target.value)}
-            />
-          </label>
-          <label>
-            细分方向（可选）
-            <input
-              maxLength={120}
-              disabled={submitting}
-              value={specialty}
-              onChange={(event) => setSpecialty(event.target.value)}
-            />
-          </label>
-          <label>
-            主题标签（可选）
-            <input
-              maxLength={240}
-              disabled={submitting}
-              value={tags}
+              placeholder="例如：技术、产品设计、经济学"
               onChange={(event) => {
-                setTags(event.target.value);
+                setName(event.target.value);
                 setFormError('');
               }}
             />
-            <small>最多 12 个，用于后续检索和画像归类。</small>
           </label>
           {formError && <p className="shelf-create-error" role="alert">{formError}</p>}
           <div className="dialog-actions">
@@ -2426,12 +3556,14 @@ function ShelfCreateDialog({
 function ShelfPage({
   shelf,
   profile,
+  onBack,
   onCreate,
   onOpen,
   onDelete,
 }: {
   shelf: Shelf;
   profile: LearningProfile;
+  onBack: () => void;
   onCreate: (body: object, idempotencyKey: string) => Promise<void>;
   onOpen: (id: string) => void;
   onDelete: (id: string) => Promise<void>;
@@ -2451,18 +3583,19 @@ function ShelfPage({
 
   return (
     <section className="landing-section">
+      <button type="button" className="shelf-back-button" onClick={onBack}>
+        <span aria-hidden="true">←</span> 全部书架
+      </button>
       {shelfDescriptor(shelf) && <p className="eyebrow">{shelfDescriptor(shelf)}</p>}
       <div className="title-row">
         <div>
           <h1>{shelf.name}</h1>
-          <p className="lead">选择一个系列继续学习，或规划新的学习主题。</p>
         </div>
         <button className="primary-button" onClick={() => setShowPlan(!showPlan)}>＋ 创建学习系列</button>
       </div>
       {showPlan && <PlanForm profile={profile} submit={onCreate} />}
       <div className="series-shelf-heading">
-        <span>技术书架 · 第 1 层</span>
-        <small>{shelf.series.length} 册在架</small>
+        <span>学习系列</span>
       </div>
       <div className="series-bookshelf">
         <div className="series-volume-row">
@@ -2482,7 +3615,6 @@ function ShelfPage({
                 <span className="series-volume-kicker">slow learning series</span>
                 <h2>{item.title}</h2>
                 <span className="series-volume-rule" />
-                <p>{item.rationale}</p>
                 <span className="series-volume-progress">
                   <i><b style={{ width: `${item.progress}%` }} /></i>
                   <small>{item.progress}%</small>
@@ -2524,7 +3656,7 @@ function ShelfPage({
             <span className="delete-confirm-icon"><TrashIcon size={20} /></span>
             <p className="eyebrow">删除学习系列</p>
             <h2 id="delete-series-title">{deleteTarget.title}</h2>
-            <p>该系列及其书、章节会从书架和学习入口中移除。历史学习证据会保留用于审计，当前界面暂不支持恢复。</p>
+            <p>该系列及其书、章节会从书架和学习入口中移除。已有学习记录会保留，但当前界面暂不支持恢复。</p>
             <div>
               <button className="quiet-button" disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button>
               <button
@@ -2562,6 +3694,11 @@ function TrashIcon({ size = 16 }: { size?: number }) {
 }
 
 function PlanForm({ profile, submit }: { profile: LearningProfile; submit: (body: object, idempotencyKey: string) => Promise<void> }) {
+  const depthOptions = [
+    { value: 'overview', label: '快速了解', description: '建立基本认识，抓住核心概念' },
+    { value: 'deep', label: '深入理解', description: '理解原理、边界和典型应用' },
+    { value: 'mastery', label: '掌握运用', description: '能够独立迁移，并通过复习巩固' },
+  ];
   const [topic, setTopic] = useState('');
   const [background, setBackground] = useState(profile.profession);
   const [experience, setExperience] = useState(profile.experience || '暂无直接经验，希望从当前基础开始建立理解。');
@@ -2608,7 +3745,7 @@ function PlanForm({ profile, submit }: { profile: LearningProfile; submit: (body
       </label>
       <fieldset disabled={submitting} aria-describedby={formError ? 'plan-depth-error' : undefined}>
         <legend>目标深度</legend>
-        {[['overview', '简单了解'], ['deep', '深度学习'], ['mastery', '掌握路径']].map(([value, label]) => (
+        {depthOptions.map(({ value, label, description }) => (
           <button
             type="button"
             className={depth === value ? 'selected' : ''}
@@ -2619,7 +3756,8 @@ function PlanForm({ profile, submit }: { profile: LearningProfile; submit: (body
             }}
             key={value}
           >
-            {label}
+            <span>{label}</span>
+            <small>{description}</small>
           </button>
         ))}
         {formError && <p className="plan-form-error" id="plan-depth-error" role="alert">{formError}</p>}
@@ -2629,9 +3767,187 @@ function PlanForm({ profile, submit }: { profile: LearningProfile; submit: (body
   );
 }
 
+type WorkspacePanel = 'directory' | 'qa';
+type WorkspaceLayoutRatios = {
+  threeDirectory: number;
+  threeQa: number;
+  directoryOnly: number;
+  qaOnly: number;
+};
+type WorkspaceLayoutRatioKey = keyof WorkspaceLayoutRatios;
+
+const workspacePanelSizing = {
+  directory: { defaultWidth: 240, minWidth: 220, maxWidth: 360 },
+  qa: { defaultWidth: 380, minWidth: 300, maxWidth: 480 },
+} as const;
+const workspaceReaderMinWidth = 512;
+const workspaceRatioMigrationReferenceWidth = 1440;
+const defaultWorkspaceLayoutRatios: WorkspaceLayoutRatios = {
+  threeDirectory: workspacePanelSizing.directory.defaultWidth / workspaceRatioMigrationReferenceWidth,
+  threeQa: workspacePanelSizing.qa.defaultWidth / workspaceRatioMigrationReferenceWidth,
+  directoryOnly: workspacePanelSizing.directory.defaultWidth / workspaceRatioMigrationReferenceWidth,
+  qaOnly: workspacePanelSizing.qa.defaultWidth / workspaceRatioMigrationReferenceWidth,
+};
+const legacyWorkspacePanelStorageKeys: Record<WorkspacePanel, string> = {
+  directory: 'slow.learning-workspace.directory-width',
+  qa: 'slow.learning-workspace.qa-width',
+};
+
+function legacyUserWorkspacePanelStorageKey(userId: string, panel: WorkspacePanel) {
+  return `slow.learning-workspace.${userId}.${panel}-width`;
+}
+
+function workspaceLayoutRatiosStorageKey(userId: string) {
+  return `slow.learning-workspace.${userId}.layout-ratios`;
+}
+
+function clampWorkspacePanelWidth(panel: WorkspacePanel, width: number, availableWidth = Number.POSITIVE_INFINITY) {
+  const sizing = workspacePanelSizing[panel];
+  return Math.min(Math.max(sizing.minWidth, width), sizing.maxWidth, Math.max(sizing.minWidth, availableWidth));
+}
+
+function validWorkspaceLayoutRatio(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 && value < 1;
+}
+
+function persistWorkspaceLayoutRatios(userId: string, ratios: WorkspaceLayoutRatios) {
+  try {
+    window.localStorage.setItem(
+      workspaceLayoutRatiosStorageKey(userId),
+      JSON.stringify({ version: 1, ...ratios }),
+    );
+  } catch {
+    // Reading remains fully usable if browser storage is unavailable.
+  }
+}
+
+function readWorkspaceLayoutRatios(userId: string): WorkspaceLayoutRatios {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(workspaceLayoutRatiosStorageKey(userId)) || 'null');
+    if (
+      stored
+      && validWorkspaceLayoutRatio(stored.threeDirectory)
+      && validWorkspaceLayoutRatio(stored.threeQa)
+      && validWorkspaceLayoutRatio(stored.directoryOnly)
+      && validWorkspaceLayoutRatio(stored.qaOnly)
+    ) {
+      return {
+        threeDirectory: stored.threeDirectory,
+        threeQa: stored.threeQa,
+        directoryOnly: stored.directoryOnly,
+        qaOnly: stored.qaOnly,
+      };
+    }
+
+    const legacyWidth = (panel: WorkspacePanel) => {
+      const scopedKey = legacyUserWorkspacePanelStorageKey(userId, panel);
+      const scopedValue = window.localStorage.getItem(scopedKey);
+      const globalKey = legacyWorkspacePanelStorageKeys[panel];
+      const rawValue = scopedValue ?? window.localStorage.getItem(globalKey);
+      const width = Number(rawValue);
+      if (rawValue !== null) {
+        window.localStorage.removeItem(scopedKey);
+        window.localStorage.removeItem(globalKey);
+      }
+      return Number.isFinite(width) && width > 0 ? width : null;
+    };
+    const directoryWidth = legacyWidth('directory');
+    const qaWidth = legacyWidth('qa');
+    const ratios = {
+      threeDirectory: directoryWidth
+        ? directoryWidth / workspaceRatioMigrationReferenceWidth
+        : defaultWorkspaceLayoutRatios.threeDirectory,
+      threeQa: qaWidth
+        ? qaWidth / workspaceRatioMigrationReferenceWidth
+        : defaultWorkspaceLayoutRatios.threeQa,
+      directoryOnly: directoryWidth
+        ? directoryWidth / workspaceRatioMigrationReferenceWidth
+        : defaultWorkspaceLayoutRatios.directoryOnly,
+      qaOnly: qaWidth
+        ? qaWidth / workspaceRatioMigrationReferenceWidth
+        : defaultWorkspaceLayoutRatios.qaOnly,
+    };
+    persistWorkspaceLayoutRatios(userId, ratios);
+    return ratios;
+  } catch {
+    return defaultWorkspaceLayoutRatios;
+  }
+}
+
+function workspaceLayoutRatioKey(
+  panel: WorkspacePanel,
+  directoryHidden: boolean,
+  qaHidden: boolean,
+): WorkspaceLayoutRatioKey | null {
+  if (!directoryHidden && !qaHidden) return panel === 'directory' ? 'threeDirectory' : 'threeQa';
+  if (panel === 'directory' && !directoryHidden) return 'directoryOnly';
+  if (panel === 'qa' && !qaHidden) return 'qaOnly';
+  return null;
+}
+
+function fitVisibleWorkspacePanelWidths(
+  workspaceWidth: number,
+  directoryWidth: number,
+  qaWidth: number,
+  directoryHidden: boolean,
+  qaHidden: boolean,
+) {
+  let nextDirectoryWidth = clampWorkspacePanelWidth('directory', directoryWidth);
+  let nextQaWidth = clampWorkspacePanelWidth('qa', qaWidth);
+  if (!directoryHidden && !qaHidden) {
+    const availableForPanels = Math.max(
+      workspacePanelSizing.directory.minWidth + workspacePanelSizing.qa.minWidth,
+      workspaceWidth - workspaceReaderMinWidth,
+    );
+    let overflow = Math.max(0, nextDirectoryWidth + nextQaWidth - availableForPanels);
+    const qaReduction = Math.min(overflow, nextQaWidth - workspacePanelSizing.qa.minWidth);
+    nextQaWidth -= qaReduction;
+    overflow -= qaReduction;
+    nextDirectoryWidth -= Math.min(overflow, nextDirectoryWidth - workspacePanelSizing.directory.minWidth);
+  } else if (!directoryHidden) {
+    nextDirectoryWidth = clampWorkspacePanelWidth(
+      'directory',
+      nextDirectoryWidth,
+      workspaceWidth - workspaceReaderMinWidth,
+    );
+  } else if (!qaHidden) {
+    nextQaWidth = clampWorkspacePanelWidth('qa', nextQaWidth, workspaceWidth - workspaceReaderMinWidth);
+  }
+  return { directoryWidth: nextDirectoryWidth, qaWidth: nextQaWidth };
+}
+
+function resolveWorkspacePanelWidths(
+  workspaceWidth: number,
+  ratios: WorkspaceLayoutRatios,
+  currentDirectoryWidth: number,
+  currentQaWidth: number,
+  directoryHidden: boolean,
+  qaHidden: boolean,
+) {
+  let directoryWidth = currentDirectoryWidth;
+  let qaWidth = currentQaWidth;
+  if (!directoryHidden && !qaHidden) {
+    directoryWidth = workspaceWidth * ratios.threeDirectory;
+    qaWidth = workspaceWidth * ratios.threeQa;
+  } else if (!directoryHidden) {
+    directoryWidth = workspaceWidth * ratios.directoryOnly;
+  } else if (!qaHidden) {
+    qaWidth = workspaceWidth * ratios.qaOnly;
+  }
+  return fitVisibleWorkspacePanelWidths(
+    workspaceWidth,
+    directoryWidth,
+    qaWidth,
+    directoryHidden,
+    qaHidden,
+  );
+}
+
 function LearningWorkspace({
+  userId,
   series,
   section,
+  dailyMode,
   onSelectSection,
   onGenerateSection,
   onRegenerateSection,
@@ -2644,9 +3960,12 @@ function LearningWorkspace({
   onRefreshSeries,
   onDeleteBook,
   onFeedbackBlock,
+  onQaVisibilityChange,
 }: {
+  userId: string;
   series: Series;
   section: Section | null;
+  dailyMode: DailyMode;
   onSelectSection: (id: string) => Promise<Section>;
   onGenerateSection: (id: string) => Promise<void>;
   onRegenerateSection: (id: string) => Promise<void>;
@@ -2659,27 +3978,108 @@ function LearningWorkspace({
   onRefreshSeries: () => Promise<void>;
   onDeleteBook: (bookId: string) => Promise<void>;
   onFeedbackBlock: (block: Block) => void;
+  onQaVisibilityChange: (open: boolean) => void;
 }) {
   const [selectedBlockId, setSelectedBlockId] = useState('');
   const [selectedQuote, setSelectedQuote] = useState<TextQuote | null>(null);
+  const [explanationRequest, setExplanationRequest] = useState<ExplanationRequest | null>(null);
   const [compactLayout, setCompactLayout] = useState(() => window.matchMedia('(max-width: 900px)').matches);
+  const [auxiliaryExclusive, setAuxiliaryExclusive] = useState(() => window.matchMedia('(max-width: 1180px)').matches);
   const [directoryHidden, setDirectoryHidden] = useState(() => window.matchMedia('(max-width: 900px)').matches);
-  const [qaHidden, setQaHidden] = useState(() => window.matchMedia('(max-width: 900px)').matches);
+  const [qaHidden, setQaHidden] = useState(true);
+  const [layoutRatios, setLayoutRatios] = useState(() => readWorkspaceLayoutRatios(userId));
+  const [directoryWidth, setDirectoryWidth] = useState(() => clampWorkspacePanelWidth(
+    'directory',
+    window.innerWidth * layoutRatios.directoryOnly,
+  ));
+  const [qaWidth, setQaWidth] = useState(() => clampWorkspacePanelWidth(
+    'qa',
+    window.innerWidth * layoutRatios.qaOnly,
+  ));
+  const [resizingPanel, setResizingPanel] = useState<WorkspacePanel | null>(null);
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const panelLayoutRef = useRef({ directoryWidth, qaWidth, directoryHidden, qaHidden, layoutRatios });
+  const resizeSessionRef = useRef<{
+    panel: WorkspacePanel;
+    pointerId: number;
+    startClientX: number;
+    startWidth: number;
+    startedCollapsed: boolean;
+    moved: boolean;
+    latestWidth: number;
+  } | null>(null);
+  panelLayoutRef.current = { directoryWidth, qaWidth, directoryHidden, qaHidden, layoutRatios };
 
   useEffect(() => {
-    const media = window.matchMedia('(max-width: 900px)');
-    const adaptPanels = (event: MediaQueryListEvent) => {
-      setCompactLayout(event.matches);
-      setDirectoryHidden(event.matches);
-      setQaHidden(event.matches);
+    onQaVisibilityChange(!qaHidden);
+  }, [onQaVisibilityChange, qaHidden]);
+
+  useEffect(() => () => onQaVisibilityChange(false), [onQaVisibilityChange]);
+
+  useEffect(() => {
+    const compactMedia = window.matchMedia('(max-width: 900px)');
+    const exclusiveMedia = window.matchMedia('(max-width: 1180px)');
+    const adaptPanels = () => {
+      const compact = compactMedia.matches;
+      const exclusive = exclusiveMedia.matches;
+      setCompactLayout(compact);
+      setAuxiliaryExclusive(exclusive);
+      if (compact) {
+        setDirectoryHidden(true);
+        setQaHidden(true);
+      } else if (exclusive) {
+        setDirectoryHidden(true);
+      }
     };
-    media.addEventListener('change', adaptPanels);
-    return () => media.removeEventListener('change', adaptPanels);
+    compactMedia.addEventListener('change', adaptPanels);
+    exclusiveMedia.addEventListener('change', adaptPanels);
+    return () => {
+      compactMedia.removeEventListener('change', adaptPanels);
+      exclusiveMedia.removeEventListener('change', adaptPanels);
+    };
   }, []);
+
+  useEffect(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace || typeof ResizeObserver === 'undefined') return;
+    const fitPanelWidths = (workspaceWidth: number) => {
+      const current = panelLayoutRef.current;
+      const { directoryWidth: nextDirectoryWidth, qaWidth: nextQaWidth } = resolveWorkspacePanelWidths(
+        workspaceWidth,
+        current.layoutRatios,
+        current.directoryWidth,
+        current.qaWidth,
+        current.directoryHidden,
+        current.qaHidden,
+      );
+      if (nextDirectoryWidth !== current.directoryWidth) setDirectoryWidth(nextDirectoryWidth);
+      if (nextQaWidth !== current.qaWidth) setQaWidth(nextQaWidth);
+    };
+    const observer = new ResizeObserver(([entry]) => fitPanelWidths(entry.contentRect.width));
+    observer.observe(workspace);
+    fitPanelWidths(workspace.clientWidth);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    const fitted = resolveWorkspacePanelWidths(
+      workspace.clientWidth,
+      layoutRatios,
+      directoryWidth,
+      qaWidth,
+      directoryHidden,
+      qaHidden,
+    );
+    if (fitted.directoryWidth !== directoryWidth) setDirectoryWidth(fitted.directoryWidth);
+    if (fitted.qaWidth !== qaWidth) setQaWidth(fitted.qaWidth);
+  }, [directoryHidden, qaHidden]);
 
   useEffect(() => {
     setSelectedBlockId(section?.content?.blocks[0]?.id || '');
     setSelectedQuote(null);
+    setExplanationRequest(null);
   }, [section?.id, section?.content?.id]);
 
   const location = useMemo(() => findSectionLocation(series, section?.id), [series, section?.id]);
@@ -2689,16 +4089,160 @@ function LearningWorkspace({
     setSelectedQuote(null);
   };
   const toggleDirectory = () => {
-    if (compactLayout && directoryHidden) setQaHidden(true);
+    if ((compactLayout || auxiliaryExclusive) && directoryHidden) setQaHidden(true);
     setDirectoryHidden((hidden) => !hidden);
   };
   const toggleQa = () => {
-    if (compactLayout && qaHidden) setDirectoryHidden(true);
+    if ((compactLayout || auxiliaryExclusive) && qaHidden) setDirectoryHidden(true);
     setQaHidden((hidden) => !hidden);
   };
 
+  const setPanelWidth = (panel: WorkspacePanel, width: number) => {
+    if (panel === 'directory') setDirectoryWidth(width);
+    else setQaWidth(width);
+  };
+  const openPanel = (panel: WorkspacePanel) => {
+    if (panel === 'directory') {
+      if (compactLayout || auxiliaryExclusive) setQaHidden(true);
+      setDirectoryHidden(false);
+    } else {
+      if (compactLayout || auxiliaryExclusive) setDirectoryHidden(true);
+      setQaHidden(false);
+    }
+  };
+  const panelAvailableWidth = (panel: WorkspacePanel, startedCollapsed = false) => {
+    const workspaceWidth = workspaceRef.current?.clientWidth || window.innerWidth;
+    const otherPanelWillClose = startedCollapsed && auxiliaryExclusive;
+    const otherWidth = panel === 'directory'
+      ? (!qaHidden && !otherPanelWillClose ? qaWidth : 0)
+      : (!directoryHidden && !otherPanelWillClose ? directoryWidth : 0);
+    return workspaceWidth - workspaceReaderMinWidth - otherWidth;
+  };
+  const persistPanelRatio = (
+    panel: WorkspacePanel,
+    ratio: number,
+    currentDirectoryHidden = directoryHidden,
+    currentQaHidden = qaHidden,
+  ) => {
+    const key = workspaceLayoutRatioKey(panel, currentDirectoryHidden, currentQaHidden);
+    if (!key) return;
+    setLayoutRatios((current) => {
+      const next = { ...current, [key]: ratio };
+      persistWorkspaceLayoutRatios(userId, next);
+      return next;
+    });
+  };
+  const rememberPanelWidth = (
+    panel: WorkspacePanel,
+    width: number,
+    currentDirectoryHidden = directoryHidden,
+    currentQaHidden = qaHidden,
+  ) => {
+    const workspaceWidth = workspaceRef.current?.clientWidth || window.innerWidth;
+    persistPanelRatio(panel, width / workspaceWidth, currentDirectoryHidden, currentQaHidden);
+  };
+  const beginPanelResize = (panel: WorkspacePanel, event: ReactPointerEvent<HTMLDivElement>) => {
+    if (compactLayout || (event.pointerType === 'mouse' && event.button !== 0)) return;
+    const startedCollapsed = panel === 'directory' ? directoryHidden : qaHidden;
+    const startWidth = panel === 'directory' ? directoryWidth : qaWidth;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    resizeSessionRef.current = {
+      panel,
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startWidth,
+      startedCollapsed,
+      moved: false,
+      latestWidth: startWidth,
+    };
+    setResizingPanel(panel);
+    if (startedCollapsed) openPanel(panel);
+  };
+  const movePanelResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const session = resizeSessionRef.current;
+    const workspace = workspaceRef.current;
+    if (!session || !workspace || session.pointerId !== event.pointerId) return;
+    const pointerTravel = event.clientX - session.startClientX;
+    if (!session.moved && Math.abs(pointerTravel) < 3) return;
+    session.moved = true;
+    const bounds = workspace.getBoundingClientRect();
+    const proposedWidth = session.startedCollapsed
+      ? session.panel === 'directory'
+        ? event.clientX - bounds.left
+        : bounds.right - event.clientX
+      : session.startWidth + (session.panel === 'directory' ? pointerTravel : -pointerTravel);
+    const nextWidth = clampWorkspacePanelWidth(
+      session.panel,
+      proposedWidth,
+      panelAvailableWidth(session.panel, session.startedCollapsed),
+    );
+    session.latestWidth = nextWidth;
+    setPanelWidth(session.panel, nextWidth);
+  };
+  const finishPanelResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const session = resizeSessionRef.current;
+    if (!session || session.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (session.moved) {
+      const current = panelLayoutRef.current;
+      rememberPanelWidth(
+        session.panel,
+        session.latestWidth,
+        current.directoryHidden,
+        current.qaHidden,
+      );
+    }
+    resizeSessionRef.current = null;
+    setResizingPanel(null);
+  };
+  const resetPanelWidth = (panel: WorkspacePanel) => {
+    const key = workspaceLayoutRatioKey(panel, directoryHidden, qaHidden);
+    if (!key) return;
+    const defaultRatio = defaultWorkspaceLayoutRatios[key];
+    const workspaceWidth = workspaceRef.current?.clientWidth || window.innerWidth;
+    const defaultWidth = clampWorkspacePanelWidth(
+      panel,
+      workspaceWidth * defaultRatio,
+      panelAvailableWidth(panel),
+    );
+    setPanelWidth(panel, defaultWidth);
+    persistPanelRatio(panel, defaultRatio);
+  };
+  const handlePanelKeyDown = (panel: WorkspacePanel, event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const hidden = panel === 'directory' ? directoryHidden : qaHidden;
+    if (hidden && (event.key === 'Enter' || event.key === ' ')) {
+      event.preventDefault();
+      openPanel(panel);
+      return;
+    }
+    if (hidden) return;
+    const currentWidth = panel === 'directory' ? directoryWidth : qaWidth;
+    let nextWidth = currentWidth;
+    const step = event.shiftKey ? 32 : 12;
+    if (event.key === 'Home') nextWidth = workspacePanelSizing[panel].minWidth;
+    else if (event.key === 'End') nextWidth = workspacePanelSizing[panel].maxWidth;
+    else if (event.key === 'ArrowLeft') nextWidth += panel === 'directory' ? -step : step;
+    else if (event.key === 'ArrowRight') nextWidth += panel === 'directory' ? step : -step;
+    else return;
+    event.preventDefault();
+    nextWidth = clampWorkspacePanelWidth(panel, nextWidth, panelAvailableWidth(panel));
+    setPanelWidth(panel, nextWidth);
+    rememberPanelWidth(panel, nextWidth);
+  };
+  const workspaceStyle = {
+    '--directory-width': `${directoryWidth}px`,
+    '--qa-width': `${qaWidth}px`,
+  } as CSSProperties;
+
   return (
-    <div className={`learning-workspace ${directoryHidden ? 'directory-collapsed' : ''} ${qaHidden ? 'qa-collapsed' : ''}`}>
+    <div
+      ref={workspaceRef}
+      style={workspaceStyle}
+      className={`learning-workspace mode-${dailyMode} ${directoryHidden ? 'directory-collapsed' : ''} ${qaHidden ? 'qa-collapsed' : ''} ${resizingPanel ? 'is-resizing' : ''}`}
+    >
       {compactLayout && (!directoryHidden || !qaHidden) && (
         <button
           className="panel-backdrop"
@@ -2724,16 +4268,21 @@ function LearningWorkspace({
         onDeleteBook={onDeleteBook}
       />
       <ReaderPanel
+        series={series}
         section={section}
+        dailyMode={dailyMode}
         directoryHidden={directoryHidden}
         qaHidden={qaHidden}
         onToggleDirectory={toggleDirectory}
         onToggleQa={toggleQa}
         location={location}
         selectedBlockId={activeBlockId}
+        onSelectBlock={selectBlock}
         onQuote={(quote) => {
           setSelectedBlockId(quote.blockId);
           setSelectedQuote(quote);
+          if (compactLayout || auxiliaryExclusive) setDirectoryHidden(true);
+          setQaHidden(false);
         }}
         onGenerate={() => section && onGenerateSection(section.id)}
         onRegenerate={() => (section ? onRegenerateSection(section.id) : Promise.resolve())}
@@ -2741,17 +4290,109 @@ function LearningWorkspace({
         onSectionChange={onSectionChange}
         onRefreshSeries={onRefreshSeries}
         onFeedbackBlock={onFeedbackBlock}
+        onRestorePersonalPresentation={async (block) => {
+          if (!section?.content || !block.personalPresentation) return;
+          await api.restorePersonalPresentation(section.id, block.id, section.content.id);
+          onSectionChange(await api.section(section.id));
+        }}
+        onExplainBlock={async (block, style, customInstruction) => {
+          const option = style === 'custom' ? null : EXPLANATION_STYLE_OPTIONS[style];
+          const instruction = customInstruction?.trim();
+          const question = style === 'custom'
+            ? (instruction ? `请按这个要求重新解释当前段落：${instruction}` : '')
+            : option?.prompt;
+          if (!question) return;
+          const blockKind = ['text', 'bullet_list', 'ordered_steps', 'diagram', 'table', 'code', 'formula'].includes(block.kind)
+            ? block.kind
+            : 'text';
+          setSelectedBlockId(block.id);
+          setSelectedQuote(null);
+          const requestId = crypto.randomUUID();
+          let evidenceEventId: string | undefined;
+          let preferenceStatus: ExplanationRequest['preferenceStatus'] = 'unsaved';
+          if (section?.content) {
+            try {
+              await api.recordPreferenceEvidence({
+                eventId: requestId,
+                sectionId: section.id,
+                contentVersionId: section.content.id,
+                blockId: block.id,
+                blockKind,
+                style,
+                signal: 'requested',
+                customInstruction: style === 'custom' ? instruction : undefined,
+              });
+              evidenceEventId = requestId;
+              preferenceStatus = 'saved';
+            } catch {
+              // Ask AI remains available; the panel exposes retryable unsaved state.
+            }
+          }
+          setExplanationRequest({
+            requestId,
+            blockId: block.id,
+            blockKind,
+            style,
+            label: option?.label || '我的讲法',
+            question,
+            displayQuestion: style === 'custom' ? `按这个讲：${instruction}` : option?.label || '我的讲法',
+            evidenceEventId,
+            preferenceStatus,
+            customInstruction: style === 'custom' ? instruction : undefined,
+          });
+          if (compactLayout || auxiliaryExclusive) setDirectoryHidden(true);
+          setQaHidden(false);
+          telemetry.track('explanation_style_requested', {
+            view: 'learn',
+            entityType: 'section',
+            entityId: section?.id || '',
+            properties: { style, blockKind },
+          });
+        }}
       />
       <QaPanel
         key={section?.id || 'empty'}
         section={section}
+        dailyMode={dailyMode}
         hidden={qaHidden}
         onClose={() => setQaHidden(true)}
         selectedBlockId={activeBlockId}
         selectedQuote={selectedQuote}
         onAnchor={selectBlock}
         onClearQuote={() => setSelectedQuote(null)}
+        explanationRequest={explanationRequest}
+        onSectionChange={onSectionChange}
       />
+      {(['directory', 'qa'] as const).map((panel) => {
+        const hidden = panel === 'directory' ? directoryHidden : qaHidden;
+        const width = panel === 'directory' ? directoryWidth : qaWidth;
+        const sizing = workspacePanelSizing[panel];
+        const panelName = panel === 'directory' ? '目录' : '答疑';
+        return (
+          <div
+            key={panel}
+            className={`workspace-resize-handle ${panel}-resize-handle ${hidden ? 'is-collapsed' : ''}`}
+            role="separator"
+            aria-label={hidden ? `展开${panelName}` : `调整${panelName}宽度`}
+            aria-orientation="vertical"
+            aria-valuemin={sizing.minWidth}
+            aria-valuemax={sizing.maxWidth}
+            aria-valuenow={Math.round(width)}
+            aria-expanded={!hidden}
+            tabIndex={0}
+            title={hidden ? `点击或向内拖动展开${panelName}` : `拖动调整${panelName}宽度，双击恢复默认`}
+            onPointerDown={(event) => beginPanelResize(panel, event)}
+            onPointerMove={movePanelResize}
+            onPointerUp={finishPanelResize}
+            onPointerCancel={finishPanelResize}
+            onLostPointerCapture={finishPanelResize}
+            onDoubleClick={() => resetPanelWidth(panel)}
+            onKeyDown={(event) => handlePanelKeyDown(panel, event)}
+          >
+            <span aria-hidden="true">{panel === 'directory' ? '›' : '‹'}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -2841,7 +4482,7 @@ function DirectoryPanel({
   return (
     <aside className="directory-panel" id="course-directory-panel" aria-label="课程目录" hidden={hidden}>
       <div className="directory-heading">
-        <button className="panel-drawer-close" aria-label="关闭目录" onClick={onClose}>×</button>
+        <button className="panel-collapse-button" aria-label="收起目录" onClick={onClose}>收起</button>
         <span className="panel-label">目录</span>
         <h2>{series.title}</h2>
         <div className="series-progress">
@@ -2895,7 +4536,7 @@ function DirectoryPanel({
             <p className="eyebrow">删除书籍</p>
             <h2 id="delete-book-title">{deleteTarget.title}</h2>
             <p>
-              书籍及其章节会从学习入口中移除，历史学习证据和审计记录仍会保留。
+              书籍及其章节会从学习入口中移除，已有学习记录会保留。
               {series.books.length === 1 ? '这是系列中的最后一本书，删除后该系列也会从书架隐藏。' : ''}
               当前界面暂不支持恢复。
             </p>
@@ -2966,7 +4607,7 @@ function BookTree({
           <b>{book.title}</b>
           <small>
             {book.outlineStatus === 'draft'
-              ? '章节草案'
+              ? '待确认'
               : book.status === 'completed'
                 ? '已完成'
                 : book.status === 'locked'
@@ -2980,16 +4621,16 @@ function BookTree({
       {book.outlineStatus === 'draft' && (
         <div className="book-outline-callout" role="status">
           <span>
-            <b>{canActivate ? '可以校准下一本书' : '章节目录为初始草案'}</b>
+            <b>{canActivate ? '下一本书可以开始准备' : '下一本书将在完成前一册后调整'}</b>
             <small>
               {canActivate
-                ? '将使用刚完成的测验、Ask Me 与复习证据重新规划；确认后才解锁。'
-                : '完成上一本书后，系统会按届时的学习画像重新规划。'}
+                ? '会根据你最近的学习表现调整章节；确认后即可开始。'
+                : '完成上一本书后，会根据你的学习情况调整章节。'}
             </small>
           </span>
           {canActivate && (
             <button className="secondary-button" onClick={() => onActivate(book)}>
-              校准并确认章节
+              查看并确认章节
             </button>
           )}
         </div>
@@ -3003,7 +4644,7 @@ function BookTree({
                 <div
                   className={`chapter-title ${chapterLocked ? 'locked' : ''}`}
                   aria-label={chapterLocked
-                    ? `第 ${chapter.position} 章 ${chapter.title}，未解锁；完成上一章后按学习需要生成小节`
+                    ? `第 ${chapter.position} 章 ${chapter.title}，未解锁`
                     : `第 ${chapter.position} 章 ${chapter.title}`}
                 >
                   <span>第 {chapter.position} 章</span>
@@ -3050,30 +4691,15 @@ function BookTree({
                   {chapterLocked ? <LockIcon size={10} /> : <GenerateIcon />}
                 </span>
                 <small>
-                  {chapterLocked
-                    ? '完成上一章后解锁，并按学习需要生成小节'
-                    : '点击章名，按学习需要生成本章小节'}
+                  {chapterLocked ? '完成上一章后解锁' : '点击章名开始'}
                 </small>
               </div>
-            )}
-            {chapter.practice && (
-              <ArtifactSubmission
-                kind="practice"
-                id={chapter.id}
-                status={chapter.practice.status}
-                attachmentCount={chapter.practice.attachments.length}
-                onSubmit={async (action) => {
-                  await action();
-                  await onRefreshSeries();
-                }}
-              />
             )}
             </div>
           );
         })}
         {book.capstone && (
           <ArtifactSubmission
-            kind="capstone"
             id={book.id}
             status={book.capstone.status}
             attachmentCount={book.capstone.attachments.length}
@@ -3112,7 +4738,6 @@ function SectionTreeButton({
     <button
       className={`section-tree-button ${active ? 'active' : ''} ${item.status}`}
       disabled={item.status === 'locked' || preparing}
-      title={preparing ? '正文和验证题准备完成后即可进入' : undefined}
       aria-label={`${sectionNumber} ${item.title}`}
       onClick={onClick}
     >
@@ -3124,13 +4749,16 @@ function SectionTreeButton({
 }
 
 function ReaderPanel({
+  series,
   section,
+  dailyMode,
   directoryHidden,
   qaHidden,
   onToggleDirectory,
   onToggleQa,
   location,
   selectedBlockId,
+  onSelectBlock,
   onQuote,
   onGenerate,
   onRegenerate,
@@ -3138,14 +4766,19 @@ function ReaderPanel({
   onSectionChange,
   onRefreshSeries,
   onFeedbackBlock,
+  onRestorePersonalPresentation,
+  onExplainBlock,
 }: {
+  series: Series;
   section: Section | null;
+  dailyMode: DailyMode;
   directoryHidden: boolean;
   qaHidden: boolean;
   onToggleDirectory: () => void;
   onToggleQa: () => void;
   location: ReturnType<typeof findSectionLocation>;
   selectedBlockId: string;
+  onSelectBlock: (blockId: string) => void;
   onQuote: (quote: TextQuote) => void;
   onGenerate: () => void;
   onRegenerate: () => Promise<void>;
@@ -3153,6 +4786,8 @@ function ReaderPanel({
   onSectionChange: (section: Section) => void;
   onRefreshSeries: () => Promise<void>;
   onFeedbackBlock: (block: Block) => void;
+  onRestorePersonalPresentation: (block: Block) => Promise<void>;
+  onExplainBlock: (block: Block, style: ExplanationStyle, customQuestion?: string) => void;
 }) {
   const [tab, setTab] = useState<ReaderTab>('content');
   const [selectionPopup, setSelectionPopup] = useState<SelectionPopup | null>(null);
@@ -3160,14 +4795,27 @@ function ReaderPanel({
   const [regenerating, setRegenerating] = useState(false);
   const [regenerationStartedAt, setRegenerationStartedAt] = useState(0);
   const [regenerationClock, setRegenerationClock] = useState(Date.now());
+  const [reviewTargetBlockId, setReviewTargetBlockId] = useState('');
   const readerScrollRef = useRef<HTMLDivElement>(null);
+  const reviewHighlightTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
-    setTab('content');
+    setTab(section?.status === 'completed' && section.note ? 'note' : 'content');
     setSelectionPopup(null);
     setRegenerationConfirmOpen(false);
+    setReviewTargetBlockId('');
+    if (reviewHighlightTimerRef.current !== null) {
+      window.clearTimeout(reviewHighlightTimerRef.current);
+      reviewHighlightTimerRef.current = null;
+    }
     if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
-  }, [section?.id]);
+  }, [section?.id, section?.content?.id]);
+
+  useEffect(() => () => {
+    if (reviewHighlightTimerRef.current !== null) {
+      window.clearTimeout(reviewHighlightTimerRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     if (!regenerating) return undefined;
@@ -3190,6 +4838,42 @@ function ReaderPanel({
     requestAnimationFrame(() => {
       if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
     });
+  };
+
+  const reviewContent = (blockId?: string) => {
+    const targetExists = Boolean(
+      blockId && section?.content?.blocks.some((block) => block.id === blockId),
+    );
+    if (!blockId || !targetExists) {
+      switchTab('content');
+      return;
+    }
+
+    onSelectBlock(blockId);
+    setTab('content');
+    setSelectionPopup(null);
+    setReviewTargetBlockId(blockId);
+    if (reviewHighlightTimerRef.current !== null) {
+      window.clearTimeout(reviewHighlightTimerRef.current);
+    }
+    reviewHighlightTimerRef.current = window.setTimeout(() => {
+      setReviewTargetBlockId('');
+      reviewHighlightTimerRef.current = null;
+    }, 3200);
+
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const target = Array.from(
+        readerScrollRef.current?.querySelectorAll<HTMLElement>('[data-block-id]') || [],
+      ).find((element) => element.dataset.blockId === blockId);
+      if (!target) return;
+      target.focus({ preventScroll: true });
+      target.scrollIntoView({
+        behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches
+          ? 'auto'
+          : 'smooth',
+        block: 'center',
+      });
+    }));
   };
 
   const captureTextSelection = () => {
@@ -3225,20 +4909,6 @@ function ReaderPanel({
     typeof generationTrace.stage === 'string'
       ? generationTrace.stage
       : 'queued';
-  const maxSourceAttempts =
-    typeof generationTrace.maxSourceAttempts === 'number'
-      ? generationTrace.maxSourceAttempts
-      : 4;
-  const maxQuizAttempts =
-    typeof generationTrace.maxQuizAttempts === 'number'
-      ? generationTrace.maxQuizAttempts
-      : 4;
-  const generationRound =
-    typeof generationTrace.sourceAttempt === 'number'
-      ? `来源第 ${generationTrace.sourceAttempt}/${maxSourceAttempts} 轮`
-      : typeof generationTrace.quizAttempt === 'number'
-        ? `测验第 ${generationTrace.quizAttempt}/${maxQuizAttempts} 轮`
-        : '';
   const generationElapsed = Math.max(
     activeGeneration?.durationMs || 0,
     regenerationStartedAt ? regenerationClock - regenerationStartedAt : 0,
@@ -3246,17 +4916,14 @@ function ReaderPanel({
 
   if (!section) {
     return (
-      <main className="reader-panel empty-reader">
+      <main className="reader-panel route-preview-reader">
         <ReaderPanelToggles
           directoryHidden={directoryHidden}
           qaHidden={qaHidden}
           onToggleDirectory={onToggleDirectory}
           onToggleQa={onToggleQa}
         />
-        <span className="empty-symbol">S</span>
-        <p className="eyebrow">选择左侧目录开始</p>
-        <h1>今天，学清楚一个问题。</h1>
-        <p>完成一节、通过验证、留下笔记。下一节会在掌握后自动解锁。</p>
+        <SeriesRoutePreview series={series} />
       </main>
     );
   }
@@ -3283,7 +4950,7 @@ function ReaderPanel({
         <div className="reader-toolbar-actions">
           <span className={`lesson-status ${section.status}`}>
             {section.status === 'completed'
-              ? '已完成'
+              ? '已验证'
               : section.status === 'available'
                 ? '学习中'
                 : section.status === 'preparing'
@@ -3304,7 +4971,9 @@ function ReaderPanel({
 
       <div className="reader-tabs" role="tablist">
         <button className={tab === 'content' ? 'active' : ''} onClick={() => switchTab('content')}>正文</button>
-        <button className={tab === 'quiz' ? 'active' : ''} disabled={!section.quiz} onClick={() => switchTab('quiz')}>验证</button>
+        <button className={tab === 'quiz' ? 'active' : ''} disabled={!section.quiz} onClick={() => switchTab('quiz')}>
+          {section.status === 'completed' ? '验证结果' : '验证'}
+        </button>
         <button className={tab === 'note' ? 'active' : ''} disabled={!section.note} onClick={() => switchTab('note')}>笔记</button>
       </div>
 
@@ -3318,20 +4987,25 @@ function ReaderPanel({
         {tab === 'content' && (
           <LessonContent
             section={section}
+            dailyMode={dailyMode}
             selectedBlockId={selectedBlockId}
+            reviewTargetBlockId={reviewTargetBlockId}
             onGenerate={onGenerate}
             onStartQuiz={() => switchTab('quiz')}
             onFeedbackBlock={onFeedbackBlock}
+            onRestorePersonalPresentation={onRestorePersonalPresentation}
+            onExplainBlock={onExplainBlock}
           />
         )}
         {tab === 'quiz' && section.quiz && (
           <Quiz
             key={section.quiz.id}
             section={section}
+            onUpgrade={() => setRegenerationConfirmOpen(true)}
             onSectionChange={onSectionChange}
             onRefreshSeries={onRefreshSeries}
             onSelectSection={onSelectSection}
-            onReviewContent={() => switchTab('content')}
+            onReviewContent={reviewContent}
             onSubmissionComplete={() => {
               if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
             }}
@@ -3356,12 +5030,11 @@ function ReaderPanel({
           >
             <p className="eyebrow">重新生成本节</p>
             <h2 id="regenerate-section-title">{section.title}</h2>
-            <p>系统会生成新的正文与测验版本，旧版本会保留在审计记录中。已经提交过测验的内容不能重新生成，以免改写学习证据。</p>
+            <p>已完成验证的内容无法重新生成。</p>
             {regenerating && (
               <div className="regeneration-progress" aria-live="polite">
                 <span><i />{GENERATION_STAGE_LABELS[generationStage] || '正在处理'}</span>
-                <b>{generationRound || '准备中'} · 已用 {formatElapsed(generationElapsed)}</b>
-                <small>正文来源核验通过后才会生成测验。</small>
+                <b>处理中</b>
               </div>
             )}
             <div>
@@ -3410,6 +5083,82 @@ function ReaderPanel({
   );
 }
 
+function SeriesRoutePreview({ series }: { series: Series }) {
+  const taskStatus = series.initializationTask?.status;
+  const totalMinutes = series.books.reduce(
+    (total, book) => total + book.estimatedMinutes,
+    0,
+  );
+  const firstBook = series.books[0];
+  const firstChapter = firstBook?.chapters[0];
+  const statusCopy = taskStatus === 'failed'
+    ? '第一节暂未准备完成。'
+    : taskStatus === 'pending'
+      ? '排队中'
+      : taskStatus === 'running'
+        ? '准备中'
+        : '选择左侧已经解锁的小节开始学习。';
+  return (
+    <div className="route-preview-scroll">
+      <header className="route-preview-hero">
+        <div className={`route-preparation-state ${taskStatus || 'ready'}`}>
+          <i aria-hidden="true" />
+          <span>{taskStatus === 'failed'
+            ? '第一节需要重新准备'
+            : taskStatus === 'pending' || taskStatus === 'running'
+              ? '第一节正在准备'
+              : '学习路线已就绪'}</span>
+        </div>
+        <p className="eyebrow">你的学习路线</p>
+        <h1>{series.title}</h1>
+        <p>{series.rationale}</p>
+        <div className="route-preview-meta" aria-label="学习路线概览">
+          <span><b>{series.books.length}</b> 本书</span>
+          <span><b>{series.books.reduce((total, book) => total + book.chapters.length, 0)}</b> 章</span>
+          <span><b>{Math.max(1, Math.round(totalMinutes / 60))}</b> 小时预计投入</span>
+        </div>
+      </header>
+
+      <section className="route-opening-note">
+        <span className="route-opening-mark" aria-hidden="true">起</span>
+        <div>
+          <small>从这里开始</small>
+          <h2>{firstChapter?.title || firstBook?.title || '第一节'}</h2>
+          <p>{firstChapter?.objective || statusCopy}</p>
+        </div>
+      </section>
+
+      <section className="route-book-sequence" aria-label="全系列书目与章节">
+        {series.books.map((book) => (
+          <article className="route-book" key={book.id}>
+            <div className="route-book-spine" aria-hidden="true">
+              <span>{String(book.position).padStart(2, '0')}</span>
+            </div>
+            <div className="route-book-body">
+              <header>
+                <div>
+                  <small>第 {book.position} 本 · 约 {Math.max(1, Math.round(book.estimatedMinutes / 60))} 小时</small>
+                  <h2>{book.title}</h2>
+                </div>
+                <span>{book.position === 1 ? '即将开始' : '后续路径'}</span>
+              </header>
+              <p>{book.description}</p>
+              <ol>
+                {book.chapters.map((chapter) => (
+                  <li key={chapter.id}>
+                    <b>第 {chapter.position} 章</b>
+                    <span>{chapter.title}</span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          </article>
+        ))}
+      </section>
+    </div>
+  );
+}
+
 function ReaderPanelToggles({
   directoryHidden,
   qaHidden,
@@ -3423,43 +5172,108 @@ function ReaderPanelToggles({
 }) {
   return (
     <>
-      <button
-        className={`reader-rail-toggle directory-toggle ${directoryHidden ? 'is-collapsed' : ''}`}
-        aria-controls="course-directory-panel"
-        aria-expanded={!directoryHidden}
-        aria-label={directoryHidden ? '显示目录' : '隐藏目录'}
-        title={directoryHidden ? '显示目录' : '隐藏目录'}
-        onClick={onToggleDirectory}
-      >
-        {directoryHidden ? '›' : '‹'}
-      </button>
-      <button
-        className={`reader-rail-toggle qa-toggle ${qaHidden ? 'is-collapsed' : ''}`}
-        aria-controls="section-qa-panel"
-        aria-expanded={!qaHidden}
-        aria-label={qaHidden ? '显示答疑' : '隐藏答疑'}
-        title={qaHidden ? '显示答疑' : '隐藏答疑'}
-        onClick={onToggleQa}
-      >
-        {qaHidden ? '‹' : '›'}
-      </button>
+      {directoryHidden && (
+        <button
+          className="reader-directory-trigger"
+          aria-controls="course-directory-panel"
+          aria-expanded={false}
+          onClick={onToggleDirectory}
+        >
+          目录
+        </button>
+      )}
+      {!directoryHidden && (
+        <button
+          className="reader-rail-toggle directory-toggle"
+          aria-controls="course-directory-panel"
+          aria-expanded={true}
+          aria-label="收起目录"
+          title="收起目录"
+          onClick={onToggleDirectory}
+        >
+          ‹
+        </button>
+      )}
+      {qaHidden && (
+        <button
+          className="reader-qa-trigger"
+          aria-controls="section-qa-panel"
+          aria-expanded={false}
+          onClick={onToggleQa}
+        >
+          Ask AI
+        </button>
+      )}
+      {!qaHidden && (
+        <button
+          className="reader-rail-toggle qa-toggle"
+          aria-controls="section-qa-panel"
+          aria-expanded={true}
+          aria-label="收起答疑"
+          title="收起答疑"
+          onClick={onToggleQa}
+        >
+          ›
+        </button>
+      )}
     </>
   );
 }
 
+function selectFastBlocks(blocks: Block[]) {
+  const selected: Block[] = [];
+  const add = (block?: Block) => {
+    if (block && !selected.some((item) => item.id === block.id)) selected.push(block);
+  };
+
+  // V3 provides an explicit reader projection. Legacy lessons still fall back
+  // to their conclusion/boundary roles, then to authored order.
+  blocks.filter((block) => block.readerPriority === 'essential').forEach(add);
+  add(blocks.find((block) => block.role === 'core_instruction'));
+  add(blocks.find((block) => block.role === 'conclusion'));
+  add(blocks.find((block) => block.readerPriority === 'highlight'));
+  add(blocks.find((block) => block.role === 'boundary'));
+  blocks.forEach((block) => {
+    if (selected.length < 2) add(block);
+  });
+  return selected.slice(0, 2);
+}
+
 function LessonContent({
   section,
+  dailyMode,
   selectedBlockId,
+  reviewTargetBlockId,
   onGenerate,
   onStartQuiz,
   onFeedbackBlock,
+  onRestorePersonalPresentation,
+  onExplainBlock,
 }: {
   section: Section;
+  dailyMode: DailyMode;
   selectedBlockId: string;
+  reviewTargetBlockId: string;
   onGenerate: () => void;
   onStartQuiz: () => void;
   onFeedbackBlock: (block: Block) => void;
+  onRestorePersonalPresentation: (block: Block) => Promise<void>;
+  onExplainBlock: (block: Block, style: ExplanationStyle, customQuestion?: string) => void;
 }) {
+  const [showCompleteFast, setShowCompleteFast] = useState(false);
+  const [fastCheck, setFastCheck] = useState<'clear'|'unclear'|null>(null);
+
+  useEffect(() => {
+    setShowCompleteFast(false);
+    setFastCheck(null);
+  }, [section.id, section.content?.id, dailyMode]);
+
+  useEffect(() => {
+    if (dailyMode === 'fast' && reviewTargetBlockId) {
+      setShowCompleteFast(true);
+    }
+  }, [dailyMode, reviewTargetBlockId]);
+
   if (!section.content) {
     return (
       <div className="lesson-intro">
@@ -3471,12 +5285,13 @@ function LessonContent({
           ))}
         </div>
         {section.generation?.status === 'failed' && (
-          <div className="inline-error">{section.generation.error || '上次生成失败，可安全重试。'}</div>
+          <div className="inline-error">
+            上次准备失败，请重试。
+          </div>
         )}
         <button className="primary-button large" onClick={onGenerate}>
-          {section.generation?.status === 'failed' ? '安全重试' : '生成正文并开始学习'}
+          {section.generation?.status === 'failed' ? '重新准备' : '准备正文并开始学习'}
         </button>
-        <small className="generation-note">正文与测验将一次生成，并在发布前校验 Learning Contract、目标绑定和证据引用。</small>
       </div>
     );
   }
@@ -3486,6 +5301,18 @@ function LessonContent({
       ? []
       : [{ source, index }]
   ));
+  const fastBlocks = selectFastBlocks(section.content.blocks);
+  const lessonRoles = new Set(section.content.blocks.map((block) => block.role));
+  const fastCheckPrompt = lessonRoles.has('primary_source') || lessonRoles.has('evidence_analysis')
+    ? '你能概括本节的核心解释，并说出一条支持它的材料吗？'
+    : lessonRoles.has('derivation')
+      ? '你能复述本节结论，并指出推导中最关键的一步吗？'
+      : lessonRoles.has('empirical_case') || lessonRoles.has('comparison')
+        ? '你能复述核心机制，并解释两个案例为什么会出现不同结果吗？'
+        : '你能用一句话复述本节核心依据，并说出一个适用条件吗？';
+  const shownBlocks = dailyMode === 'fast' && !showCompleteFast && !reviewTargetBlockId
+    ? fastBlocks
+    : section.content.blocks;
 
   return (
     <article className="lesson-document">
@@ -3495,21 +5322,48 @@ function LessonContent({
       </div>
       <p className="content-trust-note">
         {section.content.generationMode === 'demo'
-          ? '演示内容 · 不代表真实 AI 生成或事实核验'
+          ? '演示内容 · 仅用于体验学习流程'
           : section.content.boundaryValidation.status === 'passed'
-            ? `${section.content.aiGenerated ? 'AI 生成' : '授权内容'} · 已通过结构、契约和证据边界校验 · 未经逐项事实核验`
+            ? `${section.content.aiGenerated ? 'AI 生成' : '授权内容'} · 已完成发布检查 · 关键事实请结合参考来源判断`
             : section.content.boundaryValidation.status === 'legacy'
-              ? '历史内容 · 未确认通过当前结构、契约和证据边界校验 · 未经逐项事实核验'
-              : `${section.content.aiGenerated ? 'AI 生成' : '授权内容'} · 未确认通过结构、契约和证据边界校验 · 未经逐项事实核验`}
+              ? '历史内容 · 尚未按当前标准重新检查 · 关键事实请结合参考来源判断'
+              : `${section.content.aiGenerated ? 'AI 生成' : '授权内容'} · 检查状态未确认 · 关键事实请结合参考来源判断`}
       </p>
-      {section.content.blocks.map((block) => (
+      {dailyMode === 'fast' && (
+        <aside className="fast-view-notice">
+          <div>
+            <span>FAST VIEW · 快速浏览</span>
+            <b>{showCompleteFast ? '已展开完整正文' : `核心依据 · ${fastBlocks.length} 个关键段落`}</b>
+          </div>
+          <button type="button" onClick={() => setShowCompleteFast((shown) => !shown)}>
+            {showCompleteFast ? '收回快速视图' : '展开完整正文'}
+          </button>
+        </aside>
+      )}
+      {shownBlocks.map((block) => (
         <ContentBlock
           key={block.id}
           block={block}
           selected={block.id === selectedBlockId}
+          reviewTarget={block.id === reviewTargetBlockId}
           onFeedback={() => onFeedbackBlock(block)}
+          onRestorePersonalPresentation={() => onRestorePersonalPresentation(block)}
+          onExplain={(style, customQuestion) => onExplainBlock(block, style, customQuestion)}
         />
       ))}
+      {dailyMode === 'fast' && !showCompleteFast && (
+        <section className="fast-check" aria-label="快速自检">
+          <span>30 秒自检</span>
+          <h3>{fastCheckPrompt}</h3>
+          <div>
+            <button className={fastCheck === 'clear' ? 'selected' : ''} onClick={() => setFastCheck('clear')}>可以复述</button>
+            <button className={fastCheck === 'unclear' ? 'selected' : ''} onClick={() => setFastCheck('unclear')}>还不能说明依据</button>
+          </div>
+          {fastCheck && <p>{fastCheck === 'clear'
+            ? '很好。若要完成本节，请继续完成下方同一套验证题。'
+            : '先展开完整正文，重点阅读相关段落。'}</p>}
+        </section>
+      )}
       {visibleSources.length > 0 && <details className="source-list">
         <summary>参考来源 · {visibleSources.length}</summary>
         {visibleSources.map(({ source, index }) => (
@@ -3520,11 +5374,15 @@ function LessonContent({
           </a>
         ))}
       </details>}
-      <div className="lesson-complete-action">
-        <span>正文阅读完成</span>
-        <h3>现在，验证你是否真正理解。</h3>
-        <p>完成选择题并达到及格线，才会解锁下一节；满分后还会开放“深入讨论”。</p>
-        <button className="primary-button" onClick={onStartQuiz}>开始验证 <i>→</i></button>
+      <div className={`lesson-complete-action ${section.status === 'completed' ? 'verified' : ''}`}>
+        <span>{section.status === 'completed' ? '本节已验证' : '正文阅读完成'}</span>
+        <h3>{section.status === 'completed' ? '本节已验证' : '现在，验证你是否真正理解。'}</h3>
+        <p>{section.status === 'completed'
+          ? '可以随时回看作答结果、错题解析和对应的正文依据。'
+          : '完成选择题：及格解锁下一节，满分解锁隐藏关卡。'}</p>
+        <button className="primary-button" onClick={onStartQuiz}>
+          {section.status === 'completed' ? '查看验证结果' : '开始验证'} <i>→</i>
+        </button>
       </div>
     </article>
   );
@@ -3533,51 +5391,205 @@ function LessonContent({
 function ContentBlock({
   block,
   selected,
+  reviewTarget,
   onFeedback,
+  onRestorePersonalPresentation,
+  onExplain,
 }: {
   block: Block;
   selected: boolean;
+  reviewTarget: boolean;
   onFeedback: () => void;
+  onRestorePersonalPresentation: () => Promise<void>;
+  onExplain: (style: ExplanationStyle, customQuestion?: string) => void;
 }) {
+  const [explanationMenuOpen, setExplanationMenuOpen] = useState(false);
+  const [customExplanation, setCustomExplanation] = useState('');
+  const explanationMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!explanationMenuOpen) return undefined;
+    const closeOnOutsidePress = (event: MouseEvent) => {
+      if (!explanationMenuRef.current?.contains(event.target as Node)) {
+        setExplanationMenuOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setExplanationMenuOpen(false);
+    };
+    document.addEventListener('mousedown', closeOnOutsidePress);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsidePress);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [explanationMenuOpen]);
   const labels: Record<string, string> = {
     text: '阅读',
+    bullet_list: '要点',
+    ordered_steps: '步骤',
     diagram: '图解',
     table: '对照',
     code: '演练',
     formula: '推导',
   };
+  const roleLabels: Record<string, string> = {
+    core_instruction: '核心依据',
+    conclusion: '核心依据',
+    prerequisite_scaffold: '必要前置',
+    context: '背景',
+    mechanism: '机制',
+    derivation: '推导',
+    worked_example: '逐步示例',
+    empirical_case: '真实案例',
+    primary_source: '原始材料',
+    evidence_analysis: '证据分析',
+    comparison: '对照',
+    alternative_interpretation: '另一种解释',
+    counterargument: '反方观点',
+    counterexample: '反例',
+    boundary: '适用边界',
+    application: '应用',
+    transfer: '迁移',
+    practice: '练习',
+    synthesis: '综合',
+    summary: '回顾',
+  };
   return (
     <section
-      className={`content-block role-${block.role} ${selected ? 'selected' : ''}`}
+      className={`content-block role-${block.role} ${selected ? 'selected' : ''} ${reviewTarget ? 'review-target' : ''}`}
       data-block-id={block.id}
+      tabIndex={-1}
     >
-      <div className="block-meta"><b>{labels[block.kind] || '阅读'}</b></div>
-      <button
-        className="block-feedback-button"
-        type="button"
-        aria-label={`反馈“${block.heading}”这一段`}
-        onClick={onFeedback}
-      >
-        <span aria-hidden="true">↳</span> 反馈这段
-      </button>
+      {reviewTarget && <span className="review-target-label">错题依据</span>}
+      <div className="block-meta">
+        <b>{labels[block.kind] || '阅读'}</b>
+        {roleLabels[block.role] && <span>{roleLabels[block.role]}</span>}
+      </div>
+      <div className="block-actions">
+        <div className="block-explanation-control" ref={explanationMenuRef}>
+          <button
+            className="block-explanation-button"
+            type="button"
+            aria-expanded={explanationMenuOpen}
+            aria-haspopup="dialog"
+            onClick={() => setExplanationMenuOpen((open) => !open)}
+          >
+            <span aria-hidden="true">↻</span> 换个讲法
+          </button>
+          {explanationMenuOpen && (
+            <div className="block-explanation-menu" role="dialog" aria-label={`换一种方式理解“${block.heading}”`}>
+              <header>
+                <b>这段想怎么讲？</b>
+              </header>
+              <div className="block-explanation-presets">
+                {explanationOptionsForBlock(block.kind).map((option) => (
+                  <button
+                    type="button"
+                    key={option.style}
+                    onClick={() => {
+                      onExplain(option.style);
+                      setExplanationMenuOpen(false);
+                    }}
+                  >
+                    <b>{option.label}</b>
+                  </button>
+                ))}
+              </div>
+              <form
+                className="block-explanation-custom"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const instruction = customExplanation.trim();
+                  if (instruction.length < 2) return;
+                  onExplain('custom', instruction);
+                  setCustomExplanation('');
+                  setExplanationMenuOpen(false);
+                }}
+              >
+                <label htmlFor={`custom-explanation-${block.id}`}>我更想要的风格</label>
+                <div>
+                  <input
+                    id={`custom-explanation-${block.id}`}
+                    value={customExplanation}
+                    maxLength={240}
+                    placeholder="例如：像讲故事一样，少用术语"
+                    onChange={(event) => setCustomExplanation(event.target.value)}
+                  />
+                  <button type="submit" disabled={customExplanation.trim().length < 2}>按这个讲</button>
+                </div>
+              </form>
+            </div>
+          )}
+        </div>
+        <button
+          className="block-feedback-button"
+          type="button"
+          aria-label={`反馈“${block.heading}”这一段`}
+          onClick={onFeedback}
+        >
+          <span aria-hidden="true">↳</span> 反馈
+        </button>
+      </div>
       <h2>{block.heading}</h2>
       <BlockBody block={block} />
+      {block.personalPresentation && (
+        <aside className="personal-presentation" aria-label="我的另一种讲法">
+          <header>
+            <span>我的另一种讲法</span>
+            <button type="button" onClick={() => void onRestorePersonalPresentation()}>移除</button>
+          </header>
+          <BlockBody block={block} content={block.personalPresentation.content} />
+        </aside>
+      )}
     </section>
   );
 }
 
-function BlockBody({ block }: { block: Block }) {
+function BlockBody({ block, content = block.content }: { block: Block; content?: string }) {
   if (block.kind === 'code') {
-    return <pre className="code-block"><code>{block.content}</code></pre>;
+    return <pre className="code-block"><code>{content}</code></pre>;
   }
   const markdown = block.kind === 'table'
-    ? normalizeTableMarkdown(block.content)
-    : block.content;
+    ? normalizeTableMarkdown(content)
+    : block.kind === 'text'
+      ? normalizeLessonTextMarkdown(content)
+      : content;
   return (
     <div className={`content-markdown kind-${block.kind}`}>
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
     </div>
   );
+}
+
+function normalizeLessonTextMarkdown(content: string): string {
+  const normalized = content.replace(/\r\n?/g, '\n').trim();
+  const hasAuthoredStructure = /\n\s*\n/.test(normalized)
+    || /(^|\n)\s*(?:#{1,6}\s|[-+*]\s+|\d+[.)]\s+|>\s+|```)/m.test(normalized);
+  if (normalized.length < 200 || hasAuthoredStructure) return normalized;
+
+  const sentences = normalized
+    .match(/[^。！？]+[。！？]+|[^。！？]+$/g)
+    ?.map((sentence) => sentence.trim())
+    .filter(Boolean) || [];
+  if (sentences.length < 4) return normalized;
+
+  const paragraphCount = Math.min(
+    3,
+    Math.floor(sentences.length / 2),
+    Math.max(2, Math.ceil(normalized.length / 150)),
+  );
+  if (paragraphCount < 2) return normalized;
+
+  const paragraphs: string[] = [];
+  let cursor = 0;
+  for (let index = 0; index < paragraphCount; index += 1) {
+    const remainingSentences = sentences.length - cursor;
+    const remainingParagraphs = paragraphCount - index;
+    const take = Math.ceil(remainingSentences / remainingParagraphs);
+    paragraphs.push(sentences.slice(cursor, cursor + take).join(''));
+    cursor += take;
+  }
+  return paragraphs.join('\n\n');
 }
 
 function normalizeTableMarkdown(content: string): string {
@@ -3604,6 +5616,7 @@ function normalizeTableMarkdown(content: string): string {
 
 function Quiz({
   section,
+  onUpgrade,
   onSectionChange,
   onRefreshSeries,
   onSelectSection,
@@ -3611,10 +5624,11 @@ function Quiz({
   onSubmissionComplete,
 }: {
   section: Section;
+  onUpgrade: () => void;
   onSectionChange: (section: Section) => void;
   onRefreshSeries: () => Promise<void>;
   onSelectSection: (id: string) => Promise<Section>;
-  onReviewContent: () => void;
+  onReviewContent: (blockId?: string) => void;
   onSubmissionComplete: () => void;
 }) {
   const quizDraftKey = `slow:quiz-draft:${section.id}:${section.quiz?.id || 'none'}`;
@@ -3679,8 +5693,6 @@ function Quiz({
   const [submissionError, setSubmissionError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [workflowRunning, setWorkflowRunning] = useState(false);
-  const [workflowMessage, setWorkflowMessage] = useState('');
-  const [failedTasks, setFailedTasks] = useState<LearningTask[]>([]);
   const [workflowTasks, setWorkflowTasks] = useState<LearningTask[]>(
     section.workflowTasks || [],
   );
@@ -3689,6 +5701,10 @@ function Quiz({
   const [openingRemediation, setOpeningRemediation] = useState(false);
   const [reassessing, setReassessing] = useState(false);
   const [openingNextSection, setOpeningNextSection] = useState(false);
+  const failedTasks = workflowTasks.filter((task) => (
+    task.status === 'failed' &&
+    (!result || !task.triggerId || task.triggerId === result.attemptId)
+  ));
   const remediationTask = result
     ? workflowTasks.find((task) => (
         task.type === 'remediation_generation' &&
@@ -3723,12 +5739,6 @@ function Quiz({
     if (!initialTasks.length) return;
     setWorkflowRunning(true);
     setWorkflowTasks([...preservedFailures, ...initialTasks]);
-    setFailedTasks(preservedFailures);
-    setWorkflowMessage(
-      initialTasks.some((task) => task.type === 'remediation_generation')
-        ? '评分已完成，正在准备补充教学和新的等价题…'
-        : '评分已完成，正在准备个人笔记和下一节…',
-    );
     let current = initialTasks;
     for (let poll = 0; poll < 900; poll += 1) {
       current = await Promise.all(
@@ -3740,15 +5750,7 @@ function Quiz({
           ...preservedFailures,
           ...current.filter((task) => task.status === 'failed'),
         ];
-        setFailedTasks(failures);
         setWorkflowRunning(false);
-        setWorkflowMessage(
-          failures.length
-            ? '评分结果已保存，但部分后续内容生成失败，可以安全重试。'
-            : passed
-              ? '个人笔记和下一节已经准备完成。'
-              : '补充教学和新的等价题已经准备完成。',
-        );
         if (!failures.length && passed === false) {
           setRemediationReady(true);
         }
@@ -3758,7 +5760,6 @@ function Quiz({
       await new Promise((resolve) => window.setTimeout(resolve, 1000));
     }
     setWorkflowRunning(false);
-    setWorkflowMessage('评分结果已保存，后续内容仍在后台处理中。');
   };
 
   useEffect(() => {
@@ -3766,13 +5767,56 @@ function Quiz({
       (task) => task.status !== 'succeeded',
     );
     if (!unfinished.length) return;
-    void monitorTasks(unfinished).catch((reason) => {
+    void monitorTasks(unfinished).catch(() => {
       setWorkflowRunning(false);
-      setSubmissionError(
-        reason instanceof Error ? reason.message : '无法恢复后台任务状态。',
-      );
+      setSubmissionError('暂时无法更新后续内容，请稍后再试。');
     });
   }, [section.id]);
+
+  useEffect(() => {
+    if (!result || result.passed || remediationTask?.status !== 'failed') return;
+    let cancelled = false;
+    const reconcileFailedRemediation = async () => {
+      try {
+        const latest = await api.learningTask(remediationTask.taskId);
+        if (cancelled) return;
+        setWorkflowTasks((current) => current.map((task) => (
+          task.taskId === latest.taskId ? latest : task
+        )));
+        if (latest.status === 'failed') return;
+        if (latest.status === 'succeeded') {
+          setWorkflowRunning(false);
+          setRemediationReady(true);
+          await onRefreshSeries();
+          return;
+        }
+        void monitorTasks([latest], false).catch(() => {
+          setWorkflowRunning(false);
+          setSubmissionError('暂时无法更新后续内容，请稍后再试。');
+        });
+      } catch {
+        // A transient refresh failure must not replace the saved quiz result.
+      }
+    };
+    const reconcileOnFocus = () => { void reconcileFailedRemediation(); };
+    const reconcileWhenVisible = () => {
+      if (document.visibilityState === 'visible') reconcileOnFocus();
+    };
+    window.addEventListener('focus', reconcileOnFocus);
+    document.addEventListener('visibilitychange', reconcileWhenVisible);
+    void reconcileFailedRemediation();
+    return () => {
+      cancelled = true;
+      window.removeEventListener('focus', reconcileOnFocus);
+      document.removeEventListener('visibilitychange', reconcileWhenVisible);
+    };
+  }, [
+    section.id,
+    result?.attemptId,
+    result?.passed,
+    remediationTask?.taskId,
+    remediationTask?.status,
+  ]);
 
   const retryFailedTasks = async () => {
     setSubmissionError('');
@@ -3785,8 +5829,8 @@ function Quiz({
         ),
       );
       await monitorTasks(retried, result?.passed, preservedFailures);
-    } catch (reason) {
-      setSubmissionError(reason instanceof Error ? reason.message : '任务重试失败。');
+    } catch {
+      setSubmissionError('后续内容暂时没有准备完成，请稍后再试。');
     } finally {
       setRetryingTasks(false);
     }
@@ -3868,7 +5912,7 @@ function Quiz({
   const submit = async () => {
     if (!section.quiz) return;
     if (quizGovernanceBlocked) {
-      setSubmissionError('这套验证题未通过发布门禁，系统不会接受作答。请重新生成后再试。');
+      setSubmissionError('这套验证题暂时不可用，请重新准备后再试。');
       return;
     }
     const firstUnanswered = answers.findIndex((answer) => answer.length === 0);
@@ -3919,6 +5963,7 @@ function Quiz({
       );
       const reviewValue = {...value, questions: section.quiz.questions};
       setResult(reviewValue);
+      requestAnimationFrame(onSubmissionComplete);
       try {
         sessionStorage.setItem(quizResultStorageKey, JSON.stringify(reviewValue));
       } catch {
@@ -3927,18 +5972,21 @@ function Quiz({
       setRemediationReady(false);
       localStorage.removeItem(quizDraftKey);
       localStorage.removeItem(quizRequestStorageKey);
-      if (value.passed) {
-        const next = await api.section(section.id);
-        onSectionChange(next);
-      }
-      await onRefreshSeries();
-      onSubmissionComplete();
-      void monitorTasks(value.workflowTasks, value.passed).catch((reason) => {
+      void monitorTasks(value.workflowTasks, value.passed).catch(() => {
         setWorkflowRunning(false);
-        setSubmissionError(
-          reason instanceof Error ? reason.message : '无法读取后续任务状态。',
-        );
+        setSubmissionError('暂时无法更新后续内容，请稍后再试。');
       });
+      void (async () => {
+        try {
+          if (value.passed) {
+            const next = await api.section(section.id);
+            onSectionChange(next);
+          }
+          await onRefreshSeries();
+        } catch {
+          setSubmissionError('目录进度暂未同步，请刷新后重试。');
+        }
+      })();
     } catch (reason) {
       setSubmissionError(
         reason instanceof Error && reason.name !== 'TypeError'
@@ -3954,12 +6002,17 @@ function Quiz({
     <div className="quiz-view">
       <p className="eyebrow">完成验证后解锁下一节</p>
       <h2>小节验证</h2>
-      <p className="quiz-rule">答对至少 80% 且通过全部必需目标即可继续；错题会进入重点巩固与学习画像。</p>
-      <p className="quiz-draft-note">单选题只能选择一个答案，多选题可选择多个；切回正文查阅时，当前作答会自动保留。</p>
+      <p className="quiz-rule">答对至少 80%，且关键题达到要求即可继续；错题会用于安排重点巩固。</p>
+      <p className="quiz-draft-note">单选题只能选择一个答案，多选题可选择多个。</p>
       {quizGovernanceBlocked && (
         <aside className="quiz-governance-notice" role="alert">
-          <b>这套验证题尚未通过发布门禁</b>
-          <p>系统不会展示或接受这套题的作答，也不会用它评分、解锁或形成学习证据。请重新生成后再试。</p>
+          <b>这节内容需要升级后才能验证</b>
+          <p>这是旧版本内容，需要升级后才能验证。</p>
+          {section.bestScore === 0 && section.totalScore === 0 && (
+            <button className="secondary-button" type="button" onClick={onUpgrade}>
+              升级本节内容与验证
+            </button>
+          )}
         </aside>
       )}
       {quizGovernanceBlocked ? null : result ? (
@@ -3973,16 +6026,20 @@ function Quiz({
           nextSectionTask={nextSectionTask || null}
           nextSectionId={nextSectionId}
           openingNextSection={openingNextSection}
+          workflowRunning={workflowRunning}
+          workflowTasks={workflowTasks}
+          retryingTasks={retryingTasks}
           onReviewContent={onReviewContent}
           onOpenRemediation={openRemediation}
           onReassess={reassessAttempt}
           onOpenNextSection={openNextSection}
+          onRetryTasks={retryFailedTasks}
         />
       ) : (
         <>
           {section.remediations.map((item) => (
             <section className="remediation-card" key={item.id}>
-              <span>错题补充教学 · {item.strategy}</span>
+              <span>错题补充教学</span>
               {item.blocks.map((block) => (
                 <div key={block.id}>
                   <h3>{block.heading}</h3>
@@ -4035,53 +6092,6 @@ function Quiz({
       )}
       <div id="quiz-submission-feedback" aria-live="polite">
         {submissionError && <p className="result failure" role="alert">{submissionError}</p>}
-        {result && (
-          <p className={result.passed ? 'result success' : 'result failure'}>
-            {result.passed
-              ? nextSectionTask
-                ? '验证已通过，下一节正在准备；正文和验证题完成后即可进入。'
-                : '验证已通过，学习结果已经保存。'
-              : '本次未通过，评分结果已经保存。'}
-          </p>
-        )}
-        {workflowMessage && <p className={failedTasks.length ? 'result failure' : 'result success'}>{workflowMessage}</p>}
-        {workflowTasks.length > 0 && (
-          <div className="workflow-task-list" aria-label="后台任务状态">
-            {workflowTasks.map((task) => (
-              <div className={`workflow-task ${task.status}`} key={task.taskId}>
-                <span>{{
-                  content_feedback_regeneration: '反馈修订',
-                  initial_book_preload: '第一节准备',
-                  note_generation: '个人笔记',
-                  remediation_generation: '补充教学与新题',
-                  next_section_preload: '下一节预加载',
-                }[task.type]}</span>
-                <b>{{
-                  pending: '等待中',
-                  running: '进行中',
-                  succeeded: '已完成',
-                  failed: '失败',
-                }[task.status]}</b>
-                <small>
-                  尝试 {task.attemptCount || 0}/{task.maxAttempts || 0}
-                  {task.status === 'failed'
-                    ? ` · ${task.errorMessage || task.errorCode || '未知错误'}`
-                    : ''}
-                </small>
-              </div>
-            ))}
-          </div>
-        )}
-        {failedTasks.some((task) => task.retryable) && (
-          <button
-            type="button"
-            className="secondary-button"
-            disabled={retryingTasks || workflowRunning}
-            onClick={retryFailedTasks}
-          >
-            {retryingTasks ? '正在重试…' : '安全重试后续生成'}
-          </button>
-        )}
       </div>
       {section.askMeUnlocked && <AskMePanel sectionId={section.id} />}
     </div>
@@ -4098,10 +6108,14 @@ function QuizReview({
   nextSectionTask,
   nextSectionId,
   openingNextSection,
+  workflowRunning,
+  workflowTasks,
+  retryingTasks,
   onReviewContent,
   onOpenRemediation,
   onReassess,
   onOpenNextSection,
+  onRetryTasks,
 }: {
   section: Section;
   result: QuizResult;
@@ -4112,10 +6126,14 @@ function QuizReview({
   nextSectionTask: LearningTask | null;
   nextSectionId: string | null;
   openingNextSection: boolean;
-  onReviewContent: () => void;
+  workflowRunning: boolean;
+  workflowTasks: LearningTask[];
+  retryingTasks: boolean;
+  onReviewContent: (blockId?: string) => void;
   onOpenRemediation: () => Promise<void>;
   onReassess: () => Promise<void>;
   onOpenNextSection: () => Promise<void>;
+  onRetryTasks: () => Promise<void>;
 }) {
   const questions = result.questions || section.quiz?.questions || [];
   const wrongIndexes = result.results
@@ -4135,6 +6153,39 @@ function QuizReview({
     document.getElementById(`quiz-review-${result.attemptId}-${questionIndex}`)
       ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
+  const relevantWorkflowTasks = workflowTasks.filter((task) => (
+    !task.triggerId || task.triggerId === result.attemptId
+  ));
+  const failedWorkflowTasks = relevantWorkflowTasks.filter((task) => task.status === 'failed');
+  const hasRetryableFailure = failedWorkflowTasks.some((task) => task.retryable);
+  const workflowPending = workflowRunning || relevantWorkflowTasks.some(
+    (task) => task.status === 'pending' || task.status === 'running',
+  );
+  const noteTask = relevantWorkflowTasks.find((task) => task.type === 'note_generation');
+  const remediationTask = relevantWorkflowTasks.find(
+    (task) => task.type === 'remediation_generation',
+  );
+  const failedTaskLabels = Array.from(new Set(failedWorkflowTasks.map((task) => {
+    if (task.type === 'note_generation') return '个人笔记';
+    if (task.type === 'next_section_preload') return '下一节';
+    if (task.type === 'remediation_generation') return '补充教学';
+    return '后续内容';
+  })));
+  const failedTaskSummary = failedTaskLabels.length
+    ? `${failedTaskLabels.join('和')}暂未准备完成。`
+    : '后续内容暂未准备完成。';
+  const nextSectionReady = Boolean(
+    result.passed && nextSectionTask?.status === 'succeeded' && nextSectionId,
+  );
+  const hasBlockingWorkflowFailure = (
+    failedWorkflowTasks.length > 0 && !nextSectionReady
+  );
+  const followupReady = (
+    eligibleUnderCurrentPolicy ||
+    remediationReady ||
+    nextSectionReady ||
+    (result.passed && !workflowPending && failedWorkflowTasks.length === 0)
+  );
 
   return (
     <section className="quiz-review" aria-labelledby="quiz-review-title">
@@ -4145,9 +6196,7 @@ function QuizReview({
         </h3>
         <strong>{result.score}<small> / {result.total}</small></strong>
         <p>
-          {result.passed
-            ? '答题事实已经保存，可以查看解析或回到正文。'
-            : '先查看下面的即时错题解析；个性化补充教学会在后台继续准备。'}
+          {result.passed ? '查看解析或回到正文。' : '先查看下面的错题解析。'}
         </p>
       </header>
 
@@ -4167,6 +6216,9 @@ function QuizReview({
           const question = questions[questionIndex];
           const review = result.results[questionIndex];
           if (!question || !review) return null;
+          const evidenceBlocks = (question.evidenceBlockIds || [])
+            .map((blockId) => section.content?.blocks.find((block) => block.id === blockId))
+            .filter((block): block is Block => Boolean(block));
           return (
             <article
               className="wrong-question-card"
@@ -4197,7 +6249,21 @@ function QuizReview({
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{review.explanation}</ReactMarkdown>
                 </div>
               </div>
-              <button className="quiet-button" onClick={onReviewContent}>回看本节正文</button>
+              {evidenceBlocks.length > 0 ? (
+                <aside className="review-evidence" aria-label={`第 ${questionIndex + 1} 题的正文依据`}>
+                  <span>正文依据</span>
+                  <div>
+                    {evidenceBlocks.map((block) => (
+                      <button key={block.id} type="button" onClick={() => onReviewContent(block.id)}>
+                        <i aria-hidden="true">§</i>
+                        {block.heading}
+                      </button>
+                    ))}
+                  </div>
+                </aside>
+              ) : (
+                <button className="quiet-button" onClick={() => onReviewContent()}>回看本节正文</button>
+              )}
             </article>
           );
         })}
@@ -4221,12 +6287,27 @@ function QuizReview({
         </details>
       )}
 
-      <div className={`remediation-readiness ${remediationReady || result.passed || eligibleUnderCurrentPolicy ? 'ready' : ''}`}>
+      <div
+        className={`remediation-readiness ${hasBlockingWorkflowFailure ? 'failed' : followupReady ? 'ready' : ''}`}
+        aria-live="polite"
+        aria-atomic="true"
+      >
         {result.passed ? (
-          nextSectionTask ? (
-            nextSectionTask.status === 'succeeded' && nextSectionId ? (
-              <>
-                <span>下一节已经准备完成</span>
+          nextSectionReady ? (
+            <>
+              <span>下一节已准备好</span>
+              {noteTask?.status === 'failed' && <small>个人笔记暂未更新。</small>}
+              <div className="remediation-readiness-actions">
+                {noteTask?.status === 'failed' && noteTask.retryable && (
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={retryingTasks || workflowRunning}
+                    onClick={onRetryTasks}
+                  >
+                    {retryingTasks ? '正在重新准备…' : '重新准备笔记'}
+                  </button>
+                )}
                 <button
                   className="primary-button"
                   disabled={openingNextSection}
@@ -4234,27 +6315,40 @@ function QuizReview({
                 >
                   {openingNextSection ? '正在进入…' : '进入下一节'}
                 </button>
-              </>
-            ) : nextSectionTask.status === 'failed' ? (
-              <>
-                <span>本节已通过，下一节准备失败</span>
-                <small>可以在下方安全重试，不会影响已经保存的成绩。</small>
-              </>
-            ) : (
-              <>
-                <span><i />本节已通过，正在直接生成下一节</span>
-                <button className="primary-button" disabled>下一节准备中…</button>
-              </>
-            )
+              </div>
+            </>
+          ) : failedWorkflowTasks.length > 0 ? (
+            <>
+              <span>准备失败</span>
+              <small>{failedTaskSummary}</small>
+              {hasRetryableFailure && (
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={retryingTasks || workflowRunning}
+                  onClick={onRetryTasks}
+                >
+                  {retryingTasks ? '正在重新准备…' : '重新准备'}
+                </button>
+              )}
+            </>
+          ) : nextSectionTask ? (
+            <>
+              <span><i />正在准备下一节</span>
+            </>
+          ) : noteTask && (workflowPending || noteTask.status !== 'succeeded') ? (
+            <>
+              <span><i />正在整理个人笔记</span>
+            </>
           ) : (
             <>
-              <span>本节验证已经完成</span>
-              <button className="secondary-button" onClick={onReviewContent}>返回正文</button>
+              <span>本节已验证</span>
+              <button className="secondary-button" onClick={() => onReviewContent()}>返回正文</button>
             </>
           )
         ) : eligibleUnderCurrentPolicy ? (
           <>
-            <span>按当前规则，答对 {result.score}/{result.total} 已达到继续学习标准</span>
+            <span>可以继续学习</span>
             <button
               className="primary-button"
               disabled={reassessing}
@@ -4262,11 +6356,10 @@ function QuizReview({
             >
               {reassessing ? '正在更新进度…' : '按当前规则继续'}
             </button>
-            <small>错题仍会进入个人笔记和掌握画像，不会被视为已经掌握。</small>
           </>
         ) : remediationReady ? (
           <>
-            <span>个性化补充教学和变式题已准备完成</span>
+            <span>补充教学已准备好</span>
             <button
               className="primary-button"
               disabled={openingRemediation}
@@ -4275,10 +6368,24 @@ function QuizReview({
               {openingRemediation ? '正在打开…' : '开始补充教学与变式题'}
             </button>
           </>
+        ) : remediationTask?.status === 'failed' || failedWorkflowTasks.length > 0 ? (
+          <>
+            <span>准备失败</span>
+            <small>{failedTaskSummary}</small>
+            {hasRetryableFailure && (
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={retryingTasks || workflowRunning}
+                onClick={onRetryTasks}
+              >
+                {retryingTasks ? '正在重新准备…' : '重新准备'}
+              </button>
+            )}
+          </>
         ) : (
           <>
-            <span><i />个性化补充教学正在后台准备</span>
-            <small>你可以继续阅读上面的错题解析，生成不会阻塞当前页面。</small>
+            <span><i />正在准备补充教学</span>
           </>
         )}
       </div>
@@ -4363,41 +6470,30 @@ function Note({
     try {
       await api.note(sectionId, editing);
       onSaved(await api.section(sectionId));
-      setMessage('已保存为新的个人版本；底稿与复习补充保持不变。');
+      setMessage('我的笔记已保存。');
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : '保存失败');
     }
   };
   return (
     <div className="note-view">
-      <p className="eyebrow">完成后持续生长的学习资产</p>
-      <h2>三层学习笔记</h2>
-      <p className="note-intro">底稿记录首次通过时的理解，真正完成复习后只追加补充；你的改写单独保存，不会覆盖前两层。</p>
+      <p className="eyebrow">本节学习记录</p>
+      <h2>学习笔记</h2>
 
       <article className="note-layer note-summary-layer">
         <header>
-          <span className="note-layer-index">01</span>
-          <div><b>学习总结</b><small>首次通过时冻结的稳定底稿</small></div>
-          {summary && <em>V{summary.version}</em>}
+          <div><b>学习总结</b></div>
         </header>
         <NoteContentView content={summary?.content ?? note.aiContent} empty="本节还没有学习总结。" />
-        {summary && (
-          <footer>
-            <span>内容版本 {summary.sourceContentVersionId ?? '旧数据'}</span>
-            <span>契约 {summary.sourceContractVersion}</span>
-            <span>观察水位 {summary.sourceObservationWatermark}</span>
-          </footer>
-        )}
       </article>
 
       <section className="note-layer note-review-layer">
         <header>
-          <span className="note-layer-index">02</span>
-          <div><b>复习补充</b><small>按完成时间追加，不改写底稿</small></div>
+          <div><b>复习补充</b></div>
           <em>{note.layers.reviewSupplements.length} 条</em>
         </header>
         {note.layers.reviewSupplements.length === 0 ? (
-          <p className="note-empty-layer">完成一次无辅助复习后，新的理解会出现在这里。单纯答对不会自动生成正文。</p>
+          <p className="note-empty-layer">暂无复习补充。</p>
         ) : (
           <div className="note-review-timeline">
             {note.layers.reviewSupplements.map((supplement, index) => (
@@ -4415,11 +6511,10 @@ function Note({
 
       <article className="note-layer note-user-layer">
         <header>
-          <span className="note-layer-index">03</span>
-          <div><b>我的版本</b><small>只有你的保存操作会创建新版本</small></div>
-          <em>{revision ? `V${revision.version}` : '未创建'}</em>
+          <div><b>我的笔记</b></div>
+          <em>{revision ? '已保存' : '未创建'}</em>
         </header>
-        {revision && <NoteContentView content={revision.content} empty="当前个人版本为空。" />}
+        {revision && <NoteContentView content={revision.content} empty="我的笔记目前为空。" />}
         <div className="note-editor">
           <label>
             <span>我如何描述本节解决的问题</span>
@@ -4441,22 +6536,20 @@ function Note({
               </label>
             ))}
           </div>
-          <button className="primary-button" onClick={save}>保存为新的个人版本</button>
+          <button className="primary-button" onClick={save}>保存我的笔记</button>
         </div>
       </article>
 
-      <aside className="note-verification" aria-label="当前验证标注">
-        <header><b>当前验证标注</b><span>只读 · 会随后续证据变化</span></header>
-        <p>这些状态来自测量与掌握度投影，不属于笔记正文，也不会静默改写任何版本。</p>
+      <aside className="note-verification" aria-label="本节掌握情况">
+        <header><b>本节掌握情况</b></header>
         {note.verificationAnnotations.length === 0 ? (
-          <small>目前没有可显示的验证标注。</small>
+          <small>目前还没有可显示的掌握情况。</small>
         ) : (
           <ul>
             {note.verificationAnnotations.map((annotation) => (
               <li key={annotation.assessmentTargetId}>
-                <span><b>{annotation.objective}</b><small>{annotation.dimension}</small></span>
-                <em>{annotation.claimStatus}</em>
-                <strong>{Math.round(annotation.pKnown * 100)}%</strong>
+                <span><b>{annotation.objective}</b></span>
+                <em>{annotation.pKnown >= 0.8 ? '掌握稳固' : annotation.pKnown >= 0.55 ? '继续巩固' : '尚未验证'}</em>
               </li>
             ))}
           </ul>
@@ -4468,70 +6561,349 @@ function Note({
 }
 
 function AskMePanel({ sectionId }: { sectionId: string }) {
-  const [askMe, setAskMe] = useState<AskMe | null>(null);
+  const [discussion, setDiscussion] = useState<AskMeDiscussion | null>(null);
   const [answer, setAnswer] = useState('');
-  const runAskMe = async () => {
-    const next = await api.askMe(sectionId, answer);
-    setAskMe(next);
-    setAnswer('');
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [actioning, setActioning] = useState(false);
+  const [confirmingFinish, setConfirmingFinish] = useState(false);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const turnRequest = useRef<{ fingerprint: string; id: string } | null>(null);
+  const actionRequest = useRef<{ fingerprint: string; id: string } | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    setLoading(true);
+    setError('');
+    api.askMeDiscussion(sectionId)
+      .then((value) => {
+        if (active) setDiscussion(value);
+      })
+      .catch((reason) => {
+        if (active) setError(reason instanceof Error ? reason.message : '无法恢复深入讨论。');
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => { active = false; };
+  }, [sectionId]);
+
+  useEffect(() => {
+    if (!message || submitting) return;
+    const timer = window.setTimeout(() => setMessage(''), 2400);
+    return () => window.clearTimeout(timer);
+  }, [message, submitting]);
+
+  const start = async () => {
+    setError('');
+    setActioning(true);
+    try {
+      setDiscussion(await api.startAskMeDiscussion(sectionId));
+      setMessage('主题已准备。');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '无法开始深入讨论。');
+    } finally {
+      setActioning(false);
+    }
   };
+
+  const activeTopic = discussion?.topics.find((topic) => topic.id === discussion.activeTopicId) || null;
+  const activeTurns = discussion?.turns.filter((turn) => turn.topicId === activeTopic?.id) || [];
+  const activeTopicIndex = activeTopic ? discussion?.topics.findIndex((topic) => topic.id === activeTopic.id) ?? -1 : -1;
+  const isLastTopic = Boolean(discussion && activeTopicIndex === discussion.topics.length - 1);
+  const displayedPrompt = activeTopic?.currentPrompt
+    .replace(/^继续围绕“[^”]+”(?:说明)?[：:]\s*/, '')
+    .trim() || '';
+
+  const submit = async () => {
+    if (!discussion || !activeTopic || !answer.trim() || submitting) return;
+    const normalizedAnswer = answer.trim();
+    const fingerprint = JSON.stringify({
+      sessionId: discussion.id,
+      topicId: activeTopic.id,
+      revision: discussion.revision,
+      answer: normalizedAnswer,
+    });
+    if (!turnRequest.current || turnRequest.current.fingerprint !== fingerprint) {
+      turnRequest.current = { fingerprint, id: crypto.randomUUID() };
+    }
+    setSubmitting(true);
+    setError('');
+    setMessage('回答已提交，正在评阅…');
+    try {
+      const next = await api.submitAskMeDiscussionTurn(
+        sectionId,
+        {
+          sessionId: discussion.id,
+          topicId: activeTopic.id,
+          expectedRevision: discussion.revision,
+          answer: normalizedAnswer,
+        },
+        turnRequest.current.id,
+      );
+      setDiscussion(next);
+      setAnswer('');
+      turnRequest.current = null;
+      setMessage('回答已记录。');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '回答没有记录成功，请重试。');
+      setMessage('');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const applyAction = async (action: 'next_topic' | 'pause' | 'resume' | 'finish') => {
+    if (!discussion || actioning || submitting) return;
+    const fingerprint = JSON.stringify({
+      sessionId: discussion.id,
+      revision: discussion.revision,
+      action,
+    });
+    if (!actionRequest.current || actionRequest.current.fingerprint !== fingerprint) {
+      actionRequest.current = { fingerprint, id: crypto.randomUUID() };
+    }
+    setActioning(true);
+    setError('');
+    try {
+      const next = await api.applyAskMeDiscussionAction(
+        sectionId,
+        {
+          sessionId: discussion.id,
+          expectedRevision: discussion.revision,
+          action,
+        },
+        actionRequest.current.id,
+      );
+      setDiscussion(next);
+      setAnswer('');
+      setConfirmingFinish(false);
+      turnRequest.current = null;
+      actionRequest.current = null;
+      setMessage(action === 'next_topic'
+        ? '已切换主题。'
+        : action === 'pause'
+          ? '已暂停。'
+          : action === 'resume'
+            ? '已恢复。'
+            : '已结束。');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '操作没有完成，请重试。');
+    } finally {
+      setActioning(false);
+    }
+  };
+
+  const evaluationLabel = (value: string) => ({
+    strong: '理解稳固',
+    partial: '基本到位',
+    weak: '需要补强',
+  }[value] || value);
   return (
     <div className="askme-view">
-      <p className="eyebrow">满分解锁 · 深入讨论</p>
-      <h2>机制 → 边界 → 迁移</h2>
-      <p>这是一场围绕本节内容的深入讨论。系统会依次与你探讨机制、边界和迁移，帮助你检验理解是否稳固。</p>
-      {!askMe ? (
-        <button className="primary-button large" onClick={runAskMe}>开始深入讨论</button>
+      <header className="askme-intro">
+        <div>
+          <p className="eyebrow">隐藏关卡</p>
+          <h2>Grill Me</h2>
+        </div>
+        {discussion && (
+          <span>
+            {discussion.status === 'completed'
+              ? '已结束'
+              : `主题 ${Math.max(activeTopicIndex + 1, 1)} / ${discussion.topics.length}`}
+          </span>
+        )}
+      </header>
+
+      {loading ? (
+        <div className="askme-loading" aria-live="polite">正在恢复讨论…</div>
+      ) : !discussion ? (
+        <div className="askme-start-card">
+          <button className="primary-button large" disabled={actioning} onClick={start}>
+            {actioning ? '正在准备…' : '进入关卡'}
+          </button>
+        </div>
       ) : (
-        <>
-          <div className="oral-timeline">
-            {askMe.entries.map((entry) => (
-              <section key={entry.dimension}>
-                <span>{entry.dimension}</span>
-                <h3>{entry.prompt}</h3>
-                {entry.answer && <p>你的回答：{entry.answer}</p>}
-                {entry.evaluation !== 'not_evaluated' && <b>评估：{entry.evaluation}</b>}
-              </section>
+        <div className="askme-discussion">
+          <nav className="askme-topic-tabs" aria-label="讨论主题">
+            {discussion.topics.map((topic) => (
+              <div className={`askme-topic-item is-${topic.status} ${topic.id === discussion.activeTopicId ? 'is-current' : ''}`} key={topic.id}>
+                <span>{topic.position + 1}</span>
+                <b>{topic.title}</b>
+                {topic.status === 'closed' && <small>已完成</small>}
+              </div>
             ))}
-          </div>
-          {askMe.status !== 'completed' ? (
-            <>
-              <textarea value={answer} onChange={(event) => setAnswer(event.target.value)} placeholder="在这里作答…" />
-              <button className="primary-button" onClick={runAskMe}>提交本轮</button>
-            </>
-          ) : (
-            <p className="result success">深入讨论完成，证据已写入掌握画像。</p>
-          )}
-        </>
+          </nav>
+
+          <section className="askme-conversation">
+            {discussion.status === 'completed' ? (
+              <div className="askme-complete-card">
+                <h3>本次讨论已结束</h3>
+              </div>
+            ) : activeTopic ? (
+              <>
+                <div className="askme-turn-list">
+                  {activeTurns.map((turn) => (
+                    <article className="askme-turn" key={turn.id}>
+                      <div className="askme-question">
+                        <span>考官追问</span>
+                        <p>{turn.prompt}</p>
+                      </div>
+                      <div className="askme-answer">
+                        <span>你的回答</span>
+                        <p>{turn.answer}</p>
+                      </div>
+                      <div className={`askme-feedback is-${turn.evaluation}`}>
+                        <header>
+                          <span>本轮反馈</span>
+                          <b>{evaluationLabel(turn.evaluation)}</b>
+                        </header>
+                        {turn.feedback.correctPoints.length > 0 && (
+                          <section className="is-correct">
+                            <h4>你答对了什么</h4>
+                            <ul>{turn.feedback.correctPoints.map((item) => <li key={item}>{item}</li>)}</ul>
+                          </section>
+                        )}
+                        {turn.feedback.issues.length > 0 && (
+                          <section className="is-gap">
+                            <h4>具体缺口</h4>
+                            {turn.feedback.issues.map((issue, index) => (
+                              <div key={`${issue.kind}-${index}`}>
+                                {issue.answerExcerpt && <blockquote>“{issue.answerExcerpt}”</blockquote>}
+                                <p>{issue.explanation}</p>
+                              </div>
+                            ))}
+                          </section>
+                        )}
+                        <section className="is-suggestion">
+                          <h4>改进建议</h4>
+                          <ul>{turn.feedback.suggestions.map((item) => <li key={item}>{item}</li>)}</ul>
+                        </section>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+
+                {discussion.status === 'paused' ? (
+                  <div className="askme-paused-card">
+                    <strong>讨论已暂停</strong>
+                    <button className="primary-button" disabled={actioning} onClick={() => applyAction('resume')}>
+                      {actioning ? '正在恢复…' : '继续讨论'}
+                    </button>
+                  </div>
+                ) : (
+                  <div className={`askme-composer ${submitting ? 'is-submitting' : ''}`} aria-busy={submitting}>
+                    <label htmlFor={`askme-answer-${sectionId}`}>
+                      <span>{activeTurns.length ? '下一问' : '当前问题'}</span>
+                      <strong>{displayedPrompt}</strong>
+                    </label>
+                    <textarea
+                      id={`askme-answer-${sectionId}`}
+                      value={answer}
+                      disabled={submitting || actioning}
+                      aria-describedby={submitting ? `askme-review-status-${sectionId}` : undefined}
+                      onChange={(event) => setAnswer(event.target.value)}
+                      placeholder="写下你的判断、依据和不确定的地方…"
+                    />
+                    {submitting && (
+                      <div
+                        className="askme-reviewing-status"
+                        id={`askme-review-status-${sectionId}`}
+                        role="status"
+                        aria-live="assertive"
+                      >
+                        <i aria-hidden="true" />
+                        <span>
+                          <b>评阅中</b>
+                        </span>
+                      </div>
+                    )}
+                    <div className="askme-composer-actions">
+                      <button
+                        type="button"
+                        className="primary-button"
+                        disabled={submitting || actioning || !answer.trim()}
+                        aria-busy={submitting}
+                        onClick={submit}
+                      >
+                        {submitting ? '正在评阅…' : '提交回答'}
+                      </button>
+                      {!isLastTopic && (
+                        <button disabled={submitting || actioning} onClick={() => applyAction('next_topic')}>换个主题 →</button>
+                      )}
+                      <button
+                        className="askme-finish"
+                        disabled={submitting || actioning}
+                        aria-expanded={confirmingFinish}
+                        onClick={() => setConfirmingFinish((current) => !current)}
+                      >
+                        结束关卡
+                      </button>
+                    </div>
+                    {confirmingFinish && (
+                      <div className="askme-finish-confirm" role="alert">
+                        <span>结束后不能继续本次讨论。</span>
+                        <button disabled={actioning} onClick={() => setConfirmingFinish(false)}>继续讨论</button>
+                        <button disabled={actioning} onClick={() => applyAction('finish')}>
+                          {actioning ? '正在结束…' : '确认结束'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
+            ) : null}
+          </section>
+        </div>
       )}
+      <div className="askme-live-status" aria-live="polite">
+        {error && <p className="result failure">{error}</p>}
+        {!error && message && <p>{message}</p>}
+      </div>
     </div>
   );
 }
 
 function QaPanel({
   section,
+  dailyMode,
   hidden,
   onClose,
   selectedBlockId,
   selectedQuote,
   onAnchor,
   onClearQuote,
+  explanationRequest,
+  onSectionChange,
 }: {
   section: Section | null;
+  dailyMode: DailyMode;
   hidden: boolean;
   onClose: () => void;
   selectedBlockId: string;
   selectedQuote: TextQuote | null;
   onAnchor: (id: string) => void;
   onClearQuote: () => void;
+  explanationRequest: ExplanationRequest | null;
+  onSectionChange: (section: Section) => void;
 }) {
   const [threadId, setThreadId] = useState<string>();
   const [newQuestion, setNewQuestion] = useState(false);
   const [question, setQuestion] = useState('');
   const [messages, setMessages] = useState<QaExchange[]>([]);
   const [asking, setAsking] = useState(false);
+  const [historyStatus, setHistoryStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
+  const [historyError, setHistoryError] = useState('');
+  const [draftExplanation, setDraftExplanation] = useState<ExplanationRequest | null>(null);
+  const [styleFeedback, setStyleFeedback] = useState<Record<string, 'helpful' | 'unclear'>>({});
+  const [preferenceError, setPreferenceError] = useState('');
+  const [adoptingExchange, setAdoptingExchange] = useState('');
+  const [adoptedExchange, setAdoptedExchange] = useState('');
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
+  const explanationRequestRef = useRef('');
+  const draftExplanationRef = useRef<ExplanationRequest | null>(null);
   const selectedBlock =
     section?.content?.blocks.find((block) => block.id === selectedBlockId) ??
     section?.content?.blocks[0];
@@ -4542,22 +6914,92 @@ function QaPanel({
   }, [selectedQuote]);
 
   useEffect(() => {
+    if (!explanationRequest || explanationRequestRef.current === explanationRequest.requestId) return;
+    explanationRequestRef.current = explanationRequest.requestId;
+    setDraftExplanation(explanationRequest);
+    setQuestion(explanationRequest.displayQuestion);
+    setNewQuestion(true);
+    setPreferenceError('');
+    requestAnimationFrame(() => composerRef.current?.focus());
+  }, [explanationRequest]);
+
+  useEffect(() => {
+    draftExplanationRef.current = draftExplanation;
+  }, [draftExplanation]);
+
+  useEffect(() => {
     const node = messagesRef.current;
     if (node) node.scrollTop = node.scrollHeight;
   }, [messages]);
 
+  const loadHistory = async () => {
+    if (!section?.content || historyStatus === 'loading') return;
+    setHistoryStatus('loading');
+    setHistoryError('');
+    try {
+      const history = await api.qaHistory(section.id);
+      setMessages(qaHistoryExchanges(history));
+      setThreadId(history.lastThreadId || undefined);
+      if (!selectedQuote && !explanationRequest && history.lastThreadId) {
+        const lastThread = history.threads.find((item) => item.threadId === history.lastThreadId);
+        const lastBlockId = [...(lastThread?.messages || [])]
+          .reverse()
+          .find((message) => message.blockId)?.blockId;
+        if (lastBlockId && section.content.blocks.some((block) => block.id === lastBlockId)) {
+          onAnchor(lastBlockId);
+        }
+      }
+      setHistoryStatus('loaded');
+    } catch (reason) {
+      setHistoryStatus('error');
+      setHistoryError(
+        reason instanceof Error
+          ? reason.message
+          : '暂时无法读取答疑。',
+      );
+    }
+  };
+
+  useEffect(() => {
+    if (!hidden && section?.content && historyStatus === 'idle') {
+      void loadHistory();
+    }
+  }, [hidden, section?.id, section?.content?.id, historyStatus]);
+
   const ask = async () => {
-    if (asking || !section || !effectiveBlockId || !question.trim()) return;
+    if (asking || historyStatus === 'loading' || !section || !effectiveBlockId || !question.trim()) return;
     const visibleQuestion = question.trim();
-    const submittedQuestion = selectedQuote
+    const submittedQuestion = draftExplanation && visibleQuestion === draftExplanation.displayQuestion
+      ? draftExplanation.question
+      : (selectedQuote
       ? `请基于以下选中的正文回答。\n\n选中内容：${selectedQuote.text}\n\n问题：${visibleQuestion}`
-      : visibleQuestion;
+      : visibleQuestion);
     const exchangeId = crypto.randomUUID();
+    const explanationStyle = draftExplanation?.style;
+    const preferenceRequestEventId = draftExplanation?.evidenceEventId;
+    const explanationBlockKind = draftExplanation?.blockKind;
+    const preferenceStatus = draftExplanation?.preferenceStatus === 'saved'
+      ? 'saved'
+      : draftExplanation
+        ? 'unsaved'
+        : undefined;
     setMessages((current) => [
       ...current,
-      { id: exchangeId, question: visibleQuestion, answer: '', relation: 'pending', status: 'streaming' },
+      {
+        id: exchangeId,
+        blockId: effectiveBlockId,
+        question: visibleQuestion,
+        answer: '',
+        relation: 'pending',
+        status: 'streaming',
+        explanationStyle,
+        preferenceRequestEventId,
+        explanationBlockKind,
+        preferenceStatus,
+      },
     ]);
     setQuestion('');
+    setDraftExplanation(null);
     setAsking(true);
     try {
       const result = await api.askStream(
@@ -4569,10 +7011,15 @@ function QaPanel({
         ))),
         newQuestion ? undefined : threadId,
         newQuestion ? 'new_question' : undefined,
+        preferenceRequestEventId && explanationStyle && explanationBlockKind
+          ? { preferenceRequestEventId, explanationStyle, explanationBlockKind }
+          : undefined,
       );
       setThreadId(result.threadId);
       setMessages((current) => current.map((message) => (
-        message.id === exchangeId ? { ...message, relation: result.relation, status: 'done' } : message
+        message.id === exchangeId
+          ? { ...message, threadId: result.threadId, answerMessageId: result.answerMessageId, relation: result.relation, status: 'done' }
+          : message
       )));
       setNewQuestion(false);
     } catch (reason) {
@@ -4597,23 +7044,29 @@ function QaPanel({
   return (
     <aside className="qa-panel" id="section-qa-panel" aria-label="本节答疑" hidden={hidden}>
       <div className="qa-heading">
-        <button className="panel-drawer-close" aria-label="关闭答疑" onClick={onClose}>×</button>
-        <span className="panel-label">答疑</span>
+        <div>
+          <span className="panel-label">答疑</span>
+          <button className="panel-collapse-button" aria-label="收起答疑" onClick={onClose}>收起</button>
+        </div>
         <h2>围绕当前小节追问</h2>
-        <p>答疑独立保存，不会打断正文阅读。</p>
       </div>
       {!section?.content ? (
         <div className="qa-empty">
           <span>?</span>
-          <b>正文生成后即可提问</b>
-          <p>选择正文中的具体段落，AI 会带着当前位置回答。</p>
+          <b>暂不可提问</b>
         </div>
       ) : (
         <>
-          <div className="anchor-card">
-            <span>当前锚点</span>
-            <b>{selectedBlock?.heading || '请选择正文段落'}</b>
-            <select value={effectiveBlockId} onChange={(event) => onAnchor(event.target.value)}>
+          <div className="qa-context-bar">
+            <span>当前段落</span>
+            <select
+              aria-label="当前答疑段落"
+              value={effectiveBlockId}
+              onChange={(event) => {
+                setDraftExplanation(null);
+                onAnchor(event.target.value);
+              }}
+            >
               {section.content.blocks.map((block, index) => (
                 <option value={block.id} key={block.id}>{index + 1}. {block.heading}</option>
               ))}
@@ -4628,12 +7081,71 @@ function QaPanel({
               <blockquote>{selectedQuote.text}</blockquote>
             </div>
           )}
+          {draftExplanation && (
+            <div className="qa-explanation-request" role="status">
+              <span aria-hidden="true">另解</span>
+              <div>
+                <b>{draftExplanation.label}</b>
+                {draftExplanation.preferenceStatus !== 'saved' && (
+                  <small>偏好未保存</small>
+                )}
+              </div>
+              {draftExplanation.preferenceStatus !== 'saved' && (
+                <button type="button" disabled={draftExplanation.preferenceStatus === 'saving'} onClick={async () => {
+                  if (!section.content || draftExplanation.preferenceStatus === 'saving') return;
+                  const retriedDraft = draftExplanation;
+                  const retriedRequestId = retriedDraft.requestId;
+                  setDraftExplanation((current) => current?.requestId === retriedRequestId
+                    ? { ...current, preferenceStatus: 'saving' }
+                    : current);
+                  setPreferenceError('');
+                  try {
+                    await api.recordPreferenceEvidence({
+                      eventId: retriedRequestId,
+                      sectionId: section.id,
+                      contentVersionId: section.content.id,
+                      blockId: retriedDraft.blockId,
+                      blockKind: retriedDraft.blockKind,
+                      style: retriedDraft.style,
+                      signal: 'requested',
+                      customInstruction: retriedDraft.customInstruction,
+                    });
+                    setDraftExplanation((current) => current?.requestId === retriedRequestId ? {
+                      ...current,
+                      evidenceEventId: retriedRequestId,
+                      preferenceStatus: 'saved',
+                    } : current);
+                  } catch (reason) {
+                    setDraftExplanation((current) => current?.requestId === retriedRequestId
+                      ? { ...current, preferenceStatus: 'unsaved' }
+                      : current);
+                    if (draftExplanationRef.current?.requestId === retriedRequestId) {
+                      setPreferenceError(reason instanceof Error ? reason.message : '偏好未保存，请重试。');
+                    }
+                  }
+                }}>{draftExplanation.preferenceStatus === 'saving' ? '保存中…' : '重试保存'}</button>
+              )}
+            </div>
+          )}
           <div className="qa-messages" ref={messagesRef}>
-            {messages.length === 0 && (
+            {historyStatus === 'loading' && (
+              <div className="qa-history-state" role="status" aria-live="polite">
+                <span className="streaming-dots" aria-hidden="true"><i /><i /><i /></span>
+                <b>读取中</b>
+              </div>
+            )}
+            {historyStatus === 'error' && messages.length === 0 && (
+              <div className="qa-history-state error" role="alert">
+                <b>暂时没有读到历史答疑</b>
+                <p>{historyError}</p>
+                <button type="button" onClick={() => void loadHistory()}>重新读取</button>
+              </div>
+            )}
+            {historyStatus === 'loaded' && messages.length === 0 && !draftExplanation && (
               <div className="qa-suggestion">
                 <span>可以这样问</span>
-                <button onClick={() => setQuestion('这个机制最容易被误解的地方是什么？')}>这个机制最容易被误解的地方是什么？</button>
-                <button onClick={() => setQuestion('它在什么边界条件下会失效？')}>它在什么边界条件下会失效？</button>
+                <button onClick={() => { setDraftExplanation(null); setQuestion(dailyMode === 'fast' ? '用一句结论和三个要点解释这段。' : '这个机制最容易被误解的地方是什么？'); }}>{dailyMode === 'fast' ? '用一句结论和三个要点解释这段。' : '这个机制最容易被误解的地方是什么？'}</button>
+                <button onClick={() => { setDraftExplanation(null); setQuestion('它在什么边界条件下会失效？'); }}>它在什么边界条件下会失效？</button>
               </div>
             )}
             {messages.map((message) => (
@@ -4657,6 +7169,87 @@ function QaPanel({
                     {message.status === 'streaming' && message.answer && <span className="stream-caret" />}
                   </div>
                 </div>
+                {message.status === 'done' && message.explanationStyle && (
+                  <div className="explanation-style-feedback">
+                    <span>{message.preferenceRequestEventId ? '这次讲法怎么样？' : '偏好未保存'}</span>
+                    {!message.preferenceRequestEventId && <p>本次回答不会计入长期偏好。</p>}
+                    <div className="explanation-style-actions">
+                      <button
+                        className={styleFeedback[message.id] === 'helpful' ? 'selected' : ''}
+                        disabled={!message.preferenceRequestEventId || Boolean(styleFeedback[message.id]) || adoptedExchange === message.id}
+                        onClick={async () => {
+                          if (message.preferenceRequestEventId && message.blockId && section.content) {
+                            try {
+                              await api.recordPreferenceEvidence({
+                                eventId: crypto.randomUUID(), requestEventId: message.preferenceRequestEventId,
+                                sectionId: section.id, contentVersionId: section.content.id,
+                                blockId: message.blockId, blockKind: message.explanationBlockKind || 'text',
+                                style: message.explanationStyle, signal: 'helpful',
+                              });
+                              setStyleFeedback((current) => ({ ...current, [message.id]: 'helpful' }));
+                              telemetry.track('explanation_style_feedback', {
+                                view: 'learn', entityType: 'section', entityId: section.id,
+                                properties: { style: message.explanationStyle!, helpful: true },
+                              });
+                            } catch (reason) {
+                              setPreferenceError(reason instanceof Error ? reason.message : '操作暂未保存，请重试。');
+                            }
+                          }
+                        }}
+                      >有帮助</button>
+                      <button
+                        className={styleFeedback[message.id] === 'unclear' ? 'selected' : ''}
+                        disabled={!message.preferenceRequestEventId || Boolean(styleFeedback[message.id]) || adoptedExchange === message.id}
+                        onClick={async () => {
+                          if (message.preferenceRequestEventId && message.blockId && section.content) {
+                            try {
+                              await api.recordPreferenceEvidence({
+                                eventId: crypto.randomUUID(), requestEventId: message.preferenceRequestEventId,
+                                sectionId: section.id, contentVersionId: section.content.id,
+                                blockId: message.blockId, blockKind: message.explanationBlockKind || 'text',
+                                style: message.explanationStyle, signal: 'unclear',
+                              });
+                              setStyleFeedback((current) => ({ ...current, [message.id]: 'unclear' }));
+                              telemetry.track('explanation_style_feedback', {
+                                view: 'learn', entityType: 'section', entityId: section.id,
+                                properties: { style: message.explanationStyle!, helpful: false },
+                              });
+                            } catch (reason) {
+                              setPreferenceError(reason instanceof Error ? reason.message : '操作暂未保存，请重试。');
+                            }
+                          }
+                        }}
+                      >还是不清楚</button>
+                      <button
+                        className="replace"
+                        disabled={adoptingExchange === message.id || adoptedExchange === message.id || Boolean(styleFeedback[message.id]) || !message.threadId || !message.answerMessageId || !message.preferenceRequestEventId || !section.content}
+                        onClick={async () => {
+                          const explanationStyle = message.explanationStyle;
+                          if (!explanationStyle || !message.threadId || !message.answerMessageId || !message.preferenceRequestEventId || !message.blockId || !section.content) return;
+                          setAdoptingExchange(message.id);
+                          setPreferenceError('');
+                          try {
+                            await api.adoptPersonalPresentation(section.id, {
+                              eventId: crypto.randomUUID(), requestEventId: message.preferenceRequestEventId,
+                              contentVersionId: section.content.id, blockId: message.blockId,
+                              blockKind: message.explanationBlockKind || 'text', style: explanationStyle,
+                              threadId: message.threadId, answerMessageId: message.answerMessageId,
+                            });
+                            onSectionChange(await api.section(section.id));
+                            setAdoptedExchange(message.id);
+                          } catch (reason) {
+                            setPreferenceError(reason instanceof Error ? reason.message : '暂时无法保存，请重试。');
+                          } finally {
+                            setAdoptingExchange('');
+                          }
+                        }}
+                      >
+                        {adoptingExchange === message.id ? '正在保存…' : adoptedExchange === message.id ? '已保留' : '保留为另一种讲法'}
+                      </button>
+                    </div>
+                    {preferenceError && <p className="explanation-style-error" role="alert">{preferenceError}</p>}
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -4664,6 +7257,7 @@ function QaPanel({
             <textarea
               ref={composerRef}
               value={question}
+              disabled={historyStatus === 'loading'}
               onChange={(event) => setQuestion(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;
@@ -4678,7 +7272,9 @@ function QaPanel({
                 <label><input type="checkbox" checked={newQuestion} onChange={(event) => setNewQuestion(event.target.checked)} /> 新问题</label>
                 <span>Enter 发送 · ⌘/Ctrl + Enter 换行</span>
               </div>
-              <button disabled={asking || !question.trim()} onClick={ask}>{asking ? '回答中…' : '发送 ↑'}</button>
+              <button disabled={asking || historyStatus === 'loading' || !question.trim()} onClick={ask}>
+                {asking ? '回答中…' : '发送 ↑'}
+              </button>
             </div>
           </div>
         </>
@@ -4688,33 +7284,28 @@ function QaPanel({
 }
 
 function ArtifactSubmission({
-  kind,
   id,
   status,
   attachmentCount,
   onSubmit,
 }: {
-  kind: 'practice' | 'capstone';
   id: string;
   status: string;
   attachmentCount: number;
   onSubmit: (action: () => Promise<unknown>) => Promise<void>;
 }) {
-  const label = kind === 'practice' ? '章末实践' : '全书大作业';
   const needsLegacyFile = status === 'completed' && attachmentCount === 0;
   const enabled = status === 'available' || needsLegacyFile;
   const upload = async (file: File) => {
-    const attachment = kind === 'practice' ? await api.uploadPractice(id, file) : await api.uploadCapstone(id, file);
-    return kind === 'practice'
-      ? api.practice(id, { evidence: '由学习者提交', reflection: '已完成章末实践' }, [attachment.id])
-      : api.capstone(id, { artifact: '全书综合成果', verification: '学习者复核记录' }, [attachment.id]);
+    const attachment = await api.uploadCapstone(id, file);
+    return api.capstone(id, { artifact: '全书综合成果', verification: '学习者复核记录' }, [attachment.id]);
   };
   return (
-    <label className={`artifact-submit ${kind} ${enabled ? 'enabled' : ''}`}>
+    <label className={`artifact-submit capstone ${enabled ? 'enabled' : ''}`}>
       <span className="artifact-icon">
-        {status === 'locked' ? <LockIcon size={12} /> : kind === 'practice' ? '◇' : '◆'}
+        {status === 'locked' ? <LockIcon size={12} /> : '◆'}
       </span>
-      <span>{label}</span>
+      <span>全书大作业</span>
       {status !== 'locked' && (
         <small>· {needsLegacyFile ? '补充附件' : status === 'completed' ? '已完成' : '提交成果'}</small>
       )}

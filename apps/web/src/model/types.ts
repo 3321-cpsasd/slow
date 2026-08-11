@@ -16,18 +16,33 @@ export type Series = {
   initializationTask?:LearningTask|null;
 };
 export type Shelf = { id:string; name:string; domain:string; specialty:string; tags:string[]; series:Series[] };
-export type ShelfCreateInput = { name:string; domain:string; specialty:string; tags:string[] };
+export type ShelfCreateInput = { name:string };
 export type ResumePosition = {
   learningRunId:string;
   sectionId:string;
   blockId:string;
   updatedAt:string;
 };
+export type DailyMode = 'fast'|'slow';
+export type DailyModeDuration = '1h'|'3h'|'6h'|'today';
+export type DailyModeSource = 'dialog'|'header_toggle'|'duration_adjustment';
+export type DailyModeState = {
+  active:boolean;
+  dailyMode:DailyMode|null;
+  lastDailyMode:DailyMode|null;
+  duration:DailyModeDuration|null;
+  timezone:string|null;
+  activatedAt:string|null;
+  expiresAt:string|null;
+  version:number;
+  serverNow:string;
+};
 export type Bootstrap = {
   user:{id:string;name:string};
   shelves:Shelf[];
   profile:LearningProfile;
   resume:ResumePosition|null;
+  dailyMode:DailyModeState;
   milestoneDashboard:MilestoneDashboard;
 };
 export type LearningPreferences = {
@@ -35,6 +50,7 @@ export type LearningPreferences = {
   explanationDensity:'auto'|'concise'|'balanced'|'thorough';
   formatPreferences:('diagram'|'worked_example'|'code'|'table'|'analogy')[];
   interactionRhythm:'auto'|'low_interruption'|'balanced'|'frequent_checkins';
+  dailyModePromptEnabled:boolean;
 };
 export type LearningProfile = {
   profession:string;
@@ -145,14 +161,19 @@ export type AccountExitReceipt = {
 };
 export type AuthConfig = {
   mode:'demo'|'local'|'password'|'oidc';
+  registrationMode:'closed'|'alpha'|'open';
+  registrationCodeRequired:boolean;
   providerName:string;
   privacyNotice:PrivacyNotice;
 };
+export type RegistrationResult = AuthState & { recoveryCode:string };
+export type RecoveryResetResult = { reset:true; recoveryCode:string };
 export type AiRuntime = {
   mode:'provider'|'demo'|'injected';
   configured:boolean;
   model:string;
   providerModel:string;
+  fallbackModels:string[];
   baseUrl:string;
   apiKeyStored:boolean;
   ephemeral:boolean;
@@ -163,7 +184,41 @@ export type AiRuntime = {
   streaming:boolean;
 };
 export type Source = { title:string; url:string; kind:string; version:string };
-export type Block = { id:string; version:number; kind:string; role:string; heading:string; content:string; source_indexes:number[] };
+export type Block = {
+  id:string;
+  version:number;
+  kind:string;
+  role:string;
+  heading:string;
+  content:string;
+  source_indexes:number[];
+  teachingMoves?:string[];
+  caseKind?:string;
+  relationToAnchor?:string;
+  readerPriority?:'essential'|'highlight'|'normal';
+  assessmentTargetIds?:string[];
+  personalPresentation?:{
+    id:string;
+    content:string;
+    source:'ask_ai';
+    updatedAt:string;
+  };
+};
+export type LearningPreferenceProjection = {
+  recorded?:boolean;
+  updatedAt:string;
+  dimensions:{
+    key:string;
+    label:string;
+    score:number;
+    confidence:number;
+    evidenceCount:number;
+    positiveOutcomes:number;
+    contextCount:number;
+    active:boolean;
+  }[];
+  effectivePreferences:Record<string,unknown>;
+};
 export type FeedbackReceipt = {
   id:string;
   status:'received';
@@ -182,7 +237,15 @@ export type FeedbackRepairResult = {
   contentBlockId:string;
   replayed:boolean;
 };
-export type Question = { prompt:string; options:string[]; core:boolean; objective:string; assessmentTargetId?:string; selectionMode:'single'|'multiple' };
+export type Question = {
+  prompt:string;
+  options:string[];
+  core:boolean;
+  objective:string;
+  assessmentTargetId?:string;
+  evidenceBlockIds?:string[];
+  selectionMode:'single'|'multiple';
+};
 export type QuizGovernance = {
   decisionId:string;
   scope:string;
@@ -292,10 +355,54 @@ export type Note = {
   verificationAnnotations:NoteVerificationAnnotation[];
 };
 export type AskMe = {id:string;status:string;round:number;dimension:string;prompt:string|null;entries:{dimension:string;prompt:string;answer:string|null;evaluation:string;rationale:string}[]};
-export type Section = SectionSummary & { generation:null|Generation; content:null|{id:string;version:number;blocks:Block[];sources:Source[];sourceVerification:SourceVerification[];confidence:string;publicationStatus:string;generationMode:'model_only'|'rights_grounded'|'demo';rightsStatus:string;factualStatus:string;aiGenerated:boolean;schemaVersion:string;promptVersion:string;boundaryValidation:{status:'passed'|'legacy'|'unverified';ruleVersion:string|null}}; quiz:null|{id:string;generation:number;publicationStatus:string;questions:Question[];governance:QuizGovernance|null}; latestAttemptReview:QuizResult|null; remediations:Remediation[]; note:null|Note; workflowTasks:LearningTask[] };
+export type AskMeDiscussionFeedback = {
+  evaluation:'strong'|'partial'|'weak';
+  correctPoints:string[];
+  issues:{
+    kind:'factual_error'|'reasoning_gap'|'boundary_missed'|'evidence_insufficient'|'transfer_failure'|'off_topic';
+    answerExcerpt:string;
+    explanation:string;
+  }[];
+  suggestions:string[];
+  followUpPrompt:string;
+  followUpPurpose:string;
+  topicSufficiency:'insufficient'|'sufficient';
+};
+export type AskMeDiscussion = {
+  id:string;
+  status:'active'|'paused'|'completed';
+  revision:number;
+  activeTopicId:string;
+  pending:boolean;
+  schemaVersion:string;
+  topics:{
+    id:string;
+    position:number;
+    title:string;
+    purpose:string;
+    dimension:'mechanism'|'boundary'|'transfer';
+    assessmentTargetIds:string[];
+    status:'pending'|'active'|'sufficient'|'closed';
+    currentPrompt:string;
+    turnCount:number;
+    evidenceRecorded:boolean;
+    finalAssessment:Record<string,unknown>;
+  }[];
+  turns:{
+    id:string;
+    topicId:string;
+    turnIndex:number;
+    prompt:string;
+    answer:string;
+    evaluation:'strong'|'partial'|'weak';
+    feedback:AskMeDiscussionFeedback;
+    createdAt:string;
+  }[];
+};
+export type Section = SectionSummary & { dailyModeAtStart?:DailyMode;dailyModeStateVersion?:number;activityStartedAt?:string; generation:null|Generation; content:null|{id:string;version:number;blocks:Block[];sources:Source[];sourceVerification:SourceVerification[];confidence:string;publicationStatus:string;generationMode:'model_only'|'rights_grounded'|'demo';rightsStatus:string;factualStatus:string;aiGenerated:boolean;schemaVersion:string;promptVersion:string;boundaryValidation:{status:'passed'|'legacy'|'unverified';ruleVersion:string|null}}; quiz:null|{id:string;generation:number;publicationStatus:string;questions:Question[];governance:QuizGovernance|null}; latestAttemptReview:QuizResult|null; remediations:Remediation[]; note:null|Note; workflowTasks:LearningTask[] };
 export type LearningTask = {
   taskId:string;
-  type:'content_feedback_regeneration'|'initial_book_preload'|'note_generation'|'remediation_generation'|'next_section_preload';
+  type:'content_feedback_regeneration'|'initial_book_preload'|'note_generation'|'remediation_generation'|'next_section_preload'|'section_lookahead_preload';
   sectionId:string|null;
   triggerId?:string|null;
   status:'pending'|'running'|'succeeded'|'failed';
@@ -337,6 +444,7 @@ export type QuizResult = {
 export type QaAnswer = {
   sessionId:string;
   threadId:string;
+  answerMessageId:string;
   relation:'follow_up'|'new_question';
   answer:string;
 };
@@ -345,4 +453,30 @@ export type QaCorrection = {
   targetThreadId:string;
   classification:'follow_up';
   corrected:boolean;
+};
+export type QaHistoryMessage = {
+  id:string;
+  blockId:string;
+  role:'user'|'assistant';
+  content:string;
+  createdAt:string;
+  preferenceRequestEventId?:string|null;
+  explanationStyle?:'worked_example'|'diagram'|'analogy'|'derivation'|'precise'|'concise'|'custom'|null;
+  explanationBlockKind?:Block['kind']|null;
+  requestSource?:'ask_ai'|'explanation_preference';
+};
+export type QaHistoryThread = {
+  threadId:string;
+  summary:string;
+  relation:'follow_up'|'new_question';
+  corrected:boolean;
+  createdAt:string;
+  updatedAt:string;
+  messages:QaHistoryMessage[];
+};
+export type QaHistory = {
+  sectionId:string;
+  lastThreadId:string|null;
+  truncated:boolean;
+  threads:QaHistoryThread[];
 };

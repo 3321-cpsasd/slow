@@ -156,6 +156,7 @@ def test_context_pack_propagates_profile_mission_depth_and_attempt():
                     "explanationDensity": "thorough",
                     "formatPreferences": ["worked_example", "diagram"],
                     "interactionRhythm": "balanced",
+                    "dailyModePromptEnabled": False,
                 },
                 ensure_ascii=False,
             )
@@ -168,7 +169,7 @@ def test_context_pack_propagates_profile_mission_depth_and_attempt():
         assert plan_context["operation"] == "plan"
         assert plan_context["learner"]["planRole"] == "猎头顾问"
         assert plan_context["learner"]["planExperience"].startswith("能阅读技术简历")
-        assert plan_context["policy"]["depthPolicy"]["label"] == "深度学习"
+        assert plan_context["policy"]["depthPolicy"]["label"] == "深入理解"
 
         chapter_context = ai.requests["chapter"][0]["generationContext"]
         assert chapter_context["operation"] == "chapter"
@@ -266,6 +267,10 @@ def test_context_pack_propagates_profile_mission_depth_and_attempt():
         assert remediation_context["learningState"]["attempt"]["answers"]
         assert remediation_context["learningState"]["attempt"]["scoringResults"]
         assert remediation_context["learner"]["planRole"] == "猎头顾问"
+        assert not any(
+            request.get("remediationStrategy")
+            for request in ai.requests["alignment"]
+        )
 
         with client.app.state.sessions() as db:
             contract = db.scalar(select(LearningContractVersion))

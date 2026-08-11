@@ -19,6 +19,20 @@ class Settings(BaseSettings):
     ai_provider_protocol: Literal["openai", "anthropic"] = "openai"
     openai_api_mode: Literal["responses", "chat_completions"] = "responses"
     openai_reasoning_mode: Literal["optional", "required", "disabled"] = "optional"
+    ai_request_timeout_seconds: int = Field(
+        default=90,
+        ge=15,
+        le=300,
+        validation_alias="AI_REQUEST_TIMEOUT_SECONDS",
+    )
+    ai_fallback_models: str = Field(
+        default="qwen3.8-max-preview",
+        validation_alias="AI_FALLBACK_MODELS",
+    )
+    qwen38_api_key: str = Field(default="", validation_alias="QWEN38_API_KEY")
+    qwen38_base_url: str = Field(default="", validation_alias="QWEN38_BASE_URL")
+    kimi_k3_api_key: str = Field(default="", validation_alias="KIMI_K3_API_KEY")
+    kimi_k3_base_url: str = Field(default="", validation_alias="KIMI_K3_BASE_URL")
     source_claim_fetch_concurrency: int = Field(default=6, ge=1, le=32)
     source_claim_review_concurrency: int = Field(default=2, ge=1, le=16)
     database_url: str = f"sqlite+pysqlite:///{ROOT / 'data' / 'slow-v0.db'}"
@@ -34,6 +48,9 @@ class Settings(BaseSettings):
     session_cookie_secure: bool = False
     password_escrow_enabled: bool = False
     password_escrow_path: Path = ROOT / "data" / "password-escrow.json"
+    registration_mode: Literal["closed", "alpha", "open"] = "closed"
+    alpha_registration_code: str = ""
+    alpha_registration_daily_limit: int = Field(default=100, ge=1, le=10000)
     oidc_issuer: str = ""
     oidc_client_id: str = ""
     oidc_client_secret: str = ""

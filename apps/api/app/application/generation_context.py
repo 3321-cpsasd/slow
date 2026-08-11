@@ -34,6 +34,24 @@ from ..infrastructure.tables import (
 )
 from ..modules.curriculum.baselines import CurriculumBaselineService
 from ..modules.knowledge.context import KnowledgeContextBuilder
+from ..modules.preferences.service import LearningPreferenceService
+
+
+PEDAGOGICAL_PREFERENCE_KEYS = {
+    "openingStyle",
+    "explanationDensity",
+    "formatPreferences",
+    "interactionRhythm",
+    "styleGuidance",
+}
+
+
+def _pedagogical_preferences(value: Any) -> dict[str, Any]:
+    return {
+        key: item
+        for key, item in (value.items() if isinstance(value, dict) else ())
+        if key in PEDAGOGICAL_PREFERENCE_KEYS
+    }
 
 
 def _load(value: str, default):
@@ -69,7 +87,7 @@ class GenerationContextBuilder:
         curriculum_baseline: dict[str, Any] | None = None,
     ) -> GenerationContextPack:
         plan = self._plan(series, mission)
-        learner = self._learner(plan, mission, plan_input)
+        learner = self._learner(plan, mission, plan_input, shelf_id=shelf.id)
         mission_depth = (
             _load(mission.constraints_json, {}).get("depth") if mission else ""
         )
@@ -159,6 +177,8 @@ class GenerationContextBuilder:
         plan: LearningPlan | None,
         mission: LearningMissionVersion | None,
         plan_input: dict[str, Any] | None,
+        *,
+        shelf_id: str,
     ) -> LearnerContext:
         profile = self.db.get(UserProfile, self.user_id)
         baseline = {
@@ -170,7 +190,9 @@ class GenerationContextBuilder:
             "experience": profile.experience if profile else "",
             "weeklyMinutes": profile.weekly_minutes if profile else 0,
             "targetDate": profile.target_date if profile else "",
-            "preferences": _load(profile.preferences_json, {}) if profile else {},
+            "preferences": _pedagogical_preferences(
+                _load(profile.preferences_json, {}) if profile else {}
+            ),
         }
         adopted = _load(mission.learner_context_json, {}) if mission else {}
         submitted = plan_input or {}
@@ -197,6 +219,16 @@ class GenerationContextBuilder:
         ):
             if adopted.get(key) not in (None, "", []):
                 baseline[alias] = adopted[key]
+        baseline["preferences"] = _pedagogical_preferences(
+            baseline["preferences"]
+        )
+        baseline["preferences"] = LearningPreferenceService(
+            self.db,
+            self.user_id,
+        ).effective_preferences(
+            baseline["preferences"],
+            shelf_id=shelf_id,
+        )
         if plan and plan.purpose:
             baseline["purpose"] = plan.purpose
         if submitted.get("purpose"):

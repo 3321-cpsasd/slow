@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from datetime import timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -8,6 +9,7 @@ from ...core.errors import AiError, AppError
 from ...infrastructure.tables import (
     LearningContractVersion,
     LearningMissionVersion,
+    LearningPreferenceEvidence,
     LearningRunSectionBinding,
     QaMessage,
     QaSession,
@@ -16,6 +18,10 @@ from ...infrastructure.tables import (
 )
 from ..learning.contracts import open_run_section
 from ..learning.progress import ProgressStore
+
+
+QA_HISTORY_THREAD_LIMIT = 10
+QA_HISTORY_MESSAGES_PER_THREAD = 20
 
 
 class QaService:
@@ -33,6 +39,7 @@ class QaService:
         generation_contexts: GenerationContextBuilder,
         section_reader: Callable,
         memory_loader: Callable,
+        daily_mode_reader: Callable,
         uid: Callable[[str], str],
         dump: Callable,
         load: Callable,
@@ -46,9 +53,129 @@ class QaService:
         self.generation_contexts = generation_contexts
         self.section_reader = section_reader
         self.memory_loader = memory_loader
+        self.daily_mode_reader = daily_mode_reader
         self.uid = uid
         self.dump = dump
         self.load = load
+
+    def history(self, section_id: str):
+        """Return persisted Ask AI history for the user's active learning run.
+
+        Reading history is deliberately side-effect free: opening a section that
+        has never used Ask AI must not create an empty QA session.
+        """
+        section_context = self.contexts.resolve_section(
+            user_id=self.user_id,
+            section_id=section_id,
+        )
+        learning_run = self.progress.active_run(section_context.series.id)
+        session = self.db.scalar(
+            select(QaSession).where(
+                QaSession.section_id == section_id,
+                QaSession.user_id == self.user_id,
+                QaSession.learning_run_id == learning_run.id,
+            )
+        )
+        if not session:
+            return {
+                "sectionId": section_id,
+                "lastThreadId": None,
+                "threads": [],
+                "truncated": False,
+            }
+
+        recent_threads = self.db.scalars(
+            select(QaThread)
+            .where(QaThread.session_id == session.id)
+            .order_by(QaThread.updated_at.desc(), QaThread.thread_id.desc())
+            .limit(QA_HISTORY_THREAD_LIMIT + 1)
+        ).all()
+        threads_truncated = len(recent_threads) > QA_HISTORY_THREAD_LIMIT
+        threads = sorted(
+            recent_threads[:QA_HISTORY_THREAD_LIMIT],
+            key=lambda thread: (thread.created_at, thread.thread_id),
+        )
+        messages_by_thread: dict[str, list[dict]] = {
+            thread.thread_id: [] for thread in threads
+        }
+        messages_truncated = False
+        for thread in threads:
+            recent_messages = self.db.scalars(
+                select(QaMessage)
+                .where(
+                    QaMessage.session_id == session.id,
+                    QaMessage.thread_id == thread.thread_id,
+                )
+                .order_by(QaMessage.created_at.desc(), QaMessage.id.desc())
+                .limit(QA_HISTORY_MESSAGES_PER_THREAD + 2)
+            ).all()
+            if len(recent_messages) > QA_HISTORY_MESSAGES_PER_THREAD:
+                messages_truncated = True
+            messages = list(reversed(recent_messages))[
+                -QA_HISTORY_MESSAGES_PER_THREAD:
+            ]
+            messages_by_thread[thread.thread_id] = [
+                {
+                    "id": message.id,
+                    "blockId": message.block_id,
+                    "role": message.role,
+                    "content": message.content,
+                    "createdAt": message.created_at.isoformat(),
+                    "preferenceRequestEventId": message.preference_request_event_id,
+                    "explanationStyle": message.explanation_style,
+                    "explanationBlockKind": message.explanation_block_kind,
+                    "requestSource": message.request_source,
+                }
+                for message in messages
+            ]
+
+        # Older rows were inserted as a user/assistant pair without an
+        # explicit causal timestamp. SQLAlchemy may flush same-table rows in
+        # primary-key order, so the assistant row can receive the earlier
+        # default timestamp. Each saved turn is exactly one adjacent pair;
+        # normalize that pair for a stable, conversational history view.
+        for thread_id, thread_messages in messages_by_thread.items():
+            ordered_messages: list[dict] = []
+            for position in range(0, len(thread_messages), 2):
+                pair = thread_messages[position : position + 2]
+                if {item["role"] for item in pair} == {"user", "assistant"}:
+                    pair = sorted(
+                        pair,
+                        key=lambda item: 0 if item["role"] == "user" else 1,
+                    )
+                ordered_messages.extend(pair)
+            messages_by_thread[thread_id] = ordered_messages
+
+        thread_ids = {thread.thread_id for thread in threads}
+        memory = self.load(session.memory_json, {}) or {}
+        last_thread_id = memory.get("lastThread")
+        if last_thread_id not in thread_ids:
+            last_thread_id = (
+                max(
+                    threads,
+                    key=lambda thread: (thread.updated_at, thread.thread_id),
+                ).thread_id
+                if threads
+                else None
+            )
+
+        return {
+            "sectionId": section_id,
+            "lastThreadId": last_thread_id,
+            "truncated": threads_truncated or messages_truncated,
+            "threads": [
+                {
+                    "threadId": thread.thread_id,
+                    "summary": thread.summary,
+                    "relation": thread.classification,
+                    "corrected": thread.corrected,
+                    "createdAt": thread.created_at.isoformat(),
+                    "updatedAt": thread.updated_at.isoformat(),
+                    "messages": messages_by_thread[thread.thread_id],
+                }
+                for thread in threads
+            ],
+        }
 
     def prepare(self, section_id: str, body):
         section_context = self.contexts.resolve_section(
@@ -85,6 +212,42 @@ class QaService:
                 code="BLOCK_INVALID",
                 status=409,
             )
+        preference_metadata = None
+        if body.preference_request_event_id:
+            preference_request = self.db.scalar(
+                select(LearningPreferenceEvidence).where(
+                    LearningPreferenceEvidence.user_id == self.user_id,
+                    LearningPreferenceEvidence.event_id
+                    == body.preference_request_event_id,
+                    LearningPreferenceEvidence.signal == "requested",
+                )
+            )
+            if not preference_request:
+                raise AppError(
+                    "找不到对应的讲法请求",
+                    code="PREFERENCE_EVIDENCE_PARENT_NOT_FOUND",
+                    status=404,
+                )
+            if (
+                preference_request.section_id != section_id
+                or preference_request.content_version_id
+                != binding.content_version_id
+                or preference_request.block_id != body.block_id
+                or preference_request.style != body.explanation_style
+                or preference_request.block_kind
+                != body.explanation_block_kind
+            ):
+                raise AppError(
+                    "讲法请求与当前正文不一致",
+                    code="PREFERENCE_EVIDENCE_INVALID",
+                    status=409,
+                )
+            preference_metadata = {
+                "preferenceRequestEventId": body.preference_request_event_id,
+                "explanationStyle": body.explanation_style,
+                "explanationBlockKind": body.explanation_block_kind,
+                "requestSource": "explanation_preference",
+            }
         session = self.db.scalar(
             select(QaSession).where(
                 QaSession.section_id == section_id,
@@ -92,6 +255,7 @@ class QaService:
                 QaSession.learning_run_id == learning_run.id,
             )
         )
+        daily_mode_state = self.daily_mode_reader()
         if not session:
             session = QaSession(
                 id=self.uid("qa"),
@@ -102,8 +266,19 @@ class QaService:
                     binding.learning_contract_version_id
                 ),
                 content_version_id=binding.content_version_id,
+                daily_mode=daily_mode_state.get("dailyMode") or "slow",
             )
             self.db.add(session)
+            self.db.commit()
+        elif (
+            daily_mode_state.get("active")
+            and daily_mode_state.get("dailyMode") in {"fast", "slow"}
+            and session.daily_mode != daily_mode_state["dailyMode"]
+        ):
+            # An explicit active-mode change should affect the next answer.
+            # Once the mode expires, keep the session snapshot so an ongoing
+            # activity is not interrupted by the selection dialog.
+            session.daily_mode = daily_mode_state["dailyMode"]
             self.db.commit()
         messages = self.db.scalars(
             select(QaMessage)
@@ -156,6 +331,7 @@ class QaService:
             interaction={
                 "anchorBlockId": body.block_id,
                 "question": body.question,
+                "explanationPreference": preference_metadata,
                 "currentThreadFullHistory": current_history,
                 "relatedThreadSummaries": related_summaries,
             },
@@ -167,6 +343,7 @@ class QaService:
             "requestedThreadId": body.thread_id,
             "forcedRelation": body.force_relation,
             "newThreadId": suggested,
+            "dailyMode": session.daily_mode,
             "weightedContext": {
                 "currentThreadFullHistory": current_history,
                 "relatedThreadSummaries": related_summaries,
@@ -177,6 +354,7 @@ class QaService:
             "session": session,
             "suggestedThreadId": suggested,
             "request": self.generation_contexts.attach(request, context_pack),
+            "preferenceMetadata": preference_metadata,
         }
 
     def save_answer(
@@ -211,26 +389,41 @@ class QaService:
         thread_summary = thread_summary.strip() or answer.strip()[:240]
         thread.summary = thread_summary
         thread.updated_at = now()
-        self.db.add_all(
-            [
-                QaMessage(
-                    id=self.uid("msg"),
-                    session_id=session.id,
-                    thread_id=thread_id,
-                    block_id=body.block_id,
-                    role="user",
-                    content=body.question,
-                ),
-                QaMessage(
-                    id=self.uid("msg"),
-                    session_id=session.id,
-                    thread_id=thread_id,
-                    block_id=body.block_id,
-                    role="assistant",
-                    content=answer,
-                ),
-            ]
+        user_message_created_at = now()
+        preference_metadata = context.get("preferenceMetadata") or {}
+        message_metadata = {
+            "preference_request_event_id": preference_metadata.get(
+                "preferenceRequestEventId"
+            ),
+            "explanation_style": preference_metadata.get("explanationStyle"),
+            "explanation_block_kind": preference_metadata.get(
+                "explanationBlockKind"
+            ),
+            "request_source": preference_metadata.get(
+                "requestSource", "ask_ai"
+            ),
+        }
+        user_message = QaMessage(
+            id=self.uid("msg"),
+            session_id=session.id,
+            thread_id=thread_id,
+            block_id=body.block_id,
+            role="user",
+            content=body.question,
+            created_at=user_message_created_at,
+            **message_metadata,
         )
+        assistant_message = QaMessage(
+            id=self.uid("msg"),
+            session_id=session.id,
+            thread_id=thread_id,
+            block_id=body.block_id,
+            role="assistant",
+            content=answer,
+            created_at=user_message_created_at + timedelta(microseconds=1),
+            **message_metadata,
+        )
+        self.db.add_all([user_message, assistant_message])
         memory = self.load(session.memory_json, {"threads": {}}) or {
             "threads": {}
         }
@@ -241,6 +434,7 @@ class QaService:
         return {
             "sessionId": session.id,
             "threadId": thread_id,
+            "answerMessageId": assistant_message.id,
             "relation": relation,
             "answer": answer,
             "classificationCorrectable": True,
@@ -283,6 +477,7 @@ class QaService:
             "type": "done",
             "sessionId": saved["sessionId"],
             "threadId": saved["threadId"],
+            "answerMessageId": saved["answerMessageId"],
             "relation": saved["relation"],
             "classificationCorrectable": True,
         }

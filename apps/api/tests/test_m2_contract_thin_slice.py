@@ -194,9 +194,10 @@ def test_m2_contract_thin_slice_engineering_chain_is_complete():
             assert db.scalar(
                 select(func.count()).select_from(GovernanceDecisionSnapshot)
             ) == 12
-            # conclusion, mechanism and boundary each carry an explicit
-            # claim-level gap per generated section.
-            assert db.scalar(select(func.count()).select_from(KnowledgeGap)) == 12
+            # Governance no longer manufactures gaps from fixed paragraph
+            # roles. Only the explicitly assessable target claim carries a
+            # claim-level gap for each generated section.
+            assert db.scalar(select(func.count()).select_from(KnowledgeGap)) == 4
             assert db.scalar(
                 select(func.count()).select_from(LearningDecisionSnapshot).where(
                     LearningDecisionSnapshot.decision_kind == "assessment_gate"

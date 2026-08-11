@@ -13,7 +13,7 @@ import pytest
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, event, func, select
-from app.ai.contracts import AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedChapter, GeneratedContent, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedQuiz, GeneratedSectionOutline, PlanBook, PlanChapter, PlanMilestone, PlanMilestoneCriterion, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
+from app.ai.contracts import AskMeDiscussionTurn, AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedChapter, GeneratedContent, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedQuiz, GeneratedSectionOutline, PlanBook, PlanChapter, PlanMilestone, PlanMilestoneCriterion, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
 from app.application.service import (
     apply_source_repair_scope,
     source_blacklist_from_generation_traces,
@@ -39,8 +39,12 @@ from app.infrastructure.tables import (
     AssessmentGateState,
     AssessmentObservation,
     AssessmentTarget,
+    AskMeDiscussionSession,
+    AskMeDiscussionTopic,
+    AskMeDiscussionTurnRecord,
     Book,
     ChapterRevision,
+    ContentBlockClaimAnchor,
     ContentBlockVersion,
     ContentVersion,
     EvidenceQualificationEvent,
@@ -64,6 +68,7 @@ from app.infrastructure.tables import (
     MilestonePathRevision,
     QuizAttempt,
     QuizSet,
+    QaSession,
     ReviewState,
     ScoringResult,
     Remediation,
@@ -75,6 +80,7 @@ from app.infrastructure.tables import (
     SourceClaimVersion,
     SourceVersion,
     UserFeedback,
+    UserDailyModeState,
     now,
 )
 from app.modules.learning.assessment import (
@@ -231,6 +237,20 @@ class FakeAi:
     async def ask_me(self, request):
         dimension = request["dimension"]
         return AskMeTurn(dimension=dimension, prompt=f"请说明 {dimension}", evaluation="not_evaluated" if not request.get("previousAnswer") else "strong", rationale="回答覆盖关键点")
+    async def ask_me_discussion(self, request):
+        return AskMeDiscussionTurn(
+            evaluation="partial",
+            correct_points=["回答已经提出了一个可判断的观点。"],
+            issues=[{
+                "kind": "evidence_insufficient",
+                "answer_excerpt": request["previousAnswer"],
+                "explanation": "还需要一个可以验证判断的具体信号。",
+            }],
+            suggestions=["补充一个业务或技术层面的可观察证据。"],
+            follow_up_prompt="什么证据会让你改变刚才的判断？",
+            follow_up_purpose="检查判断边界是否稳定。",
+            topic_sufficiency="insufficient",
+        )
     async def replan_book(self, request, memory):
         return ReplannedBook(rationale="根据学习记忆减少重复", chapters=[ReplannedChapter(title="重规划章节", objective="验证迁移")])
 
@@ -622,11 +642,13 @@ def test_model_only_route_does_not_turn_missing_sources_into_governance():
     assert task["status"] == "succeeded"
     assert task["attemptCount"] == 1
     assert recovered.status_code == 200
-    assert ai.content_requests == [{"urls": [], "hosts": []}]
-    assert ai.quiz_requests == [{
+    assert ai.content_requests
+    assert all(item == {"urls": [], "hosts": []} for item in ai.content_requests)
+    assert ai.quiz_requests
+    assert all(item == {
         "unverifiedSourceIndexes": [],
         "contentReliability": None,
-    }]
+    } for item in ai.quiz_requests)
     body = recovered.json()
     assert body["content"]["confidence"] == "high"
     assert body["content"]["sources"] == []
@@ -652,8 +674,17 @@ def test_claim_verification_does_not_hold_the_sqlite_write_lock(tmp_path):
         assert task["status"] == "succeeded"
         assert verifier.probed is True
         with source_client.app.state.sessions() as db:
-            assert db.scalar(select(func.count()).select_from(ContentVersion)) == 1
-            assert db.scalar(select(func.count()).select_from(QuizSet)) == 1
+            first_section_id = task["result"]["targetSectionId"]
+            assert db.scalar(
+                select(func.count()).select_from(ContentVersion).where(
+                    ContentVersion.section_id == first_section_id,
+                )
+            ) == 1
+            assert db.scalar(
+                select(func.count()).select_from(QuizSet).where(
+                    QuizSet.section_id == first_section_id,
+                )
+            ) == 1
 
 
 def test_claim_verification_failure_publishes_no_content_or_quiz(tmp_path):
@@ -686,7 +717,7 @@ def client(tmp_path):
         yield value
 
 
-def test_note_and_next_section_run_in_parallel_without_early_unlock(tmp_path):
+def test_cached_next_section_becomes_ready_without_waiting_for_note(tmp_path):
     ai = ParallelWorkflowAi()
     storage = LocalAttachmentStorage(tmp_path / "parallel-attachments")
     database_url = f"sqlite+pysqlite:///{tmp_path / 'parallel.db'}"
@@ -707,6 +738,19 @@ def test_note_and_next_section_run_in_parallel_without_early_unlock(tmp_path):
         section = parallel_client.get(
             f"/api/sections/{first_section['id']}"
         ).json()
+        with parallel_client.app.state.sessions() as db:
+            lookahead = db.scalar(
+                select(LearningTask).where(
+                    LearningTask.task_type == "section_lookahead_preload",
+                    LearningTask.section_id == first_section["id"],
+                )
+            )
+            assert lookahead is not None
+            lookahead_id = lookahead.id
+        assert wait_for_task(
+            parallel_client,
+            lookahead_id,
+        )["status"] == "succeeded"
 
         ai.parallel_phase = True
         result = parallel_client.post(
@@ -718,35 +762,23 @@ def test_note_and_next_section_run_in_parallel_without_early_unlock(tmp_path):
         ).json()
         tasks = {task["type"]: task for task in result["workflowTasks"]}
 
-        try:
-            assert ai.next_section_started.wait(2)
-            deadline = time.monotonic() + 2
-            while "note_end" not in ai.events and time.monotonic() < deadline:
-                time.sleep(0.01)
-            assert ai.events.index("next_section_start") < ai.events.index("note_end")
-
-            preparing_series = parallel_client.get(
-                f"/api/series/{series['id']}"
-            ).json()
-            preparing_sections = preparing_series["books"][0]["chapters"][0]["sections"]
-            assert preparing_sections[0]["status"] == "completed"
-            assert preparing_sections[1]["status"] == "preparing"
-
-            preparing = parallel_client.get(
-                f"/api/sections/{preparing_sections[1]['id']}"
-            )
-            assert preparing.status_code == 409
-            assert preparing.json()["code"] == "SECTION_PREPARING"
-        finally:
-            ai.release_next_section.set()
+        assert wait_for_task(
+            parallel_client,
+            tasks["next_section_preload"]["taskId"],
+        )["status"] == "succeeded"
+        ready_series = parallel_client.get(
+            f"/api/series/{series['id']}"
+        ).json()
+        ready_sections = ready_series["books"][0]["chapters"][0]["sections"]
+        assert ready_sections[0]["status"] == "completed"
+        assert ready_sections[1]["status"] == "available"
+        assert parallel_client.get(
+            f"/api/sections/{ready_sections[1]['id']}"
+        ).status_code == 200
 
         assert wait_for_task(
             parallel_client,
             tasks["note_generation"]["taskId"],
-        )["status"] == "succeeded"
-        assert wait_for_task(
-            parallel_client,
-            tasks["next_section_preload"]["taskId"],
         )["status"] == "succeeded"
 
         ready_series = parallel_client.get(
@@ -1559,7 +1591,7 @@ def test_assessment_gate_remediates_only_failed_target_and_rebuilds(client):
         item for item in memory
         if item.get("assessmentTargetId") == original_targets["核心目标"]
     )
-    assert core_memory["projectionRuleVersion"] == "mastery_v2"
+    assert core_memory["projectionRuleVersion"] == "mastery_v3"
     assert core_memory["pKnown"] == 0.056604
     assert core_memory["mastery"] == 6
 
@@ -2393,6 +2425,19 @@ def create_series(client):
     return client.post("/api/plans", json={"shelfId":"shelf_technology","topic":"Kubernetes","role":"技术人员","experience":"会 Docker","depth":"deep"}).json()
 
 
+def test_shelf_topics_are_rebuilt_from_confirmed_series(client):
+    series = create_series(client)
+
+    shelf = client.get("/api/bootstrap").json()["shelves"][0]
+    assert shelf["domain"] == ""
+    assert shelf["specialty"] == ""
+    assert shelf["tags"] == ["Kubernetes"]
+
+    assert client.delete(f"/api/series/{series['id']}").status_code == 204
+    rebuilt = client.get("/api/bootstrap").json()["shelves"][0]
+    assert rebuilt["tags"] == []
+
+
 def test_plan_creation_persists_and_exposes_immutable_mission(client):
     series = create_series(client)
 
@@ -2778,6 +2823,61 @@ def test_qa_correction_and_three_round_ask_me(client):
     assert edited["aiContent"] == before["aiContent"] and edited["userContent"] == {"my":"补充"}
 
 
+def test_ask_ai_tracks_explicit_daily_mode_switch_but_not_expiry(client):
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    section = generate_and_pass(client, chapter["sections"][0]["id"])
+    block_id = section["content"]["blocks"][0]["id"]
+
+    fast = client.put(
+        "/api/daily-mode",
+        headers={"Idempotency-Key": "qa-mode-fast"},
+        json={
+            "dailyMode": "fast",
+            "duration": "1h",
+            "timezone": "Asia/Shanghai",
+            "source": "header_toggle",
+        },
+    )
+    assert fast.status_code == 200
+    assert client.post(
+        f"/api/sections/{section['id']}/ask",
+        json={"blockId": block_id, "question": "先说结论"},
+    ).status_code == 200
+    with client.app.state.sessions() as db:
+        assert db.scalar(select(QaSession)).daily_mode == "fast"
+
+    slow = client.put(
+        "/api/daily-mode",
+        headers={"Idempotency-Key": "qa-mode-slow"},
+        json={
+            "dailyMode": "slow",
+            "duration": "1h",
+            "timezone": "Asia/Shanghai",
+            "source": "header_toggle",
+        },
+    )
+    assert slow.status_code == 200
+    assert client.post(
+        f"/api/sections/{section['id']}/ask",
+        json={"blockId": block_id, "question": "再说清楚机制"},
+    ).status_code == 200
+    with client.app.state.sessions() as db:
+        assert db.scalar(select(QaSession)).daily_mode == "slow"
+        state = db.scalar(select(UserDailyModeState))
+        state.expires_at = now() - timedelta(seconds=1)
+        db.commit()
+
+    assert client.post(
+        f"/api/sections/{section['id']}/ask",
+        json={"blockId": block_id, "question": "到期后继续"},
+    ).status_code == 200
+    with client.app.state.sessions() as db:
+        assert db.scalar(select(QaSession)).daily_mode == "slow"
+
+
 def test_ask_me_retries_invalid_model_evaluation():
     class FlakyAskMeAi(FakeAi):
         answered_calls = 0
@@ -2798,6 +2898,362 @@ def test_ask_me_retries_invalid_model_evaluation():
         advanced = retry_client.post(f"/api/sections/{section['id']}/ask-me", json={"answer":"机制回答"})
         assert advanced.status_code == 200 and advanced.json()["dimension"] == "boundary"
         assert ai.answered_calls == 2
+
+
+def test_ask_me_discussion_is_resumable_and_turn_submissions_are_idempotent(client):
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    section = generate_and_pass(client, chapter["sections"][0]["id"])
+    path = f"/api/sections/{section['id']}/ask-me/discussion"
+
+    assert client.get(path).json() is None
+    started = client.post(path).json()
+    assert started["status"] == "active"
+    assert started["revision"] == 0
+    assert len(started["topics"]) == 3
+    assert [item["dimension"] for item in started["topics"]] == [
+        "mechanism",
+        "boundary",
+        "transfer",
+    ]
+
+    turn_body = {
+        "sessionId": started["id"],
+        "topicId": started["activeTopicId"],
+        "expectedRevision": 0,
+        "answer": "我会先提出判断，再用一个可观察的业务信号验证它。",
+    }
+    headers = {"Idempotency-Key": "ask-me-v2-turn-0001"}
+    submitted = client.post(f"{path}/turns", json=turn_body, headers=headers)
+    assert submitted.status_code == 200
+    first = submitted.json()
+    assert first["revision"] == 1
+    assert len(first["turns"]) == 1
+    assert first["turns"][0]["feedback"]["correctPoints"]
+    assert first["turns"][0]["feedback"]["issues"][0]["explanation"]
+    assert first["turns"][0]["feedback"]["suggestions"]
+
+    replay = client.post(f"{path}/turns", json=turn_body, headers=headers)
+    assert replay.status_code == 200
+    assert replay.json() == first
+    assert len(client.get(path).json()["turns"]) == 1
+
+    conflict_body = {**turn_body, "answer": "复用同一个键提交另一份答案"}
+    conflict = client.post(
+        f"{path}/turns",
+        json=conflict_body,
+        headers=headers,
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "ASK_ME_DISCUSSION_IDEMPOTENCY_CONFLICT"
+
+    stale = client.post(
+        f"{path}/turns",
+        json={**turn_body, "answer": "旧版本上的新回答"},
+        headers={"Idempotency-Key": "ask-me-v2-turn-stale"},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "ASK_ME_DISCUSSION_REVISION_CONFLICT"
+
+    continued = client.post(
+        f"{path}/turns",
+        json={
+            **turn_body,
+            "expectedRevision": 1,
+            "answer": "我继续沿着同一个主题补充反例和判断边界。",
+        },
+        headers={"Idempotency-Key": "ask-me-v2-turn-0002"},
+    ).json()
+    assert continued["activeTopicId"] == started["activeTopicId"]
+    assert continued["topics"][0]["turnCount"] == 2
+
+
+def test_ask_me_discussion_retry_survives_reload_with_a_new_key():
+    class FailOnceDiscussionAi(FakeAi):
+        attempts = 0
+
+        async def ask_me_discussion(self, request):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise AiError("temporary Ask Me failure")
+            return await super().ask_me_discussion(request)
+
+    ai = FailOnceDiscussionAi()
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            ai,
+            AcceptingSourceVerifier(),
+        ),
+        raise_server_exceptions=False,
+    ) as retry_client:
+        series = create_series(retry_client)
+        chapter = retry_client.post(
+            f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+        ).json()
+        section = generate_and_pass(
+            retry_client,
+            chapter["sections"][0]["id"],
+        )
+        path = f"/api/sections/{section['id']}/ask-me/discussion"
+        started = retry_client.post(path).json()
+        body = {
+            "sessionId": started["id"],
+            "topicId": started["activeTopicId"],
+            "expectedRevision": 0,
+            "answer": "这份回答在网络失败后应以同一请求标识安全重试。",
+        }
+        headers = {"Idempotency-Key": "ask-me-v2-failed-retry"}
+
+        failed = retry_client.post(f"{path}/turns", json=body, headers=headers)
+        assert failed.status_code == 502
+        assert retry_client.get(path).json()["pending"] is False
+
+        recovered = retry_client.post(
+            f"{path}/turns",
+            json=body,
+            headers={"Idempotency-Key": "ask-me-v2-failed-retry-after-reload"},
+        )
+        assert recovered.status_code == 200
+        assert recovered.json()["revision"] == 1
+        assert len(recovered.json()["turns"]) == 1
+        assert ai.attempts == 2
+
+
+def test_ask_me_discussion_reclaims_expired_processing_turn(client):
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    section = generate_and_pass(client, chapter["sections"][0]["id"])
+    path = f"/api/sections/{section['id']}/ask-me/discussion"
+    started = client.post(path).json()
+    body = {
+        "sessionId": started["id"],
+        "topicId": started["activeTopicId"],
+        "expectedRevision": 0,
+        "answer": "进程退出后，我仍应能够安全地重新提交这一轮回答。",
+    }
+    request_payload = {
+        "sectionId": section["id"],
+        "sessionId": started["id"],
+        "topicId": started["activeTopicId"],
+        "expectedRevision": 0,
+        "answer": body["answer"],
+    }
+    request_hash = hashlib.sha256(json.dumps(
+        request_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()).hexdigest()
+    turn_id = f"askme_turn_{uuid4().hex}"
+    with client.app.state.sessions() as db:
+        session = db.get(AskMeDiscussionSession, started["id"])
+        topic = db.get(AskMeDiscussionTopic, started["activeTopicId"])
+        db.add(AskMeDiscussionTurnRecord(
+            id=turn_id,
+            session_id=session.id,
+            topic_id=topic.id,
+            user_id=session.user_id,
+            turn_index=0,
+            prompt=topic.current_prompt,
+            answer=body["answer"],
+            evaluation="",
+            feedback_json="{}",
+            status="processing",
+            idempotency_key="ask-me-v2-expired-turn",
+            request_hash=request_hash,
+            response_json="",
+            error_code="",
+            lease_token="expired-worker-token",
+            lease_expires_at=now() - timedelta(seconds=1),
+        ))
+        session.pending_turn_id = turn_id
+        db.commit()
+
+    recovered = client.post(
+        f"{path}/turns",
+        json=body,
+        headers={"Idempotency-Key": "ask-me-v2-expired-turn"},
+    )
+    assert recovered.status_code == 200
+    assert recovered.json()["revision"] == 1
+    assert recovered.json()["turns"][0]["id"] == turn_id
+    with client.app.state.sessions() as db:
+        turn = db.get(AskMeDiscussionTurnRecord, turn_id)
+        assert turn.status == "completed"
+        assert turn.lease_token == ""
+        assert turn.lease_expires_at is None
+
+
+def test_ask_me_discussion_user_controls_topic_switch_pause_and_finish(client):
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    section = generate_and_pass(client, chapter["sections"][0]["id"])
+    path = f"/api/sections/{section['id']}/ask-me/discussion"
+    started = client.post(path).json()
+    assert all(
+        len(topic["assessmentTargetIds"]) == 1
+        for topic in started["topics"]
+    )
+    answered = client.post(
+        f"{path}/turns",
+        json={
+            "sessionId": started["id"],
+            "topicId": started["activeTopicId"],
+            "expectedRevision": 0,
+            "answer": "这是一段包含判断依据和边界说明的自主回答。",
+        },
+        headers={"Idempotency-Key": "ask-me-v2-action-turn"},
+    ).json()
+
+    next_body = {
+        "sessionId": started["id"],
+        "expectedRevision": answered["revision"],
+        "action": "next_topic",
+    }
+    action_headers = {"Idempotency-Key": "ask-me-v2-next-topic"}
+    advanced = client.post(
+        f"{path}/actions",
+        json=next_body,
+        headers=action_headers,
+    )
+    assert advanced.status_code == 200
+    advanced_body = advanced.json()
+    assert advanced_body["topics"][0]["status"] == "closed"
+    assert advanced_body["topics"][0]["evidenceRecorded"]
+    assert advanced_body["activeTopicId"] == advanced_body["topics"][1]["id"]
+    assert client.post(
+        f"{path}/actions",
+        json=next_body,
+        headers=action_headers,
+    ).json() == advanced_body
+    target_ids = set(started["topics"][0]["assessmentTargetIds"])
+    with client.app.state.sessions() as db:
+        oral_rows = db.scalars(
+            select(AssessmentObservation).where(
+                AssessmentObservation.section_id == section["id"],
+                AssessmentObservation.source_type == "ask_me_topic",
+            )
+        ).all()
+        assert {item.assessment_target_id for item in oral_rows} == target_ids
+        assert all(item.attempt_id is None for item in oral_rows)
+        assert all(item.scoring_result_id is None for item in oral_rows)
+        gate_qualifications = db.scalars(
+            select(EvidenceQualificationEvent).where(
+                EvidenceQualificationEvent.observation_id.in_(
+                    [item.id for item in oral_rows]
+                ),
+                EvidenceQualificationEvent.projection_family == "gate",
+            )
+        ).all()
+        assert gate_qualifications
+        assert all(item.status == "ineligible" for item in gate_qualifications)
+        mastery_rows = db.scalars(
+            select(KnowledgeStateProjection).where(
+                KnowledgeStateProjection.assessment_target_id.in_(target_ids)
+            )
+        ).all()
+        assert {item.assessment_target_id for item in mastery_rows} == target_ids
+        oral_watermarks = {
+            item.assessment_target_id: item.sequence for item in oral_rows
+        }
+        assert all(
+            item.source_observation_watermark
+            >= oral_watermarks[item.assessment_target_id]
+            for item in mastery_rows
+        )
+
+    paused = client.post(
+        f"{path}/actions",
+        json={
+            "sessionId": started["id"],
+            "expectedRevision": advanced_body["revision"],
+            "action": "pause",
+        },
+        headers={"Idempotency-Key": "ask-me-v2-pause"},
+    ).json()
+    assert paused["status"] == "paused"
+    assert client.get(path).json()["status"] == "paused"
+
+    resumed = client.post(
+        f"{path}/actions",
+        json={
+            "sessionId": started["id"],
+            "expectedRevision": paused["revision"],
+            "action": "resume",
+        },
+        headers={"Idempotency-Key": "ask-me-v2-resume"},
+    ).json()
+    assert resumed["status"] == "active"
+
+    finished = client.post(
+        f"{path}/actions",
+        json={
+            "sessionId": started["id"],
+            "expectedRevision": resumed["revision"],
+            "action": "finish",
+        },
+        headers={"Idempotency-Key": "ask-me-v2-finish"},
+    ).json()
+    assert finished["status"] == "completed"
+    assert len(finished["topics"]) == 3
+
+
+def test_ask_me_discussion_rejects_multi_target_topic_evidence(client):
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    section = generate_and_pass(client, chapter["sections"][0]["id"])
+    path = f"/api/sections/{section['id']}/ask-me/discussion"
+    started = client.post(path).json()
+    answered = client.post(
+        f"{path}/turns",
+        json={
+            "sessionId": started["id"],
+            "topicId": started["activeTopicId"],
+            "expectedRevision": 0,
+            "answer": "我会说明机制、可观察依据，以及结论不成立的条件。",
+        },
+        headers={"Idempotency-Key": "ask-me-v2-target-boundary-turn"},
+    ).json()
+    with client.app.state.sessions() as db:
+        topic = db.get(AskMeDiscussionTopic, started["activeTopicId"])
+        valid_target_id = json.loads(topic.assessment_target_ids_json)[0]
+        topic.assessment_target_ids_json = json.dumps([
+            valid_target_id,
+            "target_outside_frozen_contract",
+        ])
+        db.commit()
+
+    rejected = client.post(
+        f"{path}/actions",
+        json={
+            "sessionId": started["id"],
+            "expectedRevision": answered["revision"],
+            "action": "next_topic",
+        },
+        headers={"Idempotency-Key": "ask-me-v2-target-boundary-action"},
+    )
+    assert rejected.status_code == 409
+    assert rejected.json()["code"] == "ASK_ME_EVIDENCE_TARGET_BOUNDARY_INVALID"
+    with client.app.state.sessions() as db:
+        topic = db.get(AskMeDiscussionTopic, started["activeTopicId"])
+        oral_count = db.scalar(
+            select(func.count(AssessmentObservation.id)).where(
+                AssessmentObservation.section_id == section["id"],
+                AssessmentObservation.source_type == "ask_me_topic",
+            )
+        )
+        assert topic.status in {"active", "sufficient"}
+        assert not topic.evidence_recorded
+        assert oral_count == 0
 
 
 def test_future_chapter_edits_and_started_boundary(client):
@@ -3049,6 +3505,75 @@ def test_section_regeneration_appends_versions_and_preserves_audit(client):
     blocked = client.post(f"/api/sections/{original['id']}/regenerate")
     assert blocked.status_code == 409
     assert blocked.json()["code"] == "SECTION_ALREADY_ASSESSED"
+
+
+def test_section_regeneration_upgrades_migrated_bound_contract(client):
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    original = client.post(
+        f"/api/sections/{chapter['sections'][0]['id']}/generate"
+    ).json()
+    opened = client.post(f"/api/sections/{original['id']}/open")
+    assert opened.status_code == 200, opened.json()
+
+    with client.app.state.sessions() as db:
+        binding = db.scalar(
+            select(LearningRunSectionBinding).where(
+                LearningRunSectionBinding.section_id == original["id"]
+            )
+        )
+        contract = db.get(
+            LearningContractVersion,
+            binding.learning_contract_version_id,
+        )
+        stored_section = db.get(Section, original["id"])
+        migrated_contract = ensure_learning_contract(
+            db,
+            stored_section,
+            mission_version_id=contract.mission_version_id,
+            provenance_mode="derived_from_m1",
+        )
+        content = db.get(ContentVersion, original["content"]["id"])
+        quiz = db.get(QuizSet, original["quiz"]["id"])
+        content.learning_contract_version_id = migrated_contract.id
+        quiz.learning_contract_version_id = migrated_contract.id
+        binding.learning_contract_version_id = migrated_contract.id
+        content.schema_version = "legacy"
+        content.prompt_version = "legacy"
+        quiz.schema_version = "legacy"
+        decisions = db.scalars(
+            select(GovernanceDecisionSnapshot).where(
+                GovernanceDecisionSnapshot.quiz_set_id == quiz.id,
+                GovernanceDecisionSnapshot.decision_scope == "quiz_publication",
+            )
+        ).all()
+        assert decisions
+        for decision in decisions:
+            decision.learning_contract_version_id = migrated_contract.id
+            decision.allowed = False
+            decision.assessment_eligible = False
+        migrated_contract_id = migrated_contract.id
+        db.commit()
+
+    migrated = client.get(f"/api/sections/{original['id']}").json()
+    assert migrated["quiz"]["governance"]["assessmentEligible"] is False
+
+    regenerated = client.post(f"/api/sections/{original['id']}/regenerate")
+
+    assert regenerated.status_code == 200, regenerated.json()
+    replacement = regenerated.json()
+    assert replacement["content"]["id"] != original["content"]["id"]
+    assert replacement["quiz"]["governance"]["assessmentEligible"] is True
+    assert (
+        replacement["versionBinding"]["learningContractVersionId"]
+        == migrated_contract_id
+    )
+    assert (
+        replacement["versionBinding"]["contentVersionId"]
+        == replacement["content"]["id"]
+    )
 
 
 def test_content_feedback_streams_the_model_repair_and_rebinds_only_content(client):
@@ -3386,11 +3911,12 @@ class DuplicateRetryAi(FakeAi):
         return await super().lesson(request, memory, None)
 
 
-def test_duplicate_retry_questions_are_rejected_and_observable():
+def test_duplicate_retry_questions_are_reordered_and_published():
     with TestClient(create_app("sqlite+pysqlite:///:memory:", DuplicateRetryAi(), AcceptingSourceVerifier())) as duplicate:
         series = create_series(duplicate)
         chapter = duplicate.post(f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate").json()
         section = duplicate.post(f"/api/sections/{chapter['sections'][0]['id']}/generate").json()
+        original_questions = section["quiz"]["questions"]
         failed = duplicate.post(f"/api/sections/{section['id']}/quiz", json={"quizSetId":section["quiz"]["id"],"answers":[[] for _ in section["quiz"]["questions"]]})
         assert failed.status_code == 200
         remediation_task = next(
@@ -3399,10 +3925,29 @@ def test_duplicate_retry_questions_are_rejected_and_observable():
             if task["type"] == "remediation_generation"
         )
         task = wait_for_task(duplicate, remediation_task["taskId"])
-        assert task["status"] == "failed"
-        assert task["errorCode"] == "QUIZ_NOT_NOVEL"
+        assert task["status"] == "succeeded"
         state = duplicate.get(f"/api/sections/{section['id']}").json()
-        assert state["generation"]["status"] == "failed" and state["generation"]["errorCode"] == "QUIZ_NOT_NOVEL"
+        assert state["quiz"]["generation"] == 2
+        assert all(
+            replacement["options"] != original["options"]
+            for replacement, original in zip(
+                state["quiz"]["questions"],
+                original_questions,
+                strict=True,
+            )
+        )
+        with duplicate.app.state.sessions() as db:
+            exhausted = db.get(LearningTask, remediation_task["taskId"])
+            exhausted.status = "failed"
+            exhausted.error_code = "QUIZ_NOT_NOVEL"
+            exhausted.attempt_count = exhausted.max_attempts
+            db.commit()
+        reset = duplicate.post(
+            f"/api/learning-tasks/{remediation_task['taskId']}/retry"
+        )
+        assert reset.status_code == 200
+        assert reset.json()["status"] == "pending"
+        assert reset.json()["maxAttempts"] == 6
 
 
 def test_source_code_requires_immutable_matching_github_ref():
@@ -3439,7 +3984,20 @@ def test_generated_content_records_governance_gap_without_promoting_reachability
                 KnowledgeGap.content_version_id == section["content"]["id"]
             )
         ).all()
-        bindings = db.scalars(select(SourceClaimBinding)).all()
+        bindings = db.scalars(
+            select(SourceClaimBinding)
+            .join(
+                ContentBlockClaimAnchor,
+                ContentBlockClaimAnchor.source_claim_version_id
+                == SourceClaimBinding.source_claim_version_id,
+            )
+            .join(
+                ContentBlockVersion,
+                ContentBlockVersion.id
+                == ContentBlockClaimAnchor.content_block_version_id,
+            )
+            .where(ContentBlockVersion.content_version_id == section["content"]["id"])
+        ).all()
         assert bindings
         reachability_bindings = [
             item for item in bindings
@@ -3713,10 +4271,12 @@ def test_invalid_remediation_candidate_never_becomes_published_quiz(tmp_path):
 def test_exhausted_next_section_preload_restores_progress_and_can_retry(tmp_path):
     class ExhaustedPreloadAi(FakeAi):
         def __init__(self):
-            self.fail_preload = False
+            self.fail_preload = True
+            self.lesson_calls = 0
 
         async def lesson(self, request, memory, prior_questions=None):
-            if self.fail_preload:
+            self.lesson_calls += 1
+            if self.fail_preload and self.lesson_calls > 1:
                 raise AiError("simulated exhausted preload")
             return await super().lesson(request, memory, prior_questions)
 
@@ -3737,7 +4297,22 @@ def test_exhausted_next_section_preload_restores_progress_and_can_retry(tmp_path
         first_section = current["books"][0]["chapters"][0]["sections"][0]
         section = recovering.get(f"/api/sections/{first_section['id']}").json()
 
-        ai.fail_preload = True
+        with recovering.app.state.sessions() as db:
+            lookahead = db.scalar(
+                select(LearningTask).where(
+                    LearningTask.learning_run_id
+                    == db.get(
+                        LearningTask,
+                        series["initializationTask"]["taskId"],
+                    ).learning_run_id,
+                    LearningTask.task_type == "section_lookahead_preload",
+                )
+            )
+            assert lookahead is not None
+            lookahead_id = lookahead.id
+        failed_lookahead = wait_for_task(recovering, lookahead_id, timeout=5)
+        assert failed_lookahead["status"] == "failed"
+
         passed = recovering.post(
             f"/api/sections/{first_section['id']}/quiz",
             json={
@@ -3750,6 +4325,14 @@ def test_exhausted_next_section_preload_restores_progress_and_can_retry(tmp_path
             for task in passed["workflowTasks"]
             if task["type"] == "next_section_preload"
         )
+        with recovering.app.state.sessions() as db:
+            queued_payload = json.loads(
+                db.get(LearningTask, preload["taskId"]).payload_json
+            )
+            assert queued_payload == {
+                "sourceSectionId": first_section["id"],
+                "targetSectionId": current["books"][0]["chapters"][0]["sections"][1]["id"],
+            }
         failed = wait_for_task(recovering, preload["taskId"], timeout=5)
         assert failed["status"] == "failed"
         assert failed["attemptCount"] == failed["maxAttempts"]
@@ -3775,6 +4358,143 @@ def test_exhausted_next_section_preload_restores_progress_and_can_retry(tmp_path
         ready = recovering.get(f"/api/sections/{next_section['id']}")
         assert ready.status_code == 200
         assert ready.json()["content"] is not None
+
+
+def test_prepare_section_repairs_orphaned_preparing_state_and_freezes_pair(tmp_path):
+    with TestClient(create_app(
+        f"sqlite+pysqlite:///{tmp_path / 'orphaned-prepare.db'}",
+        FakeAi(),
+        AcceptingSourceVerifier(),
+        LocalAttachmentStorage(tmp_path / "orphaned-prepare-attachments"),
+    )) as recovering:
+        series = create_series(recovering)
+        initialization = wait_for_task(
+            recovering,
+            series["initializationTask"]["taskId"],
+        )
+        section_id = initialization["result"]["targetSectionId"]
+        with recovering.app.state.sessions() as db:
+            progress = db.scalar(
+                select(SectionProgress).where(
+                    SectionProgress.section_id == section_id,
+                )
+            )
+            progress.status = "preparing"
+            db.commit()
+
+        prepared = recovering.post(f"/api/sections/{section_id}/prepare")
+        assert prepared.status_code == 200
+        payload = prepared.json()
+        assert payload["status"] == "available"
+        assert payload["content"] is not None
+        assert payload["quiz"] is not None
+        assert payload["versionBinding"] is not None
+
+
+def test_prepare_section_does_not_steal_an_active_preload(tmp_path):
+    with TestClient(create_app(
+        f"sqlite+pysqlite:///{tmp_path / 'owned-prepare.db'}",
+        FakeAi(),
+        AcceptingSourceVerifier(),
+        LocalAttachmentStorage(tmp_path / "owned-prepare-attachments"),
+    )) as recovering:
+        series = create_series(recovering)
+        initialization = wait_for_task(
+            recovering,
+            series["initializationTask"]["taskId"],
+        )
+        source_section_id = initialization["result"]["targetSectionId"]
+        route = recovering.get(f"/api/series/{series['id']}").json()
+        section_id = route["books"][0]["chapters"][0]["sections"][1]["id"]
+        with recovering.app.state.sessions() as db:
+            initial_task = db.get(
+                LearningTask,
+                series["initializationTask"]["taskId"],
+            )
+            progress = db.scalar(
+                select(SectionProgress).where(
+                    SectionProgress.section_id == section_id,
+                )
+            )
+            progress.status = "preparing"
+            db.add(LearningTask(
+                id=f"task_{uuid4().hex}",
+                learning_run_id=initial_task.learning_run_id,
+                user_id=initial_task.user_id,
+                section_id=source_section_id,
+                task_type="next_section_preload",
+                idempotency_key=f"owned:{section_id}",
+                trigger_id="test-active-owner",
+                # Legacy active tasks may not have persisted targetSectionId.
+                payload_json=json.dumps({"sourceSectionId": source_section_id}),
+                status="running",
+                attempt_count=1,
+                max_attempts=3,
+                lease_owner="test-worker",
+                lease_token=f"lease_{uuid4().hex}",
+                lease_expires_at=now() + timedelta(minutes=1),
+                heartbeat_at=now(),
+            ))
+            db.commit()
+
+        blocked = recovering.post(f"/api/sections/{section_id}/prepare")
+        assert blocked.status_code == 409
+        assert blocked.json()["code"] == "SECTION_PREPARING"
+
+
+def test_lookahead_prepares_one_locked_section_without_unlocking_it(tmp_path):
+    ai = FakeAi()
+    with TestClient(create_app(
+        f"sqlite+pysqlite:///{tmp_path / 'lookahead-buffer.db'}",
+        ai,
+        AcceptingSourceVerifier(),
+        LocalAttachmentStorage(tmp_path / "lookahead-buffer-attachments"),
+    )) as buffered:
+        series = create_series(buffered)
+        initialization = wait_for_task(
+            buffered,
+            series["initializationTask"]["taskId"],
+        )
+        assert initialization["status"] == "succeeded"
+        with buffered.app.state.sessions() as db:
+            lookahead = db.scalar(
+                select(LearningTask).where(
+                    LearningTask.learning_run_id
+                    == db.get(
+                        LearningTask,
+                        series["initializationTask"]["taskId"],
+                    ).learning_run_id,
+                    LearningTask.task_type == "section_lookahead_preload",
+                )
+            )
+            assert lookahead is not None
+            lookahead_id = lookahead.id
+        prepared = wait_for_task(buffered, lookahead_id, timeout=5)
+        assert prepared["status"] == "succeeded"
+        target_id = prepared["result"]["targetSectionId"]
+
+        route = buffered.get(f"/api/series/{series['id']}").json()
+        sections = route["books"][0]["chapters"][0]["sections"]
+        assert sections[0]["status"] == "available"
+        assert sections[1]["id"] == target_id
+        assert sections[1]["status"] == "locked"
+        assert buffered.get(f"/api/sections/{target_id}").status_code == 403
+        with buffered.app.state.sessions() as db:
+            content = db.scalar(
+                select(ContentVersion).where(
+                    ContentVersion.section_id == target_id,
+                    ContentVersion.publication_status == "published",
+                )
+            )
+            quiz = db.scalar(
+                select(QuizSet).where(
+                    QuizSet.section_id == target_id,
+                    QuizSet.publication_status == "published",
+                )
+            )
+            assert content is not None
+            assert quiz is not None
+            assert quiz.content_version_id == content.id
 
 
 def test_runner_persists_failure_report_and_evidence_snapshot(tmp_path, monkeypatch):

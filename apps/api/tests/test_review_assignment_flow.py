@@ -14,6 +14,7 @@ from app.ai.contracts import (
 from app.core.errors import AppError
 from app.infrastructure.tables import (
     AssessmentObservation,
+    ContentVersion,
     EvidenceQualificationEvent,
     GovernanceDecisionSnapshot,
     QuizSet,
@@ -219,6 +220,42 @@ def test_review_assignment_materializes_once_and_submits_candidate(tmp_path):
                     ReviewAssignmentEventRecord.assignment_id == assignment_id
                 )
             ) == 3
+
+
+def test_review_start_accepts_published_v2_content_blocks(tmp_path):
+    with _review_client(tmp_path) as client:
+        _complete_initial_quiz_and_make_due(client)
+        due = client.get("/api/reviews/due?daily_budget=1").json()
+        assignment_id = due["items"][0]["assignmentId"]
+
+        with client.app.state.sessions() as db:
+            assignment = db.get(ReviewAssignment, assignment_id)
+            content = db.get(ContentVersion, assignment.content_version_id)
+            blocks = json.loads(content.blocks_json)
+            v2_roles = [
+                ("core_instruction", "core"),
+                ("mechanism", "mechanism"),
+                ("comparison", "comparison"),
+                ("boundary", "boundary"),
+                ("practice", "practice"),
+            ]
+            for index, block in enumerate(blocks):
+                role, relation = v2_roles[index % len(v2_roles)]
+                block.update({
+                    "blockKey": f"review_block_{index + 1}",
+                    "role": role,
+                    "relationToAnchor": relation,
+                    "assessmentTargetIds": [assignment.assessment_target_id],
+                    "knowledgeClaimVersionIds": [],
+                })
+            blocks[0]["kind"] = "ordered_steps"
+            blocks[0]["content"] = "1. 识别目标\n2. 检查边界"
+            content.blocks_json = json.dumps(blocks, ensure_ascii=False)
+            db.commit()
+
+        started = client.post(f"/api/reviews/{assignment_id}/start")
+        assert started.status_code == 200, started.json()
+        assert started.json()["status"] == "started"
 
 
 def test_review_selection_does_not_duplicate_an_unfinished_assignment_next_day(tmp_path):

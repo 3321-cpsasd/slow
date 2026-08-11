@@ -3,6 +3,8 @@
 - **状态**：Accepted，正文与补救题的权威发布边界已落地；旧生成适配器待观测期后清理
 - **决策日期**：2026-08-06
 - **适用范围**：小节规划完成后，从正文生成到正式发布的在线链路
+
+> V3 继续继承本文的一次调用、Learning Contract、稳定绑定、失败关闭和原子发布边界；第 6 节的固定共享槽位仅保留为 V2 历史协议，已由 [ADR-0009](0009-adaptive-lesson-composition.md) 的动态正文编排取代。
 - **上位产品约束**：[Slow 产品底层基因](../../PRODUCT_DNA.md)
 
 ## 1. 为什么需要这项决策
@@ -166,9 +168,9 @@ Learning Contract 必须在正文生成之前冻结。生成器不能创建目�
     },
     {
       "slot": "SHARED_EXAMPLE",
-      "kind": "text",
+      "kind": "bullet_list",
       "heading": "把判断放进真实场景",
-      "content": "……"
+      "content": "先观察几个稳定对象：\n\n- 对象 A 满足条件。\n- 对象 B 缺少条件。\n\n再比较它们产生的结果。"
     }
   ],
   "questions": [
@@ -196,6 +198,11 @@ Learning Contract 必须在正文生成之前冻结。生成器不能创建目�
 - `assessment_eligible`、目标规范文案、必需性和 `core` 等权威字段由服务端根据冻结契约派生，不信任模型布尔值；
 - 共享与支撑槽位不直接获得考核目标；只有 `Tn_CORE` 获得同序目标绑定；
 - 服务端展开是版本化槽位协议的权威派生，不是对模型自由文本的猜测或修复；计划外、缺失或重复槽位整批失败；
+- `content` 始终是 GFM Markdown，可以在同一内容块中自然混合段落、并列列表、有序步骤与表格；
+- `kind` 只作为主要展示方式和界面标签的非权威提示，`text` 是通用回退值；服务端不得因为
+  `kind` 与 Markdown 结构不同而拒绝、重写或重新生成可正常渲染的候选；
+- 服务端仍确定性限制空内容、重复标题、未分段的长篇纯正文和过长纯正文段落；这些检查只处理
+  明确影响发布或阅读的结构，不以展示提示代替内容格式；
 - 反馈触发完整重生成时，模型必须返回真正替代旧块的
   `feedback_replacement_slot`；服务端再把冻结的旧 `source_block_id` 与新槽位展开出的
   `replacement_block_key` 显式绑定。非反馈生成该字段必须为空。
@@ -213,6 +220,7 @@ Learning Contract 必须在正文生成之前冻结。生成器不能创建目�
 | --- | --- | --- |
 | 候选结果满足版本化 JSON Schema | 整批失败 | `GENERATION_SCHEMA_INVALID` |
 | 正文块局部 Key 唯一且合法 | 整批失败 | `CONTENT_BLOCK_KEY_INVALID` |
+| 正文块非空、不重复标题，长篇纯正文满足版本化分段规则 | 整批失败 | `CONTENT_BLOCK_LAYOUT_INVALID` |
 | 正文块绑定目标全部属于冻结契约 | 整批失败 | `CONTENT_ASSESSMENT_TARGET_UNBOUND` |
 | 题目目标属于冻结契约 | 整批失败 | `ASSESSMENT_TARGET_UNBOUND` |
 | 题目引用的正文块存在 | 整批失败 | `ASSESSMENT_EVIDENCE_BLOCK_UNBOUND` |
@@ -388,6 +396,8 @@ publish_atomically()
 实现完成前至少覆盖：
 
 - 一次生成只发生一次物理模型调用；
+- 长篇纯正文未分段或单段过长时整批失败；
+- 同一 Markdown 内容块可以混合短段落、并列列表、有序步骤和表格，且不会因 `kind` 提示不同而失败；
 - 正文绑定契约外目标时整批失败；
 - 题目引用契约外目标时整批失败；
 - 题目引用不存在的正文块时整批失败；
