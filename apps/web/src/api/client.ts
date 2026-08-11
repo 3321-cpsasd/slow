@@ -269,6 +269,7 @@ export const api = {
   section:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}`),
   openSection:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}/open`,{method:'POST'}),
   generateSection:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}/generate`,{method:'POST'}),
+  prepareSection:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}/prepare`,{method:'POST'}),
   regenerateSection:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}/regenerate`,{method:'POST'}),
   quiz:(id:string,quizSetId:string,answers:number[][],idempotencyKey:string)=>call<import('../model/types').QuizResult>(`/api/sections/${id}/quiz`,{
     method:'POST',

@@ -157,6 +157,16 @@ class FallbackAiAdapter:
         self._fallback_trace.set(tuple(attempts))
         self._structured_trace.set(tuple(structured))
         if last_error:
+            if len(attempts) > 1:
+                # The durable task runner must not immediately replay an entire
+                # exhausted model chain. A user can still request an audited
+                # retry after the provider or configuration has recovered.
+                raise AiError(
+                    str(last_error),
+                    code=last_error.code,
+                    retryable=False,
+                    operation_id=last_error.operation_id,
+                ) from last_error
             raise last_error
         raise AiError("备用模型链未返回有效结果", code="AI_FALLBACK_EXHAUSTED")
 

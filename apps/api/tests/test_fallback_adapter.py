@@ -107,6 +107,24 @@ def test_fallback_adapter_does_not_bypass_nonretryable_failure():
     assert fallback.outcomes == [{"candidate": 1}]
 
 
+def test_fallback_adapter_marks_exhausted_chain_nonretryable():
+    primary = StubAdapter(
+        "primary",
+        [AiError("主模型失败", code="AI_STRUCTURED_OUTPUT_INVALID")],
+    )
+    fallback = StubAdapter(
+        "qwen3.8-max-preview",
+        [AiError("备用模型超时", code="AI_PROVIDER_TIMEOUT")],
+    )
+    adapter = FallbackAiAdapter([primary, fallback])
+
+    with pytest.raises(AiError) as captured:
+        asyncio.run(adapter.generate_lesson({}))
+
+    assert captured.value.code == "AI_PROVIDER_TIMEOUT"
+    assert captured.value.retryable is False
+
+
 def test_fallback_adapter_replaces_prior_trace_on_unexpected_failure():
     primary = StubAdapter(
         "primary",

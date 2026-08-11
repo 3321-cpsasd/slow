@@ -1,4 +1,4 @@
-from asyncio import CancelledError
+from asyncio import CancelledError, sleep
 import hashlib
 import json
 from uuid import uuid4
@@ -627,6 +627,7 @@ class SlowService:
                 "本节正在生成，请等待当前任务完成",
                 code="GENERATION_IN_PROGRESS",
                 status=409,
+                retryable=True,
             )
         try:
             return await self._generate_section_locked(
@@ -641,6 +642,34 @@ class SlowService:
             )
         finally:
             release_generation_lease(self.db, resource_key, owner_id)
+
+    async def prepare_section(self, section_id: str):
+        """Foreground escape hatch for an unlocked section with missing content.
+
+        It repairs only orphaned orchestration state. Content still has to pass
+        the normal generation coordinator and is frozen only by open_section.
+        """
+
+        context = self.contexts.resolve_section(
+            user_id=self.user_id,
+            section_id=section_id,
+        )
+        progress = self.progress.for_section(
+            context.section,
+            context.chapter,
+            context.book,
+        )
+        if progress.status == "locked":
+            raise AppError("小节未解锁", code="SECTION_LOCKED", status=403)
+        self._release_orphaned_preparing(progress)
+        if progress.status == "preparing":
+            raise AppError(
+                "本节仍在准备中，请等待当前任务完成",
+                code="SECTION_PREPARING",
+                status=409,
+            )
+        await self.generate_section(section_id)
+        return self.open_section(section_id)
 
     async def _generate_section_locked(
         self,
@@ -674,6 +703,7 @@ class SlowService:
             context.chapter,
             context.book,
         )
+        self._release_orphaned_preparing(progress)
         if progress.status == "locked":
             raise AppError("小节未解锁", code="SECTION_LOCKED", status=403)
         if progress.status == "preparing":
@@ -698,6 +728,32 @@ class SlowService:
         if snapshot:
             view.update(snapshot)
         return view
+
+    def _release_orphaned_preparing(self, progress) -> None:
+        """Restore an orphaned preparation projection without publishing data."""
+
+        if progress.status != "preparing":
+            return
+        active_tasks = self.db.scalars(
+            select(LearningTask).where(
+                LearningTask.learning_run_id == progress.learning_run_id,
+                LearningTask.user_id == self.user_id,
+                LearningTask.status.in_({"pending", "running"}),
+                LearningTask.task_type.in_({
+                    "initial_book_preload",
+                    "next_section_preload",
+                }),
+            )
+        ).all()
+        has_owner = any(
+            str((load(task.payload_json, {}) or {}).get("targetSectionId") or "")
+            == progress.section_id
+            for task in active_tasks
+        )
+        if has_owner:
+            return
+        self.progress.set_status(progress, "available")
+        self.db.commit()
 
     def section(self, section_id):
         return self.section_reads.get(
@@ -832,6 +888,11 @@ class SlowService:
                 result = await self._preload_next_section(
                     task,
                     payload.get("sourceSectionId") or task.section_id
+                )
+            elif task.task_type == "section_lookahead_preload":
+                result = await self._preload_lookahead_section(
+                    task,
+                    payload.get("sourceSectionId") or task.section_id,
                 )
             else:
                 raise AppError(
@@ -1003,8 +1064,119 @@ class SlowService:
         self.db.commit()
         await self.generate_section(target.id)
         self.progress.set_status(target_progress, "available")
+        self._enqueue_lookahead(task, target)
         self.db.commit()
         return {"targetSectionId": target.id}
+
+    def _next_existing_section(self, source: Section) -> Section | None:
+        context = self.contexts.resolve_section(
+            user_id=self.user_id,
+            section_id=source.id,
+        )
+        target = self.db.scalar(
+            select(Section)
+            .where(
+                Section.chapter_id == context.chapter.id,
+                Section.position > source.position,
+            )
+            .order_by(Section.position)
+        )
+        if target:
+            return target
+        next_chapter = self.db.scalar(
+            select(Chapter)
+            .where(
+                Chapter.book_id == context.book.id,
+                Chapter.position > context.chapter.position,
+            )
+            .order_by(Chapter.position)
+        )
+        if not next_chapter:
+            next_book = self.db.scalar(
+                select(Book)
+                .where(
+                    Book.series_id == context.book.series_id,
+                    Book.position > context.book.position,
+                    Book.deleted_at.is_(None),
+                )
+                .order_by(Book.position)
+            )
+            next_chapter = (
+                self.db.scalar(
+                    select(Chapter)
+                    .where(Chapter.book_id == next_book.id)
+                    .order_by(Chapter.position)
+                )
+                if next_book
+                else None
+            )
+        if not next_chapter:
+            return None
+        return self.db.scalar(
+            select(Section)
+            .where(Section.chapter_id == next_chapter.id)
+            .order_by(Section.position)
+        )
+
+    def _enqueue_lookahead(self, parent: LearningTask, source: Section) -> None:
+        existing = self.db.scalar(
+            select(LearningTask).where(
+                LearningTask.learning_run_id == parent.learning_run_id,
+                LearningTask.task_type == "section_lookahead_preload",
+                LearningTask.idempotency_key == f"lookahead-after:{source.id}",
+            )
+        )
+        if existing:
+            return
+        self.db.add(LearningTask(
+            id=uid("task"),
+            learning_run_id=parent.learning_run_id,
+            section_id=source.id,
+            user_id=parent.user_id,
+            task_type="section_lookahead_preload",
+            idempotency_key=f"lookahead-after:{source.id}",
+            trigger_id=parent.id,
+            payload_json=dump({"sourceSectionId": source.id}),
+            status="pending",
+        ))
+
+    async def _generate_preload_target(self, section_id: str) -> dict:
+        """Let an unlock task adopt an in-flight lookahead without racing it."""
+
+        for _ in range(60):
+            try:
+                return await self.generate_section(section_id)
+            except AppError as error:
+                if error.code != "GENERATION_IN_PROGRESS":
+                    raise
+                await sleep(0.5)
+                self.db.expire_all()
+        raise AppError(
+            "本节预热仍在运行，稍后继续确认",
+            code="GENERATION_IN_PROGRESS",
+            status=409,
+            retryable=True,
+        )
+
+    async def _preload_lookahead_section(
+        self,
+        task: LearningTask,
+        source_section_id: str,
+    ):
+        source = self.contexts.resolve_section(
+            user_id=self.user_id,
+            section_id=source_section_id,
+        ).section
+        target = self._next_existing_section(source)
+        if not target:
+            return {"targetSectionId": None, "endOfAvailableRoute": True}
+        target_progress = self.progress.for_section(target)
+        # This task is a content buffer only. It must never unlock or mark the
+        # target as preparing, because access is still owned by progression.
+        if target_progress.status == "completed":
+            return {"targetSectionId": target.id, "alreadyCompleted": True}
+        await self._generate_preload_target(target.id)
+        return {"targetSectionId": target.id, "endOfAvailableRoute": False}
 
     async def _preload_next_section(
         self,
@@ -1070,8 +1242,9 @@ class SlowService:
         if target_progress.status != "preparing":
             self.progress.set_status(target_progress, "preparing")
         self.db.commit()
-        await self.generate_section(target.id)
+        await self._generate_preload_target(target.id)
         self.progress.set_status(target_progress, "available")
+        self._enqueue_lookahead(task, target)
         self.db.commit()
         return {"targetSectionId": target.id, "endOfSeries": False}
 

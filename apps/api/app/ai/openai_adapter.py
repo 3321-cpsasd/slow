@@ -801,12 +801,13 @@ class OpenAiAdapter:
                 ) from error
 
         try:
-            # Kimi K3 is exposed as a thinking-only model.  Other chat models
-            # keep the existing non-thinking structured-output path so adding a
-            # fallback does not silently change the primary model's behaviour.
+            # Thinking-only fallback models need a controlled budget. Otherwise
+            # they can spend the entire output allowance on reasoning and return
+            # no JSON lesson content.
             lesson_reasoning_mode = (
                 "required"
-                if self.model.strip().lower() == "kimi/kimi-k3"
+                if self.model.strip().lower()
+                in {"kimi/kimi-k3", "qwen3.8-max-preview"}
                 else "disabled"
             )
             content = await self._chat_parse_once(

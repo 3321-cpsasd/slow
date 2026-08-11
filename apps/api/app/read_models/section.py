@@ -68,6 +68,8 @@ class SectionReadModel:
             context.chapter,
             context.book,
         )
+        if section_progress.status == "locked" and not allow_preparing:
+            raise AppError("小节未解锁", code="SECTION_LOCKED", status=403)
         if section_progress.status == "preparing" and not allow_preparing:
             raise AppError(
                 "下一节正文和验证题仍在准备中",
@@ -135,6 +137,7 @@ class SectionReadModel:
                 LearningTask.learning_run_id == learning_run.id,
                 LearningTask.user_id == self.user_id,
                 LearningTask.section_id == section.id,
+                LearningTask.task_type != "section_lookahead_preload",
             )
             .order_by(LearningTask.created_at)
         ).all()

@@ -17,6 +17,7 @@ TASK_TYPES = {
     "note_generation",
     "remediation_generation",
     "next_section_preload",
+    "section_lookahead_preload",
 }
 PRELOAD_TASK_TYPES = {"initial_book_preload", "next_section_preload"}
 MANUALLY_EXTENSIBLE_TASK_TYPES = PRELOAD_TASK_TYPES | {"remediation_generation"}

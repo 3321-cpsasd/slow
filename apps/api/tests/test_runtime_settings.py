@@ -60,9 +60,9 @@ def test_runtime_settings_round_trip_with_private_file_permissions(tmp_path):
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
-def test_fallback_profiles_exclude_primary_model_and_duplicates():
+def test_fallback_profiles_exclude_disabled_bundled_models_and_normalize_qwen():
     profiles = fallback_model_profiles({
-        "provider_model": "qwen3.8-max-preview",
+        "provider_model": "provider-model",
         "fallbacks": [
             {
                 "model": "qwen3.8-max-preview",
@@ -85,7 +85,9 @@ def test_fallback_profiles_exclude_primary_model_and_duplicates():
         ],
     })
 
-    assert [item["model"] for item in profiles] == ["kimi/kimi-k3"]
+    assert [item["model"] for item in profiles] == ["qwen3.8-max-preview"]
+    assert profiles[0]["apiMode"] == "chat_completions"
+    assert profiles[0]["reasoningMode"] == "required"
 
 
 def test_app_restores_saved_runtime_without_returning_the_key(tmp_path):
@@ -106,10 +108,7 @@ def test_app_restores_saved_runtime_without_returning_the_key(tmp_path):
     assert response.status_code == 200
     assert response.json()["mode"] == "demo"
     assert response.json()["providerModel"] == "provider-model"
-    assert response.json()["fallbackModels"] == [
-        "qwen3.8-max-preview",
-        "kimi/kimi-k3",
-    ]
+    assert response.json()["fallbackModels"] == ["qwen3.8-max-preview"]
     assert response.json()["apiKeyStored"] is True
     assert response.json()["ephemeral"] is False
     assert "server-only-secret" not in response.text

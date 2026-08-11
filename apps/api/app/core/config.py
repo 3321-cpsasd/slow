@@ -19,8 +19,14 @@ class Settings(BaseSettings):
     ai_provider_protocol: Literal["openai", "anthropic"] = "openai"
     openai_api_mode: Literal["responses", "chat_completions"] = "responses"
     openai_reasoning_mode: Literal["optional", "required", "disabled"] = "optional"
+    ai_request_timeout_seconds: int = Field(
+        default=90,
+        ge=15,
+        le=300,
+        validation_alias="AI_REQUEST_TIMEOUT_SECONDS",
+    )
     ai_fallback_models: str = Field(
-        default="qwen3.8-max-preview,kimi/kimi-k3",
+        default="qwen3.8-max-preview",
         validation_alias="AI_FALLBACK_MODELS",
     )
     qwen38_api_key: str = Field(default="", validation_alias="QWEN38_API_KEY")

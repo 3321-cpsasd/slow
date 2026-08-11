@@ -40,3 +40,4 @@
 | [ADR-0005](0005-m2-acceptance-v2.md) | Accepted，M2 十一项门禁已通过 | M2 五阶段可信链路薄切片、机器判定和里程碑边界 |
 | [ADR-0006](0006-daily-mode.md) | Accepted | Daily Mode 的短期学习情境、活动连续性与证据边界 |
 | [ADR-0007](0007-user-interface-expression-boundary.md) | Accepted，已实现首轮收敛 | 普通用户界面与内部治理、运行和审计机制的表达边界 |
+| [ADR-0008](0008-section-continuity-and-recovery.md) | Accepted，第一阶段已实现 | 一节内容缓冲、统一重新准备入口和 Recovery Agent 权限边界 |

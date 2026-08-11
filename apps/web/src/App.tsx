@@ -10,7 +10,7 @@ import {
 } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { api } from './api/client';
+import { api, ApiError } from './api/client';
 import { telemetry } from './telemetry';
 import { ProfileOnboardingFlow } from './ProfileOnboardingFlow';
 import { DailyModeDialog, DailyModeHeader } from './DailyMode';
@@ -521,9 +521,22 @@ export default function App() {
   };
 
   const openAndTrackSection = async (sectionId: string) => {
-    const value = await api.openSection(sectionId);
-    applyOpenedSection(value, sectionId);
-    return value;
+    try {
+      const value = await api.openSection(sectionId);
+      applyOpenedSection(value, sectionId);
+      return value;
+    } catch (reason) {
+      if (
+        reason instanceof ApiError
+        && reason.code === 'SECTION_CANDIDATE_INCOMPLETE'
+      ) {
+        // Opening is intentionally fail-closed until a complete content/quiz
+        // pair can be frozen. The read-only section view is still safe to show
+        // and contains the audited generation failure plus its retry action.
+        return api.section(sectionId);
+      }
+      throw reason;
+    }
   };
 
   const loadSection = async (
@@ -782,7 +795,7 @@ export default function App() {
   };
 
   const generateSection = async (sectionId: string) => {
-    const value = await run('正在准备并检查本节内容…', () => api.generateSection(sectionId));
+    const value = await run('正在准备并检查本节内容…', () => api.prepareSection(sectionId));
     setSection(value);
     await refreshSeries();
   };
@@ -4605,7 +4618,11 @@ function SeriesRoutePreview({ series }: { series: Series }) {
       <header className="route-preview-hero">
         <div className={`route-preparation-state ${taskStatus || 'ready'}`}>
           <i aria-hidden="true" />
-          <span>{taskStatus === 'failed' ? '第一节需要重新准备' : taskStatus ? '第一节正在准备' : '学习路线已就绪'}</span>
+          <span>{taskStatus === 'failed'
+            ? '第一节需要重新准备'
+            : taskStatus === 'pending' || taskStatus === 'running'
+              ? '第一节正在准备'
+              : '学习路线已就绪'}</span>
         </div>
         <p className="eyebrow">你的学习路线</p>
         <h1>{series.title}</h1>
@@ -4778,7 +4795,9 @@ function LessonContent({
           ))}
         </div>
         {section.generation?.status === 'failed' && (
-          <div className="inline-error">上次准备没有完成，可以重新尝试。</div>
+          <div className="inline-error">
+            上次准备没有完成，学习路径已经保留。重新准备成功后再开始学习。
+          </div>
         )}
         <button className="primary-button large" onClick={onGenerate}>
           {section.generation?.status === 'failed' ? '重新准备' : '准备正文并开始学习'}

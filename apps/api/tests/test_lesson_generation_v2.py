@@ -401,11 +401,13 @@ def test_atomic_publisher_normalizes_explicit_bindings_and_rolls_back():
 class V2FakeAi(FakeAi):
     def __init__(self, *, invalid_target=False, invalid_layout=False):
         self.lesson_generation_calls = 0
+        self.generated_section_ids = []
         self.invalid_target = invalid_target
         self.invalid_layout = invalid_layout
 
     async def generate_lesson(self, lesson_spec):
         self.lesson_generation_calls += 1
+        self.generated_section_ids.append(lesson_spec["section"]["id"])
         targets = lesson_spec["targets"]
         blocks = []
         roles = [
@@ -486,13 +488,17 @@ def test_default_v2_route_uses_one_model_call_and_publishes_both_artifacts():
         lesson = client.get(f"/api/sections/{section_id}").json()
 
         assert task["status"] == "succeeded"
-        assert ai.lesson_generation_calls == 1
+        assert ai.generated_section_ids.count(section_id) == 1
         assert lesson["content"]["publicationStatus"] == "published"
         assert lesson["content"]["boundaryValidation"]["status"] == "passed"
         assert lesson["quiz"]["publicationStatus"] == "published"
         assert lesson["generation"]["trace"]["physicalCallBudget"] == 1
         with client.app.state.sessions() as db:
-            assert db.scalar(select(func.count()).select_from(AssessmentItemVersion)) == 4
+            assert db.scalar(
+                select(func.count()).select_from(AssessmentItemVersion).where(
+                    AssessmentItemVersion.quiz_set_id == lesson["quiz"]["id"],
+                )
+            ) == 4
 
 
 def test_v2_route_rejects_unbound_content_before_formal_persistence():
@@ -697,7 +703,7 @@ def test_v2_feedback_creates_a_new_atomic_content_and_quiz_version():
         replay_done = next(payload for event, payload in replay if event == "done")
         assert replay_done["replayed"] is True
         assert replay_done["contentBlockId"] == done["contentBlockId"]
-        assert ai.lesson_generation_calls == 2
+        assert ai.generated_section_ids.count(section_id) == 2
         assert replacement["content"]["version"] == 2
         assert replacement["content"]["id"] != original["content"]["id"]
         assert replacement["quiz"]["id"] != original["quiz"]["id"]

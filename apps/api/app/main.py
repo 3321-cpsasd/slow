@@ -87,10 +87,16 @@ def build_provider_adapter(
         model,
         base_url,
         capabilities=capabilities,
+        request_timeout_seconds=settings.ai_request_timeout_seconds,
     )
 
 
 def fallback_model_profiles(config: dict) -> list[dict]:
+    enabled_bundled_models = {
+        item.strip()
+        for item in settings.ai_fallback_models.split(",")
+        if item.strip()
+    }
     configured = config.get("fallbacks")
     if configured:
         profiles = list(configured)
@@ -137,10 +143,24 @@ def fallback_model_profiles(config: dict) -> list[dict]:
     seen = set()
     for profile in profiles:
         model = str(profile.get("model") or "").strip()
+        if (
+            model in {"qwen3.8-max-preview", "kimi/kimi-k3"}
+            and model not in enabled_bundled_models
+        ):
+            continue
         if not model or model == primary_model or model in seen:
             continue
         seen.add(model)
-        normalized.append({**profile, "model": model})
+        normalized_profile = {**profile, "model": model}
+        if model == "qwen3.8-max-preview":
+            # This endpoint defaults to unbounded thinking in Responses mode.
+            # Use the compatible chat path so Slow can enforce a small,
+            # controlled thinking budget and still receive final JSON content.
+            normalized_profile.update({
+                "apiMode": "chat_completions",
+                "reasoningMode": "required",
+            })
+        normalized.append(normalized_profile)
     return normalized
 
 
@@ -1267,6 +1287,10 @@ def create_app(
 
     @app.post("/api/sections/{section_id}/generate")
     async def generate_section(section_id: str, s: SlowService = Depends(service)): return await s.generate_section(section_id)
+
+    @app.post("/api/sections/{section_id}/prepare")
+    async def prepare_section(section_id: str, s: SlowService = Depends(service)):
+        return await s.prepare_section(section_id)
 
     @app.post("/api/sections/{section_id}/regenerate")
     async def regenerate_section(section_id: str, s: SlowService = Depends(service)):

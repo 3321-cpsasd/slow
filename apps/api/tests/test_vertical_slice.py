@@ -44,6 +44,7 @@ from app.infrastructure.tables import (
     AskMeDiscussionTurnRecord,
     Book,
     ChapterRevision,
+    ContentBlockClaimAnchor,
     ContentBlockVersion,
     ContentVersion,
     EvidenceQualificationEvent,
@@ -641,11 +642,13 @@ def test_model_only_route_does_not_turn_missing_sources_into_governance():
     assert task["status"] == "succeeded"
     assert task["attemptCount"] == 1
     assert recovered.status_code == 200
-    assert ai.content_requests == [{"urls": [], "hosts": []}]
-    assert ai.quiz_requests == [{
+    assert ai.content_requests
+    assert all(item == {"urls": [], "hosts": []} for item in ai.content_requests)
+    assert ai.quiz_requests
+    assert all(item == {
         "unverifiedSourceIndexes": [],
         "contentReliability": None,
-    }]
+    } for item in ai.quiz_requests)
     body = recovered.json()
     assert body["content"]["confidence"] == "high"
     assert body["content"]["sources"] == []
@@ -671,8 +674,17 @@ def test_claim_verification_does_not_hold_the_sqlite_write_lock(tmp_path):
         assert task["status"] == "succeeded"
         assert verifier.probed is True
         with source_client.app.state.sessions() as db:
-            assert db.scalar(select(func.count()).select_from(ContentVersion)) == 1
-            assert db.scalar(select(func.count()).select_from(QuizSet)) == 1
+            first_section_id = task["result"]["targetSectionId"]
+            assert db.scalar(
+                select(func.count()).select_from(ContentVersion).where(
+                    ContentVersion.section_id == first_section_id,
+                )
+            ) == 1
+            assert db.scalar(
+                select(func.count()).select_from(QuizSet).where(
+                    QuizSet.section_id == first_section_id,
+                )
+            ) == 1
 
 
 def test_claim_verification_failure_publishes_no_content_or_quiz(tmp_path):
@@ -705,7 +717,7 @@ def client(tmp_path):
         yield value
 
 
-def test_note_and_next_section_run_in_parallel_without_early_unlock(tmp_path):
+def test_cached_next_section_becomes_ready_without_waiting_for_note(tmp_path):
     ai = ParallelWorkflowAi()
     storage = LocalAttachmentStorage(tmp_path / "parallel-attachments")
     database_url = f"sqlite+pysqlite:///{tmp_path / 'parallel.db'}"
@@ -726,6 +738,19 @@ def test_note_and_next_section_run_in_parallel_without_early_unlock(tmp_path):
         section = parallel_client.get(
             f"/api/sections/{first_section['id']}"
         ).json()
+        with parallel_client.app.state.sessions() as db:
+            lookahead = db.scalar(
+                select(LearningTask).where(
+                    LearningTask.task_type == "section_lookahead_preload",
+                    LearningTask.section_id == first_section["id"],
+                )
+            )
+            assert lookahead is not None
+            lookahead_id = lookahead.id
+        assert wait_for_task(
+            parallel_client,
+            lookahead_id,
+        )["status"] == "succeeded"
 
         ai.parallel_phase = True
         result = parallel_client.post(
@@ -737,35 +762,23 @@ def test_note_and_next_section_run_in_parallel_without_early_unlock(tmp_path):
         ).json()
         tasks = {task["type"]: task for task in result["workflowTasks"]}
 
-        try:
-            assert ai.next_section_started.wait(2)
-            deadline = time.monotonic() + 2
-            while "note_end" not in ai.events and time.monotonic() < deadline:
-                time.sleep(0.01)
-            assert ai.events.index("next_section_start") < ai.events.index("note_end")
-
-            preparing_series = parallel_client.get(
-                f"/api/series/{series['id']}"
-            ).json()
-            preparing_sections = preparing_series["books"][0]["chapters"][0]["sections"]
-            assert preparing_sections[0]["status"] == "completed"
-            assert preparing_sections[1]["status"] == "preparing"
-
-            preparing = parallel_client.get(
-                f"/api/sections/{preparing_sections[1]['id']}"
-            )
-            assert preparing.status_code == 409
-            assert preparing.json()["code"] == "SECTION_PREPARING"
-        finally:
-            ai.release_next_section.set()
+        assert wait_for_task(
+            parallel_client,
+            tasks["next_section_preload"]["taskId"],
+        )["status"] == "succeeded"
+        ready_series = parallel_client.get(
+            f"/api/series/{series['id']}"
+        ).json()
+        ready_sections = ready_series["books"][0]["chapters"][0]["sections"]
+        assert ready_sections[0]["status"] == "completed"
+        assert ready_sections[1]["status"] == "available"
+        assert parallel_client.get(
+            f"/api/sections/{ready_sections[1]['id']}"
+        ).status_code == 200
 
         assert wait_for_task(
             parallel_client,
             tasks["note_generation"]["taskId"],
-        )["status"] == "succeeded"
-        assert wait_for_task(
-            parallel_client,
-            tasks["next_section_preload"]["taskId"],
         )["status"] == "succeeded"
 
         ready_series = parallel_client.get(
@@ -3971,7 +3984,20 @@ def test_generated_content_records_governance_gap_without_promoting_reachability
                 KnowledgeGap.content_version_id == section["content"]["id"]
             )
         ).all()
-        bindings = db.scalars(select(SourceClaimBinding)).all()
+        bindings = db.scalars(
+            select(SourceClaimBinding)
+            .join(
+                ContentBlockClaimAnchor,
+                ContentBlockClaimAnchor.source_claim_version_id
+                == SourceClaimBinding.source_claim_version_id,
+            )
+            .join(
+                ContentBlockVersion,
+                ContentBlockVersion.id
+                == ContentBlockClaimAnchor.content_block_version_id,
+            )
+            .where(ContentBlockVersion.content_version_id == section["content"]["id"])
+        ).all()
         assert bindings
         reachability_bindings = [
             item for item in bindings
@@ -4245,10 +4271,12 @@ def test_invalid_remediation_candidate_never_becomes_published_quiz(tmp_path):
 def test_exhausted_next_section_preload_restores_progress_and_can_retry(tmp_path):
     class ExhaustedPreloadAi(FakeAi):
         def __init__(self):
-            self.fail_preload = False
+            self.fail_preload = True
+            self.lesson_calls = 0
 
         async def lesson(self, request, memory, prior_questions=None):
-            if self.fail_preload:
+            self.lesson_calls += 1
+            if self.fail_preload and self.lesson_calls > 1:
                 raise AiError("simulated exhausted preload")
             return await super().lesson(request, memory, prior_questions)
 
@@ -4269,7 +4297,22 @@ def test_exhausted_next_section_preload_restores_progress_and_can_retry(tmp_path
         first_section = current["books"][0]["chapters"][0]["sections"][0]
         section = recovering.get(f"/api/sections/{first_section['id']}").json()
 
-        ai.fail_preload = True
+        with recovering.app.state.sessions() as db:
+            lookahead = db.scalar(
+                select(LearningTask).where(
+                    LearningTask.learning_run_id
+                    == db.get(
+                        LearningTask,
+                        series["initializationTask"]["taskId"],
+                    ).learning_run_id,
+                    LearningTask.task_type == "section_lookahead_preload",
+                )
+            )
+            assert lookahead is not None
+            lookahead_id = lookahead.id
+        failed_lookahead = wait_for_task(recovering, lookahead_id, timeout=5)
+        assert failed_lookahead["status"] == "failed"
+
         passed = recovering.post(
             f"/api/sections/{first_section['id']}/quiz",
             json={
@@ -4307,6 +4350,140 @@ def test_exhausted_next_section_preload_restores_progress_and_can_retry(tmp_path
         ready = recovering.get(f"/api/sections/{next_section['id']}")
         assert ready.status_code == 200
         assert ready.json()["content"] is not None
+
+
+def test_prepare_section_repairs_orphaned_preparing_state_and_freezes_pair(tmp_path):
+    with TestClient(create_app(
+        f"sqlite+pysqlite:///{tmp_path / 'orphaned-prepare.db'}",
+        FakeAi(),
+        AcceptingSourceVerifier(),
+        LocalAttachmentStorage(tmp_path / "orphaned-prepare-attachments"),
+    )) as recovering:
+        series = create_series(recovering)
+        initialization = wait_for_task(
+            recovering,
+            series["initializationTask"]["taskId"],
+        )
+        section_id = initialization["result"]["targetSectionId"]
+        with recovering.app.state.sessions() as db:
+            progress = db.scalar(
+                select(SectionProgress).where(
+                    SectionProgress.section_id == section_id,
+                )
+            )
+            progress.status = "preparing"
+            db.commit()
+
+        prepared = recovering.post(f"/api/sections/{section_id}/prepare")
+        assert prepared.status_code == 200
+        payload = prepared.json()
+        assert payload["status"] == "available"
+        assert payload["content"] is not None
+        assert payload["quiz"] is not None
+        assert payload["versionBinding"] is not None
+
+
+def test_prepare_section_does_not_steal_an_active_preload(tmp_path):
+    with TestClient(create_app(
+        f"sqlite+pysqlite:///{tmp_path / 'owned-prepare.db'}",
+        FakeAi(),
+        AcceptingSourceVerifier(),
+        LocalAttachmentStorage(tmp_path / "owned-prepare-attachments"),
+    )) as recovering:
+        series = create_series(recovering)
+        initialization = wait_for_task(
+            recovering,
+            series["initializationTask"]["taskId"],
+        )
+        section_id = initialization["result"]["targetSectionId"]
+        with recovering.app.state.sessions() as db:
+            initial_task = db.get(
+                LearningTask,
+                series["initializationTask"]["taskId"],
+            )
+            progress = db.scalar(
+                select(SectionProgress).where(
+                    SectionProgress.section_id == section_id,
+                )
+            )
+            progress.status = "preparing"
+            db.add(LearningTask(
+                id=f"task_{uuid4().hex}",
+                learning_run_id=initial_task.learning_run_id,
+                user_id=initial_task.user_id,
+                section_id=section_id,
+                task_type="next_section_preload",
+                idempotency_key=f"owned:{section_id}",
+                trigger_id="test-active-owner",
+                payload_json=json.dumps({"targetSectionId": section_id}),
+                status="running",
+                attempt_count=1,
+                max_attempts=3,
+                lease_owner="test-worker",
+                lease_token=f"lease_{uuid4().hex}",
+                lease_expires_at=now() + timedelta(minutes=1),
+                heartbeat_at=now(),
+            ))
+            db.commit()
+
+        blocked = recovering.post(f"/api/sections/{section_id}/prepare")
+        assert blocked.status_code == 409
+        assert blocked.json()["code"] == "SECTION_PREPARING"
+
+
+def test_lookahead_prepares_one_locked_section_without_unlocking_it(tmp_path):
+    ai = FakeAi()
+    with TestClient(create_app(
+        f"sqlite+pysqlite:///{tmp_path / 'lookahead-buffer.db'}",
+        ai,
+        AcceptingSourceVerifier(),
+        LocalAttachmentStorage(tmp_path / "lookahead-buffer-attachments"),
+    )) as buffered:
+        series = create_series(buffered)
+        initialization = wait_for_task(
+            buffered,
+            series["initializationTask"]["taskId"],
+        )
+        assert initialization["status"] == "succeeded"
+        with buffered.app.state.sessions() as db:
+            lookahead = db.scalar(
+                select(LearningTask).where(
+                    LearningTask.learning_run_id
+                    == db.get(
+                        LearningTask,
+                        series["initializationTask"]["taskId"],
+                    ).learning_run_id,
+                    LearningTask.task_type == "section_lookahead_preload",
+                )
+            )
+            assert lookahead is not None
+            lookahead_id = lookahead.id
+        prepared = wait_for_task(buffered, lookahead_id, timeout=5)
+        assert prepared["status"] == "succeeded"
+        target_id = prepared["result"]["targetSectionId"]
+
+        route = buffered.get(f"/api/series/{series['id']}").json()
+        sections = route["books"][0]["chapters"][0]["sections"]
+        assert sections[0]["status"] == "available"
+        assert sections[1]["id"] == target_id
+        assert sections[1]["status"] == "locked"
+        assert buffered.get(f"/api/sections/{target_id}").status_code == 403
+        with buffered.app.state.sessions() as db:
+            content = db.scalar(
+                select(ContentVersion).where(
+                    ContentVersion.section_id == target_id,
+                    ContentVersion.publication_status == "published",
+                )
+            )
+            quiz = db.scalar(
+                select(QuizSet).where(
+                    QuizSet.section_id == target_id,
+                    QuizSet.publication_status == "published",
+                )
+            )
+            assert content is not None
+            assert quiz is not None
+            assert quiz.content_version_id == content.id
 
 
 def test_runner_persists_failure_report_and_evidence_snapshot(tmp_path, monkeypatch):

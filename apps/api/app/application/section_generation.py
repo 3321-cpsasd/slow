@@ -397,7 +397,10 @@ class SectionGenerationCoordinator:
             section_context.chapter,
             section_context.book,
         )
-        if section_progress.status == "locked":
+        if (
+            section_progress.status == "locked"
+            and not isinstance(self.scope, WorkerExecutionContext)
+        ):
             raise AppError("小节未解锁", code="SECTION_LOCKED", status=403)
         if (
             section_progress.status == "preparing"
