@@ -12,7 +12,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0052_auth_qa_preference_integrity"
+HEAD_REVISION = "0053_lesson_case_identity"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -299,6 +299,7 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
     assert {
         "teaching_moves_json",
         "case_kind",
+        "case_key",
         "relation_to_anchor",
         "reader_priority",
     }.issubset(content_block_columns)

@@ -231,6 +231,7 @@ def _lesson_candidate_json():
             "primary_role": role,
             "teaching_moves": ["direct_explanation"] if slot.endswith("_CORE") else [],
             "case_kind": case_kind,
+            "case_key": f"case_{slot.lower()}" if case_kind else "",
             "heading": f"正文块 {slot}",
             "content": "这一正文块完整解释当前目标的机制、判断依据与适用边界，并为测验提供直接证据。学习者可以据此复述因果链并检查反例。",
         }

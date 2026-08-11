@@ -1402,6 +1402,7 @@ class ContentBlockVersion(Base):
     semantic_role: Mapped[str] = mapped_column(String(32), index=True)
     teaching_moves_json: Mapped[str] = mapped_column(Text, default="[]")
     case_kind: Mapped[str] = mapped_column(String(32), default="", index=True)
+    case_key: Mapped[str] = mapped_column(String(64), default="")
     relation_to_anchor: Mapped[str] = mapped_column(String(32), default="")
     reader_priority: Mapped[str] = mapped_column(String(16), default="normal")
     heading: Mapped[str] = mapped_column(Text, default="")

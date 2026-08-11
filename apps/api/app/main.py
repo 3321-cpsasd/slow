@@ -28,7 +28,7 @@ from .ai.fallback_adapter import FallbackAiAdapter
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceEvidenceCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ReviewSubmit, ShelfCreate
+from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceEvidenceCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ResumeUpdate, ReviewSubmit, ShelfCreate
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -893,6 +893,7 @@ def create_app(
     @app.post("/api/auth/password/recovery-code/rotate")
     def rotate_password_recovery_code(
         request: Request,
+        body: RecoveryCodeRotate,
         scope: UserScope = Depends(current_scope),
         session: Session = Depends(db),
     ):
@@ -902,6 +903,10 @@ def create_app(
                 code="ACCOUNT_RECOVERY_NOT_AVAILABLE",
                 status=404,
             )
+        PasswordCredentialService(session).verify_current_password(
+            user_id=scope.user_id,
+            password=body.current_password.get_secret_value(),
+        )
         return {
             "recoveryCode": AccountRecoveryService(session).issue(
                 user_id=scope.user_id,

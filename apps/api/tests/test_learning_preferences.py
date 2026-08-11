@@ -207,6 +207,70 @@ def test_database_rejects_a_second_terminal_outcome_for_one_request():
     db.rollback()
 
 
+def test_legacy_terminal_retries_follow_the_migration_authority_key():
+    db = database()
+    service = LearningPreferenceService(db, "user_a")
+    service.record(evidence("request_legacy_1"), shelf_id="shelf_1")
+    old_time = datetime(2026, 8, 10, tzinfo=timezone.utc)
+    new_time = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    common = {
+        "user_id": "user_a",
+        "request_event_id": "request_legacy_1",
+        "section_id": "section_1",
+        "shelf_id": "shelf_1",
+        "content_version_id": "content_section_1",
+        "block_id": "block_1",
+        "block_kind": "text",
+        "style": "worked_example",
+        "dimensions_json": '{"example":1.0}',
+        "extraction_confidence": 1.0,
+        "extractor_version": "preset_v1",
+    }
+    db.add_all([
+        LearningPreferenceEvidence(
+            id="legacy_terminal_old",
+            event_id="legacy_helpful_1",
+            terminal_request_key=None,
+            signal="helpful",
+            request_hash="old",
+            occurred_at=old_time,
+            created_at=old_time,
+            **common,
+        ),
+        LearningPreferenceEvidence(
+            id="legacy_terminal_authority",
+            event_id="legacy_unclear_1",
+            terminal_request_key="request_legacy_1",
+            signal="unclear",
+            request_hash="new",
+            occurred_at=new_time,
+            created_at=new_time,
+            **common,
+        ),
+    ])
+    db.commit()
+
+    with pytest.raises(AppError) as raised:
+        service.record(
+            evidence(
+                "legacy_retry_helpful",
+                signal="helpful",
+                parent="request_legacy_1",
+            ),
+            shelf_id="shelf_1",
+        )
+    assert raised.value.code == "PREFERENCE_FEEDBACK_ALREADY_RECORDED"
+    replay = service.record(
+        evidence(
+            "legacy_retry_unclear",
+            signal="unclear",
+            parent="request_legacy_1",
+        ),
+        shelf_id="shelf_1",
+    )
+    assert replay["recorded"] is False
+
+
 def test_public_preference_schema_cannot_mint_adopted_evidence():
     payload = evidence("request_public_1").model_dump(mode="json", by_alias=True)
     payload.update({

@@ -111,6 +111,10 @@ class PasswordRecoveryReset(ApiModel):
         return self
 
 
+class RecoveryCodeRotate(ApiModel):
+    current_password: SecretStr = Field(min_length=8, max_length=200)
+
+
 class PrivacyConsentCreate(ApiModel):
     privacy_accepted: bool = Field(alias="privacyAccepted")
     trial_accepted: bool = Field(alias="trialAccepted")

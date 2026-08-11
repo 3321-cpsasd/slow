@@ -310,6 +310,9 @@ class GeneratedLessonBlock(StrictModel):
     claim_version_ids: list[str] = Field(default_factory=list, max_length=8)
     teaching_moves: list[LESSON_TEACHING_MOVES] = Field(default_factory=list, max_length=8)
     case_kind: LESSON_CASE_KINDS = ""
+    case_key: str = Field(
+        default="", pattern=r"^$|^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+    )
     reader_priority: Literal["essential", "highlight", "normal"] = "normal"
     heading: str = Field(min_length=1, max_length=160)
     content: str = Field(min_length=40, max_length=16000)
@@ -320,6 +323,8 @@ class GeneratedLessonBlock(StrictModel):
             raise ValueError("assessment target ids must be unique within a block")
         if len(self.claim_version_ids) != len(set(self.claim_version_ids)):
             raise ValueError("claim version ids must be unique within a block")
+        if bool(self.case_kind) != bool(self.case_key):
+            raise ValueError("case_key is required exactly when case_kind is set")
         return self
 
 
@@ -402,9 +407,18 @@ class GeneratedLessonSlotBlock(StrictModel):
     primary_role: LESSON_BLOCK_ROLES = "example"
     teaching_moves: list[LESSON_TEACHING_MOVES] = Field(default_factory=list, max_length=8)
     case_kind: LESSON_CASE_KINDS = ""
+    case_key: str = Field(
+        default="", pattern=r"^$|^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+    )
     heading: str = Field(min_length=1, max_length=160)
     content: str = Field(min_length=40, max_length=16000)
     claim_version_ids: list[str] = Field(default_factory=list, max_length=8)
+
+    @model_validator(mode="after")
+    def valid_case_identity(self):
+        if bool(self.case_kind) != bool(self.case_key):
+            raise ValueError("case_key is required exactly when case_kind is set")
+        return self
 
 
 class GeneratedLessonSlotQuestion(StrictModel):

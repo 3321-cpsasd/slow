@@ -86,6 +86,27 @@ class PasswordCredentialService:
             raise ValueError("账号已存在") from error
         return user
 
+    def verify_current_password(self, *, user_id: str, password: str) -> None:
+        credential = self.db.scalar(
+            select(LocalCredential).where(
+                LocalCredential.user_id == user_id,
+                LocalCredential.status == "active",
+            )
+        )
+        expected_hash = (
+            credential.password_hash if credential else _DUMMY_PASSWORD_HASH
+        )
+        try:
+            valid = PASSWORD_HASHER.verify(expected_hash, password)
+        except (VerifyMismatchError, VerificationError, InvalidHashError):
+            valid = False
+        if not credential or not valid:
+            raise AppError(
+                "当前密码不正确",
+                code="ACCOUNT_REAUTH_INVALID",
+                status=403,
+            )
+
     def set_account_enabled(self, *, username: str, enabled: bool) -> User:
         credential = self._credential(username)
         user = self.db.get(User, credential.user_id)

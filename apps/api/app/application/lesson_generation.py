@@ -32,9 +32,9 @@ from ..modules.learning.assessment_items import publish_assessment_item_versions
 
 
 LESSON_GENERATION_PIPELINE_VERSION = "lesson_generation_v3"
-LESSON_GENERATION_SCHEMA_VERSION = "generated_lesson_composition_candidate_v6"
-LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_composition_prompt_v9"
-LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v9"
+LESSON_GENERATION_SCHEMA_VERSION = "generated_lesson_composition_candidate_v7"
+LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_composition_prompt_v10"
+LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v10"
 LESSON_CONTEXT_POLICY_VERSION = "lesson_generation_context_v2"
 AI_CONTENT_LABEL_SCHEMA_VERSION = "ai_content_label_v2"
 
@@ -107,11 +107,11 @@ class LessonGenerationSpec(LessonSpecModel):
         default=LESSON_GENERATION_PIPELINE_VERSION,
         alias="pipelineVersion",
     )
-    schema_version: Literal["generated_lesson_composition_candidate_v6"] = Field(
+    schema_version: Literal["generated_lesson_composition_candidate_v7"] = Field(
         default=LESSON_GENERATION_SCHEMA_VERSION,
         alias="schemaVersion",
     )
-    prompt_version: Literal["lesson_generation_composition_prompt_v9"] = Field(
+    prompt_version: Literal["lesson_generation_composition_prompt_v10"] = Field(
         default=LESSON_GENERATION_PROMPT_VERSION,
         alias="promptVersion",
     )
@@ -365,11 +365,8 @@ def validate_lesson_candidate(
             maximumBlocks=spec.composition_policy.maximum_blocks,
             actualBlocks=block_count,
         )
-    case_count = sum(
-        1
-        for block in candidate.blocks
-        if block.case_kind and block.case_kind != "none"
-    )
+    case_keys = {block.case_key for block in candidate.blocks if block.case_kind}
+    case_count = len(case_keys)
     if case_count < spec.composition_policy.case_policy.minimum_distinct_cases:
         _reject(
             "CONTENT_COMPOSITION_CASES_MISSING",
@@ -667,6 +664,7 @@ def publish_lesson_candidate(
             "relationToAnchor": block.relation_to_anchor,
             "teachingMoves": block.teaching_moves,
             "caseKind": block.case_kind,
+            "caseKey": block.case_key,
             "readerPriority": reader_priority,
             "heading": block.heading,
             "content": block.content,
@@ -686,6 +684,7 @@ def publish_lesson_candidate(
                 semantic_role=block.role,
                 teaching_moves_json=_dump(block.teaching_moves),
                 case_kind=block.case_kind,
+                case_key=block.case_key,
                 relation_to_anchor=block.relation_to_anchor,
                 reader_priority=reader_priority,
                 heading=block.heading,

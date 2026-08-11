@@ -296,12 +296,9 @@ class LearningPreferenceService:
                 select(LearningPreferenceEvidence)
                 .where(
                     LearningPreferenceEvidence.user_id == self.user_id,
-                    LearningPreferenceEvidence.request_event_id == request_event_id,
-                    LearningPreferenceEvidence.signal.in_({
-                        "helpful", "unclear", "adopted",
-                    }),
+                    LearningPreferenceEvidence.terminal_request_key
+                    == request_event_id,
                 )
-                .order_by(LearningPreferenceEvidence.created_at)
             )
             if terminal:
                 if terminal.signal == signal:

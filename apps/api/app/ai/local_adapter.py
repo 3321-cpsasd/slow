@@ -190,6 +190,7 @@ class LocalDemoAdapter:
                     relation_to_anchor=relation,
                     teaching_moves=[move],
                     case_kind=case_kind,
+                    case_key=(f"demo_case_{position}" if case_kind else ""),
                     heading=f"{spec['section']['title']}：演示支持 {position}",
                     content=(
                         f"这一段围绕“{spec['section']['question']}”提供不参与新增考核目标的支持说明。"

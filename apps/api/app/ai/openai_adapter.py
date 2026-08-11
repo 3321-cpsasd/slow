@@ -187,6 +187,7 @@ def _expand_lesson_slots(
                 claim_version_ids=block.claim_version_ids,
                 teaching_moves=teaching_moves,
                 case_kind=block.case_kind,
+                case_key=block.case_key,
                 reader_priority=(
                     "essential"
                     if block.slot.endswith("_CORE")
@@ -776,8 +777,8 @@ class OpenAiAdapter:
 严格边界：
 1. section.question 是本节唯一核心知识锚点。正文可以调用必要前置、机制、比较、边界、应用和迁移知识，但不能创造新的并列核心知识点或改变 Learning Contract。
 2. serverSlotPlan.targetSlots 按 targets 的顺序分配为 T1、T2……。每个 targetSlot 必须有且只有一个同名 CORE 块，例如 T2 对应 T2_CORE；该块必须完整教授相应目标的答案依据。不得创建计划外 CORE 槽位。knowledgeContext.status=ready 时，Tn_CORE 的 claim_version_ids 只能从对应 targetSlot.allowedClaimVersionIds 中选择，不能从全局 claim 列表中选择其他概念的主张。
-3. compositionPolicy 描述本节的认识方式、证据形式、推荐段落职责和案例策略。除每个 Tn_CORE 外，使用 S1、S2……创建自然需要的支持块；总块数遵守 compositionPolicy 的预算，但推荐职责不是必须逐项独占一个块。一个支持块可以通过 teaching_moves 同时承担举例、比较和揭示边界等动作，不得为凑角色机械拆块。每个块只输出 slot、kind、primary_role、teaching_moves、case_kind、heading、content、claim_version_ids；不得输出目标 ID、目标数组、relation 或 reader priority。Tn_CORE 的 primary_role 固定为 core_instruction。支持块的 primary_role 必须来自 serverSlotPlan.allowedSupportRoles。
-4. case_kind 为空表示不是案例；真实案例使用 empirical_case，原始材料使用 primary_source_case，逐步演示使用 worked_example，反例使用 counterexample，纯假设使用 hypothetical_example，面向学习者的迁移情境使用 learner_transfer。不得把假设案例写成真实事件，也不得编造学习者经历。knowledgeContext.status=ready 时，除纯活动块以及 hypothetical_example、learner_transfer 外的事实性块必须从 knowledgeContext.claims 中选择至少一个真正支持内容的 claimVersionId；每个 Tn_CORE 的主张还必须支持对应目标概念。不得猜测、改写或引用列表外 ID，所有事实表述必须保持在所引用主张的 scope、边界和假设内。
+3. compositionPolicy 描述本节的认识方式、证据形式、推荐段落职责和案例策略。除每个 Tn_CORE 外，使用 S1、S2……创建自然需要的支持块；总块数遵守 compositionPolicy 的预算，但推荐职责不是必须逐项独占一个块。一个支持块可以通过 teaching_moves 同时承担举例、比较和揭示边界等动作，不得为凑角色机械拆块。每个块只输出 slot、kind、primary_role、teaching_moves、case_kind、case_key、heading、content、claim_version_ids；不得输出目标 ID、目标数组、relation 或 reader priority。Tn_CORE 的 primary_role 固定为 core_instruction。支持块的 primary_role 必须来自 serverSlotPlan.allowedSupportRoles。
+4. case_kind 为空表示不是案例，此时 case_key 也必须为空；使用案例时必须提供候选内稳定 case_key。同一个情境跨多个正文块展开时复用同一 case_key，只有真正不同的情境才使用不同 case_key。真实案例使用 empirical_case，原始材料使用 primary_source_case，逐步演示使用 worked_example，反例使用 counterexample，纯假设使用 hypothetical_example，面向学习者的迁移情境使用 learner_transfer。不得把假设案例写成真实事件，也不得编造学习者经历。knowledgeContext.status=ready 时，除纯活动块以及 hypothetical_example、learner_transfer 外的事实性块必须从 knowledgeContext.claims 中选择至少一个真正支持内容的 claimVersionId；每个 Tn_CORE 的主张还必须支持对应目标概念。不得猜测、改写或引用列表外 ID，所有事实表述必须保持在所引用主张的 scope、边界和假设内。
 5. 每道题只输出 target_slot、prompt、options、correct、explanation。target_slot 必须来自 serverSlotPlan；服务端会把题目确定性绑定到同名 CORE 块。不得输出 item_key、assessment_target_id 或 evidence_block_keys。
 6. 每个 required=true 的目标必须至少有一道题；总计 4-5 道。题目必须能仅根据对应 CORE 块作答，correct 使用从 0 开始的选项下标。只有一个选项成立时 correct 才能只含一个下标，且其余每个选项在题干条件下都必须明确不成立；若两个以上选项成立，必须把全部正确下标写入 correct，使其成为多选题，不能用“最佳答案”“最典型”或“更明确”等措辞强行保留为单选。explanation 必须直接引用选项的实际内容来解释知识依据，不得使用“选项 A/B/C/D”“选项 1/2/3/4”“第几个选项”或“A 项/B 项”等位置表述，因为服务端发布前会重排选项。
 7. learner、mission、depthPolicy、relevantMastery 只用于调整起点、解释深度和例子；不得把自述当作掌握证据。neighborBoundaries 用于避免与前后小节重复或越界。knowledgeContext.status=ready 时，其中冻结的 nodes、edges、claims 是本次可使用的已发布知识子图；不得引用子图之外的知识版本或声称未列出的主张已经核验。status=not_applicable 时不得把 provisional 数据伪装成正式知识图。

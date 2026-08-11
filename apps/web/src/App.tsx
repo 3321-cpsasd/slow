@@ -73,6 +73,8 @@ type ExplanationRequest = {
   question: string;
   displayQuestion: string;
   evidenceEventId?: string;
+  preferenceStatus: 'saved' | 'unsaved' | 'saving';
+  customInstruction?: string;
 };
 type FeedbackTarget =
   | { scope: 'global' }
@@ -229,6 +231,7 @@ type QaExchange = {
   explanationStyle?: ExplanationStyle;
   preferenceRequestEventId?: string;
   explanationBlockKind?: Block['kind'];
+  preferenceStatus?: 'saved' | 'unsaved';
 };
 
 const EXPLANATION_STYLE_OPTIONS: Record<PresetExplanationStyle, {
@@ -1643,7 +1646,7 @@ export default function App() {
               setData(await api.bootstrap());
             }}
             onLogout={logout}
-            onRotateRecoveryCode={async () => (await api.rotateRecoveryCode()).recoveryCode}
+            onRotateRecoveryCode={async (currentPassword) => (await api.rotateRecoveryCode(currentPassword)).recoveryCode}
             privacy={auth.privacy}
             onRequestExit={requestAccountExit}
           />
@@ -3119,7 +3122,7 @@ function ProfileCenterPage({
   onBack: () => void;
   onSave: (body: object) => Promise<void>;
   onLogout: () => Promise<void>;
-  onRotateRecoveryCode: () => Promise<string>;
+  onRotateRecoveryCode: (currentPassword: string) => Promise<string>;
   privacy: PrivacyState;
   onRequestExit: (confirmation: string, reason: string) => Promise<void>;
 }) {
@@ -3147,6 +3150,8 @@ function ProfileCenterPage({
   const [exitSubmitting, setExitSubmitting] = useState(false);
   const [recoveryCodeBusy, setRecoveryCodeBusy] = useState(false);
   const [renewedRecoveryCode, setRenewedRecoveryCode] = useState('');
+  const [recoveryPassword, setRecoveryPassword] = useState('');
+  const [recoveryError, setRecoveryError] = useState('');
 
   const domains = useMemo(() => parseProfileDomains(domainText), [domainText]);
 
@@ -3389,19 +3394,32 @@ function ProfileCenterPage({
               <div>
                 <span>账号恢复</span>
                 <h3>恢复码</h3>
+                <p>生成后，旧恢复码立即失效。</p>
                 {renewedRecoveryCode && <code>{renewedRecoveryCode}</code>}
+                {recoveryError && <p className="account-recovery-error" role="alert">{recoveryError}</p>}
               </div>
-              <button type="button" disabled={recoveryCodeBusy} onClick={async () => {
-                setRecoveryCodeBusy(true);
-                setError('');
-                try {
-                  setRenewedRecoveryCode(await onRotateRecoveryCode());
-                } catch (reason) {
-                  setError(reason instanceof Error ? reason.message : '恢复码生成失败');
-                } finally {
-                  setRecoveryCodeBusy(false);
-                }
-              }}>{recoveryCodeBusy ? '正在生成…' : renewedRecoveryCode ? '重新生成' : '生成新的恢复码'}</button>
+              <div className="account-recovery-action">
+                <label>当前密码
+                  <input
+                    type="password"
+                    autoComplete="current-password"
+                    value={recoveryPassword}
+                    onChange={(event) => setRecoveryPassword(event.target.value)}
+                  />
+                </label>
+                <button type="button" disabled={recoveryCodeBusy || !recoveryPassword} onClick={async () => {
+                  setRecoveryCodeBusy(true);
+                  setRecoveryError('');
+                  try {
+                    setRenewedRecoveryCode(await onRotateRecoveryCode(recoveryPassword));
+                    setRecoveryPassword('');
+                  } catch (reason) {
+                    setRecoveryError(reason instanceof Error ? reason.message : '恢复码生成失败');
+                  } finally {
+                    setRecoveryCodeBusy(false);
+                  }
+                }}>{recoveryCodeBusy ? '正在生成…' : renewedRecoveryCode ? '重新生成' : '生成新的恢复码'}</button>
+              </div>
             </section>
           )}
 
@@ -4291,6 +4309,7 @@ function LearningWorkspace({
           setSelectedQuote(null);
           const requestId = crypto.randomUUID();
           let evidenceEventId: string | undefined;
+          let preferenceStatus: ExplanationRequest['preferenceStatus'] = 'unsaved';
           if (section?.content) {
             try {
               await api.recordPreferenceEvidence({
@@ -4304,8 +4323,9 @@ function LearningWorkspace({
                 customInstruction: style === 'custom' ? instruction : undefined,
               });
               evidenceEventId = requestId;
+              preferenceStatus = 'saved';
             } catch {
-              // A preference write must never block the bound Ask AI flow.
+              // Ask AI remains available; the panel exposes retryable unsaved state.
             }
           }
           setExplanationRequest({
@@ -4317,6 +4337,8 @@ function LearningWorkspace({
             question,
             displayQuestion: style === 'custom' ? `按这个讲：${instruction}` : option?.label || '我的讲法',
             evidenceEventId,
+            preferenceStatus,
+            customInstruction: style === 'custom' ? instruction : undefined,
           });
           if (compactLayout || auxiliaryExclusive) setDirectoryHidden(true);
           setQaHidden(false);
@@ -6951,6 +6973,11 @@ function QaPanel({
     const explanationStyle = draftExplanation?.style;
     const preferenceRequestEventId = draftExplanation?.evidenceEventId;
     const explanationBlockKind = draftExplanation?.blockKind;
+    const preferenceStatus = draftExplanation?.preferenceStatus === 'saved'
+      ? 'saved'
+      : draftExplanation
+        ? 'unsaved'
+        : undefined;
     setMessages((current) => [
       ...current,
       {
@@ -6963,6 +6990,7 @@ function QaPanel({
         explanationStyle,
         preferenceRequestEventId,
         explanationBlockKind,
+        preferenceStatus,
       },
     ]);
     setQuestion('');
@@ -7053,7 +7081,37 @@ function QaPanel({
               <span aria-hidden="true">另解</span>
               <div>
                 <b>{draftExplanation.label}</b>
+                {draftExplanation.preferenceStatus !== 'saved' && (
+                  <small>偏好未保存</small>
+                )}
               </div>
+              {draftExplanation.preferenceStatus !== 'saved' && (
+                <button type="button" disabled={draftExplanation.preferenceStatus === 'saving'} onClick={async () => {
+                  if (!section.content || draftExplanation.preferenceStatus === 'saving') return;
+                  setDraftExplanation((current) => current ? { ...current, preferenceStatus: 'saving' } : current);
+                  setPreferenceError('');
+                  try {
+                    await api.recordPreferenceEvidence({
+                      eventId: draftExplanation.requestId,
+                      sectionId: section.id,
+                      contentVersionId: section.content.id,
+                      blockId: draftExplanation.blockId,
+                      blockKind: draftExplanation.blockKind,
+                      style: draftExplanation.style,
+                      signal: 'requested',
+                      customInstruction: draftExplanation.customInstruction,
+                    });
+                    setDraftExplanation((current) => current ? {
+                      ...current,
+                      evidenceEventId: current.requestId,
+                      preferenceStatus: 'saved',
+                    } : current);
+                  } catch (reason) {
+                    setDraftExplanation((current) => current ? { ...current, preferenceStatus: 'unsaved' } : current);
+                    setPreferenceError(reason instanceof Error ? reason.message : '偏好未保存，请重试。');
+                  }
+                }}>{draftExplanation.preferenceStatus === 'saving' ? '保存中…' : '重试保存'}</button>
+              )}
             </div>
           )}
           <div className="qa-messages" ref={messagesRef}>
@@ -7100,13 +7158,13 @@ function QaPanel({
                 </div>
                 {message.status === 'done' && message.explanationStyle && (
                   <div className="explanation-style-feedback">
-                    <span>这次讲法怎么样？</span>
+                    <span>{message.preferenceRequestEventId ? '这次讲法怎么样？' : '偏好未保存'}</span>
+                    {!message.preferenceRequestEventId && <p>本次回答不会计入长期偏好。</p>}
                     <div className="explanation-style-actions">
                       <button
                         className={styleFeedback[message.id] === 'helpful' ? 'selected' : ''}
-                        disabled={Boolean(styleFeedback[message.id]) || adoptedExchange === message.id}
+                        disabled={!message.preferenceRequestEventId || Boolean(styleFeedback[message.id]) || adoptedExchange === message.id}
                         onClick={async () => {
-                          setStyleFeedback((current) => ({ ...current, [message.id]: 'helpful' }));
                           if (message.preferenceRequestEventId && message.blockId && section.content) {
                             try {
                               await api.recordPreferenceEvidence({
@@ -7115,21 +7173,21 @@ function QaPanel({
                                 blockId: message.blockId, blockKind: message.explanationBlockKind || 'text',
                                 style: message.explanationStyle, signal: 'helpful',
                               });
+                              setStyleFeedback((current) => ({ ...current, [message.id]: 'helpful' }));
+                              telemetry.track('explanation_style_feedback', {
+                                view: 'learn', entityType: 'section', entityId: section.id,
+                                properties: { style: message.explanationStyle!, helpful: true },
+                              });
                             } catch (reason) {
                               setPreferenceError(reason instanceof Error ? reason.message : '操作暂未保存，请重试。');
                             }
                           }
-                          telemetry.track('explanation_style_feedback', {
-                            view: 'learn', entityType: 'section', entityId: section.id,
-                            properties: { style: message.explanationStyle!, helpful: true },
-                          });
                         }}
                       >有帮助</button>
                       <button
                         className={styleFeedback[message.id] === 'unclear' ? 'selected' : ''}
-                        disabled={Boolean(styleFeedback[message.id]) || adoptedExchange === message.id}
+                        disabled={!message.preferenceRequestEventId || Boolean(styleFeedback[message.id]) || adoptedExchange === message.id}
                         onClick={async () => {
-                          setStyleFeedback((current) => ({ ...current, [message.id]: 'unclear' }));
                           if (message.preferenceRequestEventId && message.blockId && section.content) {
                             try {
                               await api.recordPreferenceEvidence({
@@ -7138,14 +7196,15 @@ function QaPanel({
                                 blockId: message.blockId, blockKind: message.explanationBlockKind || 'text',
                                 style: message.explanationStyle, signal: 'unclear',
                               });
+                              setStyleFeedback((current) => ({ ...current, [message.id]: 'unclear' }));
+                              telemetry.track('explanation_style_feedback', {
+                                view: 'learn', entityType: 'section', entityId: section.id,
+                                properties: { style: message.explanationStyle!, helpful: false },
+                              });
                             } catch (reason) {
                               setPreferenceError(reason instanceof Error ? reason.message : '操作暂未保存，请重试。');
                             }
                           }
-                          telemetry.track('explanation_style_feedback', {
-                            view: 'learn', entityType: 'section', entityId: section.id,
-                            properties: { style: message.explanationStyle!, helpful: false },
-                          });
                         }}
                       >还是不清楚</button>
                       <button

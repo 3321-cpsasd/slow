@@ -227,8 +227,9 @@ export const api = {
     method:'POST',
     body:JSON.stringify(body),
   }),
-  rotateRecoveryCode:()=>call<{recoveryCode:string}>('/api/auth/password/recovery-code/rotate',{
+  rotateRecoveryCode:(currentPassword:string)=>call<{recoveryCode:string}>('/api/auth/password/recovery-code/rotate',{
     method:'POST',
+    body:JSON.stringify({currentPassword}),
   }),
   logout:async()=>{
     await call<void>('/api/auth/logout',{method:'POST'});

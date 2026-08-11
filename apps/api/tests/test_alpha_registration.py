@@ -3,6 +3,7 @@ from threading import Barrier
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from sqlalchemy.dialects import postgresql, sqlite
 
 from app.ai.local_adapter import LocalDemoAdapter
 from app.infrastructure.tables import (
@@ -12,7 +13,7 @@ from app.infrastructure.tables import (
     LocalCredential,
     User,
 )
-from app.auth.registration import claim_alpha_registration
+from app.auth.registration import _quota_insert_statement, claim_alpha_registration
 from app.core.errors import AppError
 from app.main import create_app
 from app.services.attachment_storage import LocalAttachmentStorage
@@ -200,6 +201,7 @@ def test_authenticated_user_can_rotate_a_lost_recovery_code(tmp_path):
         rotated = client.post(
             "/api/auth/password/recovery-code/rotate",
             headers={"X-CSRF-Token": created.json()["csrfToken"]},
+            json={"currentPassword": PASSWORD},
         )
         assert rotated.status_code == 200
         assert rotated.json()["recoveryCode"].startswith("SLOW-")
@@ -212,6 +214,40 @@ def test_authenticated_user_can_rotate_a_lost_recovery_code(tmp_path):
                 (1, "revoked"),
                 (2, "active"),
             ]
+
+
+def test_recovery_code_rotation_requires_the_current_password(tmp_path):
+    with TestClient(
+        alpha_app(tmp_path), base_url="https://testserver"
+    ) as client:
+        created = register(client)
+        rejected = client.post(
+            "/api/auth/password/recovery-code/rotate",
+            headers={"X-CSRF-Token": created.json()["csrfToken"]},
+            json={"currentPassword": "Wrong-Password-Value"},
+        )
+        assert rejected.status_code == 403
+        assert rejected.json()["code"] == "ACCOUNT_REAUTH_INVALID"
+        with client.app.state.sessions() as db:
+            codes = db.scalars(select(AccountRecoveryCode)).all()
+            assert [(item.version, item.status) for item in codes] == [
+                (1, "active")
+            ]
+
+
+def test_alpha_quota_insert_compiles_for_supported_production_dialects():
+    sqlite_sql = str(_quota_insert_statement(
+        dialect_name="sqlite",
+        quota_date="2026-08-11",
+        daily_limit=10,
+    ).compile(dialect=sqlite.dialect()))
+    postgres_sql = str(_quota_insert_statement(
+        dialect_name="postgresql",
+        quota_date="2026-08-11",
+        daily_limit=10,
+    ).compile(dialect=postgresql.dialect()))
+    assert "ON CONFLICT" in sqlite_sql
+    assert "ON CONFLICT" in postgres_sql
 
 
 def test_alpha_quota_reservation_is_atomic_under_concurrency(tmp_path):
