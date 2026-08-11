@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from contextlib import suppress
+from datetime import datetime, timezone
 import hmac
 import json
 import logging
@@ -11,6 +12,7 @@ from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from .auth.context import Principal, UserScope, demo_user_scope
 from .auth.profile import ProfileService
@@ -18,6 +20,7 @@ from .auth.privacy import PrivacyService, privacy_notice
 from .auth.local import LocalCredentialService
 from .auth.oidc import OidcClient
 from .auth.password import PasswordCredentialService
+from .auth.recovery import AccountRecoveryService
 from .auth.service import IdentityService, OidcStateService, SessionService, token_hash
 from .ai.openai_adapter import OpenAiAdapter
 from .ai.anthropic_adapter import AnthropicAdapter
@@ -25,13 +28,13 @@ from .ai.fallback_adapter import FallbackAiAdapter
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, DailyModeUpdate, FeedbackCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ReviewSubmit, ShelfCreate
+from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, DailyModeUpdate, FeedbackCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ReviewSubmit, ShelfCreate
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
 from .demo_personas import LOCAL_DEMO_PERSONAS
 from .infrastructure.database import build_database
-from .infrastructure.tables import Base, LearningTask, QuizAttempt, Remediation, User
+from .infrastructure.tables import Base, LearningTask, LocalCredential, QuizAttempt, Remediation, User
 from .modules.learning.tasks import claim_task, heartbeat_task, recoverable_task_ids
 from .modules.feedback.service import FeedbackService
 from .modules.telemetry.service import ProductEventService
@@ -207,16 +210,40 @@ def create_app(
     *,
     auth_mode: str | None = None,
     app_mode: str | None = None,
+    registration_mode: str | None = None,
+    alpha_registration_code: str | None = None,
+    alpha_registration_daily_limit: int | None = None,
     oidc_client=None,
 ):
     effective_auth_mode = auth_mode or settings.auth_mode
     effective_app_mode = app_mode or settings.app_mode
+    effective_registration_mode = registration_mode or settings.registration_mode
+    effective_alpha_registration_code = (
+        settings.alpha_registration_code
+        if alpha_registration_code is None
+        else alpha_registration_code
+    )
+    effective_alpha_registration_daily_limit = (
+        settings.alpha_registration_daily_limit
+        if alpha_registration_daily_limit is None
+        else alpha_registration_daily_limit
+    )
     if effective_app_mode == "production" and effective_auth_mode == "demo":
         raise RuntimeError("Production mode cannot use demo authentication")
     if effective_app_mode == "production" and effective_auth_mode == "local":
         raise RuntimeError("Production mode cannot use local authentication")
     if effective_app_mode == "production" and settings.password_escrow_enabled:
         raise RuntimeError("Production mode cannot enable password escrow")
+    if (
+        effective_registration_mode != "closed"
+        and effective_auth_mode != "password"
+    ):
+        raise RuntimeError("Registration requires password authentication")
+    if (
+        effective_registration_mode == "alpha"
+        and not effective_alpha_registration_code
+    ):
+        raise RuntimeError("Alpha registration requires an access code")
     engine, sessions = build_database(database_url or settings.database_url)
     usage_recorder = AiUsageRecorder(sessions)
     if runtime_settings_path is False:
@@ -420,6 +447,11 @@ def create_app(
     )
     app.state.auth_mode = effective_auth_mode
     app.state.app_mode = effective_app_mode
+    app.state.registration_mode = effective_registration_mode
+    app.state.alpha_registration_code = effective_alpha_registration_code
+    app.state.alpha_registration_daily_limit = (
+        effective_alpha_registration_daily_limit
+    )
     app.state.oidc = configured_oidc
 
     @app.exception_handler(AppError)
@@ -612,8 +644,15 @@ def create_app(
 
     @app.get("/api/auth/config")
     def auth_config(request: Request):
+        registration_mode = (
+            request.app.state.registration_mode
+            if request.app.state.auth_mode == "password"
+            else "closed"
+        )
         response = {
             "mode": request.app.state.auth_mode,
+            "registrationMode": registration_mode,
+            "registrationCodeRequired": registration_mode == "alpha",
             "providerName": (
                 settings.oidc_provider_name
                 if request.app.state.auth_mode == "oidc"
@@ -661,22 +700,15 @@ def create_app(
         )
         return response
 
-    def password_login_response(
+    def password_user_response(
         request: Request,
-        body: PasswordLogin,
+        user: User,
         session: Session,
         *,
         mode: str,
+        status_code: int = 200,
+        extra: dict | None = None,
     ):
-        credential_service = (
-            LocalCredentialService(session)
-            if mode == "local"
-            else PasswordCredentialService(session)
-        )
-        user = credential_service.authenticate(
-            username=body.username,
-            password=body.password.get_secret_value(),
-        )
         session_service = SessionService(
             session,
             ttl_seconds=settings.session_ttl_seconds,
@@ -700,7 +732,7 @@ def create_app(
                 )
             ),
         ).ensure_user()
-        response = JSONResponse({
+        payload = {
             "authenticated": True,
             "mode": mode,
             "user": {"id": user.id, "name": user.name},
@@ -709,7 +741,10 @@ def create_app(
                 required=privacy_required(request)
             ),
             "onboarding": ProfileService(session, user.id).state(),
-        })
+        }
+        if extra:
+            payload.update(extra)
+        response = JSONResponse(payload, status_code=status_code)
         set_session_cookies(
             response,
             request,
@@ -717,6 +752,29 @@ def create_app(
             csrf_token=csrf_token,
         )
         return response
+
+    def password_login_response(
+        request: Request,
+        body: PasswordLogin,
+        session: Session,
+        *,
+        mode: str,
+    ):
+        credential_service = (
+            LocalCredentialService(session)
+            if mode == "local"
+            else PasswordCredentialService(session)
+        )
+        user = credential_service.authenticate(
+            username=body.username,
+            password=body.password.get_secret_value(),
+        )
+        return password_user_response(
+            request,
+            user,
+            session,
+            mode=mode,
+        )
 
     @app.post("/api/auth/password/login")
     def password_auth_login(
@@ -736,6 +794,98 @@ def create_app(
             session,
             mode="password",
         )
+
+    @app.post("/api/auth/password/register")
+    def password_auth_register(
+        request: Request,
+        body: PasswordRegistration,
+        session: Session = Depends(db),
+    ):
+        if (
+            request.app.state.auth_mode != "password"
+            or request.app.state.registration_mode == "closed"
+        ):
+            raise AppError(
+                "Alpha 注册当前未开放",
+                code="REGISTRATION_NOT_AVAILABLE",
+                status=404,
+            )
+        if request.app.state.registration_mode == "alpha":
+            supplied_code = (
+                body.alpha_code.get_secret_value() if body.alpha_code else ""
+            )
+            if not hmac.compare_digest(
+                request.app.state.alpha_registration_code,
+                supplied_code,
+            ):
+                raise AppError(
+                    "Alpha 访问码无效",
+                    code="ALPHA_ACCESS_CODE_INVALID",
+                    status=403,
+                )
+        day_start = datetime.now(timezone.utc).replace(
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+        created_today = int(session.scalar(
+            select(func.count(LocalCredential.id)).where(
+                LocalCredential.created_at >= day_start,
+            )
+        ) or 0)
+        if created_today >= request.app.state.alpha_registration_daily_limit:
+            raise AppError(
+                "今天的 Alpha 名额已满，请明天再试",
+                code="REGISTRATION_DAILY_LIMIT_REACHED",
+                status=429,
+            )
+        password = body.password.get_secret_value()
+        try:
+            user = PasswordCredentialService(session).create_account(
+                username=body.username,
+                display_name=body.username.strip(),
+                password=password,
+                commit=False,
+            )
+            recovery_code = AccountRecoveryService(session).issue(
+                user_id=user.id,
+                commit=False,
+            )
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        return password_user_response(
+            request,
+            user,
+            session,
+            mode="password",
+            status_code=201,
+            extra={"recoveryCode": recovery_code},
+        )
+
+    @app.post("/api/auth/password/recover")
+    def password_auth_recover(
+        request: Request,
+        body: PasswordRecoveryReset,
+        session: Session = Depends(db),
+    ):
+        if request.app.state.auth_mode != "password":
+            raise AppError(
+                "当前未启用正式账号密码登录",
+                code="PASSWORD_AUTH_NOT_ENABLED",
+                status=404,
+            )
+        replacement = AccountRecoveryService(session).reset_password(
+            username=body.username,
+            recovery_code=body.recovery_code.get_secret_value(),
+            new_password=body.new_password.get_secret_value(),
+        )
+        return {
+            "reset": True,
+            "recoveryCode": replacement,
+        }
 
     @app.post("/api/auth/local/login")
     def local_auth_login(

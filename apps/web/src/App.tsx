@@ -25,6 +25,7 @@ import type {
   Bootstrap,
   AccountExitReceipt,
   PrivacyState,
+  RegistrationResult,
   Chapter,
   DueReviews,
   DailyMode,
@@ -64,6 +65,75 @@ type FeedbackTarget =
       block: Block;
     };
 const AI_RUNTIME_SETTINGS_ENABLED = import.meta.env.VITE_INTERNAL_AI_SETTINGS === 'true';
+type AuthPanel = 'login' | 'register' | 'recover';
+
+function RecoveryCodePanel({
+  code,
+  renewed,
+  onContinue,
+}: {
+  code:string;
+  renewed:boolean;
+  onContinue:()=>void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const copyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+    } catch {
+      setCopied(false);
+    }
+  };
+  return (
+    <div className="recovery-code-panel">
+      <div className="recovery-key-mark" aria-hidden="true"><i /><i /><i /></div>
+      <p className="eyebrow">只展示这一次</p>
+      <h2>{renewed ? '新恢复码已生成' : '把备用钥匙收好'}</h2>
+      <p>
+        {renewed
+          ? '旧恢复码已经失效。请保存这份新恢复码，再使用新密码登录。'
+          : 'Slow 不绑定邮箱或手机。忘记密码时，这串恢复码是确认账号归属的唯一凭证。'}
+      </p>
+      <div className="recovery-code-value" aria-label="账号恢复码">{code}</div>
+      <button type="button" className="recovery-copy-button" onClick={() => void copyCode()}>
+        {copied ? '已复制恢复码' : '复制恢复码'}
+      </button>
+      <small>密码和恢复码同时遗失后，将无法自助恢复账号。</small>
+      <button type="button" className="auth-submit" onClick={onContinue}>
+        {renewed ? '返回登录' : '我已保存，继续'} <span>→</span>
+      </button>
+    </div>
+  );
+}
+
+function PasswordVisibilityToggle({
+  visible,
+  onToggle,
+}: {
+  visible:boolean;
+  onToggle:()=>void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={visible ? '隐藏密码' : '显示密码'}
+      aria-pressed={visible}
+      onClick={onToggle}
+    >
+      {visible ? (
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
+          <path d="m3 3 18 18M10.6 10.7a2 2 0 0 0 2.7 2.7M9.9 4.3A10.7 10.7 0 0 1 12 4c5.5 0 9 5.5 9 5.5a16 16 0 0 1-2.2 2.7M6.6 6.6C4.3 8.1 3 9.5 3 9.5S6.5 15 12 15c1 0 1.9-.2 2.7-.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      ) : (
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
+          <path d="M3 9.5S6.5 4 12 4s9 5.5 9 5.5S17.5 15 12 15 3 9.5 3 9.5Z" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
+          <circle cx="12" cy="9.5" r="2.5" stroke="currentColor" strokeWidth="1.7" />
+        </svg>
+      )}
+    </button>
+  );
+}
 
 const routeFromLocation = (): AppRoute => {
   const parts = window.location.pathname.split('/').filter(Boolean).map((part) => {
@@ -179,6 +249,21 @@ export default function App() {
   const [localUsername, setLocalUsername] = useState('');
   const [localPassword, setLocalPassword] = useState('');
   const [showLocalPassword, setShowLocalPassword] = useState(false);
+  const [authPanel, setAuthPanel] = useState<AuthPanel>('login');
+  const [registrationUsername, setRegistrationUsername] = useState('');
+  const [registrationPassword, setRegistrationPassword] = useState('');
+  const [registrationPasswordConfirm, setRegistrationPasswordConfirm] = useState('');
+  const [showRegistrationPassword, setShowRegistrationPassword] = useState(false);
+  const [showRegistrationPasswordConfirm, setShowRegistrationPasswordConfirm] = useState(false);
+  const [alphaCode, setAlphaCode] = useState('');
+  const [registrationResult, setRegistrationResult] = useState<RegistrationResult | null>(null);
+  const [recoveryUsername, setRecoveryUsername] = useState('');
+  const [recoveryCode, setRecoveryCode] = useState('');
+  const [recoveryPassword, setRecoveryPassword] = useState('');
+  const [recoveryPasswordConfirm, setRecoveryPasswordConfirm] = useState('');
+  const [showRecoveryPassword, setShowRecoveryPassword] = useState(false);
+  const [showRecoveryPasswordConfirm, setShowRecoveryPasswordConfirm] = useState(false);
+  const [renewedRecoveryCode, setRenewedRecoveryCode] = useState('');
   const [data, setData] = useState<Bootstrap | null>(null);
   const [view, setView] = useState<View>(() => routeFromLocation().view);
   const [shelf, setShelf] = useState<Shelf | null>(null);
@@ -264,6 +349,7 @@ export default function App() {
       setSeries(null);
       setSection(null);
       setView('home');
+      setAuthPanel('login');
       setShowUserMenu(false);
       window.history.replaceState({}, '', '/');
       setAuthChecked(true);
@@ -430,6 +516,61 @@ export default function App() {
     }
   };
 
+  const switchAuthPanel = (panel: AuthPanel) => {
+    setAuthPanel(panel);
+    setError('');
+    setRenewedRecoveryCode('');
+  };
+
+  const registerAlphaAccount = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy('正在创建账号…');
+    setError('');
+    try {
+      const state = await api.registerAccount({
+        username: registrationUsername,
+        password: registrationPassword,
+        passwordConfirm: registrationPasswordConfirm,
+        alphaCode,
+      });
+      setRegistrationResult(state);
+      setRegistrationPassword('');
+      setRegistrationPasswordConfirm('');
+      setShowRegistrationPassword(false);
+      setShowRegistrationPasswordConfirm(false);
+      setAlphaCode('');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '账号创建失败');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const resetPasswordWithRecoveryCode = async (event: FormEvent) => {
+    event.preventDefault();
+    setBusy('正在重置密码…');
+    setError('');
+    try {
+      const result = await api.resetPasswordWithRecovery({
+        username: recoveryUsername,
+        recoveryCode,
+        newPassword: recoveryPassword,
+        newPasswordConfirm: recoveryPasswordConfirm,
+      });
+      setRenewedRecoveryCode(result.recoveryCode);
+      setLocalUsername(recoveryUsername);
+      setRecoveryCode('');
+      setRecoveryPassword('');
+      setRecoveryPasswordConfirm('');
+      setShowRecoveryPassword(false);
+      setShowRecoveryPasswordConfirm(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '密码重置失败');
+    } finally {
+      setBusy('');
+    }
+  };
+
   const openShelf = (value: Shelf, historyMode: 'push' | 'replace' | 'none' = 'push') => {
     if (historyMode !== 'none') routeRequestVersion.current += 1;
     updateBrowserLocation(shelfPath(value.id), historyMode);
@@ -450,6 +591,7 @@ export default function App() {
       setSeries(null);
       setSection(null);
       setView('home');
+      setAuthPanel('login');
       setShowUserMenu(false);
       window.history.replaceState({}, '', '/');
     }
@@ -932,6 +1074,9 @@ export default function App() {
     const isLocal = authConfig?.mode === 'local';
     const isPassword = authConfig?.mode === 'password';
     const usesCredentials = isLocal || isPassword;
+    const registrationOpen = Boolean(
+      isPassword && authConfig?.registrationMode !== 'closed',
+    );
     const providerName = authConfig?.providerName || '统一身份账户';
     return (
       <div className="app-shell auth-shell">
@@ -953,109 +1098,290 @@ export default function App() {
             </div>
           </section>
 
-          <section className="auth-card" aria-busy={!authChecked}>
-            <div className={`auth-mode-badge ${isDemo || isLocal ? 'demo' : ''}`}>
-              <i />{isDemo ? '固定体验环境' : isLocal ? '本地多账号环境' : '受邀用户空间'}
-            </div>
-            <h2>{isDemo ? '进入体验书架' : usesCredentials ? '登录学习账号' : '欢迎回来'}</h2>
-            <p>
-              {isDemo
-                ? '无需配置第三方账号，使用本机固定体验身份查看完整学习闭环。'
-                : usesCredentials
-                  ? '输入邀请时收到的账号和密码，进入独立的个人学习书架。'
-                  : '登录后继续你的书架、学习记录与复习安排。'}
-            </p>
-
-            {!authConfig && error ? (
-              <button className="auth-submit" onClick={() => void initializeAuth()}>
-                重新连接服务 <span>→</span>
-              </button>
-            ) : isDemo ? (
-              <button
-                className="auth-submit"
-                disabled={!authChecked}
-                onClick={async () => {
-                  sessionStorage.setItem('slow_demo_entered', 'true');
-                  await initializeAuth();
+          <section className={`auth-card auth-panel-${authPanel}`} aria-busy={Boolean(busy) || !authChecked}>
+            {registrationResult ? (
+              <RecoveryCodePanel
+                code={registrationResult.recoveryCode}
+                renewed={false}
+                onContinue={() => {
+                  setAuth(registrationResult);
+                  setData(null);
+                  setRegistrationResult(null);
                 }}
-              >
-                进入本地体验 <span>→</span>
-              </button>
-            ) : usesCredentials ? (
-              <form className="local-auth-form" onSubmit={(event) => void loginWithLocalAccount(event)}>
-                <label>
-                  账号
-                  <input
-                    autoComplete="username"
-                    value={localUsername}
-                    onChange={(event) => setLocalUsername(event.target.value)}
-                    placeholder="输入分配给你的账号"
-                    required
-                  />
-                </label>
-                <label>
-                  密码
-                  <span className="password-input">
-                    <input
-                      type={showLocalPassword ? 'text' : 'password'}
-                      autoComplete="current-password"
-                      value={localPassword}
-                      onChange={(event) => setLocalPassword(event.target.value)}
-                      placeholder={isPassword ? '输入你的密码' : '输入本地体验密码'}
-                      minLength={8}
-                      required
-                    />
+              />
+            ) : renewedRecoveryCode ? (
+              <RecoveryCodePanel
+                code={renewedRecoveryCode}
+                renewed
+                onContinue={() => switchAuthPanel('login')}
+              />
+            ) : (
+              <>
+                <div className={`auth-mode-badge ${isDemo || isLocal ? 'demo' : ''}`}>
+                  <i />{isDemo
+                    ? '固定体验环境'
+                    : isLocal
+                      ? '本地多账号环境'
+                      : registrationOpen
+                        ? 'ALPHA 开放注册'
+                        : '受邀用户空间'}
+                </div>
+
+                {registrationOpen && authPanel !== 'recover' && (
+                  <div className="auth-card-tabs" role="tablist" aria-label="账号入口">
                     <button
                       type="button"
-                      aria-label={showLocalPassword ? '隐藏密码' : '显示密码'}
-                      aria-pressed={showLocalPassword}
-                      onClick={() => setShowLocalPassword((visible) => !visible)}
-                    >
-                      {showLocalPassword ? (
-                        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
-                          <path d="m3 3 18 18M10.6 10.7a2 2 0 0 0 2.7 2.7M9.9 4.3A10.7 10.7 0 0 1 12 4c5.5 0 9 5.5 9 5.5a16 16 0 0 1-2.2 2.7M6.6 6.6C4.3 8.1 3 9.5 3 9.5S6.5 15 12 15c1 0 1.9-.2 2.7-.5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                      ) : (
-                        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none">
-                          <path d="M3 9.5S6.5 4 12 4s9 5.5 9 5.5S17.5 15 12 15 3 9.5 3 9.5Z" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
-                          <circle cx="12" cy="9.5" r="2.5" stroke="currentColor" strokeWidth="1.7" />
-                        </svg>
-                      )}
+                      role="tab"
+                      aria-selected={authPanel === 'login'}
+                      onClick={() => switchAuthPanel('login')}
+                    >登录</button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={authPanel === 'register'}
+                      onClick={() => switchAuthPanel('register')}
+                    >创建账号</button>
+                  </div>
+                )}
+
+                <h2>{isDemo
+                  ? '进入体验书架'
+                  : authPanel === 'register'
+                    ? '领取你的学习账号'
+                    : authPanel === 'recover'
+                      ? '用恢复码重置密码'
+                      : usesCredentials
+                        ? '登录学习账号'
+                        : '欢迎回来'}</h2>
+                <p>{isDemo
+                  ? '无需配置第三方账号，使用本机固定体验身份查看完整学习闭环。'
+                  : authPanel === 'register'
+                    ? '无需邮箱或手机号。创建后请保存仅展示一次的账号恢复码。'
+                    : authPanel === 'recover'
+                      ? '输入注册时保存的恢复码。完成后，旧密码和旧恢复码都会失效。'
+                      : usesCredentials
+                        ? '输入账号和密码，回到你的书架、学习记录与复习安排。'
+                        : '登录后继续你的书架、学习记录与复习安排。'}</p>
+
+                {!authConfig && error ? (
+                  <button className="auth-submit" onClick={() => void initializeAuth()}>
+                    重新连接服务 <span>→</span>
+                  </button>
+                ) : isDemo ? (
+                  <button
+                    className="auth-submit"
+                    disabled={!authChecked}
+                    onClick={async () => {
+                      sessionStorage.setItem('slow_demo_entered', 'true');
+                      await initializeAuth();
+                    }}
+                  >
+                    进入本地体验 <span>→</span>
+                  </button>
+                ) : usesCredentials && authPanel === 'register' ? (
+                  <form className="local-auth-form" onSubmit={(event) => void registerAlphaAccount(event)}>
+                    <label>
+                      学习账号
+                      <input
+                        autoComplete="username"
+                        value={registrationUsername}
+                        onChange={(event) => setRegistrationUsername(event.target.value)}
+                        placeholder="3–80 个文字、字母或数字"
+                        minLength={3}
+                        maxLength={80}
+                        required
+                      />
+                    </label>
+                    {authConfig?.registrationCodeRequired && (
+                      <label>
+                        Alpha 访问码
+                        <input
+                          type="password"
+                          autoComplete="off"
+                          value={alphaCode}
+                          onChange={(event) => setAlphaCode(event.target.value)}
+                          placeholder="输入内测访问码"
+                          required
+                        />
+                      </label>
+                    )}
+                    <label>
+                      设置密码
+                      <span className="password-input">
+                        <input
+                          type={showRegistrationPassword ? 'text' : 'password'}
+                          autoComplete="new-password"
+                          value={registrationPassword}
+                          onChange={(event) => setRegistrationPassword(event.target.value)}
+                          placeholder="至少 12 个字符"
+                          minLength={12}
+                          required
+                        />
+                        <PasswordVisibilityToggle
+                          visible={showRegistrationPassword}
+                          onToggle={() => setShowRegistrationPassword((visible) => !visible)}
+                        />
+                      </span>
+                    </label>
+                    <label>
+                      再输入一次
+                      <span className="password-input">
+                        <input
+                          type={showRegistrationPasswordConfirm ? 'text' : 'password'}
+                          autoComplete="new-password"
+                          value={registrationPasswordConfirm}
+                          onChange={(event) => setRegistrationPasswordConfirm(event.target.value)}
+                          placeholder="确认你的密码"
+                          minLength={12}
+                          required
+                        />
+                        <PasswordVisibilityToggle
+                          visible={showRegistrationPasswordConfirm}
+                          onToggle={() => setShowRegistrationPasswordConfirm((visible) => !visible)}
+                        />
+                      </span>
+                    </label>
+                    <button className="auth-submit" type="submit" disabled={Boolean(busy)}>
+                      创建并进入书架 <span>→</span>
                     </button>
-                  </span>
-                </label>
-                <button className="auth-submit" type="submit" disabled={Boolean(busy)}>
-                  登录独立书架 <span>→</span>
-                </button>
-              </form>
-            ) : (
-              <button
-                className="auth-submit"
-                disabled={!authChecked}
-                onClick={() => api.login(`${window.location.pathname}${window.location.search}`)}
-              >
-                使用{providerName}继续 <span>→</span>
-              </button>
-            )}
+                  </form>
+                ) : usesCredentials && authPanel === 'recover' ? (
+                  <form className="local-auth-form" onSubmit={(event) => void resetPasswordWithRecoveryCode(event)}>
+                    <label>
+                      学习账号
+                      <input
+                        autoComplete="username"
+                        value={recoveryUsername}
+                        onChange={(event) => setRecoveryUsername(event.target.value)}
+                        placeholder="输入你的账号"
+                        required
+                      />
+                    </label>
+                    <label>
+                      恢复码
+                      <input
+                        autoComplete="off"
+                        value={recoveryCode}
+                        onChange={(event) => setRecoveryCode(event.target.value)}
+                        placeholder="SLOW-XXXX-XXXX-…"
+                        minLength={20}
+                        required
+                      />
+                    </label>
+                    <label>
+                      新密码
+                      <span className="password-input">
+                        <input
+                          type={showRecoveryPassword ? 'text' : 'password'}
+                          autoComplete="new-password"
+                          value={recoveryPassword}
+                          onChange={(event) => setRecoveryPassword(event.target.value)}
+                          placeholder="至少 12 个字符"
+                          minLength={12}
+                          required
+                        />
+                        <PasswordVisibilityToggle
+                          visible={showRecoveryPassword}
+                          onToggle={() => setShowRecoveryPassword((visible) => !visible)}
+                        />
+                      </span>
+                    </label>
+                    <label>
+                      确认新密码
+                      <span className="password-input">
+                        <input
+                          type={showRecoveryPasswordConfirm ? 'text' : 'password'}
+                          autoComplete="new-password"
+                          value={recoveryPasswordConfirm}
+                          onChange={(event) => setRecoveryPasswordConfirm(event.target.value)}
+                          placeholder="再次输入新密码"
+                          minLength={12}
+                          required
+                        />
+                        <PasswordVisibilityToggle
+                          visible={showRecoveryPasswordConfirm}
+                          onToggle={() => setShowRecoveryPasswordConfirm((visible) => !visible)}
+                        />
+                      </span>
+                    </label>
+                    <button className="auth-submit" type="submit" disabled={Boolean(busy)}>
+                      重置密码 <span>→</span>
+                    </button>
+                    <button type="button" className="auth-text-button" onClick={() => switchAuthPanel('login')}>
+                      ← 返回登录
+                    </button>
+                  </form>
+                ) : usesCredentials ? (
+                  <form className="local-auth-form" onSubmit={(event) => void loginWithLocalAccount(event)}>
+                    <label>
+                      账号
+                      <input
+                        autoComplete="username"
+                        value={localUsername}
+                        onChange={(event) => setLocalUsername(event.target.value)}
+                        placeholder={isPassword ? '输入你的学习账号' : '输入分配给你的账号'}
+                        required
+                      />
+                    </label>
+                    <label>
+                      密码
+                      <span className="password-input">
+                        <input
+                          type={showLocalPassword ? 'text' : 'password'}
+                          autoComplete="current-password"
+                          value={localPassword}
+                          onChange={(event) => setLocalPassword(event.target.value)}
+                          placeholder={isPassword ? '输入你的密码' : '输入本地体验密码'}
+                          minLength={8}
+                          required
+                        />
+                        <PasswordVisibilityToggle
+                          visible={showLocalPassword}
+                          onToggle={() => setShowLocalPassword((visible) => !visible)}
+                        />
+                      </span>
+                    </label>
+                    <button className="auth-submit" type="submit" disabled={Boolean(busy)}>
+                      登录独立书架 <span>→</span>
+                    </button>
+                    {isPassword && (
+                      <button type="button" className="auth-text-button" onClick={() => switchAuthPanel('recover')}>
+                        我有恢复码，需要重置密码
+                      </button>
+                    )}
+                  </form>
+                ) : (
+                  <button
+                    className="auth-submit"
+                    disabled={!authChecked}
+                    onClick={() => api.login(`${window.location.pathname}${window.location.search}`)}
+                  >
+                    使用{providerName}继续 <span>→</span>
+                  </button>
+                )}
 
-            {!authChecked && <div className="auth-inline-status">正在确认登录状态…</div>}
-            {error && <div className="auth-inline-error">{error}</div>}
+                {!authChecked && <div className="auth-inline-status">正在确认登录状态…</div>}
+                {error && <div className="auth-inline-error">{error}</div>}
 
-            {(isDemo || isLocal || isPassword) && (
-              <small className="auth-disclaimer">
-                {isDemo
-                  ? '体验内容会明确标记，并与正式账号数据分开。'
-                  : isLocal
-                    ? '本地账号仅用于开发和场景验证，生产环境会拒绝启用。'
-                    : '账号仅由内测管理员创建，不开放公开注册。'}
-              </small>
-            )}
-            {authConfig?.privacyNotice && (
-              <details className="auth-privacy-brief">
-                <summary>内测隐私与数据说明</summary>
-                <p>{authConfig.privacyNotice.summary}</p>
-                <small>登录后、开始填写学习画像前，需要确认隐私告知与自愿参加内测。</small>
-              </details>
+                {(isDemo || isLocal || isPassword) && (
+                  <small className="auth-disclaimer">
+                    {isDemo
+                      ? '体验内容会明确标记，并与正式账号数据分开。'
+                      : isLocal
+                        ? '本地账号仅用于开发和场景验证，生产环境会拒绝启用。'
+                        : registrationOpen
+                          ? 'Alpha 账号不绑定邮箱或手机号；请自行保存恢复码。'
+                          : '账号仅由内测管理员创建，当前不开放注册。'}
+                  </small>
+                )}
+                {authConfig?.privacyNotice && (
+                  <details className="auth-privacy-brief">
+                    <summary>内测隐私与数据说明</summary>
+                    <p>{authConfig.privacyNotice.summary}</p>
+                    <small>登录后、开始填写学习画像前，需要确认隐私告知与自愿参加内测。</small>
+                  </details>
+                )}
+              </>
             )}
           </section>
         </main>

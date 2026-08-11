@@ -82,6 +82,35 @@ class PasswordLogin(ApiModel):
     password: SecretStr = Field(min_length=8, max_length=200)
 
 
+class PasswordRegistration(ApiModel):
+    username: str = Field(min_length=3, max_length=80)
+    password: SecretStr = Field(min_length=12, max_length=200)
+    password_confirm: SecretStr = Field(min_length=12, max_length=200)
+    alpha_code: SecretStr | None = Field(default=None, max_length=200)
+
+    @model_validator(mode="after")
+    def passwords_match(self):
+        if self.password.get_secret_value() != self.password_confirm.get_secret_value():
+            raise ValueError("两次输入的密码不一致")
+        return self
+
+
+class PasswordRecoveryReset(ApiModel):
+    username: str = Field(min_length=3, max_length=80)
+    recovery_code: SecretStr = Field(min_length=20, max_length=100)
+    new_password: SecretStr = Field(min_length=12, max_length=200)
+    new_password_confirm: SecretStr = Field(min_length=12, max_length=200)
+
+    @model_validator(mode="after")
+    def passwords_match(self):
+        if (
+            self.new_password.get_secret_value()
+            != self.new_password_confirm.get_secret_value()
+        ):
+            raise ValueError("两次输入的新密码不一致")
+        return self
+
+
 class PrivacyConsentCreate(ApiModel):
     privacy_accepted: bool = Field(alias="privacyAccepted")
     trial_accepted: bool = Field(alias="trialAccepted")

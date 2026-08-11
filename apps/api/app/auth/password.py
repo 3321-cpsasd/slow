@@ -43,6 +43,7 @@ class PasswordCredentialService:
         username: str,
         display_name: str,
         password: str,
+        commit: bool = True,
     ) -> User:
         normalized = normalize_username(username)
         if not 3 <= len(normalized) <= 80:
@@ -73,7 +74,9 @@ class PasswordCredentialService:
         )
         self.db.add(credential)
         try:
-            self.db.commit()
+            self.db.flush()
+            if commit:
+                self.db.commit()
         except IntegrityError as error:
             self.db.rollback()
             raise ValueError("账号已存在") from error
@@ -97,7 +100,13 @@ class PasswordCredentialService:
         self.db.commit()
         return user
 
-    def reset_password(self, *, username: str, password: str) -> User:
+    def reset_password(
+        self,
+        *,
+        username: str,
+        password: str,
+        commit: bool = True,
+    ) -> User:
         if not 12 <= len(password) <= 200:
             raise ValueError("密码长度必须为 12 到 200 个字符")
         credential = self._credential(username)
@@ -111,7 +120,10 @@ class PasswordCredentialService:
         credential.password_changed_at = current
         credential.updated_at = current
         self._revoke_user_sessions(user.id)
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
         return user
 
     def authenticate(self, *, username: str, password: str) -> User:

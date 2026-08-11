@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     session_cookie_secure: bool = False
     password_escrow_enabled: bool = False
     password_escrow_path: Path = ROOT / "data" / "password-escrow.json"
+    registration_mode: Literal["closed", "alpha", "open"] = "closed"
+    alpha_registration_code: str = ""
+    alpha_registration_daily_limit: int = Field(default=100, ge=1, le=10000)
     oidc_issuer: str = ""
     oidc_client_id: str = ""
     oidc_client_secret: str = ""

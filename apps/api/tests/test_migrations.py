@@ -12,7 +12,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0048_ask_me_evidence_and_turn_leases"
+HEAD_REVISION = "0049_alpha_account_recovery"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -136,6 +136,16 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
         local_credential_columns = {
             row[1]: row
             for row in connection.execute("PRAGMA table_info(local_credentials)")
+        }
+        recovery_code_schema = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'account_recovery_codes'"
+        ).fetchone()[0]
+        recovery_code_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(account_recovery_codes)"
+            )
         }
         remediation_columns = {
             row[1]: row
@@ -297,6 +307,9 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
         "failed_attempts",
         "locked_until",
     }.issubset(local_credential_columns)
+    assert "uq_account_recovery_codes_user_version" in recovery_code_schema
+    assert "code_hash" in recovery_code_schema
+    assert "raw_code" not in recovery_code_columns
     assert "supersedes_id" in remediation_columns
     assert any(
         row[1] == "ix_remediations_attempt_id" and row[2] == 0
@@ -425,7 +438,7 @@ def test_0048_empty_database_downgrades_and_upgrades(tmp_path):
 
 def test_0048_downgrade_refuses_oral_assessment_facts(tmp_path):
     database = tmp_path / "0048-oral-facts.db"
-    run_alembic(database, "upgrade", "head")
+    run_alembic(database, "upgrade", "0048_ask_me_evidence_and_turn_leases")
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA foreign_keys=OFF")
         connection.execute(
@@ -464,13 +477,13 @@ def test_0048_downgrade_refuses_oral_assessment_facts(tmp_path):
             "SELECT COUNT(*) FROM assessment_observations "
             "WHERE source_type = 'ask_me_topic'"
         ).fetchone()[0]
-    assert revision == HEAD_REVISION
+    assert revision == "0048_ask_me_evidence_and_turn_leases"
     assert oral_count == 1
 
 
 def test_0048_downgrade_refuses_duplicate_discussion_retries(tmp_path):
     database = tmp_path / "0048-discussion-retries.db"
-    run_alembic(database, "upgrade", "head")
+    run_alembic(database, "upgrade", "0048_ask_me_evidence_and_turn_leases")
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA foreign_keys=OFF")
         connection.executemany(
@@ -520,8 +533,45 @@ def test_0048_downgrade_refuses_duplicate_discussion_retries(tmp_path):
             "SELECT COUNT(*) FROM ask_me_discussion_turns "
             "WHERE topic_id = 'topic_missing' AND turn_index = 0"
         ).fetchone()[0]
-    assert revision == HEAD_REVISION
+    assert revision == "0048_ask_me_evidence_and_turn_leases"
     assert retry_count == 2
+
+
+def test_0049_downgrade_refuses_account_recovery_history(tmp_path):
+    database = tmp_path / "0049-recovery-history.db"
+    run_alembic(database, "upgrade", "head")
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute(
+            """
+            INSERT INTO account_recovery_codes (
+                id, user_id, version, code_hash, status, failed_attempts,
+                created_at
+            ) VALUES (
+                'recovery_history', 'user_missing', 1,
+                'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                'used', 0, '2026-08-11 12:00:00'
+            )
+            """
+        )
+        connection.commit()
+
+    with pytest.raises(subprocess.CalledProcessError):
+        run_alembic(
+            database,
+            "downgrade",
+            "0048_ask_me_evidence_and_turn_leases",
+        )
+
+    with sqlite3.connect(database) as connection:
+        revision = connection.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone()[0]
+        recovery_count = connection.execute(
+            "SELECT COUNT(*) FROM account_recovery_codes"
+        ).fetchone()[0]
+    assert revision == HEAD_REVISION
+    assert recovery_count == 1
 
 
 def test_generation_lease_migration_accepts_orm_precreated_table(tmp_path):

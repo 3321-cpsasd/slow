@@ -161,9 +161,13 @@ export type AccountExitReceipt = {
 };
 export type AuthConfig = {
   mode:'demo'|'local'|'password'|'oidc';
+  registrationMode:'closed'|'alpha'|'open';
+  registrationCodeRequired:boolean;
   providerName:string;
   privacyNotice:PrivacyNotice;
 };
+export type RegistrationResult = AuthState & { recoveryCode:string };
+export type RecoveryResetResult = { reset:true; recoveryCode:string };
 export type AiRuntime = {
   mode:'provider'|'demo'|'injected';
   configured:boolean;

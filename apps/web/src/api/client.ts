@@ -205,6 +205,28 @@ export const api = {
     csrfToken = state.csrfToken;
     return state;
   },
+  registerAccount:async(body:{
+    username:string;
+    password:string;
+    passwordConfirm:string;
+    alphaCode:string;
+  })=>{
+    const state = await call<import('../model/types').RegistrationResult>('/api/auth/password/register',{
+      method:'POST',
+      body:JSON.stringify(body),
+    });
+    csrfToken = state.csrfToken;
+    return state;
+  },
+  resetPasswordWithRecovery:(body:{
+    username:string;
+    recoveryCode:string;
+    newPassword:string;
+    newPasswordConfirm:string;
+  })=>call<import('../model/types').RecoveryResetResult>('/api/auth/password/recover',{
+    method:'POST',
+    body:JSON.stringify(body),
+  }),
   logout:async()=>{
     await call<void>('/api/auth/logout',{method:'POST'});
     csrfToken = '';

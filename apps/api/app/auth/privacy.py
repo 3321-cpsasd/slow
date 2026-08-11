@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from ..core.errors import AppError
 from ..infrastructure.tables import (
     AccountExitRequest,
+    AccountRecoveryCode,
     AuthSession,
     LocalCredential,
     PrivacyConsent,
@@ -150,6 +151,14 @@ class PrivacyService:
             .where(
                 AuthSession.user_id == self.user_id,
                 AuthSession.status == "active",
+            )
+            .values(status="revoked", revoked_at=current)
+        )
+        self.db.execute(
+            update(AccountRecoveryCode)
+            .where(
+                AccountRecoveryCode.user_id == self.user_id,
+                AccountRecoveryCode.status == "active",
             )
             .values(status="revoked", revoked_at=current)
         )
