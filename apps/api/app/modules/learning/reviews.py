@@ -52,16 +52,6 @@ from .review_assignments import (
 )
 
 
-_REVIEW_BLOCK_ROLE_COMPATIBILITY = {
-    "core_instruction": "conclusion",
-    "prerequisite_scaffold": "transition",
-    "comparison": "example",
-    "application": "example",
-    "transfer": "example",
-    "summary": "conclusion",
-}
-
-
 class _ReviewGenerationContent(GeneratedContent):
     enforce_standard_sentence_endings: ClassVar[bool] = False
 
@@ -90,7 +80,7 @@ def _content_for_review_generation(content: ContentVersion) -> GeneratedContent:
             "id": block.get("id", ""),
             "version": block.get("version", 1),
             "kind": "text" if kind in {"bullet_list", "ordered_steps"} else kind,
-            "role": _REVIEW_BLOCK_ROLE_COMPATIBILITY.get(role, role),
+            "role": role,
             "heading": block.get("heading", ""),
             "content": block.get("content", ""),
             "source_indexes": block.get("source_indexes", []),

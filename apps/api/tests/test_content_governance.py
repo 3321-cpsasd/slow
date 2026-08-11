@@ -79,7 +79,7 @@ def _reason_codes(decision) -> set[str]:
     return {reason.code for reason in decision.reasons}
 
 
-def test_formal_content_requires_semantic_closure_but_not_claims_for_explanation() -> None:
+def test_formal_content_requires_evidence_integrity_not_a_fixed_role_template() -> None:
     decision = evaluate_content_publication(_content())
     assert decision.allowed is True
     assert decision.mode == "formal"
@@ -136,7 +136,7 @@ def test_blocking_gap_requires_explicit_experimental_mode() -> None:
     assert all(reason.severity == "warning" for reason in experimental.reasons)
 
 
-def test_experimental_mode_cannot_override_structure_or_hard_gap() -> None:
+def test_experimental_mode_does_not_require_fixed_roles_and_cannot_override_hard_gap() -> None:
     incomplete = evaluate_content_publication(
         _content(
             blocks=tuple(block for block in _blocks() if block.role != "practice"),
@@ -157,12 +157,27 @@ def test_experimental_mode_cannot_override_structure_or_hard_gap() -> None:
             explicit_experimental_consent=True,
         )
     )
-    assert incomplete.allowed is False
-    assert "SEMANTIC_CLOSURE_INCOMPLETE" in _reason_codes(incomplete)
+    assert incomplete.allowed is True
     assert blocked.allowed is False
     assert "KNOWLEDGE_GAP_NOT_EXPERIMENTALLY_OVERRIDABLE" in _reason_codes(
         blocked
     )
+
+
+def test_empirical_case_requires_a_traceable_claim_independent_of_role_name() -> None:
+    candidate = _content(
+        blocks=(
+            *_blocks(),
+            ContentBlockInput(
+                "case_1",
+                "empirical_case",
+                case_kind="empirical_case",
+            ),
+        )
+    )
+    decision = evaluate_content_publication(candidate)
+    assert decision.allowed is False
+    assert "STRICT_CLAIM_MISSING" in _reason_codes(decision)
 
 
 def test_quiz_requires_contract_target_taught_target_and_supported_claim() -> None:

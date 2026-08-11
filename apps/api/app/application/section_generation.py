@@ -1,6 +1,6 @@
 """Section generation orchestration extracted from the application facade.
 
-This module owns the v2 one-call coordinator and lazily delegates the isolated
+This module owns the versioned one-call coordinator and lazily delegates the isolated
 legacy remediation/test pipeline. SlowService supplies only shared application
 collaborators and read-model callbacks.
 """
@@ -48,6 +48,7 @@ from .lesson_generation import (
     publish_lesson_candidate,
     validate_lesson_candidate,
 )
+from .lesson_composition import resolve_lesson_composition_policy
 
 
 CONTENT_COMPLIANCE_RULE_VERSION = "content_compliance_v1"
@@ -302,7 +303,7 @@ class SectionGenerationCoordinator:
                 False,
             ):
                 raise AppError(
-                    "当前 AI 适配器不支持 lesson_generation_v2；拒绝回退旧链路",
+                    "当前 AI 适配器不支持版本化正文生成；拒绝回退旧链路",
                     code="LESSON_GENERATION_V2_UNSUPPORTED",
                     status=500,
                 )
@@ -590,6 +591,18 @@ class SectionGenerationCoordinator:
                 )
             )
         learner = context_payload["learner"]
+        section_spec = {
+            "id": section.id,
+            "title": section.title,
+            "question": section.question,
+            "bookTitle": section_context.book.title,
+            "chapterTitle": section_context.chapter.title,
+            "chapterObjective": section_context.chapter.objective,
+        }
+        composition_policy = resolve_lesson_composition_policy(
+            section=section_spec,
+            targets=target_payloads,
+        )
         spec = LessonGenerationSpec(
             generationMode=(
                 "demo" if getattr(self.ai, "configured", True) is False else "model_only"
@@ -607,14 +620,7 @@ class SectionGenerationCoordinator:
                     "preferences",
                 )
             },
-            section={
-                "id": section.id,
-                "title": section.title,
-                "question": section.question,
-                "bookTitle": section_context.book.title,
-                "chapterTitle": section_context.chapter.title,
-                "chapterObjective": section_context.chapter.objective,
-            },
+            section=section_spec,
             learningContractVersionId=contract.id,
             learningContractVersion=contract.version,
             targets=[
@@ -634,6 +640,7 @@ class SectionGenerationCoordinator:
                 )
                 for item in target_payloads
             ],
+            compositionPolicy=composition_policy,
             neighborBoundaries=neighbors,
             relevantMastery=[
                 item
@@ -664,6 +671,7 @@ class SectionGenerationCoordinator:
                     "promptVersion": LESSON_GENERATION_PROMPT_VERSION,
                     "schemaVersion": LESSON_GENERATION_SCHEMA_VERSION,
                     "contextPolicyVersion": LESSON_CONTEXT_POLICY_VERSION,
+                    "compositionPolicy": composition_policy,
                     "contextHash": spec.context_hash(),
                     "contractVersionId": contract.id,
                     "knowledgeContext": (

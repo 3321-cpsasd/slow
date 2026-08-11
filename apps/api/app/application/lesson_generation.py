@@ -31,10 +31,10 @@ from ..infrastructure.tables import (
 from ..modules.learning.assessment_items import publish_assessment_item_versions
 
 
-LESSON_GENERATION_PIPELINE_VERSION = "lesson_generation_v2"
-LESSON_GENERATION_SCHEMA_VERSION = "generated_lesson_slot_candidate_v5"
-LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_slot_prompt_v8"
-LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v7"
+LESSON_GENERATION_PIPELINE_VERSION = "lesson_generation_v3"
+LESSON_GENERATION_SCHEMA_VERSION = "generated_lesson_composition_candidate_v6"
+LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_composition_prompt_v9"
+LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v8"
 LESSON_CONTEXT_POLICY_VERSION = "lesson_generation_context_v2"
 AI_CONTENT_LABEL_SCHEMA_VERSION = "ai_content_label_v2"
 
@@ -61,6 +61,35 @@ class LessonTargetSpec(LessonSpecModel):
     verification_policy: str = Field(alias="verificationPolicy")
 
 
+class LessonCasePolicy(LessonSpecModel):
+    minimum_distinct_cases: int = Field(ge=0, le=6, alias="minimumDistinctCases")
+    preferred_kinds: list[str] = Field(default_factory=list, max_length=6, alias="preferredKinds")
+
+
+class LessonCompositionPolicy(LessonSpecModel):
+    schema_version: Literal["lesson_composition_policy_v1"] = Field(alias="schemaVersion")
+    resolver_version: Literal["contract_epistemic_resolver_v1"] = Field(alias="resolverVersion")
+    profile: Literal[
+        "generic_conceptual",
+        "formal_quantitative",
+        "technical_procedural",
+        "scientific_causal",
+        "historical_evidentiary",
+        "textual_argumentative",
+        "social_empirical",
+        "normative_case_analysis",
+    ]
+    basis: Literal["frozen_contract_deterministic_inference"]
+    matched_signals: list[str] = Field(default_factory=list, max_length=6, alias="matchedSignals")
+    knowledge_form: str = Field(alias="knowledgeForm", min_length=1, max_length=80)
+    learning_operation: str = Field(alias="learningOperation", min_length=1, max_length=80)
+    evidence_forms: list[str] = Field(alias="evidenceForms", min_length=1, max_length=8)
+    recommended_roles: list[str] = Field(alias="recommendedRoles", max_length=12)
+    recommended_teaching_moves: list[str] = Field(alias="recommendedTeachingMoves", max_length=12)
+    case_policy: LessonCasePolicy = Field(alias="casePolicy")
+    minimum_blocks: int = Field(ge=2, le=12, alias="minimumBlocks")
+    maximum_blocks: int = Field(ge=2, le=12, alias="maximumBlocks")
+
 class NeighborBoundary(LessonSpecModel):
     direction: Literal["previous", "next"]
     section_id: str = Field(alias="sectionId")
@@ -72,15 +101,15 @@ class NeighborBoundary(LessonSpecModel):
 class LessonGenerationSpec(LessonSpecModel):
     """Small, versioned, server-owned input to the one physical model call."""
 
-    pipeline_version: Literal["lesson_generation_v2"] = Field(
+    pipeline_version: Literal["lesson_generation_v3"] = Field(
         default=LESSON_GENERATION_PIPELINE_VERSION,
         alias="pipelineVersion",
     )
-    schema_version: Literal["generated_lesson_slot_candidate_v5"] = Field(
+    schema_version: Literal["generated_lesson_composition_candidate_v6"] = Field(
         default=LESSON_GENERATION_SCHEMA_VERSION,
         alias="schemaVersion",
     )
-    prompt_version: Literal["lesson_generation_slot_prompt_v8"] = Field(
+    prompt_version: Literal["lesson_generation_composition_prompt_v9"] = Field(
         default=LESSON_GENERATION_PROMPT_VERSION,
         alias="promptVersion",
     )
@@ -97,6 +126,26 @@ class LessonGenerationSpec(LessonSpecModel):
     learning_contract_version_id: str = Field(alias="learningContractVersionId")
     learning_contract_version: int = Field(alias="learningContractVersion")
     targets: list[LessonTargetSpec] = Field(min_length=1, max_length=8)
+    composition_policy: LessonCompositionPolicy = Field(
+        default_factory=lambda: LessonCompositionPolicy.model_validate(
+            {
+                "schemaVersion": "lesson_composition_policy_v1",
+                "resolverVersion": "contract_epistemic_resolver_v1",
+                "profile": "generic_conceptual",
+                "basis": "frozen_contract_deterministic_inference",
+                "matchedSignals": [],
+                "knowledgeForm": "concept_or_system",
+                "learningOperation": "explain_and_apply",
+                "evidenceForms": ["conceptual_reasoning"],
+                "recommendedRoles": ["mechanism", "example", "boundary", "practice"],
+                "recommendedTeachingMoves": ["direct_explanation", "illustrate"],
+                "casePolicy": {"minimumDistinctCases": 0, "preferredKinds": []},
+                "minimumBlocks": 2,
+                "maximumBlocks": 12,
+            }
+        ),
+        alias="compositionPolicy",
+    )
     neighbor_boundaries: list[NeighborBoundary] = Field(
         default_factory=list,
         max_length=2,
@@ -135,7 +184,7 @@ class LessonGenerationSpec(LessonSpecModel):
         return _hash(self.payload())
 
 
-@dataclass(frozen=True)
+@dataclass
 class CandidateValidationFailure(Exception):
     code: str
     message: str
@@ -173,6 +222,18 @@ _POSITIONAL_OPTION_REFERENCE_PATTERNS = (
 _HEDGED_SINGLE_ANSWER_RE = re.compile(
     r"最佳答案|最优答案|最合适(?:的)?答案|更(?:典型|明确|明显|合适)"
 )
+_READER_HIGHLIGHT_ROLES = frozenset({
+    "worked_example", "empirical_case", "primary_source", "evidence_analysis",
+    "counterexample", "boundary",
+})
+
+
+def _reader_priority(role: str) -> str:
+    if role == "core_instruction":
+        return "essential"
+    if role in _READER_HIGHLIGHT_ROLES:
+        return "highlight"
+    return "normal"
 
 
 def _layout_reject(block, rule: str, message: str, **details: Any) -> None:
@@ -305,12 +366,25 @@ def validate_lesson_candidate(
                 blockKey=block.block_key,
             )
         block_by_key[block.block_key] = block
-        if block.role in {"prerequisite_scaffold", "transition"} and (
-            block.assessment_target_ids
-        ):
+        expected_case_kind = {
+            "worked_example": "worked_example",
+            "empirical_case": "empirical_case",
+            "primary_source": "primary_source_case",
+            "counterexample": "counterexample",
+        }.get(block.role)
+        if expected_case_kind and block.case_kind != expected_case_kind:
+            _reject(
+                "CONTENT_CASE_KIND_INVALID",
+                "案例职责必须声明匹配的案例真实性类型",
+                blockKey=block.block_key,
+                role=block.role,
+                expectedCaseKind=expected_case_kind,
+                actualCaseKind=block.case_kind,
+            )
+        if block.role != "core_instruction" and block.assessment_target_ids:
             _reject(
                 "CONTENT_ASSESSMENT_TARGET_UNBOUND",
-                "支撑性正文块不能声明可考核目标",
+                "只有核心依据块可以声明可考核目标",
                 blockKey=block.block_key,
                 assessmentTargetIds=block.assessment_target_ids,
                 contractVersion=spec.learning_contract_version,
@@ -332,7 +406,17 @@ def validate_lesson_candidate(
                 blockKey=block.block_key,
                 claimVersionIds=sorted(unknown_claim_ids),
             )
-        claim_required = block.role not in {"practice", "transition"}
+        if block.case_kind in {"empirical_case", "primary_source_case"} and not block.claim_version_ids:
+            _reject(
+                "CONTENT_CASE_EVIDENCE_MISSING",
+                "实证案例和原始材料案例必须绑定允许的知识主张",
+                blockKey=block.block_key,
+                caseKind=block.case_kind,
+            )
+        claim_required = (
+            block.role not in {"practice", "transition"}
+            and block.case_kind not in {"hypothetical_example", "learner_transfer"}
+        )
         if knowledge_ready and claim_required and not block.claim_version_ids:
             _reject(
                 "CONTENT_KNOWLEDGE_CLAIM_MISSING",
@@ -441,6 +525,22 @@ def validate_lesson_candidate(
         for block in candidate.blocks
         for target_id in block.assessment_target_ids
     }
+    core_blocks_by_target: dict[str, list[str]] = {}
+    for block in candidate.blocks:
+        if block.role != "core_instruction":
+            continue
+        for target_id in block.assessment_target_ids:
+            core_blocks_by_target.setdefault(target_id, []).append(block.block_key)
+    for target in spec.targets:
+        core_blocks = core_blocks_by_target.get(target.assessment_target_id, [])
+        if len(core_blocks) != 1:
+            _reject(
+                "TARGET_CORE_BLOCK_CARDINALITY_INVALID",
+                "每个冻结目标必须且只能对应一个核心依据块",
+                assessmentTargetId=target.assessment_target_id,
+                blockKeys=core_blocks,
+                contractVersion=spec.learning_contract_version,
+            )
     for target in spec.targets:
         if not target.required:
             continue
@@ -525,6 +625,7 @@ def publish_lesson_candidate(
             validated.target_by_id[target_id].objective
             for target_id in block.assessment_target_ids
         ]
+        reader_priority = _reader_priority(block.role)
         payload = {
             "id": block_id,
             "version": content.version,
@@ -532,6 +633,9 @@ def publish_lesson_candidate(
             "kind": block.kind,
             "role": block.role,
             "relationToAnchor": block.relation_to_anchor,
+            "teachingMoves": block.teaching_moves,
+            "caseKind": block.case_kind,
+            "readerPriority": reader_priority,
             "heading": block.heading,
             "content": block.content,
             "source_indexes": [],
@@ -548,6 +652,10 @@ def publish_lesson_candidate(
                 block_version=content.version,
                 format_kind=block.kind,
                 semantic_role=block.role,
+                teaching_moves_json=_dump(block.teaching_moves),
+                case_kind=block.case_kind,
+                relation_to_anchor=block.relation_to_anchor,
+                reader_priority=reader_priority,
                 heading=block.heading,
                 content=block.content,
                 source_indexes_json="[]",
@@ -727,9 +835,9 @@ def publish_lesson_candidate(
                 actor_kind="generation_attempt",
                 actor_id=generation_run.id,
                 idempotency_key=(
-                    f"lesson-v2:content:{content.id}"
+                    f"lesson-v3:content:{content.id}"
                     if quiz_id is None
-                    else f"lesson-v2:quiz:{quiz.id}"
+                    else f"lesson-v3:quiz:{quiz.id}"
                 ),
             )
         )

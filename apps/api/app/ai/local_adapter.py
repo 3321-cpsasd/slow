@@ -158,23 +158,17 @@ class LocalDemoAdapter:
 
     async def generate_lesson(self, spec):
         targets = spec["targets"]
-        roles = [
-            ("core_instruction", "core"),
-            ("mechanism", "mechanism"),
-            ("comparison", "comparison"),
-            ("boundary", "boundary"),
-            ("practice", "practice"),
-        ]
         blocks = []
-        for index, (role, relation) in enumerate(roles):
-            target = targets[index % len(targets)]
+        for index, target in enumerate(targets):
             blocks.append(
                 GeneratedLessonBlock(
                     block_key=f"b{index + 1}",
                     kind="text",
-                    role=role,
-                    relation_to_anchor=relation,
+                    role="core_instruction",
+                    relation_to_anchor="core",
                     assessment_target_ids=[target["assessmentTargetId"]],
+                    teaching_moves=["direct_explanation"],
+                    reader_priority="essential",
                     heading=f"{spec['section']['title']}：演示说明 {index + 1}",
                     content=(
                         f"这是围绕“{spec['section']['question']}”生成的本地演示教材块。"
@@ -183,21 +177,36 @@ class LocalDemoAdapter:
                     ),
                 )
             )
+        for role, relation, move, case_kind in (
+            ("mechanism", "mechanism", "explain_mechanism", ""),
+            ("practice", "practice", "guided_practice", "hypothetical_example"),
+        ):
+            position = len(blocks) + 1
+            blocks.append(
+                GeneratedLessonBlock(
+                    block_key=f"b{position}",
+                    kind="text",
+                    role=role,
+                    relation_to_anchor=relation,
+                    teaching_moves=[move],
+                    case_kind=case_kind,
+                    heading=f"{spec['section']['title']}：演示支持 {position}",
+                    content=(
+                        f"这一段围绕“{spec['section']['question']}”提供不参与新增考核目标的支持说明。"
+                        "它帮助学习者连接核心依据、适用条件与后续练习，但不会扩大本节的验证范围。"
+                    ),
+                )
+            )
         question_count = max(4, min(5, len(targets)))
         questions = []
         for index in range(question_count):
             target_index = index % len(targets)
             target = targets[target_index]
-            evidence_index = next(
-                block_index
-                for block_index, block in enumerate(blocks)
-                if target["assessmentTargetId"] in block.assessment_target_ids
-            )
             questions.append(
                 GeneratedLessonQuestion(
                     item_key=f"q{index + 1}",
                     assessment_target_id=target["assessmentTargetId"],
-                    evidence_block_keys=[f"b{evidence_index + 1}"],
+                    evidence_block_keys=[f"b{target_index + 1}"],
                     prompt=f"关于“{target['objective']}”，哪一项符合本节演示正文？",
                     options=["忽略机制直接猜测", "依据机制和边界进行判断", "把示例当作普遍定律"],
                     correct=[1],

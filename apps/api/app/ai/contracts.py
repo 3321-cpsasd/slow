@@ -137,7 +137,14 @@ class ContentBlock(StrictModel):
     id: str = Field(default="", max_length=120)
     version: int = Field(default=1, ge=1)
     kind: Literal["text", "code", "formula", "table", "diagram"]
-    role: Literal["conclusion", "mechanism", "example", "boundary", "practice", "transition"]
+    role: Literal[
+        "conclusion", "core_instruction", "prerequisite_scaffold", "context",
+        "mechanism", "derivation", "example", "worked_example", "empirical_case",
+        "primary_source", "evidence_analysis", "comparison",
+        "alternative_interpretation", "counterargument", "counterexample",
+        "boundary", "application", "transfer", "practice", "synthesis", "summary",
+        "transition",
+    ]
     heading: str
     content: str
     source_indexes: list[int] = Field(default_factory=list)
@@ -175,7 +182,7 @@ class GeneratedContent(StrictModel):
     # model_only content must not invent source URLs. Sources are populated only
     # by the separate rights_grounded workflow after asset-rights review.
     sources: list[Source] = Field(default_factory=list, max_length=12)
-    blocks: list[ContentBlock] = Field(min_length=5, max_length=12)
+    blocks: list[ContentBlock] = Field(min_length=2, max_length=12)
 
     @model_validator(mode="after")
     def valid_source_coverage(self):
@@ -204,12 +211,22 @@ class GeneratedLesson(GeneratedContent):
 LESSON_BLOCK_ROLES = Literal[
     "core_instruction",
     "prerequisite_scaffold",
+    "context",
     "mechanism",
+    "derivation",
+    "worked_example",
+    "empirical_case",
+    "primary_source",
+    "evidence_analysis",
     "comparison",
+    "alternative_interpretation",
+    "counterargument",
+    "counterexample",
     "boundary",
     "application",
     "transfer",
     "practice",
+    "synthesis",
     "summary",
     "transition",
 ]
@@ -217,14 +234,57 @@ LESSON_BLOCK_ROLES = Literal[
 LESSON_ANCHOR_RELATIONS = Literal[
     "core",
     "prerequisite",
+    "context",
     "mechanism",
+    "derivation",
+    "evidence",
     "comparison",
     "boundary",
     "application",
     "transfer",
     "practice",
+    "synthesis",
     "summary",
     "transition",
+]
+
+
+LESSON_TEACHING_MOVES = Literal[
+    "direct_explanation",
+    "illustrate",
+    "explain_mechanism",
+    "derive_stepwise",
+    "demonstrate",
+    "diagnose_error",
+    "trace_causality",
+    "interpret_evidence",
+    "test_generalization",
+    "expose_boundary",
+    "situate_context",
+    "compare_explanations",
+    "synthesize",
+    "close_read",
+    "reconstruct_argument",
+    "compare_interpretations",
+    "respond_to_objection",
+    "contrast",
+    "transfer",
+    "state_rule",
+    "apply_to_case",
+    "expose_exception",
+    "weigh_competing_reasons",
+    "guided_practice",
+]
+
+
+LESSON_CASE_KINDS = Literal[
+    "",
+    "hypothetical_example",
+    "empirical_case",
+    "primary_source_case",
+    "worked_example",
+    "counterexample",
+    "learner_transfer",
 ]
 
 
@@ -248,6 +308,9 @@ class GeneratedLessonBlock(StrictModel):
     relation_to_anchor: LESSON_ANCHOR_RELATIONS
     assessment_target_ids: list[str] = Field(default_factory=list, max_length=8)
     claim_version_ids: list[str] = Field(default_factory=list, max_length=8)
+    teaching_moves: list[LESSON_TEACHING_MOVES] = Field(default_factory=list, max_length=8)
+    case_kind: LESSON_CASE_KINDS = ""
+    reader_priority: Literal["essential", "highlight", "normal"] = "normal"
     heading: str = Field(min_length=1, max_length=160)
     content: str = Field(min_length=40, max_length=16000)
 
@@ -295,7 +358,7 @@ class GeneratedLessonFeedbackReplacement(StrictModel):
 
 
 class GeneratedLessonCandidate(StrictModel):
-    """The single-call v2 candidate; it has no publication authority."""
+    """A versioned single-call candidate; it has no publication authority."""
 
     decision: Literal["candidate", "replan_required"] = "candidate"
     replan_code: Literal["", "PREREQUISITE_GAP_REQUIRES_REPLAN"] = ""
@@ -319,8 +382,8 @@ class GeneratedLessonCandidate(StrictModel):
             return self
         if self.replan_code or self.replan_reason:
             raise ValueError("candidate decision cannot carry replan fields")
-        if not 5 <= len(self.blocks) <= 12:
-            raise ValueError("candidate requires 5-12 content blocks")
+        if not 2 <= len(self.blocks) <= 12:
+            raise ValueError("candidate requires 2-12 content blocks")
         if not 4 <= len(self.questions) <= 5:
             raise ValueError("candidate requires 4-5 questions")
         return self
@@ -332,10 +395,13 @@ class GeneratedLessonSlotBlock(StrictModel):
     slot: str = Field(
         pattern=(
             r"^(T[1-8]_CORE|SHARED_EXAMPLE|BOUNDARY|PRACTICE|SUMMARY|"
-            r"PREREQUISITE|TRANSITION)$"
+            r"PREREQUISITE|TRANSITION|S[1-9][0-9]?)$"
         )
     )
     kind: LESSON_BLOCK_KINDS
+    primary_role: LESSON_BLOCK_ROLES = "example"
+    teaching_moves: list[LESSON_TEACHING_MOVES] = Field(default_factory=list, max_length=8)
+    case_kind: LESSON_CASE_KINDS = ""
     heading: str = Field(min_length=1, max_length=160)
     content: str = Field(min_length=40, max_length=16000)
     claim_version_ids: list[str] = Field(default_factory=list, max_length=8)
@@ -387,16 +453,13 @@ class GeneratedLessonSlotCandidate(StrictModel):
             return self
         if self.replan_code or self.replan_reason:
             raise ValueError("candidate decision cannot carry replan fields")
-        if not 5 <= len(self.blocks) <= 12:
-            raise ValueError("candidate requires 5-12 content blocks")
+        if not 2 <= len(self.blocks) <= 12:
+            raise ValueError("candidate requires 2-12 content blocks")
         if not 4 <= len(self.questions) <= 5:
             raise ValueError("candidate requires 4-5 questions")
         slots = [block.slot for block in self.blocks]
         if len(slots) != len(set(slots)):
             raise ValueError("lesson block slots must be unique")
-        required_shared = {"SHARED_EXAMPLE", "BOUNDARY", "PRACTICE", "SUMMARY"}
-        if not required_shared.issubset(slots):
-            raise ValueError("candidate is missing a required shared lesson slot")
         return self
 
 

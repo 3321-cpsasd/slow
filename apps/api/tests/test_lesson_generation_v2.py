@@ -78,10 +78,10 @@ def spec(*, second_required=False, feedback=None):
 def candidate():
     roles = [
         ("core_instruction", "core", ["target_core"]),
-        ("mechanism", "mechanism", ["target_core"]),
-        ("comparison", "comparison", ["target_boundary"]),
-        ("boundary", "boundary", ["target_boundary"]),
-        ("practice", "practice", ["target_core"]),
+        ("core_instruction", "core", ["target_boundary"]),
+        ("comparison", "comparison", []),
+        ("boundary", "boundary", []),
+        ("practice", "practice", []),
     ]
     blocks = [
         GeneratedLessonBlock(
@@ -135,7 +135,7 @@ def test_option_position_dependent_explanation_is_rejected(explanation):
     assert raised.value.location == {
         "itemKey": "q1",
         "rule": "positional_option_reference",
-        "schemaVersion": "generated_lesson_slot_candidate_v5",
+        "schemaVersion": "generated_lesson_composition_candidate_v6",
     }
 
 
@@ -173,7 +173,7 @@ def test_long_text_requires_authored_paragraph_breaks():
         "blockKey": "b1",
         "kind": "text",
         "rule": "long_single_paragraph",
-        "schemaVersion": "generated_lesson_slot_candidate_v5",
+        "schemaVersion": "generated_lesson_composition_candidate_v6",
         "characterCount": len(value.blocks[0].content),
         "paragraphCount": 1,
     }
@@ -255,11 +255,11 @@ def _grounded_spec():
 def test_grounded_candidate_requires_explicit_in_scope_claim_ids():
     value = candidate()
     for block in value.blocks:
-        block.claim_version_ids = [
-            "claim_core"
-            if block.assessment_target_ids == ["target_core"]
-            else "claim_boundary"
-        ]
+        block.claim_version_ids = (
+            [] if block.role == "practice" else
+            ["claim_core"] if block.assessment_target_ids == ["target_core"] else
+            ["claim_boundary"]
+        )
     validate_lesson_candidate(_grounded_spec(), value)
 
     missing = candidate()
@@ -390,7 +390,10 @@ def test_atomic_publisher_normalizes_explicit_bindings_and_rolls_back():
         )
         assert published.content.publication_status == "published"
         assert published.quiz.publication_status == "published"
-        assert db.scalar(select(func.count()).select_from(ContentBlockAssessmentTarget)) == 5
+        payload = published.content.blocks_json
+        assert '"teachingMoves"' in payload
+        assert '"readerPriority":"essential"' in payload
+        assert db.scalar(select(func.count()).select_from(ContentBlockAssessmentTarget)) == 2
         assert db.scalar(select(func.count()).select_from(AssessmentItemVersion)) == 4
         assert db.scalar(select(func.count()).select_from(AssessmentItemEvidenceBlock)) == 4
         db.rollback()
@@ -411,14 +414,12 @@ class V2FakeAi(FakeAi):
         targets = lesson_spec["targets"]
         blocks = []
         roles = [
-            ("core_instruction", "core"),
-            ("mechanism", "mechanism"),
-            ("comparison", "comparison"),
-            ("boundary", "boundary"),
-            ("practice", "practice"),
+            *[("core_instruction", "core", target["assessmentTargetId"]) for target in targets],
+            ("comparison", "comparison", ""),
+            ("boundary", "boundary", ""),
+            ("practice", "practice", ""),
         ]
-        for index, (role, relation) in enumerate(roles, 1):
-            target_id = targets[(index - 1) % len(targets)]["assessmentTargetId"]
+        for index, (role, relation, target_id) in enumerate(roles, 1):
             blocks.append(
                 GeneratedLessonBlock(
                     block_key=f"b{index}",
@@ -427,7 +428,7 @@ class V2FakeAi(FakeAi):
                     relation_to_anchor=relation,
                     assessment_target_ids=[
                         "outside_contract" if self.invalid_target and index == 1 else target_id
-                    ],
+                    ] if target_id else [],
                     heading=f"正文块 {index}",
                     content=(
                         "这是一个没有任何分段的较长正文块。" * 20
@@ -438,12 +439,9 @@ class V2FakeAi(FakeAi):
             )
         questions = []
         for index in range(4):
-            target = targets[index % len(targets)]
-            block = next(
-                item
-                for item in blocks
-                if target["assessmentTargetId"] in item.assessment_target_ids
-            )
+            target_index = index % len(targets)
+            target = targets[target_index]
+            block = blocks[target_index]
             questions.append(
                 GeneratedLessonQuestion(
                     item_key=f"q{index + 1}",
@@ -464,7 +462,7 @@ class V2FakeAi(FakeAi):
                     source_block_id=feedback["blockId"],
                     # Deliberately map the first old block to the last new block
                     # so the integration test proves identity is not positional.
-                    replacement_block_key="b5",
+                    replacement_block_key=blocks[-1].block_key,
                 )
                 if feedback
                 else None
@@ -564,7 +562,7 @@ def test_legacy_content_never_claims_current_boundary_validation():
         legacy = client.get(f"/api/sections/{section_id}").json()
         assert legacy["content"]["boundaryValidation"] == {
             "status": "legacy",
-            "ruleVersion": "lesson_candidate_gate_v7",
+                "ruleVersion": "lesson_candidate_gate_v8",
         }
 
 
@@ -695,7 +693,7 @@ def test_v2_feedback_creates_a_new_atomic_content_and_quiz_version():
         events = sse_events(streamed)
         done = next(payload for event, payload in events if event == "done")
         replacement = client.get(f"/api/sections/{section_id}").json()
-        assert done["contentBlockId"] == replacement["content"]["blocks"][4]["id"]
+        assert done["contentBlockId"] == replacement["content"]["blocks"][-1]["id"]
         assert done["contentBlockId"] != replacement["content"]["blocks"][0]["id"]
         replay = sse_events(
             client.post(f"/api/feedback/{submitted.json()['id']}/repair/stream")

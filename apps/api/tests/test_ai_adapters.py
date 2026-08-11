@@ -215,22 +215,26 @@ def test_openai_chat_repairs_invalid_schema_with_validation_feedback():
 
 
 def _lesson_candidate_json():
+    slots = (
+        ("T1_CORE", "core_instruction", ""),
+        ("T2_CORE", "core_instruction", ""),
+        ("T3_CORE", "core_instruction", ""),
+        ("S1", "empirical_case", "hypothetical_example"),
+        ("S2", "comparison", ""),
+        ("S3", "boundary", "counterexample"),
+        ("S4", "synthesis", ""),
+    )
     blocks = [
         {
             "slot": slot,
             "kind": "text",
+            "primary_role": role,
+            "teaching_moves": ["direct_explanation"] if slot.endswith("_CORE") else [],
+            "case_kind": case_kind,
             "heading": f"正文块 {slot}",
             "content": "这一正文块完整解释当前目标的机制、判断依据与适用边界，并为测验提供直接证据。学习者可以据此复述因果链并检查反例。",
         }
-        for slot in (
-            "T1_CORE",
-            "T2_CORE",
-            "T3_CORE",
-            "SHARED_EXAMPLE",
-            "BOUNDARY",
-            "PRACTICE",
-            "SUMMARY",
-        )
+        for slot, role, case_kind in slots
     ]
     questions = [
         {
@@ -261,7 +265,7 @@ def _lesson_candidate_json():
 
 def _lesson_spec():
     return {
-        "pipelineVersion": "lesson_generation_v2",
+        "pipelineVersion": "lesson_generation_v3",
         "learningContractVersionId": "contract_1",
         "section": {"id": "section_1", "question": "为什么需要稳定绑定？"},
         "targets": [
@@ -284,6 +288,10 @@ def _lesson_spec():
             ],
         },
         "feedback": {},
+        "compositionPolicy": {
+            "profile": "social_empirical",
+            "recommendedRoles": ["mechanism", "empirical_case", "comparison"],
+        },
     }
 
 
@@ -316,14 +324,17 @@ def test_openai_chat_lesson_v2_uses_exactly_one_physical_call():
     request_payload = json.loads(calls[0]["messages"][1]["content"])
     assert "content 始终是可被 GFM 正确解析的 Markdown" in calls[0]["messages"][0]["content"]
     assert "kind 只是主要展示方式的提示" in calls[0]["messages"][0]["content"]
-    assert "不会因 kind 与 Markdown 结构不同而拒绝候选" in calls[0]["messages"][0]["content"]
+    assert "不得为了匹配 kind 或职责人为拆块" in calls[0]["messages"][0]["content"]
     assert "若两个以上选项成立" in calls[0]["messages"][0]["content"]
     assert "选项 1/2/3/4" in calls[0]["messages"][0]["content"]
     assert [
         item["allowedClaimVersionIds"]
         for item in request_payload["serverSlotPlan"]["targetSlots"]
     ] == [["claim_1"], ["claim_2"], ["claim_3"]]
-    assert request_payload["serverSlotPlan"]["optionalBlockSlots"] == ["TRANSITION"]
+    assert request_payload["serverSlotPlan"]["supportSlotPattern"] == "S1..S99"
+    assert request_payload["serverSlotPlan"]["recommendedSupportRoles"] == [
+        "mechanism", "empirical_case", "comparison"
+    ]
     assert trace[0]["schema"] == "GeneratedLessonSlotCandidate"
     assert trace[0]["attempts"] == 1
     assert trace[0]["repairAttempts"] == 0

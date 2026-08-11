@@ -56,6 +56,8 @@ Slow 的重要变更记录在这里。本项目采用 [Keep a Changelog](https:/
 
 ### Changed · 调整
 
+- Replaced the fixed lesson-body slot template with versioned, contract-derived composition policies for formal, technical, scientific, historical, textual, social-empirical, normative, and general conceptual knowledge, while preserving paragraph-level management, deterministic evidence gates, and atomic publication.
+- 将固定正文槽位模板替换为从冻结学习契约确定性派生、可版本审计的跨知识类型编排策略；形式推导、技术过程、科学因果、历史证据、文本论证、社会实证、规范案例与通用概念可采用不同段落职责，同时保留段落级管理、证据门禁和原子发布。
 - Fixed the login startup race and the invalid response body previously emitted by the `204 No Content` logout endpoint.
 - 修复登录页启动竞态，以及退出接口在 `204 No Content` 响应中错误发送正文的问题。
 - Made the Web launcher portable, removed workstation paths from project context and historical/future evaluation reports, aligned the example model with the server default, and made production deployment explicitly opt-in.

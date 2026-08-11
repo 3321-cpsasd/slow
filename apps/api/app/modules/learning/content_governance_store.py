@@ -46,7 +46,7 @@ from .content_governance import (
 )
 
 
-NORMALIZATION_RULE_VERSION = "content_lineage_v1"
+NORMALIZATION_RULE_VERSION = "content_lineage_v2"
 
 
 def _dump(value) -> str:
@@ -69,15 +69,11 @@ def _id(prefix: str, *parts) -> str:
 
 
 def _claim_kind(block: dict, *, question_dependency: bool = False) -> str | None:
-    role = str(block.get("role", ""))
-    if role == "conclusion":
-        return "core_conclusion"
-    if role == "boundary":
-        return "boundary"
-    if role == "mechanism":
-        return "mechanism"
     if block.get("assessmentEligible") or block.get("assessment_eligible"):
         return "assessable_fact"
+    case_kind = str(block.get("caseKind") or block.get("case_kind") or "")
+    if case_kind in {"empirical_case", "primary_source_case"}:
+        return "teaching_synthesis"
     if question_dependency:
         return "question_dependency"
     return None
@@ -359,6 +355,10 @@ def persist_generated_governance(
             block_version=int(block.get("version") or content.version),
             format_kind=str(block.get("kind") or "text"),
             semantic_role=role,
+            teaching_moves_json=_dump(block.get("teachingMoves", [])),
+            case_kind=str(block.get("caseKind") or ""),
+            relation_to_anchor=str(block.get("relationToAnchor") or ""),
+            reader_priority=str(block.get("readerPriority") or "normal"),
             heading=str(block.get("heading") or ""),
             content=str(block.get("content") or ""),
             source_indexes_json=_dump(block.get("source_indexes", [])),
@@ -375,6 +375,8 @@ def persist_generated_governance(
                 role=role,
                 assessment_target_ids=taught_targets,
                 assessment_eligible=False,
+                factuality_class=str(block.get("factualityClass") or "unspecified"),
+                case_kind=str(block.get("caseKind") or ""),
             )
         )
         kind = _claim_kind(
@@ -902,6 +904,8 @@ def reevaluate_generated_governance(
                 target_by_objective,
             ),
             assessment_eligible=item.assessment_eligible,
+            factuality_class=item.factuality_class,
+            case_kind=item.case_kind,
         )
         for item in block_rows
     )

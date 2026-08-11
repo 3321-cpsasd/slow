@@ -229,7 +229,11 @@ class AnthropicAdapter(OpenAiAdapter):
             "你是 Slow 的高级个性化教材作者。围绕 section.question 这一个核心知识锚点，"
             "在同一次输出中生成正文、选择题和局部绑定。只有 targets 中的稳定 "
             "assessmentTargetId 可以绑定正文或题目；不得创造、猜测或用自然语言替代 ID。"
-            "prerequisite_scaffold 与 transition 的 assessment_target_ids 必须为空。"
+            "每个目标必须且只能有一个 role=core_instruction 的块绑定它；其他职责块的 "
+            "assessment_target_ids 必须为空。compositionPolicy 是服务端版本化的教学编排建议，"
+            "按其认识方式、证据形式和案例策略自然组织 2-12 块，不得为凑职责机械拆块。"
+            "每块用 teaching_moves 声明零到多个辅助教学动作；真实案例、假设案例、原始材料、"
+            "worked example、反例和迁移情境必须用 case_kind 准确区分。"
             "每道题只测一个契约目标，并用 evidence_block_keys 引用真正教授同一目标的块；"
             "所有 required 目标必须同时有正文和题目覆盖。内容块只是节内结构，不是目录层级。"
             "model_only 不得编造来源或事实核验声明。如果大型前置缺口无法在本节以非考核脚手架补足，"
@@ -248,7 +252,7 @@ class AnthropicAdapter(OpenAiAdapter):
             system=system,
             user=json.dumps({"lessonGenerationSpec": spec}, ensure_ascii=False),
             max_tokens=12000,
-            operation="lesson_generation_v2",
+            operation="lesson_generation_v3",
         )
         content = clean_json_output(
             "".join(

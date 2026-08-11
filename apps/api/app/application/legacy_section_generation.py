@@ -91,7 +91,7 @@ async def generate_legacy_section(
             False,
         ):
             raise AppError(
-                "当前 AI 适配器不支持 lesson_generation_v2；拒绝回退旧链路",
+                "当前 AI 适配器不支持版本化正文生成；拒绝回退旧链路",
                 code="LESSON_GENERATION_V2_UNSUPPORTED",
                 status=500,
             )

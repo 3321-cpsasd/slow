@@ -954,7 +954,7 @@ class SqlAlchemyM2EvidenceAuditor:
         if execution.execution_mode == "real_provider":
             physical_invocations = self.db.scalars(
                 select(AiInvocation).where(
-                    AiInvocation.operation == "lesson_generation_v2",
+                    AiInvocation.operation.in_(("lesson_generation_v2", "lesson_generation_v3")),
                     AiInvocation.status == "succeeded",
                     AiInvocation.provider == execution.provider,
                     AiInvocation.model == execution.model,

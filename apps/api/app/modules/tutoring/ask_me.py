@@ -747,6 +747,7 @@ class AskMeService:
                 LearningContractAssessmentTarget.position,
                 AssessmentTarget.id,
                 AssessmentTarget.objective_statement,
+                AssessmentTarget.dimension,
                 ContentBlockVersion.semantic_role,
                 ContentBlockVersion.position,
             )
@@ -776,14 +777,19 @@ class AskMeService:
             )
         ).all()
         candidates_by_role: dict[str, list[dict[str, str]]] = {}
-        for _, target_id, objective, role, _ in rows:
+        all_candidates: list[dict[str, str]] = []
+        for _, target_id, objective, target_dimension, role, _ in rows:
             candidates = candidates_by_role.setdefault(role, [])
             if any(item["assessmentTargetId"] == target_id for item in candidates):
                 continue
-            candidates.append({
+            candidate = {
                 "assessmentTargetId": target_id,
                 "objective": objective,
-            })
+                "dimension": target_dimension,
+            }
+            candidates.append(candidate)
+            if not any(item["assessmentTargetId"] == target_id for item in all_candidates):
+                all_candidates.append(candidate)
 
         # M1 content keeps the same explicit block-to-objective declarations in
         # the immutable block payload instead of the normalized binding table.
@@ -791,7 +797,11 @@ class AskMeService:
         # not infer a target from prose or fuzzy similarity.
         content = self.db.get(ContentVersion, content_version_id)
         contract_targets = self.db.execute(
-            select(AssessmentTarget.id, AssessmentTarget.objective_statement)
+            select(
+                AssessmentTarget.id,
+                AssessmentTarget.objective_statement,
+                AssessmentTarget.dimension,
+            )
             .join(
                 LearningContractAssessmentTarget,
                 LearningContractAssessmentTarget.assessment_target_id
@@ -807,11 +817,12 @@ class AskMeService:
             target_id: {
                 "assessmentTargetId": target_id,
                 "objective": objective,
+                "dimension": dimension,
             }
-            for target_id, objective in contract_targets
+            for target_id, objective, dimension in contract_targets
         }
         targets_by_objective: dict[str, list[dict[str, str]]] = {}
-        for target_id, objective in contract_targets:
+        for target_id, objective, _dimension in contract_targets:
             targets_by_objective.setdefault(objective, []).append(
                 target_by_id[target_id]
             )
@@ -845,15 +856,28 @@ class AskMeService:
                     candidate = target_by_id[target_id]
                     if candidate not in candidates:
                         candidates.append(candidate)
+                    if candidate not in all_candidates:
+                        all_candidates.append(candidate)
 
         assigned: set[str] = set()
         result: dict[str, dict[str, str]] = {}
         for dimension in self.DIMENSIONS:
             candidates: list[dict[str, str]] = []
+            matching_dimensions = {
+                "mechanism": {"mechanism", "recognition"},
+                "boundary": {"boundary", "comparison"},
+                "transfer": {"transfer", "application"},
+            }[dimension]
+            for candidate in all_candidates:
+                if candidate.get("dimension") in matching_dimensions:
+                    candidates.append(candidate)
             for role in self.TARGET_BLOCK_ROLES[dimension]:
                 for candidate in candidates_by_role.get(role, []):
                     if candidate not in candidates:
                         candidates.append(candidate)
+            for candidate in all_candidates:
+                if candidate not in candidates:
+                    candidates.append(candidate)
             if not candidates:
                 raise AppError(
                     "正文没有为深入讨论提供可验证的目标绑定",
