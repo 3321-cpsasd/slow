@@ -1,13 +1,19 @@
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.ai.local_adapter import LocalDemoAdapter
 from app.infrastructure.tables import (
     AccountRecoveryCode,
+    AlphaRegistrationQuota,
     AuthSession,
     LocalCredential,
     User,
 )
+from app.auth.registration import claim_alpha_registration
+from app.core.errors import AppError
 from app.main import create_app
 from app.services.attachment_storage import LocalAttachmentStorage
 from app.services.source_verifier import AcceptingSourceVerifier
@@ -80,6 +86,10 @@ def test_alpha_registration_creates_recoverable_account_and_session(tmp_path):
             credential = db.scalar(select(LocalCredential))
             recovery = db.scalar(select(AccountRecoveryCode))
             assert credential.password_hash.startswith("$argon2id$")
+            assert credential.registration_source == "alpha_self_service"
+            assert credential.registration_quota_date
+            quota = db.scalar(select(AlphaRegistrationQuota))
+            assert quota.used_count == 1
             assert recovery.status == "active"
             assert recovery.version == 1
             assert raw_recovery_code not in recovery.code_hash
@@ -179,6 +189,57 @@ def test_recovery_reset_rotates_code_revokes_sessions_and_hides_account_lookup(t
             assert len(db.scalars(
                 select(AuthSession).where(AuthSession.status == "active")
             ).all()) == 1
+
+
+def test_authenticated_user_can_rotate_a_lost_recovery_code(tmp_path):
+    with TestClient(
+        alpha_app(tmp_path), base_url="https://testserver"
+    ) as client:
+        created = register(client)
+        old_code = created.json()["recoveryCode"]
+        rotated = client.post(
+            "/api/auth/password/recovery-code/rotate",
+            headers={"X-CSRF-Token": created.json()["csrfToken"]},
+        )
+        assert rotated.status_code == 200
+        assert rotated.json()["recoveryCode"].startswith("SLOW-")
+        assert rotated.json()["recoveryCode"] != old_code
+        with client.app.state.sessions() as db:
+            codes = db.scalars(
+                select(AccountRecoveryCode).order_by(AccountRecoveryCode.version)
+            ).all()
+            assert [(item.version, item.status) for item in codes] == [
+                (1, "revoked"),
+                (2, "active"),
+            ]
+
+
+def test_alpha_quota_reservation_is_atomic_under_concurrency(tmp_path):
+    app = alpha_app(tmp_path, daily_limit=1)
+    with TestClient(app, base_url="https://testserver"):
+        quota_date = "2026-08-11"
+        barrier = Barrier(2)
+
+        def reserve() -> bool:
+            with app.state.sessions() as db:
+                barrier.wait()
+                try:
+                    claim_alpha_registration(
+                        db,
+                        quota_date=quota_date,
+                        daily_limit=1,
+                    )
+                    db.commit()
+                    return True
+                except AppError:
+                    db.rollback()
+                    return False
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: reserve(), range(2)))
+        assert sorted(results) == [False, True]
+        with app.state.sessions() as db:
+            assert db.get(AlphaRegistrationQuota, quota_date).used_count == 1
 
 
 def test_registration_and_recovery_validation_never_echo_secrets(tmp_path):

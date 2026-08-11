@@ -9,6 +9,7 @@ from ...core.errors import AiError, AppError
 from ...infrastructure.tables import (
     LearningContractVersion,
     LearningMissionVersion,
+    LearningPreferenceEvidence,
     LearningRunSectionBinding,
     QaMessage,
     QaSession,
@@ -120,6 +121,10 @@ class QaService:
                     "role": message.role,
                     "content": message.content,
                     "createdAt": message.created_at.isoformat(),
+                    "preferenceRequestEventId": message.preference_request_event_id,
+                    "explanationStyle": message.explanation_style,
+                    "explanationBlockKind": message.explanation_block_kind,
+                    "requestSource": message.request_source,
                 }
                 for message in messages
             ]
@@ -207,6 +212,42 @@ class QaService:
                 code="BLOCK_INVALID",
                 status=409,
             )
+        preference_metadata = None
+        if body.preference_request_event_id:
+            preference_request = self.db.scalar(
+                select(LearningPreferenceEvidence).where(
+                    LearningPreferenceEvidence.user_id == self.user_id,
+                    LearningPreferenceEvidence.event_id
+                    == body.preference_request_event_id,
+                    LearningPreferenceEvidence.signal == "requested",
+                )
+            )
+            if not preference_request:
+                raise AppError(
+                    "找不到对应的讲法请求",
+                    code="PREFERENCE_EVIDENCE_PARENT_NOT_FOUND",
+                    status=404,
+                )
+            if (
+                preference_request.section_id != section_id
+                or preference_request.content_version_id
+                != binding.content_version_id
+                or preference_request.block_id != body.block_id
+                or preference_request.style != body.explanation_style
+                or preference_request.block_kind
+                != body.explanation_block_kind
+            ):
+                raise AppError(
+                    "讲法请求与当前正文不一致",
+                    code="PREFERENCE_EVIDENCE_INVALID",
+                    status=409,
+                )
+            preference_metadata = {
+                "preferenceRequestEventId": body.preference_request_event_id,
+                "explanationStyle": body.explanation_style,
+                "explanationBlockKind": body.explanation_block_kind,
+                "requestSource": "explanation_preference",
+            }
         session = self.db.scalar(
             select(QaSession).where(
                 QaSession.section_id == section_id,
@@ -290,6 +331,7 @@ class QaService:
             interaction={
                 "anchorBlockId": body.block_id,
                 "question": body.question,
+                "explanationPreference": preference_metadata,
                 "currentThreadFullHistory": current_history,
                 "relatedThreadSummaries": related_summaries,
             },
@@ -312,6 +354,7 @@ class QaService:
             "session": session,
             "suggestedThreadId": suggested,
             "request": self.generation_contexts.attach(request, context_pack),
+            "preferenceMetadata": preference_metadata,
         }
 
     def save_answer(
@@ -347,6 +390,19 @@ class QaService:
         thread.summary = thread_summary
         thread.updated_at = now()
         user_message_created_at = now()
+        preference_metadata = context.get("preferenceMetadata") or {}
+        message_metadata = {
+            "preference_request_event_id": preference_metadata.get(
+                "preferenceRequestEventId"
+            ),
+            "explanation_style": preference_metadata.get("explanationStyle"),
+            "explanation_block_kind": preference_metadata.get(
+                "explanationBlockKind"
+            ),
+            "request_source": preference_metadata.get(
+                "requestSource", "ask_ai"
+            ),
+        }
         user_message = QaMessage(
             id=self.uid("msg"),
             session_id=session.id,
@@ -355,6 +411,7 @@ class QaService:
             role="user",
             content=body.question,
             created_at=user_message_created_at,
+            **message_metadata,
         )
         assistant_message = QaMessage(
             id=self.uid("msg"),
@@ -364,6 +421,7 @@ class QaService:
             role="assistant",
             content=answer,
             created_at=user_message_created_at + timedelta(microseconds=1),
+            **message_metadata,
         )
         self.db.add_all([user_message, assistant_message])
         memory = self.load(session.memory_json, {"threads": {}}) or {

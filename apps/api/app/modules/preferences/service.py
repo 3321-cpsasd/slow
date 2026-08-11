@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ...core.errors import AppError
@@ -322,6 +323,11 @@ class LearningPreferenceService:
                 user_id=self.user_id,
                 event_id=event_id,
                 request_event_id=request_event_id or "",
+                terminal_request_key=(
+                    request_event_id
+                    if signal in {"helpful", "unclear", "adopted"}
+                    else None
+                ),
                 section_id=section_id,
                 shelf_id=shelf_id,
                 content_version_id=content_version_id or "",
@@ -337,7 +343,26 @@ class LearningPreferenceService:
                 created_at=occurred_at,
             )
         )
-        self.db.commit()
+        try:
+            self.db.commit()
+        except IntegrityError:
+            self.db.rollback()
+            if signal not in {"helpful", "unclear", "adopted"}:
+                raise
+            terminal = self.db.scalar(
+                select(LearningPreferenceEvidence).where(
+                    LearningPreferenceEvidence.user_id == self.user_id,
+                    LearningPreferenceEvidence.terminal_request_key
+                    == request_event_id,
+                )
+            )
+            if terminal and terminal.signal == signal:
+                return self.projection(shelf_id=shelf_id, recorded=False)
+            raise AppError(
+                "这次讲法已经反馈过了",
+                code="PREFERENCE_FEEDBACK_ALREADY_RECORDED",
+                status=409,
+            )
         return self.projection(shelf_id=shelf_id, recorded=True)
 
     def projection(self, *, shelf_id: str | None = None, recorded: bool | None = None) -> dict:
@@ -541,6 +566,10 @@ class PersonalPresentationService:
                 QaMessage.thread_id == body.thread_id,
                 QaMessage.block_id == body.block_id,
                 QaMessage.role == "assistant",
+                QaMessage.preference_request_event_id == body.request_event_id,
+                QaMessage.explanation_style == body.style,
+                QaMessage.explanation_block_kind == body.block_kind,
+                QaMessage.request_source == "explanation_preference",
             )
         )
         if not message:

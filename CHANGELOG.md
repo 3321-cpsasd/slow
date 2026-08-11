@@ -56,6 +56,12 @@ Slow 的重要变更记录在这里。本项目采用 [Keep a Changelog](https:/
 
 ### Changed · 调整
 
+- Hardened learning-preference evidence with persisted QA request lineage, database-enforced single terminal outcomes, and exact server-side adoption checks that survive page refreshes.
+- 加固学习偏好证据链：持久化答疑请求来源，在数据库层保证每次讲法只有一个终态反馈，并让服务端采用校验在刷新后仍可精确追溯。
+- Made Alpha registration quotas atomic and source-scoped, added authenticated recovery-code rotation, and recorded registration provenance for audit.
+- 将 Alpha 注册额度改为原子且按来源计数，新增登录后的恢复码轮换入口，并记录注册来源以供审计。
+- Replaced first-hit lesson classification with weighted, word-boundary-aware signals and enforced composition block/case minimums at the publication gate.
+- 将首个关键词命中的教材分类改为带字段权重和英文词边界的判定，并在发布门禁中强制执行正文块与案例最低要求。
 - Replaced the fixed lesson-body slot template with versioned, contract-derived composition policies for formal, technical, scientific, historical, textual, social-empirical, normative, and general conceptual knowledge, while preserving paragraph-level management, deterministic evidence gates, and atomic publication.
 - 将固定正文槽位模板替换为从冻结学习契约确定性派生、可版本审计的跨知识类型编排策略；形式推导、技术过程、科学因果、历史证据、文本论证、社会实证、规范案例与通用概念可采用不同段落职责，同时保留段落级管理、证据门禁和原子发布。
 - Fixed the login startup race and the invalid response body previously emitted by the `204 No Content` logout endpoint.

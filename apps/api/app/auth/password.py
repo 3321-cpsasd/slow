@@ -43,6 +43,8 @@ class PasswordCredentialService:
         username: str,
         display_name: str,
         password: str,
+        registration_source: str = "unspecified",
+        registration_quota_date: str | None = None,
         commit: bool = True,
     ) -> User:
         normalized = normalize_username(username)
@@ -70,6 +72,8 @@ class PasswordCredentialService:
             user_id=user.id,
             username=normalized,
             password_hash=PASSWORD_HASHER.hash(password),
+            registration_source=registration_source,
+            registration_quota_date=registration_quota_date,
             status="active",
         )
         self.db.add(credential)

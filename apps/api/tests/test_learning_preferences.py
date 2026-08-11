@@ -4,6 +4,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.schemas import LearningPreferenceEvidenceCreate, PersonalPresentationAdopt
@@ -166,6 +167,46 @@ def test_each_explanation_request_accepts_only_one_terminal_outcome():
     assert raised.value.code == "PREFERENCE_FEEDBACK_ALREADY_RECORDED"
 
 
+def test_database_rejects_a_second_terminal_outcome_for_one_request():
+    db = database()
+    service = LearningPreferenceService(db, "user_a")
+    service.record(evidence("request_unique_1"), shelf_id="shelf_1")
+    service.record(
+        evidence(
+            "feedback_unique_1",
+            signal="helpful",
+            parent="request_unique_1",
+        ),
+        shelf_id="shelf_1",
+    )
+    first = db.scalar(select(LearningPreferenceEvidence).where(
+        LearningPreferenceEvidence.terminal_request_key == "request_unique_1"
+    ))
+    db.add(LearningPreferenceEvidence(
+        id="preference_evidence_conflict",
+        user_id=first.user_id,
+        event_id="feedback_unique_conflict",
+        request_event_id=first.request_event_id,
+        terminal_request_key=first.terminal_request_key,
+        section_id=first.section_id,
+        shelf_id=first.shelf_id,
+        content_version_id=first.content_version_id,
+        block_id=first.block_id,
+        block_kind=first.block_kind,
+        style=first.style,
+        signal="unclear",
+        dimensions_json=first.dimensions_json,
+        extraction_confidence=first.extraction_confidence,
+        extractor_version=first.extractor_version,
+        request_hash="conflicting-hash",
+        occurred_at=first.occurred_at,
+        created_at=first.created_at,
+    ))
+    with pytest.raises(IntegrityError):
+        db.commit()
+    db.rollback()
+
+
 def test_public_preference_schema_cannot_mint_adopted_evidence():
     payload = evidence("request_public_1").model_dump(mode="json", by_alias=True)
     payload.update({
@@ -206,6 +247,10 @@ def test_personal_presentation_is_bound_to_exact_answer_and_user():
             block_id="block_1",
             role="assistant",
             content="第一种讲法",
+            preference_request_event_id="request_event_1",
+            explanation_style="worked_example",
+            explanation_block_kind="text",
+            request_source="explanation_preference",
         ),
         QaMessage(
             id="answer_2",
@@ -276,8 +321,27 @@ def test_preference_api_adopts_and_restores_exact_answer(tmp_path):
 
         first_answer = client.post(
             f"/api/sections/{section['id']}/ask",
-            json={"blockId": block["id"], "question": "请举一个例子"},
+            json={
+                "blockId": block["id"],
+                "question": "请举一个例子",
+                "preferenceRequestEventId": request_event_id,
+                "explanationStyle": "worked_example",
+                "explanationBlockKind": block["kind"],
+            },
         ).json()
+        history = client.get(
+            f"/api/sections/{section['id']}/qa/history"
+        ).json()
+        persisted_answer = next(
+            message
+            for thread in history["threads"]
+            for message in thread["messages"]
+            if message["id"] == first_answer["answerMessageId"]
+        )
+        assert persisted_answer["preferenceRequestEventId"] == request_event_id
+        assert persisted_answer["explanationStyle"] == "worked_example"
+        assert persisted_answer["explanationBlockKind"] == block["kind"]
+        assert persisted_answer["requestSource"] == "explanation_preference"
         client.post(
             f"/api/sections/{section['id']}/ask",
             json={
@@ -300,6 +364,24 @@ def test_preference_api_adopts_and_restores_exact_answer(tmp_path):
             },
         )
         assert adopted.status_code == 201
+
+        unrelated = client.post(
+            f"/api/sections/{section['id']}/personal-presentation",
+            json={
+                "eventId": "preference_adopt_unrelated",
+                "requestEventId": request_event_id,
+                "contentVersionId": content_id,
+                "blockId": block["id"],
+                "blockKind": block["kind"],
+                "style": "worked_example",
+                "threadId": first_answer["threadId"],
+                "answerMessageId": client.post(
+                    f"/api/sections/{section['id']}/ask",
+                    json={"blockId": block["id"], "question": "普通问题"},
+                ).json()["answerMessageId"],
+            },
+        )
+        assert unrelated.status_code == 404
 
         with client.app.state.sessions() as db:
             override = db.scalar(select(PersonalBlockPresentation))

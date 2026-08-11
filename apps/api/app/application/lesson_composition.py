@@ -6,11 +6,12 @@ The deterministic, versioned result is included in every generation audit.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
 LESSON_COMPOSITION_POLICY_VERSION = "lesson_composition_policy_v1"
-LESSON_COMPOSITION_RESOLVER_VERSION = "contract_epistemic_resolver_v1"
+LESSON_COMPOSITION_RESOLVER_VERSION = "contract_epistemic_resolver_v2"
 
 
 _PROFILE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -97,20 +98,43 @@ def resolve_lesson_composition_policy(
 ) -> dict[str, Any]:
     """Return an auditable presentation policy without changing target identity."""
 
-    corpus = " ".join(
-        [str(section.get("title") or ""), str(section.get("question") or ""),
-         *[str(item.get("objective") or "") for item in targets],
-         *[str(item.get("dimension") or "") for item in targets],
-         *[str(item.get("verificationPolicy") or "") for item in targets]]
-    ).casefold()
+    weighted_fields = [
+        (str(section.get("title") or ""), 1),
+        (str(section.get("question") or ""), 2),
+        *[(str(item.get("objective") or ""), 2) for item in targets],
+        *[(str(item.get("dimension") or ""), 3) for item in targets],
+        *[(str(item.get("verificationPolicy") or ""), 4) for item in targets],
+    ]
+
+    def contains_signal(text: str, signal: str) -> bool:
+        folded_text = text.casefold()
+        folded_signal = signal.casefold()
+        if re.fullmatch(r"[a-z][a-z ]*", folded_signal):
+            return bool(re.search(
+                rf"(?<![a-z]){re.escape(folded_signal)}(?![a-z])",
+                folded_text,
+            ))
+        return folded_signal in folded_text
+
     profile = "generic_conceptual"
     matched_signals: list[str] = []
+    best_score = 0
     for candidate, signals in _PROFILE_RULES:
-        hits = [signal for signal in signals if signal.casefold() in corpus]
-        if hits:
+        candidate_hits: list[str] = []
+        score = 0
+        for signal in signals:
+            hit_weights = [
+                weight
+                for text, weight in weighted_fields
+                if contains_signal(text, signal)
+            ]
+            if hit_weights:
+                candidate_hits.append(signal)
+                score += max(hit_weights)
+        if score > best_score:
             profile = candidate
-            matched_signals = hits[:6]
-            break
+            matched_signals = candidate_hits[:6]
+            best_score = score
     target_count = max(1, len(targets))
     return {
         "schemaVersion": LESSON_COMPOSITION_POLICY_VERSION,

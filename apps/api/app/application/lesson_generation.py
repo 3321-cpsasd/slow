@@ -34,7 +34,7 @@ from ..modules.learning.assessment_items import publish_assessment_item_versions
 LESSON_GENERATION_PIPELINE_VERSION = "lesson_generation_v3"
 LESSON_GENERATION_SCHEMA_VERSION = "generated_lesson_composition_candidate_v6"
 LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_composition_prompt_v9"
-LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v8"
+LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v9"
 LESSON_CONTEXT_POLICY_VERSION = "lesson_generation_context_v2"
 AI_CONTENT_LABEL_SCHEMA_VERSION = "ai_content_label_v2"
 
@@ -68,7 +68,9 @@ class LessonCasePolicy(LessonSpecModel):
 
 class LessonCompositionPolicy(LessonSpecModel):
     schema_version: Literal["lesson_composition_policy_v1"] = Field(alias="schemaVersion")
-    resolver_version: Literal["contract_epistemic_resolver_v1"] = Field(alias="resolverVersion")
+    resolver_version: Literal[
+        "contract_epistemic_resolver_v1", "contract_epistemic_resolver_v2"
+    ] = Field(alias="resolverVersion")
     profile: Literal[
         "generic_conceptual",
         "formal_quantitative",
@@ -130,7 +132,7 @@ class LessonGenerationSpec(LessonSpecModel):
         default_factory=lambda: LessonCompositionPolicy.model_validate(
             {
                 "schemaVersion": "lesson_composition_policy_v1",
-                "resolverVersion": "contract_epistemic_resolver_v1",
+                "resolverVersion": "contract_epistemic_resolver_v2",
                 "profile": "generic_conceptual",
                 "basis": "frozen_contract_deterministic_inference",
                 "matchedSignals": [],
@@ -346,6 +348,36 @@ def validate_lesson_candidate(
             "PREREQUISITE_GAP_REQUIRES_REPLAN",
             candidate.replan_reason,
             contractVersion=spec.learning_contract_version,
+        )
+
+    block_count = len(candidate.blocks)
+    if block_count < spec.composition_policy.minimum_blocks:
+        _reject(
+            "CONTENT_COMPOSITION_MINIMUM_BLOCKS",
+            "正文块数量低于编排策略的最低要求",
+            minimumBlocks=spec.composition_policy.minimum_blocks,
+            actualBlocks=block_count,
+        )
+    if block_count > spec.composition_policy.maximum_blocks:
+        _reject(
+            "CONTENT_COMPOSITION_MAXIMUM_BLOCKS",
+            "正文块数量超过编排策略的上限",
+            maximumBlocks=spec.composition_policy.maximum_blocks,
+            actualBlocks=block_count,
+        )
+    case_count = sum(
+        1
+        for block in candidate.blocks
+        if block.case_kind and block.case_kind != "none"
+    )
+    if case_count < spec.composition_policy.case_policy.minimum_distinct_cases:
+        _reject(
+            "CONTENT_COMPOSITION_CASES_MISSING",
+            "正文案例数量低于编排策略的最低要求",
+            minimumDistinctCases=(
+                spec.composition_policy.case_policy.minimum_distinct_cases
+            ),
+            actualCases=case_count,
         )
 
     target_by_id = {item.assessment_target_id: item for item in spec.targets}

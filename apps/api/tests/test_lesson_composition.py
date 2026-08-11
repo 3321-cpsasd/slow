@@ -46,6 +46,23 @@ def test_generic_policy_is_explicitly_auditable_and_advisory():
     assert policy["matchedSignals"] == []
 
 
+def test_weighted_signals_prefer_derivation_over_general_economic_context():
+    policy = resolve_lesson_composition_policy(
+        section={"title": "经济模型", "question": "如何推导经济模型的方程？"},
+        targets=[_target("推导经济模型的方程")],
+    )
+    assert policy["profile"] == "formal_quantitative"
+
+
+def test_english_signals_use_word_boundaries():
+    policy = resolve_lesson_composition_policy(
+        section={"title": "Proof review", "question": "Find the flaw in this proof"},
+        targets=[_target("Evaluate the proof")],
+    )
+    assert policy["profile"] == "formal_quantitative"
+    assert "law" not in policy["matchedSignals"]
+
+
 def test_dynamic_candidate_no_longer_requires_fixed_shared_slots():
     candidate = GeneratedLessonSlotCandidate.model_validate(
         {
@@ -88,3 +105,22 @@ def test_empirical_case_role_cannot_hide_an_untyped_or_unsourced_case():
     with pytest.raises(CandidateValidationFailure) as raised:
         validate_lesson_candidate(spec(), value)
     assert raised.value.code == "CONTENT_CASE_KIND_INVALID"
+
+
+def test_composition_minimum_blocks_is_a_publication_gate():
+    lesson_spec = spec()
+    lesson_spec.composition_policy.minimum_blocks = len(candidate().blocks) + 1
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(lesson_spec, candidate())
+    assert raised.value.code == "CONTENT_COMPOSITION_MINIMUM_BLOCKS"
+
+
+def test_composition_minimum_cases_is_a_publication_gate():
+    value = candidate()
+    lesson_spec = spec()
+    lesson_spec.composition_policy.case_policy.minimum_distinct_cases = sum(
+        1 for block in value.blocks if block.case_kind != "none"
+    ) + 1
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(lesson_spec, value)
+    assert raised.value.code == "CONTENT_COMPOSITION_CASES_MISSING"

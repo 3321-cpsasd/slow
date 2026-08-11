@@ -12,7 +12,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0051_learning_preference_evidence"
+HEAD_REVISION = "0052_auth_qa_preference_integrity"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -190,7 +190,18 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
             "daily_mode_events",
             "learning_preference_evidence",
             "personal_block_presentations",
+            "alpha_registration_quotas",
         }.issubset(trustworthy_tables)
+        qa_message_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(qa_messages)")
+        }
+        preference_evidence_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(learning_preference_evidence)"
+            )
+        }
         assessment_target_columns = {
             row[1]
             for row in connection.execute("PRAGMA table_info(assessment_targets)")
@@ -275,6 +286,16 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
         ).fetchone()[0]
 
     assert revision == HEAD_REVISION
+    assert {"registration_source", "registration_quota_date"}.issubset(
+        local_credential_columns
+    )
+    assert {
+        "preference_request_event_id",
+        "explanation_style",
+        "explanation_block_kind",
+        "request_source",
+    }.issubset(qa_message_columns)
+    assert "terminal_request_key" in preference_evidence_columns
     assert {
         "teaching_moves_json",
         "case_kind",

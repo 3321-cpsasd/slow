@@ -227,6 +227,9 @@ export const api = {
     method:'POST',
     body:JSON.stringify(body),
   }),
+  rotateRecoveryCode:()=>call<{recoveryCode:string}>('/api/auth/password/recovery-code/rotate',{
+    method:'POST',
+  }),
   logout:async()=>{
     await call<void>('/api/auth/logout',{method:'POST'});
     csrfToken = '';
@@ -322,7 +325,11 @@ export const api = {
   learningTask:(id:string)=>call<import('../model/types').LearningTask>(`/api/learning-tasks/${id}`),
   retryLearningTask:(id:string)=>call<import('../model/types').LearningTask>(`/api/learning-tasks/${id}/retry`,{method:'POST'}),
   ask:(id:string,blockId:string,question:string,threadId?:string,forceRelation?:'follow_up'|'new_question')=>call<import('../model/types').QaAnswer>(`/api/sections/${id}/ask`,{method:'POST',body:JSON.stringify({blockId,question,threadId,forceRelation})}),
-  askStream:(id:string,blockId:string,question:string,onDelta:(delta:string)=>void,threadId?:string,forceRelation?:'follow_up'|'new_question')=>streamQa(`/api/sections/${id}/ask/stream`,{blockId,question,threadId,forceRelation},onDelta),
+  askStream:(id:string,blockId:string,question:string,onDelta:(delta:string)=>void,threadId?:string,forceRelation?:'follow_up'|'new_question',preference?:{
+    preferenceRequestEventId:string;
+    explanationStyle:'worked_example'|'diagram'|'analogy'|'derivation'|'precise'|'concise'|'custom';
+    explanationBlockKind:import('../model/types').Block['kind'];
+  })=>streamQa(`/api/sections/${id}/ask/stream`,{blockId,question,threadId,forceRelation,...preference},onDelta),
   qaHistory:(id:string)=>call<import('../model/types').QaHistory>(`/api/sections/${id}/qa/history`),
   correctQa:(id:string,threadId:string,targetThreadId:string)=>call<import('../model/types').QaCorrection>(`/api/sections/${id}/qa/threads/${threadId}`,{method:'PATCH',body:JSON.stringify({relation:'follow_up',targetThreadId})}),
   askMe:(id:string,answer='')=>call<import('../model/types').AskMe>(`/api/sections/${id}/ask-me`,{method:'POST',body:JSON.stringify({answer})}),

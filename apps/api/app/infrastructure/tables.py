@@ -197,11 +197,20 @@ class LearningPreferenceEvidence(Base):
             "user_id",
             "occurred_at",
         ),
+        Index(
+            "uq_learning_preference_evidence_user_terminal_request",
+            "user_id",
+            "terminal_request_key",
+            unique=True,
+        ),
     )
     id: Mapped[str] = mapped_column(String, primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     event_id: Mapped[str] = mapped_column(String(128))
     request_event_id: Mapped[str] = mapped_column(String(128), default="")
+    terminal_request_key: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
     section_id: Mapped[str] = mapped_column(String, index=True)
     shelf_id: Mapped[str] = mapped_column(String, index=True)
     content_version_id: Mapped[str] = mapped_column(String, default="")
@@ -295,6 +304,12 @@ class LocalCredential(Base):
     )
     username: Mapped[str] = mapped_column(String(80), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(Text)
+    registration_source: Mapped[str] = mapped_column(
+        String(32), default="unspecified", index=True
+    )
+    registration_quota_date: Mapped[str | None] = mapped_column(
+        String(10), nullable=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
     failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
     locked_until: Mapped[datetime | None] = mapped_column(
@@ -311,6 +326,16 @@ class LocalCredential(Base):
         default=now,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AlphaRegistrationQuota(Base):
+    """Atomic daily counter for self-service Alpha registrations."""
+
+    __tablename__ = "alpha_registration_quotas"
+    quota_date: Mapped[str] = mapped_column(String(10), primary_key=True)
+    used_count: Mapped[int] = mapped_column(Integer, default=0)
+    limit_snapshot: Mapped[int] = mapped_column(Integer)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -2282,6 +2307,18 @@ class QaMessage(Base):
     block_id: Mapped[str] = mapped_column(String)
     role: Mapped[str] = mapped_column(String(16))
     content: Mapped[str] = mapped_column(Text)
+    preference_request_event_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, index=True
+    )
+    explanation_style: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )
+    explanation_block_kind: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )
+    request_source: Mapped[str] = mapped_column(
+        String(32), default="ask_ai"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

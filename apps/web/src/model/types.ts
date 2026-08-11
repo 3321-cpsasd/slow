@@ -460,6 +460,10 @@ export type QaHistoryMessage = {
   role:'user'|'assistant';
   content:string;
   createdAt:string;
+  preferenceRequestEventId?:string|null;
+  explanationStyle?:'worked_example'|'diagram'|'analogy'|'derivation'|'precise'|'concise'|'custom'|null;
+  explanationBlockKind?:Block['kind']|null;
+  requestSource?:'ask_ai'|'explanation_preference';
 };
 export type QaHistoryThread = {
   threadId:string;

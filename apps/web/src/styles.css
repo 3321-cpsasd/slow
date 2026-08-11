@@ -915,6 +915,11 @@ button:disabled { cursor: not-allowed; }
 .account-policy-grid article > span { color: #6e8c78; font: 750 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; }
 .account-policy-grid h3 { margin: 18px 0 8px; color: #304338; font-size: 14px; }
 .account-policy-grid p { margin: 0; color: #748078; font-size: 10px; line-height: 1.65; }
+.account-recovery-panel { margin-top: 18px; padding: 21px; display: flex; align-items: center; justify-content: space-between; gap: 20px; border: 1px solid #dbe3dc; border-radius: 9px; background: #fff; }
+.account-recovery-panel span { color: #6e8c78; font: 750 9px/1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; }
+.account-recovery-panel h3 { margin: 8px 0 0; color: #304338; font-size: 14px; }
+.account-recovery-panel code { display: block; margin-top: 12px; color: #244c3a; font-size: 11px; user-select: all; }
+.account-recovery-panel button { flex: none; padding: 10px 14px; border: 1px solid #b9cdbf; border-radius: 7px; background: #f5f8f5; color: #315d48; font-size: 10px; font-weight: 750; }
 .account-exit-panel { margin-top: 34px; padding: 22px 0; display: flex; align-items: center; justify-content: space-between; gap: 24px; border-top: 1px solid #dfe4df; border-bottom: 1px solid #dfe4df; }
 .account-exit-panel h3 { margin: 0 0 6px; font-size: 13px; }
 .account-exit-panel p { margin: 0; color: #7b847d; font-size: 10px; }

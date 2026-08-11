@@ -268,6 +268,26 @@ class AskRequest(ApiModel):
     question: str = Field(min_length=1, max_length=3000)
     thread_id: str | None = None
     force_relation: Literal["follow_up", "new_question"] | None = None
+    preference_request_event_id: str | None = Field(default=None, max_length=128)
+    explanation_style: Literal[
+        "worked_example", "diagram", "analogy", "derivation", "precise",
+        "concise", "custom",
+    ] | None = None
+    explanation_block_kind: Literal[
+        "text", "bullet_list", "ordered_steps", "diagram", "table", "code",
+        "formula",
+    ] | None = None
+
+    @model_validator(mode="after")
+    def validate_explanation_lineage(self):
+        values = (
+            self.preference_request_event_id,
+            self.explanation_style,
+            self.explanation_block_kind,
+        )
+        if any(values) and not all(values):
+            raise ValueError("讲法请求的偏好元数据必须完整")
+        return self
 
 
 class QaClassificationUpdate(ApiModel):

@@ -562,7 +562,7 @@ def test_legacy_content_never_claims_current_boundary_validation():
         legacy = client.get(f"/api/sections/{section_id}").json()
         assert legacy["content"]["boundaryValidation"] == {
             "status": "legacy",
-                "ruleVersion": "lesson_candidate_gate_v8",
+            "ruleVersion": "lesson_candidate_gate_v9",
         }
 
 

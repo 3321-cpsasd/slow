@@ -303,6 +303,11 @@ const qaHistoryExchanges = (history: QaHistory): QaExchange[] => {
       if (activeExchange) {
         activeExchange.answer += message.content;
         activeExchange.answerMessageId = message.id;
+        if (message.preferenceRequestEventId && message.explanationStyle && message.explanationBlockKind) {
+          activeExchange.preferenceRequestEventId = message.preferenceRequestEventId;
+          activeExchange.explanationStyle = message.explanationStyle;
+          activeExchange.explanationBlockKind = message.explanationBlockKind;
+        }
       }
     });
   });
@@ -1638,6 +1643,7 @@ export default function App() {
               setData(await api.bootstrap());
             }}
             onLogout={logout}
+            onRotateRecoveryCode={async () => (await api.rotateRecoveryCode()).recoveryCode}
             privacy={auth.privacy}
             onRequestExit={requestAccountExit}
           />
@@ -3100,6 +3106,7 @@ function ProfileCenterPage({
   onBack,
   onSave,
   onLogout,
+  onRotateRecoveryCode,
   privacy,
   onRequestExit,
 }: {
@@ -3112,6 +3119,7 @@ function ProfileCenterPage({
   onBack: () => void;
   onSave: (body: object) => Promise<void>;
   onLogout: () => Promise<void>;
+  onRotateRecoveryCode: () => Promise<string>;
   privacy: PrivacyState;
   onRequestExit: (confirmation: string, reason: string) => Promise<void>;
 }) {
@@ -3137,6 +3145,8 @@ function ProfileCenterPage({
   const [exitConfirmation, setExitConfirmation] = useState('');
   const [exitReason, setExitReason] = useState('');
   const [exitSubmitting, setExitSubmitting] = useState(false);
+  const [recoveryCodeBusy, setRecoveryCodeBusy] = useState(false);
+  const [renewedRecoveryCode, setRenewedRecoveryCode] = useState('');
 
   const domains = useMemo(() => parseProfileDomains(domainText), [domainText]);
 
@@ -3373,6 +3383,27 @@ function ProfileCenterPage({
                 : '当前环境无需同意'}</p>
             </article>
           </div>
+
+          {mode === 'password' && (
+            <section className="account-recovery-panel">
+              <div>
+                <span>账号恢复</span>
+                <h3>恢复码</h3>
+                {renewedRecoveryCode && <code>{renewedRecoveryCode}</code>}
+              </div>
+              <button type="button" disabled={recoveryCodeBusy} onClick={async () => {
+                setRecoveryCodeBusy(true);
+                setError('');
+                try {
+                  setRenewedRecoveryCode(await onRotateRecoveryCode());
+                } catch (reason) {
+                  setError(reason instanceof Error ? reason.message : '恢复码生成失败');
+                } finally {
+                  setRecoveryCodeBusy(false);
+                }
+              }}>{recoveryCodeBusy ? '正在生成…' : renewedRecoveryCode ? '重新生成' : '生成新的恢复码'}</button>
+            </section>
+          )}
 
           <section className="account-exit-panel">
             <div><h3>退出当前账号</h3></div>
@@ -6947,6 +6978,9 @@ function QaPanel({
         ))),
         newQuestion ? undefined : threadId,
         newQuestion ? 'new_question' : undefined,
+        preferenceRequestEventId && explanationStyle && explanationBlockKind
+          ? { preferenceRequestEventId, explanationStyle, explanationBlockKind }
+          : undefined,
       );
       setThreadId(result.threadId);
       setMessages((current) => current.map((message) => (

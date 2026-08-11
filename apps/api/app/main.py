@@ -1,7 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
 from contextlib import suppress
-from datetime import datetime, timezone
 import hmac
 import json
 import logging
@@ -12,7 +11,7 @@ from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from .auth.context import Principal, UserScope, demo_user_scope
 from .auth.profile import ProfileService
@@ -21,6 +20,7 @@ from .auth.local import LocalCredentialService
 from .auth.oidc import OidcClient
 from .auth.password import PasswordCredentialService
 from .auth.recovery import AccountRecoveryService
+from .auth.registration import claim_alpha_registration
 from .auth.service import IdentityService, OidcStateService, SessionService, token_hash
 from .ai.openai_adapter import OpenAiAdapter
 from .ai.anthropic_adapter import AnthropicAdapter
@@ -34,7 +34,7 @@ from .core.config import settings
 from .core.errors import AppError
 from .demo_personas import LOCAL_DEMO_PERSONAS
 from .infrastructure.database import build_database
-from .infrastructure.tables import Base, LearningTask, LocalCredential, QuizAttempt, Remediation, User
+from .infrastructure.tables import Base, LearningTask, QuizAttempt, Remediation, User, now
 from .modules.learning.tasks import claim_task, heartbeat_task, recoverable_task_ids
 from .modules.feedback.service import FeedbackService
 from .modules.telemetry.service import ProductEventService
@@ -539,6 +539,7 @@ def create_app(
         consent_exempt_paths = {
             "/api/auth/me",
             "/api/auth/logout",
+            "/api/auth/password/recovery-code/rotate",
             "/api/privacy",
             "/api/privacy/consent",
             "/api/account/exit",
@@ -825,29 +826,29 @@ def create_app(
                     code="ALPHA_ACCESS_CODE_INVALID",
                     status=403,
                 )
-        day_start = datetime.now(timezone.utc).replace(
-            hour=0,
-            minute=0,
-            second=0,
-            microsecond=0,
-        )
-        created_today = int(session.scalar(
-            select(func.count(LocalCredential.id)).where(
-                LocalCredential.created_at >= day_start,
-            )
-        ) or 0)
-        if created_today >= request.app.state.alpha_registration_daily_limit:
-            raise AppError(
-                "今天的 Alpha 名额已满，请明天再试",
-                code="REGISTRATION_DAILY_LIMIT_REACHED",
-                status=429,
-            )
+        quota_date = now().date().isoformat()
         password = body.password.get_secret_value()
         try:
+            if request.app.state.registration_mode == "alpha":
+                claim_alpha_registration(
+                    session,
+                    quota_date=quota_date,
+                    daily_limit=request.app.state.alpha_registration_daily_limit,
+                )
             user = PasswordCredentialService(session).create_account(
                 username=body.username,
                 display_name=body.username.strip(),
                 password=password,
+                registration_source=(
+                    "alpha_self_service"
+                    if request.app.state.registration_mode == "alpha"
+                    else "open_self_service"
+                ),
+                registration_quota_date=(
+                    quota_date
+                    if request.app.state.registration_mode == "alpha"
+                    else None
+                ),
                 commit=False,
             )
             recovery_code = AccountRecoveryService(session).issue(
@@ -887,6 +888,24 @@ def create_app(
         return {
             "reset": True,
             "recoveryCode": replacement,
+        }
+
+    @app.post("/api/auth/password/recovery-code/rotate")
+    def rotate_password_recovery_code(
+        request: Request,
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        if request.app.state.auth_mode != "password":
+            raise AppError(
+                "当前账号不使用恢复码",
+                code="ACCOUNT_RECOVERY_NOT_AVAILABLE",
+                status=404,
+            )
+        return {
+            "recoveryCode": AccountRecoveryService(session).issue(
+                user_id=scope.user_id,
+            )
         }
 
     @app.post("/api/auth/local/login")
