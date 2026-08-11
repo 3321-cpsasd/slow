@@ -268,6 +268,35 @@ def test_recovery_code_reauthentication_uses_password_lockout(tmp_path):
             assert db.scalar(select(AccountRecoveryCode)).status == "active"
 
 
+def test_sqlite_reauthentication_lockout_is_atomic_under_concurrency(tmp_path):
+    app = alpha_app(tmp_path)
+    with TestClient(app, base_url="https://testserver") as client:
+        created = register(client)
+        headers = {"X-CSRF-Token": created.json()["csrfToken"]}
+        barrier = Barrier(5)
+
+        def reject_wrong_password() -> tuple[int, str]:
+            barrier.wait()
+            response = client.post(
+                "/api/auth/password/recovery-code/rotate",
+                headers=headers,
+                json={"currentPassword": "Wrong-Password-Value"},
+            )
+            return response.status_code, response.json()["code"]
+
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            results = list(pool.map(lambda _: reject_wrong_password(), range(5)))
+
+        assert results == [(403, "ACCOUNT_REAUTH_INVALID")] * 5
+        with app.state.sessions() as db:
+            credential = db.scalar(select(LocalCredential))
+            assert credential is not None
+            assert credential.failed_attempts == 0
+            assert credential.locked_until is not None
+            assert db.scalar(select(AuthSession)).status == "active"
+            assert db.scalar(select(AccountRecoveryCode)).status == "active"
+
+
 def test_alpha_quota_insert_compiles_for_supported_production_dialects():
     sqlite_sql = str(_quota_insert_statement(
         dialect_name="sqlite",

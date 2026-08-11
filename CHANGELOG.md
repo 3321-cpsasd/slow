@@ -8,6 +8,8 @@ Slow 的重要变更记录在这里。本项目采用 [Keep a Changelog](https:/
 
 - Hardened recovery-code re-authentication with the existing password lockout policy, rejected conflicting case kinds for one stable case identity, and prevented stale preference-save responses from updating a newer explanation request.
 - 恢复码二次认证现已复用密码锁定策略；同一稳定案例身份若声明冲突类型将拒绝发布；过期的偏好保存响应也不会再改写新的讲法请求。
+- Serialized SQLite password verification with `BEGIN IMMEDIATE`, so concurrent failures cannot lose lockout increments when row-level locks are unavailable.
+- SQLite 密码校验现使用 `BEGIN IMMEDIATE` 串行化；在不支持行锁时，并发失败也不会丢失锁定计数。
 
 ### Added · 新增
 

@@ -87,6 +87,7 @@ class PasswordCredentialService:
         return user
 
     def verify_current_password(self, *, user_id: str, password: str) -> None:
+        self._serialize_sqlite_password_attempt()
         credential = self.db.scalar(
             select(LocalCredential).where(
                 LocalCredential.user_id == user_id,
@@ -103,6 +104,17 @@ class PasswordCredentialService:
         ):
             raise self._invalid_reauthentication()
         self.db.commit()
+
+    def _serialize_sqlite_password_attempt(self) -> None:
+        if self.db.get_bind().dialect.name != "sqlite":
+            return
+        # SQLite ignores SELECT ... FOR UPDATE. End the read transaction opened
+        # by session authentication, then acquire the database write lock before
+        # reading the credential and running Argon2. This preserves one lockout
+        # counter order across threads and processes using the same SQLite file.
+        if self.db.in_transaction():
+            self.db.rollback()
+        self.db.connection().exec_driver_sql("BEGIN IMMEDIATE")
 
     @staticmethod
     def _invalid_reauthentication() -> AppError:
@@ -192,6 +204,7 @@ class PasswordCredentialService:
         return user
 
     def authenticate(self, *, username: str, password: str) -> User:
+        self._serialize_sqlite_password_attempt()
         credential = self.db.scalar(
             select(LocalCredential).where(
                 LocalCredential.username == normalize_username(username),
