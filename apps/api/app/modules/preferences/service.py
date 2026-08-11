@@ -131,12 +131,95 @@ class LearningPreferenceService:
         self.clock = clock
 
     def record(self, body, *, shelf_id: str) -> dict:
-        payload = body.model_dump(mode="json")
+        return self._record(
+            event_id=body.event_id,
+            request_event_id=body.request_event_id,
+            section_id=body.section_id,
+            content_version_id=body.content_version_id,
+            block_id=body.block_id,
+            block_kind=body.block_kind,
+            style=body.style,
+            signal=body.signal,
+            custom_instruction=body.custom_instruction,
+            shelf_id=shelf_id,
+        )
+
+    def record_adoption(
+        self,
+        body,
+        *,
+        section_id: str,
+        shelf_id: str,
+        presentation: PersonalBlockPresentation,
+    ) -> dict:
+        """Record an adoption only after the server completed that action."""
+
+        if (
+            presentation.user_id != self.user_id
+            or presentation.section_id != section_id
+        ):
+            raise AppError(
+                "个人讲法与当前操作不一致",
+                code="PREFERENCE_ADOPTION_INVALID",
+                status=409,
+            )
+        if (
+            presentation.content_version_id != body.content_version_id
+            or presentation.block_id != body.block_id
+            or presentation.source_qa_message_id != body.answer_message_id
+            or not presentation.active
+        ):
+            raise AppError(
+                "个人讲法与当前操作不一致",
+                code="PREFERENCE_ADOPTION_INVALID",
+                status=409,
+            )
+        return self._record(
+            event_id=body.event_id,
+            request_event_id=body.request_event_id,
+            section_id=section_id,
+            content_version_id=body.content_version_id,
+            block_id=body.block_id,
+            block_kind=body.block_kind,
+            style=body.style,
+            signal="adopted",
+            custom_instruction=None,
+            shelf_id=shelf_id,
+            source_qa_message_id=body.answer_message_id,
+        )
+
+    def _record(
+        self,
+        *,
+        event_id: str,
+        request_event_id: str | None,
+        section_id: str,
+        content_version_id: str,
+        block_id: str,
+        block_kind: str,
+        style: str,
+        signal: str,
+        custom_instruction: str | None,
+        shelf_id: str,
+        source_qa_message_id: str | None = None,
+    ) -> dict:
+        payload = {
+            "eventId": event_id,
+            "requestEventId": request_event_id,
+            "sectionId": section_id,
+            "contentVersionId": content_version_id,
+            "blockId": block_id,
+            "blockKind": block_kind,
+            "style": style,
+            "signal": signal,
+            "customInstruction": custom_instruction,
+            "sourceQaMessageId": source_qa_message_id,
+        }
         request_hash = sha256(_json(payload).encode("utf-8")).hexdigest()
         existing = self.db.scalar(
             select(LearningPreferenceEvidence).where(
                 LearningPreferenceEvidence.user_id == self.user_id,
-                LearningPreferenceEvidence.event_id == body.event_id,
+                LearningPreferenceEvidence.event_id == event_id,
             )
         )
         if existing:
@@ -151,29 +234,29 @@ class LearningPreferenceService:
 
         require_published_block(
             self.db,
-            section_id=body.section_id,
-            content_version_id=body.content_version_id,
-            block_id=body.block_id,
+            section_id=section_id,
+            content_version_id=content_version_id,
+            block_id=block_id,
         )
 
-        if body.signal == "requested":
-            if body.request_event_id:
+        if signal == "requested":
+            if request_event_id:
                 raise AppError(
                     "首次讲法请求不能引用另一条证据",
                     code="PREFERENCE_EVIDENCE_INVALID",
                     status=400,
                 )
-            if body.style == "custom":
+            if style == "custom":
                 dimensions, extraction_confidence = extract_custom_dimensions(
-                    body.custom_instruction or ""
+                    custom_instruction or ""
                 )
                 extractor_version = "bounded_zh_v1"
             else:
-                dimensions = STYLE_DIMENSIONS[body.style]
+                dimensions = STYLE_DIMENSIONS[style]
                 extraction_confidence = 1.0
                 extractor_version = "preset_v1"
         else:
-            if not body.request_event_id or body.custom_instruction:
+            if not request_event_id or custom_instruction:
                 raise AppError(
                     "讲法反馈必须引用原请求，且不能重复携带自由文本",
                     code="PREFERENCE_EVIDENCE_INVALID",
@@ -182,31 +265,51 @@ class LearningPreferenceService:
             parent = self.db.scalar(
                 select(LearningPreferenceEvidence).where(
                     LearningPreferenceEvidence.user_id == self.user_id,
-                    LearningPreferenceEvidence.event_id == body.request_event_id,
+                    LearningPreferenceEvidence.event_id == request_event_id,
                     LearningPreferenceEvidence.signal == "requested",
                 )
             )
-            if not parent or parent.section_id != body.section_id:
+            if not parent or parent.section_id != section_id:
                 raise AppError(
                     "找不到对应的讲法请求",
                     code="PREFERENCE_EVIDENCE_PARENT_NOT_FOUND",
                     status=404,
                 )
-            if parent.style != body.style:
+            if parent.style != style:
                 raise AppError(
                     "讲法反馈与原请求不一致",
                     code="PREFERENCE_EVIDENCE_INVALID",
                     status=400,
                 )
             if (
-                parent.content_version_id != body.content_version_id
-                or parent.block_id != body.block_id
-                or parent.block_kind != body.block_kind
+                parent.content_version_id != content_version_id
+                or parent.block_id != block_id
+                or parent.block_kind != block_kind
             ):
                 raise AppError(
                     "讲法反馈与原请求的正文段落不一致",
                     code="PREFERENCE_EVIDENCE_INVALID",
                     status=400,
+                )
+            terminal = self.db.scalar(
+                select(LearningPreferenceEvidence)
+                .where(
+                    LearningPreferenceEvidence.user_id == self.user_id,
+                    LearningPreferenceEvidence.request_event_id == request_event_id,
+                    LearningPreferenceEvidence.signal.in_({
+                        "helpful", "unclear", "adopted",
+                    }),
+                )
+                .order_by(LearningPreferenceEvidence.created_at)
+            )
+            if terminal:
+                if terminal.signal == signal:
+                    self.db.commit()
+                    return self.projection(shelf_id=shelf_id, recorded=False)
+                raise AppError(
+                    "这次讲法已经反馈过了",
+                    code="PREFERENCE_FEEDBACK_ALREADY_RECORDED",
+                    status=409,
                 )
             dimensions = _load(parent.dimensions_json, {})
             extraction_confidence = parent.extraction_confidence
@@ -217,15 +320,15 @@ class LearningPreferenceService:
             LearningPreferenceEvidence(
                 id=f"preference_evidence_{uuid4().hex}",
                 user_id=self.user_id,
-                event_id=body.event_id,
-                request_event_id=body.request_event_id or "",
-                section_id=body.section_id,
+                event_id=event_id,
+                request_event_id=request_event_id or "",
+                section_id=section_id,
                 shelf_id=shelf_id,
-                content_version_id=body.content_version_id or "",
-                block_id=body.block_id,
-                block_kind=body.block_kind,
-                style=body.style,
-                signal=body.signal,
+                content_version_id=content_version_id or "",
+                block_id=block_id,
+                block_kind=block_kind,
+                style=style,
+                signal=signal,
                 dimensions_json=_json(dimensions),
                 extraction_confidence=extraction_confidence,
                 extractor_version=extractor_version,
@@ -238,13 +341,13 @@ class LearningPreferenceService:
         return self.projection(shelf_id=shelf_id, recorded=True)
 
     def projection(self, *, shelf_id: str | None = None, recorded: bool | None = None) -> dict:
-        rows = list(
+        rows = self._effective_evidence(list(
             self.db.scalars(
                 select(LearningPreferenceEvidence).where(
                     LearningPreferenceEvidence.user_id == self.user_id
                 )
             )
-        )
+        ))
         global_stats = self._stats(rows)
         domain_rows = [row for row in rows if shelf_id and row.shelf_id == shelf_id]
         domain_stats = self._stats(domain_rows) if shelf_id else {}
@@ -289,6 +392,29 @@ class LearningPreferenceService:
         if recorded is not None:
             result["recorded"] = recorded
         return result
+
+    @staticmethod
+    def _effective_evidence(
+        rows: list[LearningPreferenceEvidence],
+    ) -> list[LearningPreferenceEvidence]:
+        """Project at most one terminal outcome for each explanation request."""
+
+        ordinary: list[LearningPreferenceEvidence] = []
+        terminal_by_request: dict[str, LearningPreferenceEvidence] = {}
+        for row in rows:
+            if (
+                row.request_event_id
+                and row.signal in {"helpful", "unclear", "adopted"}
+            ):
+                current = terminal_by_request.get(row.request_event_id)
+                if current is None or (row.occurred_at, row.id) > (
+                    current.occurred_at,
+                    current.id,
+                ):
+                    terminal_by_request[row.request_event_id] = row
+            else:
+                ordinary.append(row)
+        return [*ordinary, *terminal_by_request.values()]
 
     def effective_preferences(self, explicit: dict, *, shelf_id: str | None = None) -> dict:
         inferred = self.projection(shelf_id=shelf_id)["effectivePreferences"]
@@ -418,7 +544,7 @@ class PersonalPresentationService:
             )
         )
         if not message:
-            raise AppError("找不到可替换的讲法", code="QA_ANSWER_NOT_FOUND", status=404)
+            raise AppError("找不到可保留的讲法", code="QA_ANSWER_NOT_FOUND", status=404)
         override = self.db.scalar(
             select(PersonalBlockPresentation).where(
                 PersonalBlockPresentation.user_id == self.user_id,

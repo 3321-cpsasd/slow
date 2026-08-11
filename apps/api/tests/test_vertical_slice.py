@@ -4325,6 +4325,14 @@ def test_exhausted_next_section_preload_restores_progress_and_can_retry(tmp_path
             for task in passed["workflowTasks"]
             if task["type"] == "next_section_preload"
         )
+        with recovering.app.state.sessions() as db:
+            queued_payload = json.loads(
+                db.get(LearningTask, preload["taskId"]).payload_json
+            )
+            assert queued_payload == {
+                "sourceSectionId": first_section["id"],
+                "targetSectionId": current["books"][0]["chapters"][0]["sections"][1]["id"],
+            }
         failed = wait_for_task(recovering, preload["taskId"], timeout=5)
         assert failed["status"] == "failed"
         assert failed["attemptCount"] == failed["maxAttempts"]
@@ -4395,7 +4403,9 @@ def test_prepare_section_does_not_steal_an_active_preload(tmp_path):
             recovering,
             series["initializationTask"]["taskId"],
         )
-        section_id = initialization["result"]["targetSectionId"]
+        source_section_id = initialization["result"]["targetSectionId"]
+        route = recovering.get(f"/api/series/{series['id']}").json()
+        section_id = route["books"][0]["chapters"][0]["sections"][1]["id"]
         with recovering.app.state.sessions() as db:
             initial_task = db.get(
                 LearningTask,
@@ -4411,11 +4421,12 @@ def test_prepare_section_does_not_steal_an_active_preload(tmp_path):
                 id=f"task_{uuid4().hex}",
                 learning_run_id=initial_task.learning_run_id,
                 user_id=initial_task.user_id,
-                section_id=section_id,
+                section_id=source_section_id,
                 task_type="next_section_preload",
                 idempotency_key=f"owned:{section_id}",
                 trigger_id="test-active-owner",
-                payload_json=json.dumps({"targetSectionId": section_id}),
+                # Legacy active tasks may not have persisted targetSectionId.
+                payload_json=json.dumps({"sourceSectionId": source_section_id}),
                 status="running",
                 attempt_count=1,
                 max_attempts=3,

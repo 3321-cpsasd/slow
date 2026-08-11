@@ -218,7 +218,7 @@ class LearningPreferenceEvidenceCreate(ApiModel):
     block_id: str = Field(min_length=1, max_length=160)
     block_kind: Literal["text", "bullet_list", "ordered_steps", "diagram", "table", "code", "formula"]
     style: Literal["worked_example", "diagram", "analogy", "derivation", "precise", "concise", "custom"]
-    signal: Literal["requested", "helpful", "unclear", "adopted"]
+    signal: Literal["requested", "helpful", "unclear"]
     custom_instruction: str | None = Field(default=None, max_length=240)
 
 

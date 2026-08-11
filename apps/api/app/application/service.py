@@ -745,11 +745,25 @@ class SlowService:
                 }),
             )
         ).all()
-        has_owner = any(
-            str((load(task.payload_json, {}) or {}).get("targetSectionId") or "")
-            == progress.section_id
-            for task in active_tasks
-        )
+        has_owner = False
+        for task in active_tasks:
+            payload = load(task.payload_json, {}) or {}
+            if str(payload.get("targetSectionId") or "") == progress.section_id:
+                has_owner = True
+                break
+            # Compatibility for tasks created before targetSectionId became
+            # part of the quiz-pass transaction. The source deterministically
+            # identifies the next existing section while the task is active.
+            source_id = str(payload.get("sourceSectionId") or "")
+            source = self.db.get(Section, source_id) if source_id else None
+            if (
+                task.task_type == "next_section_preload"
+                and source
+                and (target := self._next_existing_section(source))
+                and target.id == progress.section_id
+            ):
+                has_owner = True
+                break
         if has_owner:
             return
         self.progress.set_status(progress, "available")

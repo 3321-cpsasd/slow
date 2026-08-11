@@ -124,6 +124,59 @@ def test_feedback_cannot_reference_another_users_request():
     assert raised.value.code == "PREFERENCE_EVIDENCE_PARENT_NOT_FOUND"
 
 
+def test_each_explanation_request_accepts_only_one_terminal_outcome():
+    db = database()
+    service = LearningPreferenceService(db, "user_a")
+    service.record(evidence("request_once_1"), shelf_id="shelf_1")
+
+    first = service.record(
+        evidence(
+            "feedback_once_1",
+            signal="helpful",
+            parent="request_once_1",
+        ),
+        shelf_id="shelf_1",
+    )
+    replay = service.record(
+        evidence(
+            "feedback_once_2",
+            signal="helpful",
+            parent="request_once_1",
+        ),
+        shelf_id="shelf_1",
+    )
+    assert first["recorded"] is True
+    assert replay["recorded"] is False
+    terminal_rows = db.scalars(
+        select(LearningPreferenceEvidence).where(
+            LearningPreferenceEvidence.request_event_id == "request_once_1"
+        )
+    ).all()
+    assert len(terminal_rows) == 1
+
+    with pytest.raises(AppError) as raised:
+        service.record(
+            evidence(
+                "feedback_once_3",
+                signal="unclear",
+                parent="request_once_1",
+            ),
+            shelf_id="shelf_1",
+        )
+    assert raised.value.code == "PREFERENCE_FEEDBACK_ALREADY_RECORDED"
+
+
+def test_public_preference_schema_cannot_mint_adopted_evidence():
+    payload = evidence("request_public_1").model_dump(mode="json", by_alias=True)
+    payload.update({
+        "eventId": "adopted_public_1",
+        "requestEventId": "request_public_1",
+        "signal": "adopted",
+    })
+    with pytest.raises(ValueError):
+        LearningPreferenceEvidenceCreate.model_validate(payload)
+
+
 def test_evidence_rejects_a_block_outside_the_published_content():
     db = database()
     invalid = evidence("request_invalid_block")
@@ -258,6 +311,7 @@ def test_preference_api_adopts_and_restores_exact_answer(tmp_path):
             if item["id"] == block["id"]
         )
         assert refreshed_block["personalPresentation"]["content"] == expected_content
+        assert refreshed_block["content"] == block["content"]
 
         restored = client.delete(
             f"/api/sections/{section['id']}/personal-presentation/{block['id']}",

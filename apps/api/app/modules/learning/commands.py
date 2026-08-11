@@ -497,7 +497,10 @@ class SubmitQuiz:
                     task_type="next_section_preload",
                     idempotency_key=f"next-after:{section.id}",
                     trigger_id=attempt.id,
-                    payload_json=_dump({"sourceSectionId": section.id}),
+                    payload_json=_dump({
+                        "sourceSectionId": section.id,
+                        "targetSectionId": decision.unlocked_section_id,
+                    }),
                     status="pending",
                 ))
         if not completion_passed and not was_completed:
@@ -677,6 +680,7 @@ class SubmitQuiz:
                     trigger_id=attempt.id,
                     payload_json=_dump({
                         "sourceSectionId": context.section.id,
+                        "targetSectionId": decision.unlocked_section_id,
                     }),
                     status="pending",
                 ))

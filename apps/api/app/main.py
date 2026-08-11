@@ -1093,19 +1093,13 @@ def create_app(
             body,
             section_id=section_id,
         )
-        evidence = LearningPreferenceEvidenceCreate(
-            eventId=body.event_id,
-            requestEventId=body.request_event_id,
-            sectionId=section_id,
-            contentVersionId=body.content_version_id,
-            blockId=body.block_id,
-            blockKind=body.block_kind,
-            style=body.style,
-            signal="adopted",
-        )
-        projection = LearningPreferenceService(session, scope.user_id).record(
-            evidence,
+        projection = LearningPreferenceService(
+            session, scope.user_id
+        ).record_adoption(
+            body,
+            section_id=section_id,
             shelf_id=context.shelf.id,
+            presentation=override,
         )
         return {"id": override.id, "status": "active", "projection": projection}
 

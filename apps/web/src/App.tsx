@@ -5478,19 +5478,21 @@ function ContentBlock({
         </button>
       </div>
       <h2>{block.heading}</h2>
-      {block.personalPresentation && (
-        <div className="personal-presentation-note">
-          <span>我的讲法</span>
-          <button type="button" onClick={() => void onRestorePersonalPresentation()}>恢复原文</button>
-        </div>
-      )}
       <BlockBody block={block} />
+      {block.personalPresentation && (
+        <aside className="personal-presentation" aria-label="我的另一种讲法">
+          <header>
+            <span>我的另一种讲法</span>
+            <button type="button" onClick={() => void onRestorePersonalPresentation()}>移除</button>
+          </header>
+          <BlockBody block={block} content={block.personalPresentation.content} />
+        </aside>
+      )}
     </section>
   );
 }
 
-function BlockBody({ block }: { block: Block }) {
-  const content = block.personalPresentation?.content || block.content;
+function BlockBody({ block, content = block.content }: { block: Block; content?: string }) {
   if (block.kind === 'code') {
     return <pre className="code-block"><code>{content}</code></pre>;
   }
@@ -7068,6 +7070,7 @@ function QaPanel({
                     <div className="explanation-style-actions">
                       <button
                         className={styleFeedback[message.id] === 'helpful' ? 'selected' : ''}
+                        disabled={Boolean(styleFeedback[message.id]) || adoptedExchange === message.id}
                         onClick={async () => {
                           setStyleFeedback((current) => ({ ...current, [message.id]: 'helpful' }));
                           if (message.preferenceRequestEventId && message.blockId && section.content) {
@@ -7090,6 +7093,7 @@ function QaPanel({
                       >有帮助</button>
                       <button
                         className={styleFeedback[message.id] === 'unclear' ? 'selected' : ''}
+                        disabled={Boolean(styleFeedback[message.id]) || adoptedExchange === message.id}
                         onClick={async () => {
                           setStyleFeedback((current) => ({ ...current, [message.id]: 'unclear' }));
                           if (message.preferenceRequestEventId && message.blockId && section.content) {
@@ -7112,7 +7116,7 @@ function QaPanel({
                       >还是不清楚</button>
                       <button
                         className="replace"
-                        disabled={adoptingExchange === message.id || adoptedExchange === message.id || !message.threadId || !message.answerMessageId || !message.preferenceRequestEventId || !section.content}
+                        disabled={adoptingExchange === message.id || adoptedExchange === message.id || Boolean(styleFeedback[message.id]) || !message.threadId || !message.answerMessageId || !message.preferenceRequestEventId || !section.content}
                         onClick={async () => {
                           const explanationStyle = message.explanationStyle;
                           if (!explanationStyle || !message.threadId || !message.answerMessageId || !message.preferenceRequestEventId || !message.blockId || !section.content) return;
@@ -7128,13 +7132,13 @@ function QaPanel({
                             onSectionChange(await api.section(section.id));
                             setAdoptedExchange(message.id);
                           } catch (reason) {
-                            setPreferenceError(reason instanceof Error ? reason.message : '替换暂未完成，请重试。');
+                            setPreferenceError(reason instanceof Error ? reason.message : '暂时无法保存，请重试。');
                           } finally {
                             setAdoptingExchange('');
                           }
                         }}
                       >
-                        {adoptingExchange === message.id ? '正在替换…' : adoptedExchange === message.id ? '已替换' : '替换当前段落'}
+                        {adoptingExchange === message.id ? '正在保存…' : adoptedExchange === message.id ? '已保留' : '保留为另一种讲法'}
                       </button>
                     </div>
                     {preferenceError && <p className="explanation-style-error" role="alert">{preferenceError}</p>}
