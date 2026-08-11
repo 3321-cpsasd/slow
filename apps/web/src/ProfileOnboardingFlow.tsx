@@ -121,7 +121,6 @@ export function ProfileOnboardingFlow({
         <aside className="profile-flow-rail" aria-label="基础画像填写进度">
           <p className="eyebrow">建立学习起点</p>
           <h1>先让教材<br />认识现在的你。</h1>
-          <p>这些信息决定第一本书从哪里讲起。之后的练习表现会继续调整教材难度和复习安排。</p>
           <ol>
             {state.steps.map((item, index) => (
               <li className={index === stepIndex ? 'active' : index < stepIndex ? 'done' : ''} key={item.id}>
@@ -144,7 +143,6 @@ export function ProfileOnboardingFlow({
             {step.id === 'identity' && (
               <div className="profile-step-fields">
                 <h2>你现在以什么身份学习？</h2>
-                <p>不用写正式职位，写最能影响学习内容的身份即可。</p>
                 <label>
                   当前身份或职业
                   <input
@@ -176,7 +174,6 @@ export function ProfileOnboardingFlow({
             {step.id === 'direction' && (
               <div className="profile-step-fields">
                 <h2>这一次，你想走向哪里？</h2>
-                <p>目标越具体，教材越能选择适合你的案例、边界和练习。</p>
                 <label>
                   目标领域
                   <input
@@ -214,7 +211,6 @@ export function ProfileOnboardingFlow({
             {step.id === 'review' && (
               <div className="profile-step-fields profile-review">
                 <h2>这是教材将采用的起点。</h2>
-                <p>它不是能力证明，只是你对当前状态的描述；之后的练习表现会继续更新学习建议。</p>
                 <dl>
                   <div><dt>身份</dt><dd>{profession}</dd></div>
                   <div><dt>阶段</dt><dd>{STAGES.find((item) => item.value === stage)?.label}</dd></div>
@@ -222,10 +218,6 @@ export function ProfileOnboardingFlow({
                   <div><dt>目的</dt><dd>{purpose}</dd></div>
                   <div><dt>经验</dt><dd>{experience || '暂未填写，之后可以随时补充'}</dd></div>
                 </dl>
-                <div className="profile-evidence-note">
-                  <span>起点说明</span>
-                  <p><b>不会直接计为“已掌握”</b>只有之后实际完成的练习和讨论会更新学习进度。</p>
-                </div>
               </div>
             )}
 

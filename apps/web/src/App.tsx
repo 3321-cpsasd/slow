@@ -56,6 +56,24 @@ type AppRoute =
   | { view: 'learn'; seriesId: string; sectionId: string | null };
 type TextQuote = { text: string; blockId: string };
 type SelectionPopup = TextQuote & { top: number; left: number };
+type PresetExplanationStyle =
+  | 'worked_example'
+  | 'diagram'
+  | 'analogy'
+  | 'derivation'
+  | 'precise'
+  | 'concise';
+type ExplanationStyle = PresetExplanationStyle | 'custom';
+type ExplanationRequest = {
+  requestId: string;
+  blockId: string;
+  blockKind: Block['kind'];
+  style: ExplanationStyle;
+  label: string;
+  question: string;
+  displayQuestion: string;
+  evidenceEventId?: string;
+};
 type FeedbackTarget =
   | { scope: 'global' }
   | {
@@ -207,13 +225,60 @@ type QaExchange = {
   answer: string;
   relation: string;
   status: 'streaming' | 'done' | 'error';
+  explanationStyle?: ExplanationStyle;
+  preferenceRequestEventId?: string;
+  explanationBlockKind?: Block['kind'];
+};
+
+const EXPLANATION_STYLE_OPTIONS: Record<PresetExplanationStyle, {
+  label: string;
+  prompt: string;
+}> = {
+  worked_example: {
+    label: '举个具体例子',
+    prompt: '请用一个具体、可观察或可计算的例子重新解释这一段，并说明例子中的对象、过程和结论。',
+  },
+  diagram: {
+    label: '画成关系图',
+    prompt: '请把这一段整理成清晰的文本图解或关系图，并在图后用两三句话解释关键关系。',
+  },
+  analogy: {
+    label: '打个贴切比方',
+    prompt: '请先用一个贴切、容易形成直觉的类比重新解释这一段，再说明这个类比在哪些地方会失效。',
+  },
+  derivation: {
+    label: '展开推导过程',
+    prompt: '请把这一段涉及的推理或公式一步步展开，不跳步骤，并说明每一步为什么成立。',
+  },
+  precise: {
+    label: '说得更严谨',
+    prompt: '请用准确的定义、成立条件和失效边界重新解释这一段，避免模糊表述。',
+  },
+  concise: {
+    label: '压缩成要点',
+    prompt: '请用一句结论和不超过三个要点简洁解释这一段，同时保留必要的成立条件。',
+  },
+};
+
+const explanationOptionsForBlock = (kind: Block['kind']) => {
+  const preferred: PresetExplanationStyle[] = kind === 'formula'
+    ? ['derivation', 'worked_example', 'precise', 'diagram', 'concise', 'analogy']
+    : kind === 'diagram' || kind === 'table'
+      ? ['worked_example', 'precise', 'concise', 'analogy', 'derivation', 'diagram']
+      : kind === 'code'
+        ? ['worked_example', 'derivation', 'precise', 'concise', 'diagram', 'analogy']
+        : ['worked_example', 'diagram', 'analogy', 'precise', 'derivation', 'concise'];
+  return preferred.map((style) => ({ style, ...EXPLANATION_STYLE_OPTIONS[style] }));
 };
 
 const qaQuestionForDisplay = (content: string) => {
   const quotedQuestion = content.match(
     /^请基于以下选中的正文回答。\n\n选中内容：[\s\S]*?\n\n问题：([\s\S]+)$/,
   );
-  return quotedQuestion?.[1]?.trim() || content;
+  const question = quotedQuestion?.[1]?.trim() || content;
+  const preset = Object.values(EXPLANATION_STYLE_OPTIONS).find((option) => option.prompt === question);
+  if (preset) return preset.label;
+  return question.replace(/^请按这个要求重新解释当前段落：/, '按这个讲：');
 };
 
 const qaHistoryExchanges = (history: QaHistory): QaExchange[] => {
@@ -750,7 +815,7 @@ export default function App() {
     if (!initialTask || initialTask.status === 'failed') return false;
     const monitorVersion = ++initialSectionMonitorVersion.current;
     const navigationVersion = routeRequestVersion.current;
-    const busyLabel = '正在准备第一节，完成后自动打开…';
+    const busyLabel = '准备中…';
     const isCurrent = () => {
       const route = routeFromLocation();
       return monitorVersion === initialSectionMonitorVersion.current
@@ -803,7 +868,7 @@ export default function App() {
             applyOpenedSection(openedSection, fallbackSectionId);
             setSection(openedSection);
           }
-          setError('第一节暂时没有准备完成。目录已经保存，可以从第一章重新尝试。');
+          setError('第一节暂未准备完成，请重试。');
           return true;
         }
         await new Promise((resolve) => window.setTimeout(resolve, 1000));
@@ -1088,13 +1153,10 @@ export default function App() {
           <section className="auth-story">
             <p className="eyebrow">YOUR PERSONAL LEARNING LIBRARY</p>
             <h1>把想学的，<br />变成真正学会的。</h1>
-            <p className="auth-lead">
-              Slow 把学习目标写成一套可以逐节阅读、验证和持续积累记忆的个人教材。
-            </p>
             <div className="auth-journey" aria-label="Slow 学习闭环">
-              <article><span>01</span><div><b>生成你的书</b><small>从目标到章节与小节</small></div></article>
-              <article><span>02</span><div><b>逐节学习验证</b><small>通过测验才继续前进</small></div></article>
-              <article><span>03</span><div><b>积累长期记忆</b><small>让下一本书真正了解你</small></div></article>
+              <article><span>01</span><div><b>生成你的书</b></div></article>
+              <article><span>02</span><div><b>逐节学习验证</b></div></article>
+              <article><span>03</span><div><b>持续学习</b></div></article>
             </div>
           </section>
 
@@ -1618,7 +1680,7 @@ export default function App() {
                   }[series.initializationTask.status]}：
                   {series.initializationTask.status === 'failed'
                     ? '暂时没有准备完成，可以重新尝试。'
-                    : '完成后会自动打开，不需要重复点击。'}
+                    : '准备中'}
                 </span>
                 {series.initializationTask.retryable && (
                   <button
@@ -1804,7 +1866,6 @@ function BookReplanDialog({
           <div>
             <p className="eyebrow">下一本书 · 目录预览</p>
             <h2 id="book-replan-title">开始《{book.title}》前，先看一眼新目录</h2>
-            <p>内容已结合你最近的学习表现调整。采用后，这本书会按下面的章节顺序展开。</p>
           </div>
           <button className="dialog-close" type="button" aria-label="关闭目录预览" disabled={confirming} onClick={onClose}>×</button>
         </header>
@@ -2070,7 +2131,7 @@ function FeedbackDialog({
         const updated = await api.section(target.sectionId);
         onSectionChange(updated);
         await onRefreshSeries();
-        setStatus('修改已经应用到正文。');
+        setStatus('已替换');
       }
     } catch (reason) {
       setRepairFailed(true);
@@ -2107,7 +2168,7 @@ function FeedbackDialog({
       const receipt = await api.submitFeedback(payload, submissionRef.current.key);
       setSubmitted(true);
       if (target.scope === 'global') {
-        setStatus('已收到。我们会把它放进下一次反馈整理。');
+        setStatus('已收到。');
         closeTimerRef.current = window.setTimeout(() => onCloseRef.current(), 900);
         return;
       }
@@ -2118,12 +2179,12 @@ function FeedbackDialog({
         return;
       }
       const blockedMessages: Record<string, string> = {
-        FEEDBACK_CONTENT_VERSION_STALE: '反馈已保存，但当前正文已经更新；请刷新后再反馈一次。',
-        SECTION_CONTENT_MISSING: '反馈已保存，但这段正文已经不可用；请刷新后再试。',
+        FEEDBACK_CONTENT_VERSION_STALE: '当前正文已更新；请刷新后再反馈一次。',
+        SECTION_CONTENT_MISSING: '这段正文已不可用；请刷新后再试。',
       };
       setStatus(
         blockedMessages[regeneration.reasonCode || '']
-        || '反馈已保存，但这段正文现在无法补救。',
+        || '这段正文暂时无法补救。',
       );
       setSubmitting(false);
     } catch (reason) {
@@ -2264,7 +2325,7 @@ function AiSettingsDialog({ onClose }: { onClose: () => void }) {
       setMessage(
         value.mode === 'demo'
           ? '已保存并切换到本地演示模式。'
-          : `已保存并切换到 ${value.model}，重启后会自动恢复。`,
+          : `已切换到 ${value.model}。`,
       );
     } catch (reason) {
       setMessage(reason instanceof Error ? reason.message : '切换失败');
@@ -2382,7 +2443,7 @@ function AiSettingsDialog({ onClose }: { onClose: () => void }) {
           <p className="runtime-warning">
             {runtime?.ephemeral
               ? '当前环境不提供持久化存储；重启后会恢复服务器环境变量中的配置。'
-              : '配置仅保存在本机服务端，浏览器无法读取 API Key；API 重启后会自动恢复。'}
+              : '配置仅保存在本机服务端，浏览器无法读取 API Key。'}
             保存前会先验证连接，失败时继续使用旧配置。
           </p>
           {message && <p className="runtime-message" role="status">{message}</p>}
@@ -2577,9 +2638,6 @@ function Home({
       <header className="library-hero">
         <div className="library-hero-copy">
           <h1>把正在学的，<br /><em>放回眼前。</em></h1>
-          <p>{dailyMode === 'fast'
-            ? '先用几分钟抓住一个关键判断；正式验证仍沿用同一份教材与标准。'
-            : '这里不是藏书统计，而是你的学习入口。先继续今天的一节，再回到所属领域查看完整路径。'}</p>
         </div>
         <div className="library-hero-aside">
           <p className="library-summary">
@@ -2617,7 +2675,6 @@ function Home({
           ) : (
             <div className="focus-empty-copy">
               <h2>先放入一本真正想学的书。</h2>
-              <p>创建书架与教材后，下一节会固定出现在这里。</p>
               <button onClick={() => setShowCreate(true)}>创建第一个书架 <span aria-hidden="true">→</span></button>
             </div>
           )}
@@ -2632,7 +2689,6 @@ function Home({
             <div className="review-empty-state" aria-live="polite">
               <span>正在同步</span>
               <h2>{reviewBusy}</h2>
-              <p>正在为你安排本次复习。</p>
             </div>
           ) : reviewError ? (
             <div className="review-empty-state review-error-state" role="alert">
@@ -2643,9 +2699,8 @@ function Home({
             </div>
           ) : reviewResult ? (
             <div className="review-result-state" aria-live="polite">
-              <span>{reviewResult.passed ? '保持验证完成' : '已记录本次表现'}</span>
+              <span>{reviewResult.passed ? '已完成' : '完成本次复习'}</span>
               <h2>{reviewResult.score} / {reviewResult.total}</h2>
-              <p>本次复习已记录，系统会据此安排下一次复习。</p>
               <button onClick={continueReviewQueue}>
                 {pendingReviews.length ? '继续下一项' : '完成今日复习'} <span aria-hidden="true">→</span>
               </button>
@@ -2686,7 +2741,6 @@ function Home({
             <div className="review-ready-state">
               <span>{pendingReviews.length} 项到期</span>
               <h2>{currentReview.objective}</h2>
-              <p>系统会生成一道与原题实质不同的题，检查间隔一段时间后是否仍能独立判断。</p>
               <div className="review-ready-actions">
                 <button onClick={() => void startDueReview()}>
                   {currentReview.status === 'started' ? '继续复习' : '开始复习'} <span aria-hidden="true">→</span>
@@ -2849,7 +2903,6 @@ function Home({
               ) : (
                 <span className="shelf-current-empty">
                   <b>还没有正在学习的教材</b>
-                  <small>进入书架创建学习系列后，当前教材会固定显示在这里。</small>
                 </span>
               )}
 
@@ -2997,19 +3050,19 @@ const DEFAULT_LEARNING_PREFERENCES: LearningPreferences = {
 
 const PROFILE_PREFERENCE_OPTIONS = {
   openingStyle: [
-    ['auto', '由内容决定', '根据本节问题自动选择'],
+    ['auto', '无特别偏好', ''],
     ['problem_first', '问题先行', '先抛出需要解决的问题'],
     ['example_first', '例子先行', '先从一个具体场景进入'],
     ['concept_first', '概念先行', '先建立准确的定义与框架'],
   ],
   explanationDensity: [
-    ['auto', '由内容决定', '按知识难度自动调整'],
+    ['auto', '无特别偏好', ''],
     ['concise', '更精炼', '减少铺垫，保留关键推理'],
     ['balanced', '适中', '解释与节奏保持平衡'],
     ['thorough', '更充分', '多展开机制、边界与反例'],
   ],
   interactionRhythm: [
-    ['auto', '由内容决定', '按学习任务自动安排'],
+    ['auto', '无特别偏好', ''],
     ['low_interruption', '连续阅读', '少打断，集中到段尾练习'],
     ['balanced', '适度停顿', '在关键转折处确认理解'],
     ['frequent_checkins', '频繁确认', '用更多短问题检查跟进'],
@@ -3109,7 +3162,7 @@ function ProfileCenterPage({
           dailyModePromptEnabled,
         },
       });
-      setMessage('学习设置已保存。弹窗偏好立即生效，教材表达偏好只影响之后生成或调整的内容。');
+      setMessage('已保存');
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '学习画像保存失败');
     } finally {
@@ -3144,7 +3197,6 @@ function ProfileCenterPage({
 
         <div className="profile-sidebar-ledger">
           <span>当前学习设置</span><b>已保存</b>
-          <small>体验设置立即生效；教材偏好影响后续内容。</small>
         </div>
         <button type="button" className="profile-back-button" onClick={onBack}><span aria-hidden="true">←</span> 返回书架</button>
       </aside>
@@ -3154,7 +3206,6 @@ function ProfileCenterPage({
           <header className="profile-page-heading">
             <p className="eyebrow">学习画像</p>
             <h1 id="profile-center-title">让教材始终认识<br />现在的你。</h1>
-            <p>这是所有书架共用的学习设置。学习节奏设置会立即生效；教材表达偏好只影响之后生成或调整的内容，已经完成的学习记录不会改变。</p>
           </header>
 
           <fieldset className="profile-field-group">
@@ -3175,7 +3226,6 @@ function ProfileCenterPage({
             <legend>学习方向</legend>
             <label>目标领域
               <input required maxLength={240} value={domainText} onChange={(event) => setDomainText(event.target.value)} placeholder="用逗号分隔，最多 6 个" />
-              <small>当前识别：{domains.length ? domains.join(' · ') : '尚未填写'}</small>
             </label>
             <label>我最终想获得的能力
               <textarea required maxLength={1000} value={purpose} onChange={(event) => setPurpose(event.target.value)} />
@@ -3187,7 +3237,6 @@ function ProfileCenterPage({
 
           <fieldset className="profile-field-group">
             <legend>教材表达偏好</legend>
-            <p className="profile-preference-intro">这些选项只在多个正确、有效的教学方案之间排序。若图表或类比并不适合当前知识，教材仍会选择更清楚的文字或其他形式。</p>
 
             <div className="profile-preference-section">
               <span className="profile-preference-label">怎样进入一个新问题</span>
@@ -3195,7 +3244,7 @@ function ProfileCenterPage({
                 {PROFILE_PREFERENCE_OPTIONS.openingStyle.map(([value, label, note]) => (
                   <label className={openingStyle === value ? 'selected' : ''} key={value}>
                     <input type="radio" name="opening-style" value={value} checked={openingStyle === value} onChange={() => setOpeningStyle(value)} />
-                    <span><b>{label}</b><small>{note}</small></span>
+                    <span><b>{label}</b>{note && <small>{note}</small>}</span>
                   </label>
                 ))}
               </div>
@@ -3207,7 +3256,7 @@ function ProfileCenterPage({
                 {PROFILE_PREFERENCE_OPTIONS.explanationDensity.map(([value, label, note]) => (
                   <label className={explanationDensity === value ? 'selected' : ''} key={value}>
                     <input type="radio" name="explanation-density" value={value} checked={explanationDensity === value} onChange={() => setExplanationDensity(value)} />
-                    <span><b>{label}</b><small>{note}</small></span>
+                    <span><b>{label}</b>{note && <small>{note}</small>}</span>
                   </label>
                 ))}
               </div>
@@ -3240,7 +3289,7 @@ function ProfileCenterPage({
                 {PROFILE_PREFERENCE_OPTIONS.interactionRhythm.map(([value, label, note]) => (
                   <label className={interactionRhythm === value ? 'selected' : ''} key={value}>
                     <input type="radio" name="interaction-rhythm" value={value} checked={interactionRhythm === value} onChange={() => setInteractionRhythm(value)} />
-                    <span><b>{label}</b><small>{note}</small></span>
+                    <span><b>{label}</b>{note && <small>{note}</small>}</span>
                   </label>
                 ))}
               </div>
@@ -3252,7 +3301,6 @@ function ProfileCenterPage({
             <label className="profile-toggle-row">
               <span>
                 <b>进入学习前询问 Fast / Slow 模式</b>
-                <small>关闭后不再自动弹出选择窗口；会沿用上次模式，没有历史选择时使用 Slow。页头仍可随时切换。</small>
               </span>
               <input
                 type="checkbox"
@@ -3278,7 +3326,6 @@ function ProfileCenterPage({
             </div>
           </fieldset>
 
-          <div className="profile-version-note"><span>影响范围</span><p>保存后，相关学习系列会提示你确认是否调整后续内容。</p></div>
           {error && <p className="profile-flow-error" role="alert">{error}</p>}
           {message && <p className="profile-save-message" role="status">{message}</p>}
           <footer>
@@ -3290,7 +3337,6 @@ function ProfileCenterPage({
           <header className="profile-page-heading">
             <p className="eyebrow">账号与数据</p>
             <h1 id="account-page-title">一个账号，<br />一套学习记录。</h1>
-            <p>书架、阅读位置和学习记录都属于当前账号，不会与其他用户混合。</p>
           </header>
 
           <div className="account-summary-card">
@@ -3307,7 +3353,6 @@ function ProfileCenterPage({
             <article>
               <span>数据归属</span>
               <h3>学习记录属于当前账号</h3>
-              <p>你的书架、答题和复习记录不会与其他账号混合。</p>
             </article>
             <article>
               <span>登录安全</span>
@@ -3326,7 +3371,7 @@ function ProfileCenterPage({
           </div>
 
           <section className="account-exit-panel">
-            <div><h3>退出当前账号</h3><p>退出不会删除任何书架或学习记录，下次登录后可继续。</p></div>
+            <div><h3>退出当前账号</h3></div>
             <button type="button" disabled={saving} onClick={() => void onLogout()}>退出账号</button>
           </section>
 
@@ -3422,7 +3467,6 @@ function ShelfCreateDialog({
           <div>
             <p className="eyebrow">新建学习空间</p>
             <h2 id="shelf-create-title">创建书架</h2>
-            <p>先给书架一个名字。学习方向和主题会随着教材自动整理。</p>
           </div>
           <button className="dialog-close" aria-label="关闭创建书架" disabled={submitting} onClick={onClose}>×</button>
         </div>
@@ -3442,7 +3486,6 @@ function ShelfCreateDialog({
                 setFormError('');
               }}
             />
-            <small>加入教材后，书架会自动显示学习方向和主题。</small>
           </label>
           {formError && <p className="shelf-create-error" role="alert">{formError}</p>}
           <div className="dialog-actions">
@@ -3499,8 +3542,7 @@ function ShelfPage({
       </div>
       {showPlan && <PlanForm profile={profile} submit={onCreate} />}
       <div className="series-shelf-heading">
-        <span>技术书架 · 第 1 层</span>
-        <small>{shelf.series.length} 册在架</small>
+        <span>学习系列</span>
       </div>
       <div className="series-bookshelf">
         <div className="series-volume-row">
@@ -3520,7 +3562,6 @@ function ShelfPage({
                 <span className="series-volume-kicker">slow learning series</span>
                 <h2>{item.title}</h2>
                 <span className="series-volume-rule" />
-                <p>围绕这个学习目标安排的连续教材，进入后查看完整路径与下一步。</p>
                 <span className="series-volume-progress">
                   <i><b style={{ width: `${item.progress}%` }} /></i>
                   <small>{item.progress}%</small>
@@ -3888,6 +3929,7 @@ function LearningWorkspace({
 }) {
   const [selectedBlockId, setSelectedBlockId] = useState('');
   const [selectedQuote, setSelectedQuote] = useState<TextQuote | null>(null);
+  const [explanationRequest, setExplanationRequest] = useState<ExplanationRequest | null>(null);
   const [compactLayout, setCompactLayout] = useState(() => window.matchMedia('(max-width: 900px)').matches);
   const [auxiliaryExclusive, setAuxiliaryExclusive] = useState(() => window.matchMedia('(max-width: 1180px)').matches);
   const [directoryHidden, setDirectoryHidden] = useState(() => window.matchMedia('(max-width: 900px)').matches);
@@ -3984,6 +4026,7 @@ function LearningWorkspace({
   useEffect(() => {
     setSelectedBlockId(section?.content?.blocks[0]?.id || '');
     setSelectedQuote(null);
+    setExplanationRequest(null);
   }, [section?.id, section?.content?.id]);
 
   const location = useMemo(() => findSectionLocation(series, section?.id), [series, section?.id]);
@@ -4194,6 +4237,61 @@ function LearningWorkspace({
         onSectionChange={onSectionChange}
         onRefreshSeries={onRefreshSeries}
         onFeedbackBlock={onFeedbackBlock}
+        onRestorePersonalPresentation={async (block) => {
+          if (!section?.content || !block.personalPresentation) return;
+          await api.restorePersonalPresentation(section.id, block.id, section.content.id);
+          onSectionChange(await api.section(section.id));
+        }}
+        onExplainBlock={async (block, style, customInstruction) => {
+          const option = style === 'custom' ? null : EXPLANATION_STYLE_OPTIONS[style];
+          const instruction = customInstruction?.trim();
+          const question = style === 'custom'
+            ? (instruction ? `请按这个要求重新解释当前段落：${instruction}` : '')
+            : option?.prompt;
+          if (!question) return;
+          const blockKind = ['text', 'bullet_list', 'ordered_steps', 'diagram', 'table', 'code', 'formula'].includes(block.kind)
+            ? block.kind
+            : 'text';
+          setSelectedBlockId(block.id);
+          setSelectedQuote(null);
+          const requestId = crypto.randomUUID();
+          let evidenceEventId: string | undefined;
+          if (section?.content) {
+            try {
+              await api.recordPreferenceEvidence({
+                eventId: requestId,
+                sectionId: section.id,
+                contentVersionId: section.content.id,
+                blockId: block.id,
+                blockKind,
+                style,
+                signal: 'requested',
+                customInstruction: style === 'custom' ? instruction : undefined,
+              });
+              evidenceEventId = requestId;
+            } catch {
+              // A preference write must never block the bound Ask AI flow.
+            }
+          }
+          setExplanationRequest({
+            requestId,
+            blockId: block.id,
+            blockKind,
+            style,
+            label: option?.label || '我的讲法',
+            question,
+            displayQuestion: style === 'custom' ? `按这个讲：${instruction}` : option?.label || '我的讲法',
+            evidenceEventId,
+          });
+          if (compactLayout || auxiliaryExclusive) setDirectoryHidden(true);
+          setQaHidden(false);
+          telemetry.track('explanation_style_requested', {
+            view: 'learn',
+            entityType: 'section',
+            entityId: section?.id || '',
+            properties: { style, blockKind },
+          });
+        }}
       />
       <QaPanel
         key={section?.id || 'empty'}
@@ -4205,6 +4303,8 @@ function LearningWorkspace({
         selectedQuote={selectedQuote}
         onAnchor={selectBlock}
         onClearQuote={() => setSelectedQuote(null)}
+        explanationRequest={explanationRequest}
+        onSectionChange={onSectionChange}
       />
       {(['directory', 'qa'] as const).map((panel) => {
         const hidden = panel === 'directory' ? directoryHidden : qaHidden;
@@ -4487,7 +4587,7 @@ function BookTree({
                 <div
                   className={`chapter-title ${chapterLocked ? 'locked' : ''}`}
                   aria-label={chapterLocked
-                    ? `第 ${chapter.position} 章 ${chapter.title}，未解锁；完成上一章后按学习需要生成小节`
+                    ? `第 ${chapter.position} 章 ${chapter.title}，未解锁`
                     : `第 ${chapter.position} 章 ${chapter.title}`}
                 >
                   <span>第 {chapter.position} 章</span>
@@ -4534,9 +4634,7 @@ function BookTree({
                   {chapterLocked ? <LockIcon size={10} /> : <GenerateIcon />}
                 </span>
                 <small>
-                  {chapterLocked
-                    ? '完成上一章后解锁，并按学习需要生成小节'
-                    : '点击章名，按学习需要生成本章小节'}
+                  {chapterLocked ? '完成上一章后解锁' : '点击章名开始'}
                 </small>
               </div>
             )}
@@ -4583,7 +4681,6 @@ function SectionTreeButton({
     <button
       className={`section-tree-button ${active ? 'active' : ''} ${item.status}`}
       disabled={item.status === 'locked' || preparing}
-      title={preparing ? '正文和验证题准备完成后即可进入' : undefined}
       aria-label={`${sectionNumber} ${item.title}`}
       onClick={onClick}
     >
@@ -4612,6 +4709,8 @@ function ReaderPanel({
   onSectionChange,
   onRefreshSeries,
   onFeedbackBlock,
+  onRestorePersonalPresentation,
+  onExplainBlock,
 }: {
   series: Series;
   section: Section | null;
@@ -4630,6 +4729,8 @@ function ReaderPanel({
   onSectionChange: (section: Section) => void;
   onRefreshSeries: () => Promise<void>;
   onFeedbackBlock: (block: Block) => void;
+  onRestorePersonalPresentation: (block: Block) => Promise<void>;
+  onExplainBlock: (block: Block, style: ExplanationStyle, customQuestion?: string) => void;
 }) {
   const [tab, setTab] = useState<ReaderTab>('content');
   const [selectionPopup, setSelectionPopup] = useState<SelectionPopup | null>(null);
@@ -4835,6 +4936,8 @@ function ReaderPanel({
             onGenerate={onGenerate}
             onStartQuiz={() => switchTab('quiz')}
             onFeedbackBlock={onFeedbackBlock}
+            onRestorePersonalPresentation={onRestorePersonalPresentation}
+            onExplainBlock={onExplainBlock}
           />
         )}
         {tab === 'quiz' && section.quiz && (
@@ -4870,12 +4973,11 @@ function ReaderPanel({
           >
             <p className="eyebrow">重新生成本节</p>
             <h2 id="regenerate-section-title">{section.title}</h2>
-            <p>系统会重新准备正文和验证题。已经提交过验证的内容不能替换，以保证原有学习记录不变。</p>
+            <p>已完成验证的内容无法重新生成。</p>
             {regenerating && (
               <div className="regeneration-progress" aria-live="polite">
                 <span><i />{GENERATION_STAGE_LABELS[generationStage] || '正在处理'}</span>
-                <b>处理中 · 已用 {formatElapsed(generationElapsed)}</b>
-                <small>内容检查完成后即可继续学习。</small>
+                <b>处理中</b>
               </div>
             )}
             <div>
@@ -4933,11 +5035,11 @@ function SeriesRoutePreview({ series }: { series: Series }) {
   const firstBook = series.books[0];
   const firstChapter = firstBook?.chapters[0];
   const statusCopy = taskStatus === 'failed'
-    ? '第一节这次没有准备完成，目录和学习路线已经保存。'
+    ? '第一节暂未准备完成。'
     : taskStatus === 'pending'
-      ? '第一节正在排队，完成后会自动打开。'
+      ? '排队中'
       : taskStatus === 'running'
-        ? '正文与验证题正在一起生成并检查，完成后会自动打开。'
+        ? '准备中'
         : '选择左侧已经解锁的小节开始学习。';
   return (
     <div className="route-preview-scroll">
@@ -4966,7 +5068,6 @@ function SeriesRoutePreview({ series }: { series: Series }) {
           <small>从这里开始</small>
           <h2>{firstChapter?.title || firstBook?.title || '第一节'}</h2>
           <p>{firstChapter?.objective || statusCopy}</p>
-          <em>{statusCopy}</em>
         </div>
       </section>
 
@@ -5068,10 +5169,12 @@ function selectFastBlocks(blocks: Block[]) {
     if (block && !selected.some((item) => item.id === block.id)) selected.push(block);
   };
 
-  // Fast view must be materially shorter than the 5–9 block lesson body.
-  // Keep the answer and its failure boundary; the full mechanism, example and
-  // practice remain one click away in the complete text.
+  // V3 provides an explicit reader projection. Legacy lessons still fall back
+  // to their conclusion/boundary roles, then to authored order.
+  blocks.filter((block) => block.readerPriority === 'essential').forEach(add);
+  add(blocks.find((block) => block.role === 'core_instruction'));
   add(blocks.find((block) => block.role === 'conclusion'));
+  add(blocks.find((block) => block.readerPriority === 'highlight'));
   add(blocks.find((block) => block.role === 'boundary'));
   blocks.forEach((block) => {
     if (selected.length < 2) add(block);
@@ -5087,6 +5190,8 @@ function LessonContent({
   onGenerate,
   onStartQuiz,
   onFeedbackBlock,
+  onRestorePersonalPresentation,
+  onExplainBlock,
 }: {
   section: Section;
   dailyMode: DailyMode;
@@ -5095,6 +5200,8 @@ function LessonContent({
   onGenerate: () => void;
   onStartQuiz: () => void;
   onFeedbackBlock: (block: Block) => void;
+  onRestorePersonalPresentation: (block: Block) => Promise<void>;
+  onExplainBlock: (block: Block, style: ExplanationStyle, customQuestion?: string) => void;
 }) {
   const [showCompleteFast, setShowCompleteFast] = useState(false);
   const [fastCheck, setFastCheck] = useState<'clear'|'unclear'|null>(null);
@@ -5122,13 +5229,12 @@ function LessonContent({
         </div>
         {section.generation?.status === 'failed' && (
           <div className="inline-error">
-            上次准备没有完成，学习路径已经保留。重新准备成功后再开始学习。
+            上次准备失败，请重试。
           </div>
         )}
         <button className="primary-button large" onClick={onGenerate}>
           {section.generation?.status === 'failed' ? '重新准备' : '准备正文并开始学习'}
         </button>
-        <small className="generation-note">正文和验证题会一起准备，检查完成后即可开始学习。</small>
       </div>
     );
   }
@@ -5139,6 +5245,14 @@ function LessonContent({
       : [{ source, index }]
   ));
   const fastBlocks = selectFastBlocks(section.content.blocks);
+  const lessonRoles = new Set(section.content.blocks.map((block) => block.role));
+  const fastCheckPrompt = lessonRoles.has('primary_source') || lessonRoles.has('evidence_analysis')
+    ? '你能概括本节的核心解释，并说出一条支持它的材料吗？'
+    : lessonRoles.has('derivation')
+      ? '你能复述本节结论，并指出推导中最关键的一步吗？'
+      : lessonRoles.has('empirical_case') || lessonRoles.has('comparison')
+        ? '你能复述核心机制，并解释两个案例为什么会出现不同结果吗？'
+        : '你能用一句话复述本节核心依据，并说出一个适用条件吗？';
   const shownBlocks = dailyMode === 'fast' && !showCompleteFast && !reviewTargetBlockId
     ? fastBlocks
     : section.content.blocks;
@@ -5162,8 +5276,7 @@ function LessonContent({
         <aside className="fast-view-notice">
           <div>
             <span>FAST VIEW · 快速浏览</span>
-            <b>{showCompleteFast ? '已展开完整正文' : `只看结论与边界 · ${fastBlocks.length} 个关键段落`}</b>
-            <p>这里只调整呈现密度。快速浏览不会计为完成；通过验证后才会记录进度。</p>
+            <b>{showCompleteFast ? '已展开完整正文' : `核心依据 · ${fastBlocks.length} 个关键段落`}</b>
           </div>
           <button type="button" onClick={() => setShowCompleteFast((shown) => !shown)}>
             {showCompleteFast ? '收回快速视图' : '展开完整正文'}
@@ -5177,19 +5290,21 @@ function LessonContent({
           selected={block.id === selectedBlockId}
           reviewTarget={block.id === reviewTargetBlockId}
           onFeedback={() => onFeedbackBlock(block)}
+          onRestorePersonalPresentation={() => onRestorePersonalPresentation(block)}
+          onExplain={(style, customQuestion) => onExplainBlock(block, style, customQuestion)}
         />
       ))}
       {dailyMode === 'fast' && !showCompleteFast && (
         <section className="fast-check" aria-label="快速自检">
-          <span>30 秒自检 · 不影响进度</span>
-          <h3>你能用一句话复述本节结论，并说出一个失效边界吗？</h3>
+          <span>30 秒自检</span>
+          <h3>{fastCheckPrompt}</h3>
           <div>
             <button className={fastCheck === 'clear' ? 'selected' : ''} onClick={() => setFastCheck('clear')}>可以复述</button>
-            <button className={fastCheck === 'unclear' ? 'selected' : ''} onClick={() => setFastCheck('unclear')}>边界还不清楚</button>
+            <button className={fastCheck === 'unclear' ? 'selected' : ''} onClick={() => setFastCheck('unclear')}>还不能说明依据</button>
           </div>
           {fastCheck && <p>{fastCheck === 'clear'
             ? '很好。若要完成本节，请继续完成下方同一套验证题。'
-            : '先展开完整正文，重点阅读边界段落；这次选择不会影响进度。'}</p>}
+            : '先展开完整正文，重点阅读相关段落。'}</p>}
         </section>
       )}
       {visibleSources.length > 0 && <details className="source-list">
@@ -5204,7 +5319,7 @@ function LessonContent({
       </details>}
       <div className={`lesson-complete-action ${section.status === 'completed' ? 'verified' : ''}`}>
         <span>{section.status === 'completed' ? '本节已验证' : '正文阅读完成'}</span>
-        <h3>{section.status === 'completed' ? '你的验证结果已经保存。' : '现在，验证你是否真正理解。'}</h3>
+        <h3>{section.status === 'completed' ? '本节已验证' : '现在，验证你是否真正理解。'}</h3>
         <p>{section.status === 'completed'
           ? '可以随时回看作答结果、错题解析和对应的正文依据。'
           : '完成选择题：及格解锁下一节，满分解锁隐藏关卡。'}</p>
@@ -5221,12 +5336,36 @@ function ContentBlock({
   selected,
   reviewTarget,
   onFeedback,
+  onRestorePersonalPresentation,
+  onExplain,
 }: {
   block: Block;
   selected: boolean;
   reviewTarget: boolean;
   onFeedback: () => void;
+  onRestorePersonalPresentation: () => Promise<void>;
+  onExplain: (style: ExplanationStyle, customQuestion?: string) => void;
 }) {
+  const [explanationMenuOpen, setExplanationMenuOpen] = useState(false);
+  const [customExplanation, setCustomExplanation] = useState('');
+  const explanationMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!explanationMenuOpen) return undefined;
+    const closeOnOutsidePress = (event: MouseEvent) => {
+      if (!explanationMenuRef.current?.contains(event.target as Node)) {
+        setExplanationMenuOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setExplanationMenuOpen(false);
+    };
+    document.addEventListener('mousedown', closeOnOutsidePress);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsidePress);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [explanationMenuOpen]);
   const labels: Record<string, string> = {
     text: '阅读',
     bullet_list: '要点',
@@ -5236,6 +5375,28 @@ function ContentBlock({
     code: '演练',
     formula: '推导',
   };
+  const roleLabels: Record<string, string> = {
+    core_instruction: '核心依据',
+    conclusion: '核心依据',
+    prerequisite_scaffold: '必要前置',
+    context: '背景',
+    mechanism: '机制',
+    derivation: '推导',
+    worked_example: '逐步示例',
+    empirical_case: '真实案例',
+    primary_source: '原始材料',
+    evidence_analysis: '证据分析',
+    comparison: '对照',
+    alternative_interpretation: '另一种解释',
+    counterargument: '反方观点',
+    counterexample: '反例',
+    boundary: '适用边界',
+    application: '应用',
+    transfer: '迁移',
+    practice: '练习',
+    synthesis: '综合',
+    summary: '回顾',
+  };
   return (
     <section
       className={`content-block role-${block.role} ${selected ? 'selected' : ''} ${reviewTarget ? 'review-target' : ''}`}
@@ -5243,30 +5404,97 @@ function ContentBlock({
       tabIndex={-1}
     >
       {reviewTarget && <span className="review-target-label">错题依据</span>}
-      <div className="block-meta"><b>{labels[block.kind] || '阅读'}</b></div>
-      <button
-        className="block-feedback-button"
-        type="button"
-        aria-label={`反馈“${block.heading}”这一段`}
-        onClick={onFeedback}
-      >
-        <span aria-hidden="true">↳</span> 反馈这段
-      </button>
+      <div className="block-meta">
+        <b>{labels[block.kind] || '阅读'}</b>
+        {roleLabels[block.role] && <span>{roleLabels[block.role]}</span>}
+      </div>
+      <div className="block-actions">
+        <div className="block-explanation-control" ref={explanationMenuRef}>
+          <button
+            className="block-explanation-button"
+            type="button"
+            aria-expanded={explanationMenuOpen}
+            aria-haspopup="dialog"
+            onClick={() => setExplanationMenuOpen((open) => !open)}
+          >
+            <span aria-hidden="true">↻</span> 换个讲法
+          </button>
+          {explanationMenuOpen && (
+            <div className="block-explanation-menu" role="dialog" aria-label={`换一种方式理解“${block.heading}”`}>
+              <header>
+                <b>这段想怎么讲？</b>
+              </header>
+              <div className="block-explanation-presets">
+                {explanationOptionsForBlock(block.kind).map((option) => (
+                  <button
+                    type="button"
+                    key={option.style}
+                    onClick={() => {
+                      onExplain(option.style);
+                      setExplanationMenuOpen(false);
+                    }}
+                  >
+                    <b>{option.label}</b>
+                  </button>
+                ))}
+              </div>
+              <form
+                className="block-explanation-custom"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  const instruction = customExplanation.trim();
+                  if (instruction.length < 2) return;
+                  onExplain('custom', instruction);
+                  setCustomExplanation('');
+                  setExplanationMenuOpen(false);
+                }}
+              >
+                <label htmlFor={`custom-explanation-${block.id}`}>我更想要的风格</label>
+                <div>
+                  <input
+                    id={`custom-explanation-${block.id}`}
+                    value={customExplanation}
+                    maxLength={240}
+                    placeholder="例如：像讲故事一样，少用术语"
+                    onChange={(event) => setCustomExplanation(event.target.value)}
+                  />
+                  <button type="submit" disabled={customExplanation.trim().length < 2}>按这个讲</button>
+                </div>
+              </form>
+            </div>
+          )}
+        </div>
+        <button
+          className="block-feedback-button"
+          type="button"
+          aria-label={`反馈“${block.heading}”这一段`}
+          onClick={onFeedback}
+        >
+          <span aria-hidden="true">↳</span> 反馈
+        </button>
+      </div>
       <h2>{block.heading}</h2>
+      {block.personalPresentation && (
+        <div className="personal-presentation-note">
+          <span>我的讲法</span>
+          <button type="button" onClick={() => void onRestorePersonalPresentation()}>恢复原文</button>
+        </div>
+      )}
       <BlockBody block={block} />
     </section>
   );
 }
 
 function BlockBody({ block }: { block: Block }) {
+  const content = block.personalPresentation?.content || block.content;
   if (block.kind === 'code') {
-    return <pre className="code-block"><code>{block.content}</code></pre>;
+    return <pre className="code-block"><code>{content}</code></pre>;
   }
   const markdown = block.kind === 'table'
-    ? normalizeTableMarkdown(block.content)
+    ? normalizeTableMarkdown(content)
     : block.kind === 'text'
-      ? normalizeLessonTextMarkdown(block.content)
-      : block.content;
+      ? normalizeLessonTextMarkdown(content)
+      : content;
   return (
     <div className={`content-markdown kind-${block.kind}`}>
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
@@ -5697,7 +5925,7 @@ function Quiz({
           }
           await onRefreshSeries();
         } catch {
-          setSubmissionError('评分结果已经保存；目录进度暂未同步，系统会稍后更新。');
+          setSubmissionError('目录进度暂未同步，请刷新后重试。');
         }
       })();
     } catch (reason) {
@@ -5716,11 +5944,11 @@ function Quiz({
       <p className="eyebrow">完成验证后解锁下一节</p>
       <h2>小节验证</h2>
       <p className="quiz-rule">答对至少 80%，且关键题达到要求即可继续；错题会用于安排重点巩固。</p>
-      <p className="quiz-draft-note">单选题只能选择一个答案，多选题可选择多个；切回正文查阅时，当前作答会自动保留。</p>
+      <p className="quiz-draft-note">单选题只能选择一个答案，多选题可选择多个。</p>
       {quizGovernanceBlocked && (
         <aside className="quiz-governance-notice" role="alert">
           <b>这节内容需要升级后才能验证</b>
-          <p>这是旧版本内容，原题不会被直接当作新的学习证据。升级会重新准备正文与验证题，已有成绩不会被覆盖。</p>
+          <p>这是旧版本内容，需要升级后才能验证。</p>
           {section.bestScore === 0 && section.totalScore === 0 && (
             <button className="secondary-button" type="button" onClick={onUpgrade}>
               升级本节内容与验证
@@ -5909,9 +6137,7 @@ function QuizReview({
         </h3>
         <strong>{result.score}<small> / {result.total}</small></strong>
         <p>
-          {result.passed
-            ? '答题事实已经保存，可以查看解析或回到正文。'
-            : '先查看下面的即时错题解析；个性化补充教学会继续准备。'}
+          {result.passed ? '查看解析或回到正文。' : '先查看下面的错题解析。'}
         </p>
       </header>
 
@@ -6011,13 +6237,7 @@ function QuizReview({
           nextSectionReady ? (
             <>
               <span>下一节已准备好</span>
-              <small>
-                {noteTask?.status === 'failed'
-                  ? '个人笔记暂未更新，可以重新准备，也可以直接继续学习。'
-                  : noteTask && noteTask.status !== 'succeeded'
-                    ? '个人笔记仍在整理，不影响继续学习。'
-                    : '个人笔记和学习进度已经更新。'}
-              </small>
+              {noteTask?.status === 'failed' && <small>个人笔记暂未更新。</small>}
               <div className="remediation-readiness-actions">
                 {noteTask?.status === 'failed' && noteTask.retryable && (
                   <button
@@ -6040,8 +6260,8 @@ function QuizReview({
             </>
           ) : failedWorkflowTasks.length > 0 ? (
             <>
-              <span>验证结果已保存</span>
-              <small>{failedTaskSummary}这不会影响已经保存的成绩。</small>
+              <span>准备失败</span>
+              <small>{failedTaskSummary}</small>
               {hasRetryableFailure && (
                 <button
                   type="button"
@@ -6056,23 +6276,20 @@ function QuizReview({
           ) : nextSectionTask ? (
             <>
               <span><i />正在准备下一节</span>
-              <small>验证已通过。准备完成后，这里会直接显示进入入口。</small>
             </>
           ) : noteTask && (workflowPending || noteTask.status !== 'succeeded') ? (
             <>
               <span><i />正在整理个人笔记</span>
-              <small>验证结果已经保存，完成后会自动更新笔记。</small>
             </>
           ) : (
             <>
               <span>本节已验证</span>
-              <small>学习结果已经保存。</small>
               <button className="secondary-button" onClick={() => onReviewContent()}>返回正文</button>
             </>
           )
         ) : eligibleUnderCurrentPolicy ? (
           <>
-            <span>按当前规则，答对 {result.score}/{result.total} 已达到继续学习标准</span>
+            <span>可以继续学习</span>
             <button
               className="primary-button"
               disabled={reassessing}
@@ -6080,11 +6297,10 @@ function QuizReview({
             >
               {reassessing ? '正在更新进度…' : '按当前规则继续'}
             </button>
-            <small>错题仍会用于个人笔记和后续复习，不会被视为已经掌握。</small>
           </>
         ) : remediationReady ? (
           <>
-            <span>个性化补充教学和变式题已准备完成</span>
+            <span>补充教学已准备好</span>
             <button
               className="primary-button"
               disabled={openingRemediation}
@@ -6095,8 +6311,8 @@ function QuizReview({
           </>
         ) : remediationTask?.status === 'failed' || failedWorkflowTasks.length > 0 ? (
           <>
-            <span>评分结果已保存</span>
-            <small>{failedTaskSummary}可以重新准备，不必再次答题。</small>
+            <span>准备失败</span>
+            <small>{failedTaskSummary}</small>
             {hasRetryableFailure && (
               <button
                 type="button"
@@ -6111,7 +6327,6 @@ function QuizReview({
         ) : (
           <>
             <span><i />正在准备补充教学</span>
-            <small>评分结果已经保存，你可以先阅读上面的错题解析。</small>
           </>
         )}
       </div>
@@ -6205,22 +6420,21 @@ function Note({
     <div className="note-view">
       <p className="eyebrow">本节学习记录</p>
       <h2>学习笔记</h2>
-      <p className="note-intro">这里保存本节总结、复习后的新理解和你的个人表述。</p>
 
       <article className="note-layer note-summary-layer">
         <header>
-          <div><b>学习总结</b><small>第一次完成本节时生成的总结</small></div>
+          <div><b>学习总结</b></div>
         </header>
         <NoteContentView content={summary?.content ?? note.aiContent} empty="本节还没有学习总结。" />
       </article>
 
       <section className="note-layer note-review-layer">
         <header>
-          <div><b>复习补充</b><small>完成复习后新增的理解</small></div>
+          <div><b>复习补充</b></div>
           <em>{note.layers.reviewSupplements.length} 条</em>
         </header>
         {note.layers.reviewSupplements.length === 0 ? (
-          <p className="note-empty-layer">完成一次独立复习后，新的理解会出现在这里。</p>
+          <p className="note-empty-layer">暂无复习补充。</p>
         ) : (
           <div className="note-review-timeline">
             {note.layers.reviewSupplements.map((supplement, index) => (
@@ -6238,7 +6452,7 @@ function Note({
 
       <article className="note-layer note-user-layer">
         <header>
-          <div><b>我的笔记</b><small>用自己的话整理本节内容</small></div>
+          <div><b>我的笔记</b></div>
           <em>{revision ? '已保存' : '未创建'}</em>
         </header>
         {revision && <NoteContentView content={revision.content} empty="我的笔记目前为空。" />}
@@ -6268,8 +6482,7 @@ function Note({
       </article>
 
       <aside className="note-verification" aria-label="本节掌握情况">
-        <header><b>本节掌握情况</b><span>会根据之后的学习表现更新</span></header>
-        <p>这里只显示已经验证的学习情况，不会改写上面的笔记。</p>
+        <header><b>本节掌握情况</b></header>
         {note.verificationAnnotations.length === 0 ? (
           <small>目前还没有可显示的掌握情况。</small>
         ) : (
@@ -6412,10 +6625,10 @@ function AskMePanel({ sectionId }: { sectionId: string }) {
       setMessage(action === 'next_topic'
         ? '已切换主题。'
         : action === 'pause'
-          ? '讨论已暂停，刷新页面后也可以继续。'
+          ? '已暂停。'
           : action === 'resume'
-            ? '已恢复到上次讨论的位置。'
-            : '讨论已结束，本次实际检查过的内容已经记录。');
+            ? '已恢复。'
+            : '已结束。');
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '操作没有完成，请重试。');
     } finally {
@@ -6468,7 +6681,6 @@ function AskMePanel({ sectionId }: { sectionId: string }) {
             {discussion.status === 'completed' ? (
               <div className="askme-complete-card">
                 <h3>本次讨论已结束</h3>
-                <p>只记录本次实际检查过的内容；未讨论的主题不会计为已掌握。</p>
               </div>
             ) : activeTopic ? (
               <>
@@ -6517,7 +6729,6 @@ function AskMePanel({ sectionId }: { sectionId: string }) {
                 {discussion.status === 'paused' ? (
                   <div className="askme-paused-card">
                     <strong>讨论已暂停</strong>
-                    <p>你的主题、回答和反馈都已经保存。</p>
                     <button className="primary-button" disabled={actioning} onClick={() => applyAction('resume')}>
                       {actioning ? '正在恢复…' : '继续讨论'}
                     </button>
@@ -6545,8 +6756,7 @@ function AskMePanel({ sectionId }: { sectionId: string }) {
                       >
                         <i aria-hidden="true" />
                         <span>
-                          <b>正在评阅你的回答</b>
-                          <small>完成后会显示本轮反馈，请不要重复提交。</small>
+                          <b>评阅中</b>
                         </span>
                       </div>
                     )}
@@ -6605,6 +6815,8 @@ function QaPanel({
   selectedQuote,
   onAnchor,
   onClearQuote,
+  explanationRequest,
+  onSectionChange,
 }: {
   section: Section | null;
   dailyMode: DailyMode;
@@ -6614,6 +6826,8 @@ function QaPanel({
   selectedQuote: TextQuote | null;
   onAnchor: (id: string) => void;
   onClearQuote: () => void;
+  explanationRequest: ExplanationRequest | null;
+  onSectionChange: (section: Section) => void;
 }) {
   const [threadId, setThreadId] = useState<string>();
   const [newQuestion, setNewQuestion] = useState(false);
@@ -6622,9 +6836,14 @@ function QaPanel({
   const [asking, setAsking] = useState(false);
   const [historyStatus, setHistoryStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
   const [historyError, setHistoryError] = useState('');
-  const [historyTruncated, setHistoryTruncated] = useState(false);
+  const [draftExplanation, setDraftExplanation] = useState<ExplanationRequest | null>(null);
+  const [styleFeedback, setStyleFeedback] = useState<Record<string, 'helpful' | 'unclear'>>({});
+  const [preferenceError, setPreferenceError] = useState('');
+  const [adoptingExchange, setAdoptingExchange] = useState('');
+  const [adoptedExchange, setAdoptedExchange] = useState('');
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
+  const explanationRequestRef = useRef('');
   const selectedBlock =
     section?.content?.blocks.find((block) => block.id === selectedBlockId) ??
     section?.content?.blocks[0];
@@ -6635,6 +6854,16 @@ function QaPanel({
   }, [selectedQuote]);
 
   useEffect(() => {
+    if (!explanationRequest || explanationRequestRef.current === explanationRequest.requestId) return;
+    explanationRequestRef.current = explanationRequest.requestId;
+    setDraftExplanation(explanationRequest);
+    setQuestion(explanationRequest.displayQuestion);
+    setNewQuestion(true);
+    setPreferenceError('');
+    requestAnimationFrame(() => composerRef.current?.focus());
+  }, [explanationRequest]);
+
+  useEffect(() => {
     const node = messagesRef.current;
     if (node) node.scrollTop = node.scrollHeight;
   }, [messages]);
@@ -6643,13 +6872,11 @@ function QaPanel({
     if (!section?.content || historyStatus === 'loading') return;
     setHistoryStatus('loading');
     setHistoryError('');
-    setHistoryTruncated(false);
     try {
       const history = await api.qaHistory(section.id);
       setMessages(qaHistoryExchanges(history));
       setThreadId(history.lastThreadId || undefined);
-      setHistoryTruncated(history.truncated);
-      if (!selectedQuote && history.lastThreadId) {
+      if (!selectedQuote && !explanationRequest && history.lastThreadId) {
         const lastThread = history.threads.find((item) => item.threadId === history.lastThreadId);
         const lastBlockId = [...(lastThread?.messages || [])]
           .reverse()
@@ -6664,7 +6891,7 @@ function QaPanel({
       setHistoryError(
         reason instanceof Error
           ? reason.message
-          : '暂时无法读取已保存的答疑。',
+          : '暂时无法读取答疑。',
       );
     }
   };
@@ -6678,10 +6905,15 @@ function QaPanel({
   const ask = async () => {
     if (asking || historyStatus === 'loading' || !section || !effectiveBlockId || !question.trim()) return;
     const visibleQuestion = question.trim();
-    const submittedQuestion = selectedQuote
+    const submittedQuestion = draftExplanation && visibleQuestion === draftExplanation.displayQuestion
+      ? draftExplanation.question
+      : (selectedQuote
       ? `请基于以下选中的正文回答。\n\n选中内容：${selectedQuote.text}\n\n问题：${visibleQuestion}`
-      : visibleQuestion;
+      : visibleQuestion);
     const exchangeId = crypto.randomUUID();
+    const explanationStyle = draftExplanation?.style;
+    const preferenceRequestEventId = draftExplanation?.evidenceEventId;
+    const explanationBlockKind = draftExplanation?.blockKind;
     setMessages((current) => [
       ...current,
       {
@@ -6691,9 +6923,13 @@ function QaPanel({
         answer: '',
         relation: 'pending',
         status: 'streaming',
+        explanationStyle,
+        preferenceRequestEventId,
+        explanationBlockKind,
       },
     ]);
     setQuestion('');
+    setDraftExplanation(null);
     setAsking(true);
     try {
       const result = await api.askStream(
@@ -6740,19 +6976,24 @@ function QaPanel({
           <button className="panel-collapse-button" aria-label="收起答疑" onClick={onClose}>收起</button>
         </div>
         <h2>围绕当前小节追问</h2>
-        <p>{dailyMode === 'fast' ? '先结论、后三点；答疑不会影响学习进度。' : '答疑独立保存，不会打断正文阅读。'}</p>
       </div>
       {!section?.content ? (
         <div className="qa-empty">
           <span>?</span>
-          <b>正文生成后即可提问</b>
-          <p>选择正文中的具体段落，AI 会带着当前位置回答。</p>
+          <b>暂不可提问</b>
         </div>
       ) : (
         <>
           <div className="qa-context-bar">
             <span>当前段落</span>
-            <select aria-label="当前答疑段落" value={effectiveBlockId} onChange={(event) => onAnchor(event.target.value)}>
+            <select
+              aria-label="当前答疑段落"
+              value={effectiveBlockId}
+              onChange={(event) => {
+                setDraftExplanation(null);
+                onAnchor(event.target.value);
+              }}
+            >
               {section.content.blocks.map((block, index) => (
                 <option value={block.id} key={block.id}>{index + 1}. {block.heading}</option>
               ))}
@@ -6767,12 +7008,19 @@ function QaPanel({
               <blockquote>{selectedQuote.text}</blockquote>
             </div>
           )}
+          {draftExplanation && (
+            <div className="qa-explanation-request" role="status">
+              <span aria-hidden="true">另解</span>
+              <div>
+                <b>{draftExplanation.label}</b>
+              </div>
+            </div>
+          )}
           <div className="qa-messages" ref={messagesRef}>
             {historyStatus === 'loading' && (
               <div className="qa-history-state" role="status" aria-live="polite">
                 <span className="streaming-dots" aria-hidden="true"><i /><i /><i /></span>
-                <b>正在读取已保存的答疑</b>
-                <p>同一账号在其他设备上的记录也会显示在这里。</p>
+                <b>读取中</b>
               </div>
             )}
             {historyStatus === 'error' && messages.length === 0 && (
@@ -6782,15 +7030,12 @@ function QaPanel({
                 <button type="button" onClick={() => void loadHistory()}>重新读取</button>
               </div>
             )}
-            {historyStatus === 'loaded' && messages.length === 0 && (
+            {historyStatus === 'loaded' && messages.length === 0 && !draftExplanation && (
               <div className="qa-suggestion">
                 <span>可以这样问</span>
-                <button onClick={() => setQuestion(dailyMode === 'fast' ? '用一句结论和三个要点解释这段。' : '这个机制最容易被误解的地方是什么？')}>{dailyMode === 'fast' ? '用一句结论和三个要点解释这段。' : '这个机制最容易被误解的地方是什么？'}</button>
-                <button onClick={() => setQuestion('它在什么边界条件下会失效？')}>它在什么边界条件下会失效？</button>
+                <button onClick={() => { setDraftExplanation(null); setQuestion(dailyMode === 'fast' ? '用一句结论和三个要点解释这段。' : '这个机制最容易被误解的地方是什么？'); }}>{dailyMode === 'fast' ? '用一句结论和三个要点解释这段。' : '这个机制最容易被误解的地方是什么？'}</button>
+                <button onClick={() => { setDraftExplanation(null); setQuestion('它在什么边界条件下会失效？'); }}>它在什么边界条件下会失效？</button>
               </div>
-            )}
-            {historyStatus === 'loaded' && messages.length > 0 && historyTruncated && (
-              <p className="qa-history-truncated">这里只显示最近的答疑记录。</p>
             )}
             {messages.map((message) => (
               <div className={`qa-exchange ${message.status}`} key={message.id}>
@@ -6813,6 +7058,84 @@ function QaPanel({
                     {message.status === 'streaming' && message.answer && <span className="stream-caret" />}
                   </div>
                 </div>
+                {message.status === 'done' && message.explanationStyle && (
+                  <div className="explanation-style-feedback">
+                    <span>这次讲法怎么样？</span>
+                    <div className="explanation-style-actions">
+                      <button
+                        className={styleFeedback[message.id] === 'helpful' ? 'selected' : ''}
+                        onClick={async () => {
+                          setStyleFeedback((current) => ({ ...current, [message.id]: 'helpful' }));
+                          if (message.preferenceRequestEventId && message.blockId && section.content) {
+                            try {
+                              await api.recordPreferenceEvidence({
+                                eventId: crypto.randomUUID(), requestEventId: message.preferenceRequestEventId,
+                                sectionId: section.id, contentVersionId: section.content.id,
+                                blockId: message.blockId, blockKind: message.explanationBlockKind || 'text',
+                                style: message.explanationStyle, signal: 'helpful',
+                              });
+                            } catch (reason) {
+                              setPreferenceError(reason instanceof Error ? reason.message : '操作暂未保存，请重试。');
+                            }
+                          }
+                          telemetry.track('explanation_style_feedback', {
+                            view: 'learn', entityType: 'section', entityId: section.id,
+                            properties: { style: message.explanationStyle!, helpful: true },
+                          });
+                        }}
+                      >有帮助</button>
+                      <button
+                        className={styleFeedback[message.id] === 'unclear' ? 'selected' : ''}
+                        onClick={async () => {
+                          setStyleFeedback((current) => ({ ...current, [message.id]: 'unclear' }));
+                          if (message.preferenceRequestEventId && message.blockId && section.content) {
+                            try {
+                              await api.recordPreferenceEvidence({
+                                eventId: crypto.randomUUID(), requestEventId: message.preferenceRequestEventId,
+                                sectionId: section.id, contentVersionId: section.content.id,
+                                blockId: message.blockId, blockKind: message.explanationBlockKind || 'text',
+                                style: message.explanationStyle, signal: 'unclear',
+                              });
+                            } catch (reason) {
+                              setPreferenceError(reason instanceof Error ? reason.message : '操作暂未保存，请重试。');
+                            }
+                          }
+                          telemetry.track('explanation_style_feedback', {
+                            view: 'learn', entityType: 'section', entityId: section.id,
+                            properties: { style: message.explanationStyle!, helpful: false },
+                          });
+                        }}
+                      >还是不清楚</button>
+                      <button
+                        className="replace"
+                        disabled={adoptingExchange === message.id || adoptedExchange === message.id || !message.threadId || !message.preferenceRequestEventId || !section.content}
+                        onClick={async () => {
+                          const explanationStyle = message.explanationStyle;
+                          if (!explanationStyle || !message.threadId || !message.preferenceRequestEventId || !message.blockId || !section.content) return;
+                          setAdoptingExchange(message.id);
+                          setPreferenceError('');
+                          try {
+                            await api.adoptPersonalPresentation(section.id, {
+                              eventId: crypto.randomUUID(), requestEventId: message.preferenceRequestEventId,
+                              contentVersionId: section.content.id, blockId: message.blockId,
+                              blockKind: message.explanationBlockKind || 'text', style: explanationStyle,
+                              threadId: message.threadId,
+                            });
+                            onSectionChange(await api.section(section.id));
+                            setAdoptedExchange(message.id);
+                          } catch (reason) {
+                            setPreferenceError(reason instanceof Error ? reason.message : '替换暂未完成，请重试。');
+                          } finally {
+                            setAdoptingExchange('');
+                          }
+                        }}
+                      >
+                        {adoptingExchange === message.id ? '正在替换…' : adoptedExchange === message.id ? '已替换' : '替换当前段落'}
+                      </button>
+                    </div>
+                    {preferenceError && <p className="explanation-style-error" role="alert">{preferenceError}</p>}
+                  </div>
+                )}
               </div>
             ))}
           </div>

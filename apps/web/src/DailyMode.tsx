@@ -137,7 +137,6 @@ export function DailyModeHeader({
               </button>
             ))}
           </div>
-          <p>选择后从现在重新计算有效期，不打断当前活动。</p>
         </section>
       )}
     </div>
