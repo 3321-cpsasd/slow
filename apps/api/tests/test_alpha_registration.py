@@ -235,6 +235,39 @@ def test_recovery_code_rotation_requires_the_current_password(tmp_path):
             ]
 
 
+def test_recovery_code_reauthentication_uses_password_lockout(tmp_path):
+    with TestClient(
+        alpha_app(tmp_path), base_url="https://testserver"
+    ) as client:
+        created = register(client)
+        headers = {"X-CSRF-Token": created.json()["csrfToken"]}
+
+        for _ in range(5):
+            rejected = client.post(
+                "/api/auth/password/recovery-code/rotate",
+                headers=headers,
+                json={"currentPassword": "Wrong-Password-Value"},
+            )
+            assert rejected.status_code == 403
+            assert rejected.json()["code"] == "ACCOUNT_REAUTH_INVALID"
+
+        locked = client.post(
+            "/api/auth/password/recovery-code/rotate",
+            headers=headers,
+            json={"currentPassword": PASSWORD},
+        )
+        assert locked.status_code == 403
+        assert locked.json()["code"] == "ACCOUNT_REAUTH_INVALID"
+
+        with client.app.state.sessions() as db:
+            credential = db.scalar(select(LocalCredential))
+            assert credential is not None
+            assert credential.failed_attempts == 0
+            assert credential.locked_until is not None
+            assert db.scalar(select(AuthSession)).status == "active"
+            assert db.scalar(select(AccountRecoveryCode)).status == "active"
+
+
 def test_alpha_quota_insert_compiles_for_supported_production_dialects():
     sqlite_sql = str(_quota_insert_statement(
         dialect_name="sqlite",

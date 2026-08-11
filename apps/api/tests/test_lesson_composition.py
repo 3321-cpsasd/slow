@@ -130,10 +130,28 @@ def test_composition_counts_unique_case_keys_not_case_blocks():
     value = candidate()
     value.blocks[2].case_kind = "hypothetical_example"
     value.blocks[2].case_key = "shared_case"
-    value.blocks[3].case_kind = "counterexample"
+    value.blocks[3].case_kind = "hypothetical_example"
     value.blocks[3].case_key = "shared_case"
     lesson_spec = spec()
     lesson_spec.composition_policy.case_policy.minimum_distinct_cases = 2
     with pytest.raises(CandidateValidationFailure) as raised:
         validate_lesson_candidate(lesson_spec, value)
     assert raised.value.code == "CONTENT_COMPOSITION_CASES_MISSING"
+
+
+def test_case_identity_cannot_declare_conflicting_kinds():
+    value = candidate()
+    value.blocks[2].case_kind = "hypothetical_example"
+    value.blocks[2].case_key = "shared_case"
+    value.blocks[3].case_kind = "learner_transfer"
+    value.blocks[3].case_key = "shared_case"
+
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(spec(), value)
+
+    assert raised.value.code == "CONTENT_CASE_IDENTITY_CONFLICT"
+    assert raised.value.location == {
+        "caseKey": "shared_case",
+        "expectedCaseKind": "hypothetical_example",
+        "actualCaseKind": "learner_transfer",
+    }

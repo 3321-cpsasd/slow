@@ -6903,6 +6903,7 @@ function QaPanel({
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const explanationRequestRef = useRef('');
+  const draftExplanationRef = useRef<ExplanationRequest | null>(null);
   const selectedBlock =
     section?.content?.blocks.find((block) => block.id === selectedBlockId) ??
     section?.content?.blocks[0];
@@ -6921,6 +6922,10 @@ function QaPanel({
     setPreferenceError('');
     requestAnimationFrame(() => composerRef.current?.focus());
   }, [explanationRequest]);
+
+  useEffect(() => {
+    draftExplanationRef.current = draftExplanation;
+  }, [draftExplanation]);
 
   useEffect(() => {
     const node = messagesRef.current;
@@ -7088,27 +7093,35 @@ function QaPanel({
               {draftExplanation.preferenceStatus !== 'saved' && (
                 <button type="button" disabled={draftExplanation.preferenceStatus === 'saving'} onClick={async () => {
                   if (!section.content || draftExplanation.preferenceStatus === 'saving') return;
-                  setDraftExplanation((current) => current ? { ...current, preferenceStatus: 'saving' } : current);
+                  const retriedDraft = draftExplanation;
+                  const retriedRequestId = retriedDraft.requestId;
+                  setDraftExplanation((current) => current?.requestId === retriedRequestId
+                    ? { ...current, preferenceStatus: 'saving' }
+                    : current);
                   setPreferenceError('');
                   try {
                     await api.recordPreferenceEvidence({
-                      eventId: draftExplanation.requestId,
+                      eventId: retriedRequestId,
                       sectionId: section.id,
                       contentVersionId: section.content.id,
-                      blockId: draftExplanation.blockId,
-                      blockKind: draftExplanation.blockKind,
-                      style: draftExplanation.style,
+                      blockId: retriedDraft.blockId,
+                      blockKind: retriedDraft.blockKind,
+                      style: retriedDraft.style,
                       signal: 'requested',
-                      customInstruction: draftExplanation.customInstruction,
+                      customInstruction: retriedDraft.customInstruction,
                     });
-                    setDraftExplanation((current) => current ? {
+                    setDraftExplanation((current) => current?.requestId === retriedRequestId ? {
                       ...current,
-                      evidenceEventId: current.requestId,
+                      evidenceEventId: retriedRequestId,
                       preferenceStatus: 'saved',
                     } : current);
                   } catch (reason) {
-                    setDraftExplanation((current) => current ? { ...current, preferenceStatus: 'unsaved' } : current);
-                    setPreferenceError(reason instanceof Error ? reason.message : '偏好未保存，请重试。');
+                    setDraftExplanation((current) => current?.requestId === retriedRequestId
+                      ? { ...current, preferenceStatus: 'unsaved' }
+                      : current);
+                    if (draftExplanationRef.current?.requestId === retriedRequestId) {
+                      setPreferenceError(reason instanceof Error ? reason.message : '偏好未保存，请重试。');
+                    }
                   }
                 }}>{draftExplanation.preferenceStatus === 'saving' ? '保存中…' : '重试保存'}</button>
               )}

@@ -34,7 +34,7 @@ from ..modules.learning.assessment_items import publish_assessment_item_versions
 LESSON_GENERATION_PIPELINE_VERSION = "lesson_generation_v3"
 LESSON_GENERATION_SCHEMA_VERSION = "generated_lesson_composition_candidate_v7"
 LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_composition_prompt_v10"
-LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v10"
+LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v11"
 LESSON_CONTEXT_POLICY_VERSION = "lesson_generation_context_v2"
 AI_CONTENT_LABEL_SCHEMA_VERSION = "ai_content_label_v2"
 
@@ -365,8 +365,20 @@ def validate_lesson_candidate(
             maximumBlocks=spec.composition_policy.maximum_blocks,
             actualBlocks=block_count,
         )
-    case_keys = {block.case_key for block in candidate.blocks if block.case_kind}
-    case_count = len(case_keys)
+    case_kind_by_key: dict[str, str] = {}
+    for block in candidate.blocks:
+        if not block.case_kind:
+            continue
+        existing_kind = case_kind_by_key.setdefault(block.case_key, block.case_kind)
+        if existing_kind != block.case_kind:
+            _reject(
+                "CONTENT_CASE_IDENTITY_CONFLICT",
+                "同一案例身份声明了不同的案例类型",
+                caseKey=block.case_key,
+                expectedCaseKind=existing_kind,
+                actualCaseKind=block.case_kind,
+            )
+    case_count = len(case_kind_by_key)
     if case_count < spec.composition_policy.case_policy.minimum_distinct_cases:
         _reject(
             "CONTENT_COMPOSITION_CASES_MISSING",

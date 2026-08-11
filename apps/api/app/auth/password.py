@@ -91,21 +91,61 @@ class PasswordCredentialService:
             select(LocalCredential).where(
                 LocalCredential.user_id == user_id,
                 LocalCredential.status == "active",
-            )
+            ).with_for_update()
         )
-        expected_hash = (
-            credential.password_hash if credential else _DUMMY_PASSWORD_HASH
+        if not credential:
+            self._consume_dummy_password(password)
+            raise self._invalid_reauthentication()
+        if not self._verify_password_with_lockout(
+            credential=credential,
+            password=password,
+            current=now(),
+        ):
+            raise self._invalid_reauthentication()
+        self.db.commit()
+
+    @staticmethod
+    def _invalid_reauthentication() -> AppError:
+        return AppError(
+            "当前密码不正确",
+            code="ACCOUNT_REAUTH_INVALID",
+            status=403,
         )
+
+    def _verify_password_with_lockout(
+        self,
+        *,
+        credential: LocalCredential,
+        password: str,
+        current: datetime,
+    ) -> bool:
+        if credential.locked_until and _aware(credential.locked_until) > current:
+            self._consume_dummy_password(password)
+            return False
+        if credential.locked_until:
+            credential.locked_until = None
+            credential.failed_attempts = 0
+
         try:
-            valid = PASSWORD_HASHER.verify(expected_hash, password)
+            verified = PASSWORD_HASHER.verify(credential.password_hash, password)
         except (VerifyMismatchError, VerificationError, InvalidHashError):
-            valid = False
-        if not credential or not valid:
-            raise AppError(
-                "当前密码不正确",
-                code="ACCOUNT_REAUTH_INVALID",
-                status=403,
-            )
+            verified = False
+        if not verified:
+            credential.failed_attempts += 1
+            if credential.failed_attempts >= MAX_FAILED_ATTEMPTS:
+                credential.locked_until = current + LOCK_DURATION
+                credential.failed_attempts = 0
+            credential.updated_at = current
+            self.db.commit()
+            return False
+
+        if PASSWORD_HASHER.check_needs_rehash(credential.password_hash):
+            credential.password_hash = PASSWORD_HASHER.hash(password)
+            credential.password_changed_at = current
+        credential.failed_attempts = 0
+        credential.locked_until = None
+        credential.updated_at = current
+        return True
 
     def set_account_enabled(self, *, username: str, enabled: bool) -> User:
         credential = self._credential(username)
@@ -155,7 +195,7 @@ class PasswordCredentialService:
         credential = self.db.scalar(
             select(LocalCredential).where(
                 LocalCredential.username == normalize_username(username),
-            )
+            ).with_for_update()
         )
         current = now()
         if not credential:
@@ -164,25 +204,11 @@ class PasswordCredentialService:
         if credential.status != "active":
             self._consume_dummy_password(password)
             raise self._invalid_credentials()
-        if credential.locked_until and _aware(credential.locked_until) > current:
-            self._consume_dummy_password(password)
-            raise self._invalid_credentials()
-
-        if credential.locked_until:
-            credential.locked_until = None
-            credential.failed_attempts = 0
-
-        try:
-            verified = PASSWORD_HASHER.verify(credential.password_hash, password)
-        except (VerifyMismatchError, VerificationError, InvalidHashError):
-            verified = False
-        if not verified:
-            credential.failed_attempts += 1
-            if credential.failed_attempts >= MAX_FAILED_ATTEMPTS:
-                credential.locked_until = current + LOCK_DURATION
-                credential.failed_attempts = 0
-            credential.updated_at = current
-            self.db.commit()
+        if not self._verify_password_with_lockout(
+            credential=credential,
+            password=password,
+            current=current,
+        ):
             raise self._invalid_credentials()
 
         user = self.db.get(User, credential.user_id)
@@ -192,13 +218,7 @@ class PasswordCredentialService:
                 code="ACCOUNT_DISABLED",
                 status=403,
             )
-        if PASSWORD_HASHER.check_needs_rehash(credential.password_hash):
-            credential.password_hash = PASSWORD_HASHER.hash(password)
-            credential.password_changed_at = current
-        credential.failed_attempts = 0
-        credential.locked_until = None
         credential.last_login_at = current
-        credential.updated_at = current
         self.db.commit()
         return user
 
