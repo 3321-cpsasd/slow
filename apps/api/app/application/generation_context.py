@@ -34,6 +34,7 @@ from ..infrastructure.tables import (
 )
 from ..modules.curriculum.baselines import CurriculumBaselineService
 from ..modules.knowledge.context import KnowledgeContextBuilder
+from ..modules.preferences.service import LearningPreferenceService
 
 
 PEDAGOGICAL_PREFERENCE_KEYS = {
@@ -41,6 +42,7 @@ PEDAGOGICAL_PREFERENCE_KEYS = {
     "explanationDensity",
     "formatPreferences",
     "interactionRhythm",
+    "styleGuidance",
 }
 
 
@@ -85,7 +87,7 @@ class GenerationContextBuilder:
         curriculum_baseline: dict[str, Any] | None = None,
     ) -> GenerationContextPack:
         plan = self._plan(series, mission)
-        learner = self._learner(plan, mission, plan_input)
+        learner = self._learner(plan, mission, plan_input, shelf_id=shelf.id)
         mission_depth = (
             _load(mission.constraints_json, {}).get("depth") if mission else ""
         )
@@ -175,6 +177,8 @@ class GenerationContextBuilder:
         plan: LearningPlan | None,
         mission: LearningMissionVersion | None,
         plan_input: dict[str, Any] | None,
+        *,
+        shelf_id: str,
     ) -> LearnerContext:
         profile = self.db.get(UserProfile, self.user_id)
         baseline = {
@@ -217,6 +221,13 @@ class GenerationContextBuilder:
                 baseline[alias] = adopted[key]
         baseline["preferences"] = _pedagogical_preferences(
             baseline["preferences"]
+        )
+        baseline["preferences"] = LearningPreferenceService(
+            self.db,
+            self.user_id,
+        ).effective_preferences(
+            baseline["preferences"],
+            shelf_id=shelf_id,
         )
         if plan and plan.purpose:
             baseline["purpose"] = plan.purpose

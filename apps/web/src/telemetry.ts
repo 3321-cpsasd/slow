@@ -8,6 +8,9 @@ export type ProductEventName =
   | 'section_viewed'
   | 'quiz_viewed'
   | 'feedback_opened'
+  | 'explanation_style_requested'
+  | 'explanation_style_feedback'
+  | 'explanation_style_remembered'
   | 'active_reading_60s'
   | 'frontend_error';
 

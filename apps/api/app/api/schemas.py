@@ -142,6 +142,9 @@ ProductEventName = Literal[
     "section_viewed",
     "quiz_viewed",
     "feedback_opened",
+    "explanation_style_requested",
+    "explanation_style_feedback",
+    "explanation_style_remembered",
     "active_reading_60s",
     "frontend_error",
 ]
@@ -205,6 +208,29 @@ class LearningPreferences(ApiModel):
         "auto", "low_interruption", "balanced", "frequent_checkins"
     ] = "auto"
     daily_mode_prompt_enabled: bool = Field(default=True, strict=True)
+
+
+class LearningPreferenceEvidenceCreate(ApiModel):
+    event_id: str = Field(min_length=8, max_length=128)
+    request_event_id: str | None = Field(default=None, min_length=8, max_length=128)
+    section_id: str = Field(min_length=1, max_length=160)
+    content_version_id: str = Field(min_length=1, max_length=160)
+    block_id: str = Field(min_length=1, max_length=160)
+    block_kind: Literal["text", "bullet_list", "ordered_steps", "diagram", "table", "code", "formula"]
+    style: Literal["worked_example", "diagram", "analogy", "derivation", "precise", "concise", "custom"]
+    signal: Literal["requested", "helpful", "unclear", "adopted"]
+    custom_instruction: str | None = Field(default=None, max_length=240)
+
+
+class PersonalPresentationAdopt(ApiModel):
+    event_id: str = Field(min_length=8, max_length=128)
+    request_event_id: str = Field(min_length=8, max_length=128)
+    content_version_id: str = Field(min_length=1, max_length=160)
+    block_id: str = Field(min_length=1, max_length=160)
+    block_kind: Literal["text", "bullet_list", "ordered_steps", "diagram", "table", "code", "formula"]
+    style: Literal["worked_example", "diagram", "analogy", "derivation", "precise", "concise", "custom"]
+    thread_id: str = Field(min_length=1, max_length=160)
+    answer_message_id: str = Field(min_length=1, max_length=160)
 
 
 class ProfileDraftUpdate(ApiModel):

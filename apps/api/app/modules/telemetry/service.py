@@ -19,6 +19,17 @@ _PROPERTY_RULES: dict[str, dict[str, set[str] | type]] = {
     "section_viewed": {},
     "quiz_viewed": {},
     "feedback_opened": {"scope": {"global", "content_block"}},
+    "explanation_style_requested": {
+        "style": {"worked_example", "diagram", "analogy", "derivation", "precise", "concise", "custom"},
+        "blockKind": {"text", "bullet_list", "ordered_steps", "diagram", "table", "code", "formula"},
+    },
+    "explanation_style_feedback": {
+        "style": {"worked_example", "diagram", "analogy", "derivation", "precise", "concise", "custom"},
+        "helpful": bool,
+    },
+    "explanation_style_remembered": {
+        "style": {"worked_example", "diagram", "analogy", "derivation", "precise", "concise"},
+    },
     "active_reading_60s": {"seconds": int},
     "frontend_error": {
         "kind": {"window_error", "unhandled_rejection", "render_error"},
@@ -33,6 +44,9 @@ _EXPECTED_CONTEXT = {
     "section_viewed": ("learn", {"section"}),
     "quiz_viewed": ("learn", {"section"}),
     "feedback_opened": (None, {"", "section"}),
+    "explanation_style_requested": ("learn", {"section"}),
+    "explanation_style_feedback": ("learn", {"section"}),
+    "explanation_style_remembered": ("learn", {"section"}),
     "active_reading_60s": ("learn", {"section"}),
     "frontend_error": (None, {""}),
 }

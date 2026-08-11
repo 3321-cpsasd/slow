@@ -129,3 +129,44 @@ def test_product_events_reject_arbitrary_text_and_inconsistent_context(tmp_path)
         )
         assert free_form_error.status_code == 400
         assert free_form_error.json()["code"] == "PRODUCT_EVENT_PROPERTIES_INVALID"
+
+
+def test_explanation_style_events_accept_only_bounded_preference_evidence(tmp_path):
+    with make_client(tmp_path) as client:
+        csrf = login(client)
+        accept_privacy(client, csrf)
+        headers = {"X-CSRF-Token": csrf}
+
+        requested = client.post(
+            "/api/events/batch",
+            headers=headers,
+            json=event_payload(
+                eventId="evt_style_request_1",
+                eventName="explanation_style_requested",
+                properties={"style": "custom", "blockKind": "text"},
+            ),
+        )
+        assert requested.status_code == 202
+
+        custom_feedback = client.post(
+            "/api/events/batch",
+            headers=headers,
+            json=event_payload(
+                eventId="evt_style_feedback_custom",
+                eventName="explanation_style_feedback",
+                properties={"style": "custom", "helpful": True},
+            ),
+        )
+        assert custom_feedback.status_code == 202
+
+        rejected = client.post(
+            "/api/events/batch",
+            headers=headers,
+            json=event_payload(
+                eventId="evt_style_request_2",
+                eventName="explanation_style_feedback",
+                properties={"style": "diagram", "helpful": True, "answer": "私密内容"},
+            ),
+        )
+        assert rejected.status_code == 400
+        assert rejected.json()["code"] == "PRODUCT_EVENT_PROPERTIES_INVALID"

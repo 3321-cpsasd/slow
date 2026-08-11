@@ -220,6 +220,7 @@ const formatElapsed = (milliseconds: number) => {
 type QaExchange = {
   id: string;
   threadId?: string;
+  answerMessageId?: string;
   blockId?: string;
   question: string;
   answer: string;
@@ -299,7 +300,10 @@ const qaHistoryExchanges = (history: QaHistory): QaExchange[] => {
         exchanges.push(activeExchange);
         return;
       }
-      if (activeExchange) activeExchange.answer += message.content;
+      if (activeExchange) {
+        activeExchange.answer += message.content;
+        activeExchange.answerMessageId = message.id;
+      }
     });
   });
   return exchanges.map((exchange) => exchange.answer
@@ -6945,7 +6949,7 @@ function QaPanel({
       setThreadId(result.threadId);
       setMessages((current) => current.map((message) => (
         message.id === exchangeId
-          ? { ...message, threadId: result.threadId, relation: result.relation, status: 'done' }
+          ? { ...message, threadId: result.threadId, answerMessageId: result.answerMessageId, relation: result.relation, status: 'done' }
           : message
       )));
       setNewQuestion(false);
@@ -7108,10 +7112,10 @@ function QaPanel({
                       >还是不清楚</button>
                       <button
                         className="replace"
-                        disabled={adoptingExchange === message.id || adoptedExchange === message.id || !message.threadId || !message.preferenceRequestEventId || !section.content}
+                        disabled={adoptingExchange === message.id || adoptedExchange === message.id || !message.threadId || !message.answerMessageId || !message.preferenceRequestEventId || !section.content}
                         onClick={async () => {
                           const explanationStyle = message.explanationStyle;
-                          if (!explanationStyle || !message.threadId || !message.preferenceRequestEventId || !message.blockId || !section.content) return;
+                          if (!explanationStyle || !message.threadId || !message.answerMessageId || !message.preferenceRequestEventId || !message.blockId || !section.content) return;
                           setAdoptingExchange(message.id);
                           setPreferenceError('');
                           try {
@@ -7119,7 +7123,7 @@ function QaPanel({
                               eventId: crypto.randomUUID(), requestEventId: message.preferenceRequestEventId,
                               contentVersionId: section.content.id, blockId: message.blockId,
                               blockKind: message.explanationBlockKind || 'text', style: explanationStyle,
-                              threadId: message.threadId,
+                              threadId: message.threadId, answerMessageId: message.answerMessageId,
                             });
                             onSectionChange(await api.section(section.id));
                             setAdoptedExchange(message.id);

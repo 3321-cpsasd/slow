@@ -347,28 +347,25 @@ class QaService:
         thread.summary = thread_summary
         thread.updated_at = now()
         user_message_created_at = now()
-        self.db.add_all(
-            [
-                QaMessage(
-                    id=self.uid("msg"),
-                    session_id=session.id,
-                    thread_id=thread_id,
-                    block_id=body.block_id,
-                    role="user",
-                    content=body.question,
-                    created_at=user_message_created_at,
-                ),
-                QaMessage(
-                    id=self.uid("msg"),
-                    session_id=session.id,
-                    thread_id=thread_id,
-                    block_id=body.block_id,
-                    role="assistant",
-                    content=answer,
-                    created_at=user_message_created_at + timedelta(microseconds=1),
-                ),
-            ]
+        user_message = QaMessage(
+            id=self.uid("msg"),
+            session_id=session.id,
+            thread_id=thread_id,
+            block_id=body.block_id,
+            role="user",
+            content=body.question,
+            created_at=user_message_created_at,
         )
+        assistant_message = QaMessage(
+            id=self.uid("msg"),
+            session_id=session.id,
+            thread_id=thread_id,
+            block_id=body.block_id,
+            role="assistant",
+            content=answer,
+            created_at=user_message_created_at + timedelta(microseconds=1),
+        )
+        self.db.add_all([user_message, assistant_message])
         memory = self.load(session.memory_json, {"threads": {}}) or {
             "threads": {}
         }
@@ -379,6 +376,7 @@ class QaService:
         return {
             "sessionId": session.id,
             "threadId": thread_id,
+            "answerMessageId": assistant_message.id,
             "relation": relation,
             "answer": answer,
             "classificationCorrectable": True,
@@ -421,6 +419,7 @@ class QaService:
             "type": "done",
             "sessionId": saved["sessionId"],
             "threadId": saved["threadId"],
+            "answerMessageId": saved["answerMessageId"],
             "relation": saved["relation"],
             "classificationCorrectable": True,
         }

@@ -13,6 +13,7 @@ from ..infrastructure.tables import (
     LearningNote,
     LearningRunSectionBinding,
     LearningTask,
+    PersonalBlockPresentation,
     QuizAttempt,
     QuizSet,
     Remediation,
@@ -201,7 +202,7 @@ class SectionReadModel:
                 {
                     "id": content.id,
                     "version": content.version,
-                    "blocks": _load(content.blocks_json, []),
+                    "blocks": self._blocks_with_personal_presentations(content),
                     "sources": _load(content.sources_json, []),
                     "sourceVerification": (
                         _load(verification.report_json, []) if verification else []
@@ -276,6 +277,35 @@ class SectionReadModel:
             )
         )
         return content if not content or content.publication_status == "published" else None
+
+    def _blocks_with_personal_presentations(self, content) -> list[dict]:
+        blocks = _load(content.blocks_json, []) or []
+        overrides = {
+            item.block_id: item
+            for item in self.db.scalars(
+                select(PersonalBlockPresentation).where(
+                    PersonalBlockPresentation.user_id == self.user_id,
+                    PersonalBlockPresentation.content_version_id == content.id,
+                    PersonalBlockPresentation.active.is_(True),
+                )
+            )
+        }
+        return [
+            {
+                **block,
+                **(
+                    {"personalPresentation": {
+                        "id": overrides[block.get("id")].id,
+                        "content": overrides[block.get("id")].replacement_content,
+                        "source": "ask_ai",
+                        "updatedAt": overrides[block.get("id")].updated_at.isoformat(),
+                    }}
+                    if block.get("id") in overrides
+                    else {}
+                ),
+            }
+            for block in blocks
+        ]
 
     def _published_quiz(self, section_id, binding):
         quiz = (

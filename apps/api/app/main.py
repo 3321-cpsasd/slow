@@ -28,7 +28,7 @@ from .ai.fallback_adapter import FallbackAiAdapter
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, DailyModeUpdate, FeedbackCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ReviewSubmit, ShelfCreate
+from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceEvidenceCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ResumeUpdate, ReviewSubmit, ShelfCreate
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -38,6 +38,8 @@ from .infrastructure.tables import Base, LearningTask, LocalCredential, QuizAtte
 from .modules.learning.tasks import claim_task, heartbeat_task, recoverable_task_ids
 from .modules.feedback.service import FeedbackService
 from .modules.telemetry.service import ProductEventService
+from .modules.library.context import ActiveLearningContextResolver
+from .modules.preferences.service import LearningPreferenceService, PersonalPresentationService
 from .services.source_verifier import ModelOnlySourcePolicy
 from .services.attachment_storage import LocalAttachmentStorage
 from .services.runtime_settings import RuntimeSettingsStore
@@ -1058,6 +1060,71 @@ def create_app(
         session: Session = Depends(db),
     ):
         return ProductEventService(session, scope.user_id).append(body.events)
+
+    @app.post("/api/learning-preferences/evidence", status_code=202)
+    def record_learning_preference_evidence(
+        body: LearningPreferenceEvidenceCreate,
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        ProfileService(session, scope.user_id).require_complete()
+        context = ActiveLearningContextResolver(session).resolve_section(
+            user_id=scope.user_id,
+            section_id=body.section_id,
+        )
+        return LearningPreferenceService(session, scope.user_id).record(
+            body,
+            shelf_id=context.shelf.id,
+        )
+
+    @app.post("/api/sections/{section_id}/personal-presentation", status_code=201)
+    def adopt_personal_presentation(
+        section_id: str,
+        body: PersonalPresentationAdopt,
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        ProfileService(session, scope.user_id).require_complete()
+        context = ActiveLearningContextResolver(session).resolve_section(
+            user_id=scope.user_id,
+            section_id=section_id,
+        )
+        override = PersonalPresentationService(session, scope.user_id).adopt(
+            body,
+            section_id=section_id,
+        )
+        evidence = LearningPreferenceEvidenceCreate(
+            eventId=body.event_id,
+            requestEventId=body.request_event_id,
+            sectionId=section_id,
+            contentVersionId=body.content_version_id,
+            blockId=body.block_id,
+            blockKind=body.block_kind,
+            style=body.style,
+            signal="adopted",
+        )
+        projection = LearningPreferenceService(session, scope.user_id).record(
+            evidence,
+            shelf_id=context.shelf.id,
+        )
+        return {"id": override.id, "status": "active", "projection": projection}
+
+    @app.delete("/api/sections/{section_id}/personal-presentation/{block_id}", status_code=204)
+    def restore_personal_presentation(
+        section_id: str,
+        block_id: str,
+        content_version_id: str = Query(alias="contentVersionId"),
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        ActiveLearningContextResolver(session).resolve_section(
+            user_id=scope.user_id,
+            section_id=section_id,
+        )
+        PersonalPresentationService(session, scope.user_id).restore(
+            content_version_id=content_version_id,
+            block_id=block_id,
+        )
 
     @app.post("/api/auth/logout", status_code=204)
     def auth_logout(

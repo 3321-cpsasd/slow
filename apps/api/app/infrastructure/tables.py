@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
@@ -179,6 +180,65 @@ class UserProfileRevision(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now
     )
+
+
+class LearningPreferenceEvidence(Base):
+    """Append-only evidence used to rebuild inferred teaching preferences."""
+
+    __tablename__ = "learning_preference_evidence"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "event_id",
+            name="uq_learning_preference_evidence_user_event",
+        ),
+        Index(
+            "ix_learning_preference_evidence_user_time",
+            "user_id",
+            "occurred_at",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    event_id: Mapped[str] = mapped_column(String(128))
+    request_event_id: Mapped[str] = mapped_column(String(128), default="")
+    section_id: Mapped[str] = mapped_column(String, index=True)
+    shelf_id: Mapped[str] = mapped_column(String, index=True)
+    content_version_id: Mapped[str] = mapped_column(String, default="")
+    block_id: Mapped[str] = mapped_column(String, default="")
+    block_kind: Mapped[str] = mapped_column(String(32), default="text")
+    style: Mapped[str] = mapped_column(String(32), index=True)
+    signal: Mapped[str] = mapped_column(String(24), index=True)
+    dimensions_json: Mapped[str] = mapped_column(Text, default="{}")
+    extraction_confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    extractor_version: Mapped[str] = mapped_column(String(32), default="preset_v1")
+    request_hash: Mapped[str] = mapped_column(String(64))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
+class PersonalBlockPresentation(Base):
+    """A reversible user-local reading layer over an immutable published block."""
+
+    __tablename__ = "personal_block_presentations"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "content_version_id", "block_id",
+            name="uq_personal_block_presentations_user_block",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    content_version_id: Mapped[str] = mapped_column(ForeignKey("content_versions.id"), index=True)
+    block_id: Mapped[str] = mapped_column(String, index=True)
+    replacement_content: Mapped[str] = mapped_column(Text)
+    source_qa_message_id: Mapped[str] = mapped_column(ForeignKey("qa_messages.id"))
+    active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
 class UserOnboarding(Base):
@@ -1315,6 +1375,10 @@ class ContentBlockVersion(Base):
     block_version: Mapped[int] = mapped_column(Integer, default=1)
     format_kind: Mapped[str] = mapped_column(String(24))
     semantic_role: Mapped[str] = mapped_column(String(32), index=True)
+    teaching_moves_json: Mapped[str] = mapped_column(Text, default="[]")
+    case_kind: Mapped[str] = mapped_column(String(32), default="", index=True)
+    relation_to_anchor: Mapped[str] = mapped_column(String(32), default="")
+    reader_priority: Mapped[str] = mapped_column(String(16), default="normal")
     heading: Mapped[str] = mapped_column(Text, default="")
     content: Mapped[str] = mapped_column(Text)
     source_indexes_json: Mapped[str] = mapped_column(Text, default="[]")

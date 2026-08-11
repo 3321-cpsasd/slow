@@ -75,7 +75,7 @@ async function streamQa(
   path:string,
   body:object,
   onDelta:(delta:string)=>void,
-):Promise<{sessionId:string;threadId:string;relation:string}>{
+):Promise<{sessionId:string;threadId:string;answerMessageId:string;relation:string}>{
   const response = await request(path, {
     method:'POST',
     headers:{
@@ -105,7 +105,7 @@ async function streamQa(
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
-  let completed:{sessionId:string;threadId:string;relation:string}|undefined;
+  let completed:{sessionId:string;threadId:string;answerMessageId:string;relation:string}|undefined;
   while(true){
     const {value,done} = await reader.read();
     buffer += decoder.decode(value,{stream:!done});
@@ -257,6 +257,15 @@ export const api = {
   updateProfile:(body:object)=>call<import('../model/types').LearningProfile>('/api/profile',{
     method:'PUT',
     body:JSON.stringify(body),
+  }),
+  recordPreferenceEvidence:(body:object)=>call<import('../model/types').LearningPreferenceProjection>('/api/learning-preferences/evidence',{
+    method:'POST',body:JSON.stringify(body),
+  }),
+  adoptPersonalPresentation:(sectionId:string,body:object)=>call<{id:string;status:'active';projection:import('../model/types').LearningPreferenceProjection}>(`/api/sections/${sectionId}/personal-presentation`,{
+    method:'POST',body:JSON.stringify(body),
+  }),
+  restorePersonalPresentation:(sectionId:string,blockId:string,contentVersionId:string)=>call<void>(`/api/sections/${sectionId}/personal-presentation/${blockId}?contentVersionId=${encodeURIComponent(contentVersionId)}`,{
+    method:'DELETE',
   }),
   bootstrap:()=>call<import('../model/types').Bootstrap>('/api/bootstrap'),
   dailyMode:()=>call<import('../model/types').DailyModeState>('/api/daily-mode'),

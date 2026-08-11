@@ -12,7 +12,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0049_alpha_account_recovery"
+HEAD_REVISION = "0051_learning_preference_evidence"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -147,6 +147,12 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
                 "PRAGMA table_info(account_recovery_codes)"
             )
         }
+        content_block_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(content_block_versions)"
+            )
+        }
         remediation_columns = {
             row[1]: row
             for row in connection.execute("PRAGMA table_info(remediations)")
@@ -182,6 +188,8 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
         assert {
             "user_daily_mode_states",
             "daily_mode_events",
+            "learning_preference_evidence",
+            "personal_block_presentations",
         }.issubset(trustworthy_tables)
         assessment_target_columns = {
             row[1]
@@ -267,6 +275,12 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
         ).fetchone()[0]
 
     assert revision == HEAD_REVISION
+    assert {
+        "teaching_moves_json",
+        "case_kind",
+        "relation_to_anchor",
+        "reader_priority",
+    }.issubset(content_block_columns)
     assert "uq_privacy_consents_user_versions" in privacy_consent_schema
     assert "deletion_due_at" in account_exit_schema
     assert "uq_product_events_user_event" in product_event_schema
@@ -570,7 +584,9 @@ def test_0049_downgrade_refuses_account_recovery_history(tmp_path):
         recovery_count = connection.execute(
             "SELECT COUNT(*) FROM account_recovery_codes"
         ).fetchone()[0]
-    assert revision == HEAD_REVISION
+    # 0050 has no protected history and downgrades first; 0049 then refuses to
+    # discard the recovery record and leaves the database at that revision.
+    assert revision == "0049_alpha_account_recovery"
     assert recovery_count == 1
 
 

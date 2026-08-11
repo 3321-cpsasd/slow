@@ -184,7 +184,41 @@ export type AiRuntime = {
   streaming:boolean;
 };
 export type Source = { title:string; url:string; kind:string; version:string };
-export type Block = { id:string; version:number; kind:string; role:string; heading:string; content:string; source_indexes:number[] };
+export type Block = {
+  id:string;
+  version:number;
+  kind:string;
+  role:string;
+  heading:string;
+  content:string;
+  source_indexes:number[];
+  teachingMoves?:string[];
+  caseKind?:string;
+  relationToAnchor?:string;
+  readerPriority?:'essential'|'highlight'|'normal';
+  assessmentTargetIds?:string[];
+  personalPresentation?:{
+    id:string;
+    content:string;
+    source:'ask_ai';
+    updatedAt:string;
+  };
+};
+export type LearningPreferenceProjection = {
+  recorded?:boolean;
+  updatedAt:string;
+  dimensions:{
+    key:string;
+    label:string;
+    score:number;
+    confidence:number;
+    evidenceCount:number;
+    positiveOutcomes:number;
+    contextCount:number;
+    active:boolean;
+  }[];
+  effectivePreferences:Record<string,unknown>;
+};
 export type FeedbackReceipt = {
   id:string;
   status:'received';
@@ -410,6 +444,7 @@ export type QuizResult = {
 export type QaAnswer = {
   sessionId:string;
   threadId:string;
+  answerMessageId:string;
   relation:'follow_up'|'new_question';
   answer:string;
 };
