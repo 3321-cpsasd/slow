@@ -1,4 +1,13 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  FormEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
+} from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api } from './api/client';
@@ -1286,6 +1295,7 @@ export default function App() {
               </div>
             )}
             <LearningWorkspace
+              userId={auth.user.id}
               series={series}
               section={section}
               dailyMode={activityDailyMode || data?.dailyMode?.dailyMode || 'slow'}
@@ -3324,7 +3334,184 @@ function PlanForm({ profile, submit }: { profile: LearningProfile; submit: (body
   );
 }
 
+type WorkspacePanel = 'directory' | 'qa';
+type WorkspaceLayoutRatios = {
+  threeDirectory: number;
+  threeQa: number;
+  directoryOnly: number;
+  qaOnly: number;
+};
+type WorkspaceLayoutRatioKey = keyof WorkspaceLayoutRatios;
+
+const workspacePanelSizing = {
+  directory: { defaultWidth: 240, minWidth: 220, maxWidth: 360 },
+  qa: { defaultWidth: 380, minWidth: 300, maxWidth: 480 },
+} as const;
+const workspaceReaderMinWidth = 512;
+const workspaceRatioMigrationReferenceWidth = 1440;
+const defaultWorkspaceLayoutRatios: WorkspaceLayoutRatios = {
+  threeDirectory: workspacePanelSizing.directory.defaultWidth / workspaceRatioMigrationReferenceWidth,
+  threeQa: workspacePanelSizing.qa.defaultWidth / workspaceRatioMigrationReferenceWidth,
+  directoryOnly: workspacePanelSizing.directory.defaultWidth / workspaceRatioMigrationReferenceWidth,
+  qaOnly: workspacePanelSizing.qa.defaultWidth / workspaceRatioMigrationReferenceWidth,
+};
+const legacyWorkspacePanelStorageKeys: Record<WorkspacePanel, string> = {
+  directory: 'slow.learning-workspace.directory-width',
+  qa: 'slow.learning-workspace.qa-width',
+};
+
+function legacyUserWorkspacePanelStorageKey(userId: string, panel: WorkspacePanel) {
+  return `slow.learning-workspace.${userId}.${panel}-width`;
+}
+
+function workspaceLayoutRatiosStorageKey(userId: string) {
+  return `slow.learning-workspace.${userId}.layout-ratios`;
+}
+
+function clampWorkspacePanelWidth(panel: WorkspacePanel, width: number, availableWidth = Number.POSITIVE_INFINITY) {
+  const sizing = workspacePanelSizing[panel];
+  return Math.min(Math.max(sizing.minWidth, width), sizing.maxWidth, Math.max(sizing.minWidth, availableWidth));
+}
+
+function validWorkspaceLayoutRatio(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 && value < 1;
+}
+
+function persistWorkspaceLayoutRatios(userId: string, ratios: WorkspaceLayoutRatios) {
+  try {
+    window.localStorage.setItem(
+      workspaceLayoutRatiosStorageKey(userId),
+      JSON.stringify({ version: 1, ...ratios }),
+    );
+  } catch {
+    // Reading remains fully usable if browser storage is unavailable.
+  }
+}
+
+function readWorkspaceLayoutRatios(userId: string): WorkspaceLayoutRatios {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(workspaceLayoutRatiosStorageKey(userId)) || 'null');
+    if (
+      stored
+      && validWorkspaceLayoutRatio(stored.threeDirectory)
+      && validWorkspaceLayoutRatio(stored.threeQa)
+      && validWorkspaceLayoutRatio(stored.directoryOnly)
+      && validWorkspaceLayoutRatio(stored.qaOnly)
+    ) {
+      return {
+        threeDirectory: stored.threeDirectory,
+        threeQa: stored.threeQa,
+        directoryOnly: stored.directoryOnly,
+        qaOnly: stored.qaOnly,
+      };
+    }
+
+    const legacyWidth = (panel: WorkspacePanel) => {
+      const scopedKey = legacyUserWorkspacePanelStorageKey(userId, panel);
+      const scopedValue = window.localStorage.getItem(scopedKey);
+      const globalKey = legacyWorkspacePanelStorageKeys[panel];
+      const rawValue = scopedValue ?? window.localStorage.getItem(globalKey);
+      const width = Number(rawValue);
+      if (rawValue !== null) {
+        window.localStorage.removeItem(scopedKey);
+        window.localStorage.removeItem(globalKey);
+      }
+      return Number.isFinite(width) && width > 0 ? width : null;
+    };
+    const directoryWidth = legacyWidth('directory');
+    const qaWidth = legacyWidth('qa');
+    const ratios = {
+      threeDirectory: directoryWidth
+        ? directoryWidth / workspaceRatioMigrationReferenceWidth
+        : defaultWorkspaceLayoutRatios.threeDirectory,
+      threeQa: qaWidth
+        ? qaWidth / workspaceRatioMigrationReferenceWidth
+        : defaultWorkspaceLayoutRatios.threeQa,
+      directoryOnly: directoryWidth
+        ? directoryWidth / workspaceRatioMigrationReferenceWidth
+        : defaultWorkspaceLayoutRatios.directoryOnly,
+      qaOnly: qaWidth
+        ? qaWidth / workspaceRatioMigrationReferenceWidth
+        : defaultWorkspaceLayoutRatios.qaOnly,
+    };
+    persistWorkspaceLayoutRatios(userId, ratios);
+    return ratios;
+  } catch {
+    return defaultWorkspaceLayoutRatios;
+  }
+}
+
+function workspaceLayoutRatioKey(
+  panel: WorkspacePanel,
+  directoryHidden: boolean,
+  qaHidden: boolean,
+): WorkspaceLayoutRatioKey | null {
+  if (!directoryHidden && !qaHidden) return panel === 'directory' ? 'threeDirectory' : 'threeQa';
+  if (panel === 'directory' && !directoryHidden) return 'directoryOnly';
+  if (panel === 'qa' && !qaHidden) return 'qaOnly';
+  return null;
+}
+
+function fitVisibleWorkspacePanelWidths(
+  workspaceWidth: number,
+  directoryWidth: number,
+  qaWidth: number,
+  directoryHidden: boolean,
+  qaHidden: boolean,
+) {
+  let nextDirectoryWidth = clampWorkspacePanelWidth('directory', directoryWidth);
+  let nextQaWidth = clampWorkspacePanelWidth('qa', qaWidth);
+  if (!directoryHidden && !qaHidden) {
+    const availableForPanels = Math.max(
+      workspacePanelSizing.directory.minWidth + workspacePanelSizing.qa.minWidth,
+      workspaceWidth - workspaceReaderMinWidth,
+    );
+    let overflow = Math.max(0, nextDirectoryWidth + nextQaWidth - availableForPanels);
+    const qaReduction = Math.min(overflow, nextQaWidth - workspacePanelSizing.qa.minWidth);
+    nextQaWidth -= qaReduction;
+    overflow -= qaReduction;
+    nextDirectoryWidth -= Math.min(overflow, nextDirectoryWidth - workspacePanelSizing.directory.minWidth);
+  } else if (!directoryHidden) {
+    nextDirectoryWidth = clampWorkspacePanelWidth(
+      'directory',
+      nextDirectoryWidth,
+      workspaceWidth - workspaceReaderMinWidth,
+    );
+  } else if (!qaHidden) {
+    nextQaWidth = clampWorkspacePanelWidth('qa', nextQaWidth, workspaceWidth - workspaceReaderMinWidth);
+  }
+  return { directoryWidth: nextDirectoryWidth, qaWidth: nextQaWidth };
+}
+
+function resolveWorkspacePanelWidths(
+  workspaceWidth: number,
+  ratios: WorkspaceLayoutRatios,
+  currentDirectoryWidth: number,
+  currentQaWidth: number,
+  directoryHidden: boolean,
+  qaHidden: boolean,
+) {
+  let directoryWidth = currentDirectoryWidth;
+  let qaWidth = currentQaWidth;
+  if (!directoryHidden && !qaHidden) {
+    directoryWidth = workspaceWidth * ratios.threeDirectory;
+    qaWidth = workspaceWidth * ratios.threeQa;
+  } else if (!directoryHidden) {
+    directoryWidth = workspaceWidth * ratios.directoryOnly;
+  } else if (!qaHidden) {
+    qaWidth = workspaceWidth * ratios.qaOnly;
+  }
+  return fitVisibleWorkspacePanelWidths(
+    workspaceWidth,
+    directoryWidth,
+    qaWidth,
+    directoryHidden,
+    qaHidden,
+  );
+}
+
 function LearningWorkspace({
+  userId,
   series,
   section,
   dailyMode,
@@ -3342,6 +3529,7 @@ function LearningWorkspace({
   onFeedbackBlock,
   onQaVisibilityChange,
 }: {
+  userId: string;
   series: Series;
   section: Section | null;
   dailyMode: DailyMode;
@@ -3365,6 +3553,28 @@ function LearningWorkspace({
   const [auxiliaryExclusive, setAuxiliaryExclusive] = useState(() => window.matchMedia('(max-width: 1180px)').matches);
   const [directoryHidden, setDirectoryHidden] = useState(() => window.matchMedia('(max-width: 900px)').matches);
   const [qaHidden, setQaHidden] = useState(true);
+  const [layoutRatios, setLayoutRatios] = useState(() => readWorkspaceLayoutRatios(userId));
+  const [directoryWidth, setDirectoryWidth] = useState(() => clampWorkspacePanelWidth(
+    'directory',
+    window.innerWidth * layoutRatios.directoryOnly,
+  ));
+  const [qaWidth, setQaWidth] = useState(() => clampWorkspacePanelWidth(
+    'qa',
+    window.innerWidth * layoutRatios.qaOnly,
+  ));
+  const [resizingPanel, setResizingPanel] = useState<WorkspacePanel | null>(null);
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const panelLayoutRef = useRef({ directoryWidth, qaWidth, directoryHidden, qaHidden, layoutRatios });
+  const resizeSessionRef = useRef<{
+    panel: WorkspacePanel;
+    pointerId: number;
+    startClientX: number;
+    startWidth: number;
+    startedCollapsed: boolean;
+    moved: boolean;
+    latestWidth: number;
+  } | null>(null);
+  panelLayoutRef.current = { directoryWidth, qaWidth, directoryHidden, qaHidden, layoutRatios };
 
   useEffect(() => {
     onQaVisibilityChange(!qaHidden);
@@ -3396,6 +3606,43 @@ function LearningWorkspace({
   }, []);
 
   useEffect(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace || typeof ResizeObserver === 'undefined') return;
+    const fitPanelWidths = (workspaceWidth: number) => {
+      const current = panelLayoutRef.current;
+      const { directoryWidth: nextDirectoryWidth, qaWidth: nextQaWidth } = resolveWorkspacePanelWidths(
+        workspaceWidth,
+        current.layoutRatios,
+        current.directoryWidth,
+        current.qaWidth,
+        current.directoryHidden,
+        current.qaHidden,
+      );
+      if (nextDirectoryWidth !== current.directoryWidth) setDirectoryWidth(nextDirectoryWidth);
+      if (nextQaWidth !== current.qaWidth) setQaWidth(nextQaWidth);
+    };
+    const observer = new ResizeObserver(([entry]) => fitPanelWidths(entry.contentRect.width));
+    observer.observe(workspace);
+    fitPanelWidths(workspace.clientWidth);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    const fitted = resolveWorkspacePanelWidths(
+      workspace.clientWidth,
+      layoutRatios,
+      directoryWidth,
+      qaWidth,
+      directoryHidden,
+      qaHidden,
+    );
+    if (fitted.directoryWidth !== directoryWidth) setDirectoryWidth(fitted.directoryWidth);
+    if (fitted.qaWidth !== qaWidth) setQaWidth(fitted.qaWidth);
+  }, [directoryHidden, qaHidden]);
+
+  useEffect(() => {
     setSelectedBlockId(section?.content?.blocks[0]?.id || '');
     setSelectedQuote(null);
   }, [section?.id, section?.content?.id]);
@@ -3415,8 +3662,152 @@ function LearningWorkspace({
     setQaHidden((hidden) => !hidden);
   };
 
+  const setPanelWidth = (panel: WorkspacePanel, width: number) => {
+    if (panel === 'directory') setDirectoryWidth(width);
+    else setQaWidth(width);
+  };
+  const openPanel = (panel: WorkspacePanel) => {
+    if (panel === 'directory') {
+      if (compactLayout || auxiliaryExclusive) setQaHidden(true);
+      setDirectoryHidden(false);
+    } else {
+      if (compactLayout || auxiliaryExclusive) setDirectoryHidden(true);
+      setQaHidden(false);
+    }
+  };
+  const panelAvailableWidth = (panel: WorkspacePanel, startedCollapsed = false) => {
+    const workspaceWidth = workspaceRef.current?.clientWidth || window.innerWidth;
+    const otherPanelWillClose = startedCollapsed && auxiliaryExclusive;
+    const otherWidth = panel === 'directory'
+      ? (!qaHidden && !otherPanelWillClose ? qaWidth : 0)
+      : (!directoryHidden && !otherPanelWillClose ? directoryWidth : 0);
+    return workspaceWidth - workspaceReaderMinWidth - otherWidth;
+  };
+  const persistPanelRatio = (
+    panel: WorkspacePanel,
+    ratio: number,
+    currentDirectoryHidden = directoryHidden,
+    currentQaHidden = qaHidden,
+  ) => {
+    const key = workspaceLayoutRatioKey(panel, currentDirectoryHidden, currentQaHidden);
+    if (!key) return;
+    setLayoutRatios((current) => {
+      const next = { ...current, [key]: ratio };
+      persistWorkspaceLayoutRatios(userId, next);
+      return next;
+    });
+  };
+  const rememberPanelWidth = (
+    panel: WorkspacePanel,
+    width: number,
+    currentDirectoryHidden = directoryHidden,
+    currentQaHidden = qaHidden,
+  ) => {
+    const workspaceWidth = workspaceRef.current?.clientWidth || window.innerWidth;
+    persistPanelRatio(panel, width / workspaceWidth, currentDirectoryHidden, currentQaHidden);
+  };
+  const beginPanelResize = (panel: WorkspacePanel, event: ReactPointerEvent<HTMLDivElement>) => {
+    if (compactLayout || (event.pointerType === 'mouse' && event.button !== 0)) return;
+    const startedCollapsed = panel === 'directory' ? directoryHidden : qaHidden;
+    const startWidth = panel === 'directory' ? directoryWidth : qaWidth;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    resizeSessionRef.current = {
+      panel,
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startWidth,
+      startedCollapsed,
+      moved: false,
+      latestWidth: startWidth,
+    };
+    setResizingPanel(panel);
+    if (startedCollapsed) openPanel(panel);
+  };
+  const movePanelResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const session = resizeSessionRef.current;
+    const workspace = workspaceRef.current;
+    if (!session || !workspace || session.pointerId !== event.pointerId) return;
+    const pointerTravel = event.clientX - session.startClientX;
+    if (!session.moved && Math.abs(pointerTravel) < 3) return;
+    session.moved = true;
+    const bounds = workspace.getBoundingClientRect();
+    const proposedWidth = session.startedCollapsed
+      ? session.panel === 'directory'
+        ? event.clientX - bounds.left
+        : bounds.right - event.clientX
+      : session.startWidth + (session.panel === 'directory' ? pointerTravel : -pointerTravel);
+    const nextWidth = clampWorkspacePanelWidth(
+      session.panel,
+      proposedWidth,
+      panelAvailableWidth(session.panel, session.startedCollapsed),
+    );
+    session.latestWidth = nextWidth;
+    setPanelWidth(session.panel, nextWidth);
+  };
+  const finishPanelResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const session = resizeSessionRef.current;
+    if (!session || session.pointerId !== event.pointerId) return;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (session.moved) {
+      const current = panelLayoutRef.current;
+      rememberPanelWidth(
+        session.panel,
+        session.latestWidth,
+        current.directoryHidden,
+        current.qaHidden,
+      );
+    }
+    resizeSessionRef.current = null;
+    setResizingPanel(null);
+  };
+  const resetPanelWidth = (panel: WorkspacePanel) => {
+    const key = workspaceLayoutRatioKey(panel, directoryHidden, qaHidden);
+    if (!key) return;
+    const defaultRatio = defaultWorkspaceLayoutRatios[key];
+    const workspaceWidth = workspaceRef.current?.clientWidth || window.innerWidth;
+    const defaultWidth = clampWorkspacePanelWidth(
+      panel,
+      workspaceWidth * defaultRatio,
+      panelAvailableWidth(panel),
+    );
+    setPanelWidth(panel, defaultWidth);
+    persistPanelRatio(panel, defaultRatio);
+  };
+  const handlePanelKeyDown = (panel: WorkspacePanel, event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const hidden = panel === 'directory' ? directoryHidden : qaHidden;
+    if (hidden && (event.key === 'Enter' || event.key === ' ')) {
+      event.preventDefault();
+      openPanel(panel);
+      return;
+    }
+    if (hidden) return;
+    const currentWidth = panel === 'directory' ? directoryWidth : qaWidth;
+    let nextWidth = currentWidth;
+    const step = event.shiftKey ? 32 : 12;
+    if (event.key === 'Home') nextWidth = workspacePanelSizing[panel].minWidth;
+    else if (event.key === 'End') nextWidth = workspacePanelSizing[panel].maxWidth;
+    else if (event.key === 'ArrowLeft') nextWidth += panel === 'directory' ? -step : step;
+    else if (event.key === 'ArrowRight') nextWidth += panel === 'directory' ? step : -step;
+    else return;
+    event.preventDefault();
+    nextWidth = clampWorkspacePanelWidth(panel, nextWidth, panelAvailableWidth(panel));
+    setPanelWidth(panel, nextWidth);
+    rememberPanelWidth(panel, nextWidth);
+  };
+  const workspaceStyle = {
+    '--directory-width': `${directoryWidth}px`,
+    '--qa-width': `${qaWidth}px`,
+  } as CSSProperties;
+
   return (
-    <div className={`learning-workspace mode-${dailyMode} ${directoryHidden ? 'directory-collapsed' : ''} ${qaHidden ? 'qa-collapsed' : ''}`}>
+    <div
+      ref={workspaceRef}
+      style={workspaceStyle}
+      className={`learning-workspace mode-${dailyMode} ${directoryHidden ? 'directory-collapsed' : ''} ${qaHidden ? 'qa-collapsed' : ''} ${resizingPanel ? 'is-resizing' : ''}`}
+    >
       {compactLayout && (!directoryHidden || !qaHidden) && (
         <button
           className="panel-backdrop"
@@ -3476,6 +3867,36 @@ function LearningWorkspace({
         onAnchor={selectBlock}
         onClearQuote={() => setSelectedQuote(null)}
       />
+      {(['directory', 'qa'] as const).map((panel) => {
+        const hidden = panel === 'directory' ? directoryHidden : qaHidden;
+        const width = panel === 'directory' ? directoryWidth : qaWidth;
+        const sizing = workspacePanelSizing[panel];
+        const panelName = panel === 'directory' ? '目录' : '答疑';
+        return (
+          <div
+            key={panel}
+            className={`workspace-resize-handle ${panel}-resize-handle ${hidden ? 'is-collapsed' : ''}`}
+            role="separator"
+            aria-label={hidden ? `展开${panelName}` : `调整${panelName}宽度`}
+            aria-orientation="vertical"
+            aria-valuemin={sizing.minWidth}
+            aria-valuemax={sizing.maxWidth}
+            aria-valuenow={Math.round(width)}
+            aria-expanded={!hidden}
+            tabIndex={0}
+            title={hidden ? `点击或向内拖动展开${panelName}` : `拖动调整${panelName}宽度，双击恢复默认`}
+            onPointerDown={(event) => beginPanelResize(panel, event)}
+            onPointerMove={movePanelResize}
+            onPointerUp={finishPanelResize}
+            onPointerCancel={finishPanelResize}
+            onLostPointerCapture={finishPanelResize}
+            onDoubleClick={() => resetPanelWidth(panel)}
+            onKeyDown={(event) => handlePanelKeyDown(panel, event)}
+          >
+            <span aria-hidden="true">{panel === 'directory' ? '›' : '‹'}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }
