@@ -6,6 +6,8 @@ Slow 的重要变更记录在这里。本项目采用 [Keep a Changelog](https:/
 
 ## [Unreleased] · 未发布
 
+- Reframed M3 model outages as an explicit fail-closed Agent state with safe retry, user-facing disclosure, and pilot evidence requirements; reviewed standard-content fallback is now an optional continuity tier instead of a production prerequisite.
+- M3 现将模型不可用视为 Agent 可明确呈现的失败关闭状态，要求安全重试、用户可见提示与真实试点证据；人工审核的标准内容 fallback 改为可选连续性等级，不再是生产试点前置条件。
 - Hardened recovery-code re-authentication with the existing password lockout policy, rejected conflicting case kinds for one stable case identity, and prevented stale preference-save responses from updating a newer explanation request.
 - 恢复码二次认证现已复用密码锁定策略；同一稳定案例身份若声明冲突类型将拒绝发布；过期的偏好保存响应也不会再改写新的讲法请求。
 - Serialized SQLite password verification with `BEGIN IMMEDIATE`, so concurrent failures cannot lose lockout increments when row-level locks are unavailable.

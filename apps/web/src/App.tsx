@@ -214,6 +214,21 @@ const GENERATION_STAGE_LABELS: Record<string, string> = {
   failed: '准备失败',
 };
 
+type FailureWithCode = { errorCode?: string | null } | null | undefined;
+
+const isAiGenerationFailure = (failure: FailureWithCode) => (
+  failure?.errorCode?.startsWith('AI_') === true
+);
+
+const generationFailureMessage = (
+  failure: FailureWithCode,
+  subject = '本节内容',
+) => (
+  isAiGenerationFailure(failure)
+    ? `AI 本次没有完成${subject}生成，未完成的内容不会发布。请稍后重新准备。`
+    : `${subject}本次没有准备完成，未完成的内容不会发布。请稍后重新准备。`
+);
+
 const formatElapsed = (milliseconds: number) => {
   const seconds = Math.max(0, Math.floor(milliseconds / 1000));
   if (seconds < 60) return `${seconds} 秒`;
@@ -881,7 +896,7 @@ export default function App() {
             applyOpenedSection(openedSection, fallbackSectionId);
             setSection(openedSection);
           }
-          setError('第一节暂未准备完成，请重试。');
+          setError(generationFailureMessage(task, '第一节内容'));
           return true;
         }
         await new Promise((resolve) => window.setTimeout(resolve, 1000));
@@ -1693,7 +1708,7 @@ export default function App() {
                     succeeded: '已完成',
                   }[series.initializationTask.status]}：
                   {series.initializationTask.status === 'failed'
-                    ? '暂时没有准备完成，可以重新尝试。'
+                    ? generationFailureMessage(series.initializationTask, '第一节内容')
                     : '准备中'}
                 </span>
                 {series.initializationTask.retryable && (
@@ -5093,7 +5108,7 @@ function SeriesRoutePreview({ series }: { series: Series }) {
   const firstBook = series.books[0];
   const firstChapter = firstBook?.chapters[0];
   const statusCopy = taskStatus === 'failed'
-    ? '第一节暂未准备完成。'
+    ? generationFailureMessage(series.initializationTask, '第一节内容')
     : taskStatus === 'pending'
       ? '排队中'
       : taskStatus === 'running'
@@ -5287,7 +5302,7 @@ function LessonContent({
         </div>
         {section.generation?.status === 'failed' && (
           <div className="inline-error">
-            上次准备失败，请重试。
+            {generationFailureMessage(section.generation)}
           </div>
         )}
         <button className="primary-button large" onClick={onGenerate}>
@@ -6172,8 +6187,9 @@ function QuizReview({
     if (task.type === 'remediation_generation') return '补充教学';
     return '后续内容';
   })));
+  const aiFailedTask = failedWorkflowTasks.find(isAiGenerationFailure);
   const failedTaskSummary = failedTaskLabels.length
-    ? `${failedTaskLabels.join('和')}暂未准备完成。`
+    ? generationFailureMessage(aiFailedTask, failedTaskLabels.join('和'))
     : '后续内容暂未准备完成。';
   const nextSectionReady = Boolean(
     result.passed && nextSectionTask?.status === 'succeeded' && nextSectionId,
@@ -6297,7 +6313,9 @@ function QuizReview({
           nextSectionReady ? (
             <>
               <span>下一节已准备好</span>
-              {noteTask?.status === 'failed' && <small>个人笔记暂未更新。</small>}
+              {noteTask?.status === 'failed' && (
+                <small>{generationFailureMessage(noteTask, '个人笔记')}</small>
+              )}
               <div className="remediation-readiness-actions">
                 {noteTask?.status === 'failed' && noteTask.retryable && (
                   <button
