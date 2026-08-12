@@ -312,6 +312,7 @@ button:disabled { cursor: not-allowed; }
   padding: 7px 11px;
   font-size: 12px;
 }
+.docs-header-link { text-decoration: none; }
 .ai-settings-trigger { display: flex; align-items: center; gap: 6px; }
 .ai-settings-trigger > span {
   width: 7px;
@@ -367,6 +368,20 @@ button:disabled { cursor: not-allowed; }
   align-items: center;
   gap: 30px;
 }
+.docs-entry-link {
+  min-height: 34px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #cbd8ce;
+  border-radius: 999px;
+  background: #edf4ee;
+  color: var(--green);
+  font-size: 11px;
+  font-weight: 760;
+  text-decoration: none;
+}
+.docs-entry-link:hover { border-color: #91ab99; background: #e5efe7; transform: translateY(-1px); }
 .github-repo-link {
   min-height: 34px;
   padding: 0 10px 0 9px;
@@ -4069,6 +4084,7 @@ button:disabled { cursor: not-allowed; }
   .auth-header { height: 64px; padding: 0 18px; }
   .auth-header-tagline { display: none; }
   .auth-header-left { width: 100%; justify-content: space-between; gap: 16px; }
+  .docs-entry-link { min-height: 32px; padding: 0 9px; font-size: 10px; }
   .github-repo-link { min-height: 32px; padding: 0 9px; }
   .github-repo-identity { display: none; }
   .github-repo-mobile-label { display: inline; font-size: 11px; }

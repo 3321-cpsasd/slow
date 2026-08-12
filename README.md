@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="https://3321-cpsasd.github.io/slow/">使用指南 / User guide</a> ·
   <a href="#中文">中文</a> · <a href="#english">English</a>
 </p>
 
@@ -18,6 +19,8 @@
 ## 中文
 
 Slow 是一个 AI 原生个人学习应用。它把学习目标组织为可阅读、可验证、可持续推进的个性化教材，而不是只生成一份静态计划。
+
+普通用户请从 [Slow 官方使用指南](https://3321-cpsasd.github.io/slow/) 开始；它由 GitHub Pages 自动发布。仓库中的 README、`PRODUCT_DNA.md` 与架构决策文档主要面向开发和协作。
 
 课程、生成、目录和学习证据共同遵守 [`用户 → 书架 → 系列（学习目标） → 书 → 章 → 节`](PRODUCT_DNA.md) 的领域契约；内容块只是节内结构，不是目录或解锁层级。正文与测验生成遵循 [ADR-0001](docs/decisions/0001-lesson-generation-v2.md)。
 
@@ -50,8 +53,24 @@ cp .env.example .env
 默认地址：
 
 - Web：`http://127.0.0.1:5173`
+- 官方使用指南：`http://127.0.0.1:5173/docs`
 - API：`http://127.0.0.1:8000`
 - OpenAPI：`http://127.0.0.1:8000/docs`
+
+### 官方文档发布
+
+官方使用指南通过 GitHub Pages 独立发布到
+[`https://3321-cpsasd.github.io/slow/`](https://3321-cpsasd.github.io/slow/)。首次启用时，仓库管理员需要在
+**Settings → Pages → Build and deployment → Source** 中选择 **GitHub Actions**。
+此后 `main` 分支中的文档相关文件发生变化时，
+[`Docs Pages`](.github/workflows/docs-pages.yml) 工作流会自动构建和发布。
+
+本地验证 GitHub Pages 版本：
+
+```bash
+cd apps/web
+pnpm build:pages
+```
 
 只读运营数据服务见 [`apps/ops/README.md`](apps/ops/README.md)。它运行在运营者本机，通过 SSH 隧道读取生产 PostgreSQL 的受限视图，不占用 ECS 常驻应用资源。
 
