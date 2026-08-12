@@ -94,12 +94,15 @@ export function DailyModeHeader({
         className="daily-mode-expiry"
         aria-haspopup="dialog"
         aria-expanded={popoverOpen}
+        aria-label={state.active
+          ? `调整学习模式持续时间，当前保持至 ${formatExpiry(state.expiresAt)}`
+          : '调整学习模式持续时间'}
         onClick={() => setPopoverOpen((open) => !open)}
       >
         {expiredInActivity
           ? '本节结束后重选'
           : state.active
-            ? `至 ${formatExpiry(state.expiresAt)}`
+            ? `保持至 ${formatExpiry(state.expiresAt)}`
             : '调整时间'}
       </button>
       <button
@@ -107,6 +110,9 @@ export function DailyModeHeader({
         className="daily-mode-pill"
         disabled={busy}
         aria-label={`当前 ${modeName(mode)}，点击切换到 ${modeName(mode === 'fast' ? 'slow' : 'fast')}`}
+        title={mode === 'fast'
+          ? '快速阅读：只显示关键段落和自检'
+          : '完整阅读：显示本节全部正文'}
         onClick={() => void onActivate(
           mode === 'fast' ? 'slow' : 'fast',
           duration,
