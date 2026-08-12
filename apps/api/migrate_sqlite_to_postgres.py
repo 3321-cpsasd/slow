@@ -31,6 +31,16 @@ from app.infrastructure.tables import Base
 API_ROOT = Path(__file__).resolve().parent
 ALEMBIC_TABLE = "alembic_version"
 MIGRATION_LOCK_KEY = "slow-sqlite-to-postgresql-v1"
+SCHEMA_BOOTSTRAP_ROWS = {
+    "bkt_parameter_activation_events": (
+        "id",
+        {"bkt_activation_system_default_v2"},
+    ),
+    "bkt_parameter_set_versions": (
+        "version",
+        {"bkt_multimodal_v2"},
+    ),
+}
 
 
 class MigrationRefused(RuntimeError):
@@ -107,19 +117,40 @@ def _assert_schema(
     return [table.name for table in Base.metadata.sorted_tables]
 
 
-def _assert_target_empty(connection: Connection, table_names: list[str]) -> None:
+def _prepare_empty_target(connection: Connection, table_names: list[str]) -> None:
+    """Accept only migration-owned bootstrap rows, then restore a truly empty target.
+
+    Some schema revisions install frozen system defaults. They are part of the
+    schema bootstrap rather than user/application data, and the authoritative
+    SQLite snapshot contains its own copy. Any row outside the exact bootstrap
+    primary keys still fails closed.
+    """
     metadata = sa.MetaData()
     metadata.reflect(bind=connection, only=table_names)
     populated = []
     for table_name in table_names:
         table = metadata.tables[table_name]
-        if connection.execute(sa.select(sa.literal(1)).select_from(table).limit(1)).first():
+        bootstrap = SCHEMA_BOOTSTRAP_ROWS.get(table_name)
+        if bootstrap:
+            key_name, allowed_keys = bootstrap
+            actual_keys = set(connection.execute(sa.select(table.c[key_name])).scalars())
+            if actual_keys <= allowed_keys:
+                continue
+        if connection.execute(
+            sa.select(sa.literal(1)).select_from(table).limit(1)
+        ).first():
             populated.append(table_name)
     if populated:
         raise MigrationRefused(
             "PostgreSQL target is not empty; refusing to overwrite tables: "
             + ", ".join(populated)
         )
+
+    # Delete children before parents. The transaction restores these rows from
+    # the authoritative SQLite snapshot or rolls back the entire import.
+    for table_name in SCHEMA_BOOTSTRAP_ROWS:
+        if table_name in metadata.tables:
+            connection.execute(metadata.tables[table_name].delete())
 
 
 def _coerce_value(value: Any, column: sa.Column[Any]) -> Any:
@@ -330,7 +361,7 @@ def migrate(
                             expected_revision,
                         )
                         if not verify_only:
-                            _assert_target_empty(target, table_names)
+                            _prepare_empty_target(target, table_names)
                             _copy_tables(source, target, table_names)
                         counts = _verify_tables(
                             source,
