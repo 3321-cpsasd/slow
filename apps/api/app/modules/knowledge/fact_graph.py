@@ -29,7 +29,7 @@ from ...infrastructure.tables import (
 )
 
 
-KNOWLEDGE_GRAPH_RULE_VERSION = "knowledge_fact_graph_v1"
+KNOWLEDGE_GRAPH_RULE_VERSION = "knowledge_fact_graph_v2"
 PUBLISHABLE_RIGHTS = frozenset({"public", "open_access", "licensed"})
 VERIFIED_SUPPORT = frozenset({"verified", "cross_source"})
 SUPPORTING_TYPES = frozenset({"supports", "defines"})
@@ -120,6 +120,18 @@ class KnowledgeConceptInput(KnowledgeModel):
         alias="objectiveKeys", min_length=1, max_length=12
     )
     claim_keys: list[str] = Field(alias="claimKeys", min_length=1, max_length=20)
+
+    @model_validator(mode="after")
+    def has_publishable_rank_rubric(self):
+        # Import locally to keep the fact graph independent from projection
+        # storage while sharing the exact same fail-closed rubric semantics.
+        from ..learning.knowledge_ranks import validate_rank_policy_payload
+
+        if validate_rank_policy_payload(self.scope.get("rankPolicy")) is None:
+            raise ValueError(
+                "knowledge concept scope must contain a valid rankPolicy"
+            )
+        return self
 
 
 class KnowledgeRelationInput(KnowledgeModel):
@@ -453,6 +465,18 @@ class KnowledgeFactGraphService:
         concepts = self._load_manifest_rows(
             ConceptRevision, manifest, "conceptRevisionIds"
         )
+        from ..learning.knowledge_ranks import rank_policy_for_revision
+
+        invalid_rank_rubrics = [
+            item.id for item in concepts if rank_policy_for_revision(item) is None
+        ]
+        if invalid_rank_rubrics:
+            raise AppError(
+                "知识概念尚未声明可复核的能力范围与段位上限",
+                code="KNOWLEDGE_GRAPH_RANK_RUBRIC_MISSING",
+                status=409,
+                details={"conceptRevisionIds": invalid_rank_rubrics},
+            )
         objectives = self._load_manifest_rows(
             LearningObjective, manifest, "objectiveIds"
         )

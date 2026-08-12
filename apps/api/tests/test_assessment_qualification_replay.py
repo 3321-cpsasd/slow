@@ -9,14 +9,22 @@ from app.infrastructure.tables import (
     AssessmentObservation,
     AssessmentTarget,
     Base,
+    Concept,
+    ConceptRevision,
     EvidenceQualificationEvent,
+    KnowledgeNodeStateProjection,
     KnowledgeStateProjection,
+    LearnerKnowledgeProfileProjection,
     SectionAssessmentTarget,
     now,
 )
 from app.modules.learning.assessment import (
     QUALIFICATION_RULE_VERSION,
     rebuild_assessment_projections,
+)
+from app.modules.learning.knowledge_ranks import (
+    knowledge_node_views_for_targets,
+    knowledge_settlement,
 )
 
 
@@ -26,14 +34,62 @@ def _session() -> Session:
     return Session(engine)
 
 
-def _add_target(db: Session, target_id: str = "target_replay") -> None:
+def _add_target(
+    db: Session,
+    target_id: str = "target_replay",
+    *,
+    dimension: str = "recognition",
+    published_concept: bool = False,
+    rank_policy: bool = True,
+    rank_ceiling: str = "gold",
+) -> None:
+    concept_revision_id = None
+    identity_status = "legacy_provisional"
+    if published_concept:
+        concept_id = f"concept_{target_id}"
+        concept_revision_id = f"concept_revision_{target_id}"
+        identity_status = "published_knowledge_graph"
+        db.add(
+            Concept(
+                id=concept_id,
+                namespace="test",
+                concept_key=target_id,
+                canonical_name="导数的最优化应用",
+                status="active",
+                origin="test",
+            )
+        )
+        db.add(
+            ConceptRevision(
+                id=concept_revision_id,
+                concept_id=concept_id,
+                revision=1,
+                label="导数的最优化应用",
+                definition="使用导数寻找约束下的极值。",
+                scope_json=json.dumps(
+                    {
+                        "rankPolicy": {
+                            "version": "knowledge_rank_policy_v1",
+                            "capabilityScope": "独立解决单变量标准最优化问题",
+                            "rankCeiling": rank_ceiling,
+                            "dimensionRanks": {dimension: rank_ceiling},
+                        }
+                    }
+                    if rank_policy
+                    else {}
+                ),
+                verification_status="reviewed",
+            )
+        )
     db.add(
         AssessmentTarget(
             id=target_id,
+            concept_revision_id=concept_revision_id,
             objective_key=f"key_{target_id}",
             objective_statement="解释资格事件如何约束证据重放",
-            dimension="recognition",
+            dimension=dimension,
             target_depth="standard",
+            identity_status=identity_status,
             status="active",
         )
     )
@@ -59,7 +115,9 @@ def _add_observation(
     gate_status: str = "eligible",
     mastery_status: str = "eligible_grouped",
     retention_status: str = "ineligible",
+    rank_status: str = "eligible_grouped",
     target_id: str = "target_replay",
+    episode_id: str | None = None,
 ) -> AssessmentObservation:
     observation = AssessmentObservation(
         id=f"observation_{suffix}",
@@ -72,7 +130,7 @@ def _add_observation(
         question_index=0,
         correct=correct,
         assistance_mode=assistance_mode,
-        learning_episode_id=f"episode_{suffix}",
+        learning_episode_id=episode_id or f"episode_{suffix}",
         equivalence_group_id=f"equivalence_{suffix}",
         qualification_at_creation=mastery_status,
         qualification_rule_version=QUALIFICATION_RULE_VERSION,
@@ -85,6 +143,7 @@ def _add_observation(
         "gate": gate_status,
         "mastery": mastery_status,
         "retention": retention_status,
+        "rank": rank_status,
     }.items():
         db.add(
             EvidenceQualificationEvent(
@@ -117,6 +176,8 @@ def test_replay_uses_family_qualification_and_repeat_is_not_retention() -> None:
             created_at=started_at + timedelta(days=2),
             correct=True,
             assistance_mode="unassisted_repeat",
+            mastery_status="ineligible",
+            rank_status="ineligible",
         )
         # An older rule considered the repeat a retention candidate. Replay of
         # the selected current rule must not accidentally consume it.
@@ -139,12 +200,15 @@ def test_replay_uses_family_qualification_and_repeat_is_not_retention() -> None:
             qualification_rule_version=QUALIFICATION_RULE_VERSION,
         )
         state = db.scalar(select(KnowledgeStateProjection))
+        profile = db.scalar(select(LearnerKnowledgeProfileProjection))
         gate = db.scalar(select(AssessmentGateState))
         assert report["qualifiedGateObservations"] == 2
-        assert report["qualifiedMasteryObservations"] == 2
+        assert report["qualifiedMasteryObservations"] == 1
         assert report["qualifiedRetentionObservations"] == 0
         assert state.retention_rounds == 0
         assert state.claim_status == "verified_immediate"
+        assert json.loads(profile.summary_json)["rankedNodeCount"] == 0
+        assert profile.source_observation_watermark == repeated.sequence
         assert gate.status == "resolved_initial"
         assert gate.resolved_by_observation_id == initial.id
 
@@ -197,3 +261,137 @@ def test_ineligible_family_event_is_not_consumed_by_projection() -> None:
         assert state.source_observation_watermark == eligible.sequence
         assert state.claim_status == "verified_immediate"
         assert gate.status == "resolved_initial"
+
+
+def test_published_node_rank_groups_one_quiz_as_one_independent_star() -> None:
+    with _session() as db:
+        _add_target(
+            db,
+            target_id="target_application",
+            dimension="application",
+            published_concept=True,
+        )
+        started_at = now()
+        for suffix in ("q1", "q2", "q3"):
+            _add_observation(
+                db,
+                suffix=suffix,
+                created_at=started_at,
+                correct=True,
+                assistance_mode="unassisted_initial",
+                target_id="target_application",
+                episode_id="quiz:one-attempt",
+            )
+        db.flush()
+
+        report = rebuild_assessment_projections(db, user_id="user_replay")
+        state = db.scalar(select(KnowledgeNodeStateProjection))
+
+        assert report["knowledgeNodeStates"] == 1
+        assert report["qualifiedRankObservations"] == 3
+        assert state.current_rank == "gold"
+        assert state.current_stars == 1
+        assert state.highest_rank == "gold"
+        assert state.independent_evidence_count == 1
+        assert state.activation_state == "active"
+
+        views = knowledge_node_views_for_targets(
+            db,
+            user_id="user_replay",
+            target_ids={"target_application"},
+        )
+        first_settlement = knowledge_settlement({}, views)
+        assert first_settlement["updates"][0]["change"] == "rank_up"
+        assert first_settlement["updates"][0]["before"]["rank"] == "unranked"
+        assert first_settlement["updates"][0]["after"]["rankLabel"] == "黄金 · 会用"
+        assert first_settlement["updates"][0]["after"]["atCeiling"] is True
+        assert first_settlement["updates"][0]["after"]["capabilityScope"] == (
+            "独立解决单变量标准最优化问题"
+        )
+        repeated_settlement = knowledge_settlement(views, views)
+        assert repeated_settlement["updates"][0]["change"] == "confirmed"
+
+
+def test_published_node_without_explicit_local_rank_policy_fails_closed() -> None:
+    with _session() as db:
+        _add_target(
+            db,
+            target_id="target_without_policy",
+            dimension="application",
+            published_concept=True,
+            rank_policy=False,
+        )
+        _add_observation(
+            db,
+            suffix="without_policy",
+            created_at=now(),
+            correct=True,
+            assistance_mode="unassisted_initial",
+            target_id="target_without_policy",
+        )
+        db.flush()
+
+        report = rebuild_assessment_projections(db, user_id="user_replay")
+
+        assert report["qualifiedRankObservations"] == 1
+        assert report["knowledgeNodeStates"] == 0
+        assert db.scalar(select(KnowledgeNodeStateProjection)) is None
+        assert knowledge_node_views_for_targets(
+            db,
+            user_id="user_replay",
+            target_ids={"target_without_policy"},
+        ) == {}
+
+
+def test_repeat_cannot_farm_rank_and_fresh_failure_preserves_highest_rank() -> None:
+    with _session() as db:
+        _add_target(
+            db,
+            target_id="target_application",
+            dimension="application",
+            published_concept=True,
+        )
+        started_at = now()
+        _add_observation(
+            db,
+            suffix="initial",
+            created_at=started_at,
+            correct=True,
+            assistance_mode="unassisted_initial",
+            target_id="target_application",
+        )
+        _add_observation(
+            db,
+            suffix="repeat",
+            created_at=started_at + timedelta(hours=1),
+            correct=True,
+            assistance_mode="unassisted_repeat",
+            target_id="target_application",
+            mastery_status="ineligible",
+            rank_status="ineligible",
+        )
+        db.flush()
+        rebuild_assessment_projections(db, user_id="user_replay")
+        state = db.scalar(select(KnowledgeNodeStateProjection))
+        assert state.current_rank == "gold"
+        assert state.current_stars == 1
+        assert state.evidence_count == 1
+
+        failed = _add_observation(
+            db,
+            suffix="fresh_failure",
+            created_at=started_at + timedelta(days=3),
+            correct=False,
+            assistance_mode="unassisted_review",
+            target_id="target_application",
+            retention_status="candidate",
+        )
+        db.flush()
+        rebuild_assessment_projections(db, user_id="user_replay")
+        db.refresh(state)
+
+        assert state.current_rank == "gold"
+        assert state.highest_rank == "gold"
+        assert state.current_stars == 1
+        assert state.activation_state == "reassessment"
+        assert state.source_observation_watermark == failed.sequence

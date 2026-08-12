@@ -22,6 +22,11 @@ from .domain import (
     ProgressionDecision,
     ProgressionSnapshot,
 )
+from .knowledge_ranks import (
+    KNOWLEDGE_RANK_RULE_VERSION,
+    knowledge_node_views_for_targets,
+    knowledge_settlement,
+)
 
 
 def _uid(prefix: str) -> str:
@@ -208,3 +213,49 @@ def append_progression_snapshot(
         output_decision=asdict(decision),
         source_observation_watermark=observation_watermark,
     )
+
+
+def append_knowledge_settlement_snapshot(
+    db: Session,
+    *,
+    attempt: QuizAttempt,
+    section_id: str,
+    target_ids: set[str],
+    before: dict[str, dict],
+    trigger_kind: str,
+) -> dict:
+    """Freeze the user-facing knowledge change derived from immutable facts."""
+
+    after = knowledge_node_views_for_targets(
+        db,
+        user_id=attempt.user_id,
+        target_ids=target_ids,
+    )
+    output = knowledge_settlement(before, after)
+    source_watermark = max(
+        (
+            int(view.get("sourceObservationWatermark", 0))
+            for view in [*before.values(), *after.values()]
+        ),
+        default=0,
+    )
+    snapshot = _append(
+        db,
+        attempt=attempt,
+        section_id=section_id,
+        decision_kind="knowledge_settlement",
+        trigger_kind=trigger_kind,
+        rule_version=KNOWLEDGE_RANK_RULE_VERSION,
+        input_snapshot={
+            "attemptId": attempt.id,
+            "assessmentTargetIds": sorted(target_ids),
+            "before": before,
+            "after": after,
+        },
+        output_decision=output,
+        source_observation_watermark=source_watermark,
+    )
+    # If another execution already froze this attempt/rule decision, always
+    # return that immutable output instead of recomputing a different replay.
+    frozen_output = json.loads(snapshot.output_decision_json)
+    return {**frozen_output, "settlementId": snapshot.id}

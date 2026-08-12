@@ -135,7 +135,20 @@ def _package(
                 "revision": 1,
                 "label": "递归",
                 "definition": "递归过程通过更小规模的同类调用推进，并由基本情形终止。",
-                "scope": {"pilot": True},
+                "scope": {
+                    "pilot": True,
+                    "rankPolicy": {
+                        "version": "knowledge_rank_policy_v1",
+                        "capabilityScope": "解释递归机制并判断其终止条件",
+                        "rankCeiling": "platinum",
+                        "dimensionRanks": {
+                            "recognition": "bronze",
+                            "mechanism": "silver",
+                            "application": "gold",
+                            "boundary": "platinum",
+                        },
+                    },
+                },
                 "boundaries": ["终止性需要同时检查基本情形与规模推进。"],
                 "objectiveKeys": [
                     "solve_with_enumeration_recursion_and_search",
@@ -148,7 +161,20 @@ def _package(
                 "revision": 1,
                 "label": "深度优先与广度优先搜索",
                 "definition": "图搜索从起点系统访问可达顶点，并通过访问标记避免重复处理。",
-                "scope": {"pilot": True},
+                "scope": {
+                    "pilot": True,
+                    "rankPolicy": {
+                        "version": "knowledge_rank_policy_v1",
+                        "capabilityScope": "选择并执行标准图搜索策略",
+                        "rankCeiling": "platinum",
+                        "dimensionRanks": {
+                            "recognition": "bronze",
+                            "mechanism": "silver",
+                            "application": "gold",
+                            "boundary": "platinum",
+                        },
+                    },
+                },
                 "boundaries": ["复杂度结论依赖图表示与访问模型。"],
                 "objectiveKeys": ["solve_with_enumeration_recursion_and_search"],
                 "claimKeys": ["dfs_visit_and_mark"],
@@ -158,7 +184,21 @@ def _package(
                 "revision": 1,
                 "label": "动态规划",
                 "definition": "动态规划保存重复子问题的结果，并按状态依赖组织求值。",
-                "scope": {"pilot": True},
+                "scope": {
+                    "pilot": True,
+                    "rankPolicy": {
+                        "version": "knowledge_rank_policy_v1",
+                        "capabilityScope": "建立并求解标准动态规划状态模型",
+                        "rankCeiling": "diamond",
+                        "dimensionRanks": {
+                            "recognition": "bronze",
+                            "mechanism": "silver",
+                            "application": "gold",
+                            "boundary": "platinum",
+                            "transfer": "diamond",
+                        },
+                    },
+                },
                 "boundaries": ["状态必须包含决定后续结果所需的全部信息。"],
                 "objectiveKeys": ["model_and_solve_with_dynamic_programming"],
                 "claimKeys": ["dp_reuses_subproblems"],
