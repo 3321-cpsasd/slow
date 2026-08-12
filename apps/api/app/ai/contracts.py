@@ -153,6 +153,22 @@ class ContentBlock(StrictModel):
 
 CONTENT_SENTENCE_ENDINGS = tuple("。！？.!?；;：:）)]】」』”’\"'|")
 
+DIAGNOSTIC_CAUSES = Literal[
+    "prerequisite_gap",
+    "concept_confusion",
+    "mechanism_reasoning_break",
+    "boundary_comparison_error",
+    "application_transfer_failure",
+]
+
+
+class DistractorDiagnostic(StrictModel):
+    """A bounded hypothesis represented by one incorrect answer option."""
+
+    option_index: int = Field(ge=0, le=5)
+    cause_code: DIAGNOSTIC_CAUSES
+    rationale: str = Field(min_length=4, max_length=500)
+
 
 class ChoiceQuestion(StrictModel):
     prompt: str
@@ -163,6 +179,9 @@ class ChoiceQuestion(StrictModel):
     explanation: str
     difficulty: Literal["standard"] = "standard"
     claim_block_indexes: list[int] = Field(default_factory=list)
+    distractor_diagnostics: list[DistractorDiagnostic] = Field(
+        default_factory=list, max_length=5
+    )
 
     @model_validator(mode="after")
     def valid_indexes(self):
@@ -173,6 +192,15 @@ class ChoiceQuestion(StrictModel):
             or len(set(self.claim_block_indexes)) != len(self.claim_block_indexes)
         ):
             raise ValueError("claim block indexes must be unique and non-negative")
+        diagnostic_indexes = [item.option_index for item in self.distractor_diagnostics]
+        if len(diagnostic_indexes) != len(set(diagnostic_indexes)):
+            raise ValueError("distractor diagnostic indexes must be unique")
+        if any(index in self.correct for index in diagnostic_indexes):
+            raise ValueError("correct options cannot carry distractor diagnostics")
+        if diagnostic_indexes and set(diagnostic_indexes) != (
+            set(range(len(self.options))) - set(self.correct)
+        ):
+            raise ValueError("diagnostics must cover every incorrect option")
         return self
 
 
@@ -339,6 +367,9 @@ class GeneratedLessonQuestion(StrictModel):
     correct: list[int] = Field(min_length=1, max_length=6)
     explanation: str = Field(min_length=4, max_length=3000)
     difficulty: Literal["standard"] = "standard"
+    distractor_diagnostics: list[DistractorDiagnostic] = Field(
+        default_factory=list, max_length=5
+    )
 
     @model_validator(mode="after")
     def valid_local_references(self):
@@ -350,6 +381,15 @@ class GeneratedLessonQuestion(StrictModel):
             raise ValueError("correct indexes must be unique")
         if any(index < 0 or index >= len(self.options) for index in self.correct):
             raise ValueError("correct index out of range")
+        diagnostic_indexes = [item.option_index for item in self.distractor_diagnostics]
+        if len(diagnostic_indexes) != len(set(diagnostic_indexes)):
+            raise ValueError("distractor diagnostic indexes must be unique")
+        if any(index in self.correct for index in diagnostic_indexes):
+            raise ValueError("correct options cannot carry distractor diagnostics")
+        if diagnostic_indexes and set(diagnostic_indexes) != (
+            set(range(len(self.options))) - set(self.correct)
+        ):
+            raise ValueError("diagnostics must cover every incorrect option")
         return self
 
 
@@ -429,6 +469,9 @@ class GeneratedLessonSlotQuestion(StrictModel):
     options: list[str] = Field(min_length=3, max_length=6)
     correct: list[int] = Field(min_length=1, max_length=6)
     explanation: str = Field(min_length=4, max_length=3000)
+    distractor_diagnostics: list[DistractorDiagnostic] = Field(
+        default_factory=list, max_length=5
+    )
 
     @model_validator(mode="after")
     def valid_choice(self):
@@ -438,6 +481,15 @@ class GeneratedLessonSlotQuestion(StrictModel):
             raise ValueError("correct indexes must be unique")
         if any(index < 0 or index >= len(self.options) for index in self.correct):
             raise ValueError("correct index out of range")
+        diagnostic_indexes = [item.option_index for item in self.distractor_diagnostics]
+        if len(diagnostic_indexes) != len(set(diagnostic_indexes)):
+            raise ValueError("distractor diagnostic indexes must be unique")
+        if any(index in self.correct for index in diagnostic_indexes):
+            raise ValueError("correct options cannot carry distractor diagnostics")
+        if diagnostic_indexes and set(diagnostic_indexes) != (
+            set(range(len(self.options))) - set(self.correct)
+        ):
+            raise ValueError("diagnostics must cover every incorrect option")
         return self
 
 

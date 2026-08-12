@@ -49,6 +49,7 @@ from .lesson_generation import (
     validate_lesson_candidate,
 )
 from .lesson_composition import resolve_lesson_composition_policy
+from .standard_content import StandardContentService
 
 
 CONTENT_COMPLIANCE_RULE_VERSION = "content_compliance_v1"
@@ -693,21 +694,45 @@ class SectionGenerationCoordinator:
         self.db.add(run)
         self.db.commit()
         try:
+            standard_package = None
             validated_generator = getattr(
                 self.ai,
                 "generate_lesson_validated",
                 None,
             )
-            candidate = (
-                await validated_generator(
-                    spec.payload(),
-                    lambda item: validate_lesson_candidate(spec, item),
+            try:
+                candidate = (
+                    await validated_generator(
+                        spec.payload(),
+                        lambda item: validate_lesson_candidate(spec, item),
+                    )
+                    if callable(validated_generator)
+                    else await self.ai.generate_lesson(spec.payload())
                 )
-                if callable(validated_generator)
-                else await self.ai.generate_lesson(spec.payload())
-            )
+            except AiError as model_error:
+                if (
+                    section_context.series.continuity_tier != "guaranteed"
+                    or regenerate
+                    or regeneration_feedback
+                ):
+                    raise
+                candidate, standard_package = StandardContentService(
+                    self.db
+                ).fallback_candidate(contract=contract, spec=spec)
+                run.trace_json = dump({
+                    **load(run.trace_json, {}),
+                    "modelFailureCode": safe_error_code(model_error),
+                    "continuityFallback": {
+                        "source": "reviewed_standard_package",
+                        "standardPackageVersionId": standard_package.id,
+                    },
+                })
             self._renew_generation_lease(resource_key, owner_id)
-            run.model = getattr(self.ai, "last_model", run.model)
+            run.model = (
+                "standard_content_repository"
+                if standard_package
+                else getattr(self.ai, "last_model", run.model)
+            )
             run.status = "validating"
             run.trace_json = dump(
                 {
@@ -733,7 +758,9 @@ class SectionGenerationCoordinator:
                     status=409
                     if failure.code == "PREREQUISITE_GAP_REQUIRES_REPLAN"
                     else 502,
-                    retryable=False,
+                    retryable=(
+                        failure.code != "PREREQUISITE_GAP_REQUIRES_REPLAN"
+                    ),
                     details=failure.location,
                 ) from failure
 
@@ -782,6 +809,9 @@ class SectionGenerationCoordinator:
                 quiz_generation=next_quiz_generation,
                 superseded_content=existing if regenerate else None,
                 superseded_quiz=latest_quiz if regenerate else None,
+                standard_package_version_id=(
+                    standard_package.id if standard_package else None
+                ),
             )
             if regenerate:
                 self._rebind_regenerated_section(
@@ -864,6 +894,7 @@ class SectionGenerationCoordinator:
                     {
                         **load(failed_run.trace_json, {}),
                         "stage": "failed",
+                        "aiHarness": self._ai_harness_trace(),
                         "modelAttempts": (
                             self.ai.fallback_trace()
                             if callable(getattr(self.ai, "fallback_trace", None))

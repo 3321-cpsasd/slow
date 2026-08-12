@@ -1363,6 +1363,9 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
 
     assert first.status_code == replay.status_code == 200
     assert replay.json()["attemptId"] == first.json()["attemptId"]
+    assert replay.json()["knowledgeSettlement"] == first.json()["knowledgeSettlement"]
+    assert first.json()["knowledgeSettlement"]["updates"] == []
+    assert first.json()["knowledgeSettlement"]["settlementId"]
     with client.app.state.sessions() as db:
         attempts = db.scalars(
             select(QuizAttempt).where(
@@ -1399,9 +1402,10 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
         assert len(evidence) == len(section["quiz"]["questions"])
         assert len(scoring) == 1
         assert len(observations) == len(section["quiz"]["questions"])
-        assert len(qualification) == len(observations) * 3
+        assert len(qualification) == len(observations) * 4
         assert [item.decision_kind for item in decisions] == [
             "assessment_gate",
+            "knowledge_settlement",
             "progression",
         ]
         gate = decisions[0]
@@ -1414,7 +1418,10 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
         assert gate_input["requiredTargetIds"]
         assert gate_output["passed"] is True
         assert gate_output["unresolvedRequiredTargetIds"] == []
-        progression = decisions[1]
+        settlement = decisions[1]
+        assert settlement.rule_version == "knowledge_rank_v2"
+        assert json.loads(settlement.output_decision_json)["updates"] == []
+        progression = decisions[2]
         assert progression.rule_version == "progression_v2_book_outline_gate"
         assert json.loads(progression.input_snapshot_json)["section_id"] == section["id"]
         assert json.loads(progression.output_decision_json)["completed_section_id"] == section["id"]
@@ -1431,7 +1438,7 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
             select(LearningDecisionSnapshot).where(
                 LearningDecisionSnapshot.attempt_id == first.json()["attemptId"]
             )
-        ).all()) == 2
+        ).all()) == 3
 
 
 def test_assessment_gate_remediates_only_failed_target_and_rebuilds(client):
@@ -1747,7 +1754,7 @@ def test_retention_discounts_same_source_and_counts_delayed_novel_review(client)
                 select(EvidenceQualificationEvent).where(
                     EvidenceQualificationEvent.observation_id == item.id,
                     EvidenceQualificationEvent.projection_family == "retention",
-                    EvidenceQualificationEvent.rule_version == "evidence_v2",
+                    EvidenceQualificationEvent.rule_version == "evidence_v3",
                 )
             )
             qualification.status = "candidate"
@@ -1883,7 +1890,7 @@ def test_due_review_api_enforces_daily_budget_without_creating_task_debt(client)
                 learning_episode_id=f"quiz:{attempt.id}",
                 equivalence_group_id=question["equivalenceGroupId"],
                 qualification_at_creation="eligible_grouped",
-                qualification_rule_version="evidence_v2",
+                qualification_rule_version="evidence_v3",
                 payload_json=json.dumps({
                     "questionFingerprint": hashlib.sha256(
                         json.dumps({
@@ -3605,7 +3612,7 @@ def test_content_feedback_streams_the_model_repair_and_rebinds_only_content(clie
     assert submitted.status_code == 201, submitted.json()
     receipt = submitted.json()
     assert receipt["regeneration"] == {
-        "status": "stream_ready",
+        "status": "recorded_only",
         "reasonCode": None,
         "task": None,
     }
@@ -3715,7 +3722,7 @@ def test_content_feedback_repairs_legacy_contract_bound_content(client):
 
     assert submitted.status_code == 201, submitted.json()
     receipt = submitted.json()
-    assert receipt["regeneration"]["status"] == "stream_ready"
+    assert receipt["regeneration"]["status"] == "recorded_only"
     events = sse_events(
         client.post(f"/api/feedback/{receipt['id']}/repair/stream")
     )
@@ -3763,7 +3770,7 @@ def test_content_feedback_after_assessment_repairs_without_rewriting_evidence(cl
 
     assert submitted.status_code == 201
     receipt = submitted.json()
-    assert receipt["regeneration"]["status"] == "stream_ready"
+    assert receipt["regeneration"]["status"] == "recorded_only"
     events = sse_events(
         client.post(f"/api/feedback/{receipt['id']}/repair/stream")
     )

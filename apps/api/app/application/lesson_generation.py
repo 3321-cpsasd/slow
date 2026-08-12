@@ -33,8 +33,8 @@ from ..modules.learning.assessment_items import publish_assessment_item_versions
 
 LESSON_GENERATION_PIPELINE_VERSION = "lesson_generation_v3"
 LESSON_GENERATION_SCHEMA_VERSION = "generated_lesson_composition_candidate_v7"
-LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_composition_prompt_v10"
-LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v11"
+LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_composition_prompt_v11"
+LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v12"
 LESSON_CONTEXT_POLICY_VERSION = "lesson_generation_context_v2"
 AI_CONTENT_LABEL_SCHEMA_VERSION = "ai_content_label_v2"
 
@@ -111,7 +111,7 @@ class LessonGenerationSpec(LessonSpecModel):
         default=LESSON_GENERATION_SCHEMA_VERSION,
         alias="schemaVersion",
     )
-    prompt_version: Literal["lesson_generation_composition_prompt_v10"] = Field(
+    prompt_version: Literal["lesson_generation_composition_prompt_v11"] = Field(
         default=LESSON_GENERATION_PROMPT_VERSION,
         alias="promptVersion",
     )
@@ -258,6 +258,22 @@ def _paragraphs(content: str) -> list[str]:
     ]
 
 
+def _has_unclosed_code_fence(content: str) -> bool:
+    opening: tuple[str, int] | None = None
+    for line in content.splitlines():
+        match = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", line)
+        if not match:
+            continue
+        fence, suffix = match.groups()
+        if opening is None:
+            opening = (fence[0], len(fence))
+            continue
+        marker, minimum_length = opening
+        if fence[0] == marker and len(fence) >= minimum_length and not suffix.strip():
+            opening = None
+    return opening is not None
+
+
 def _validate_lesson_block_layout(block) -> None:
     """Validate publishability without treating a presentation hint as authority."""
 
@@ -266,6 +282,13 @@ def _validate_lesson_block_layout(block) -> None:
     nonempty_lines = [line for line in lines if line.strip()]
     if not nonempty_lines:
         _layout_reject(block, "empty_content", "正文块没有可发布内容")
+
+    if _has_unclosed_code_fence(content):
+        _layout_reject(
+            block,
+            "unclosed_code_fence",
+            "Markdown 代码围栏没有闭合",
+        )
 
     first_line = re.sub(r"^#{1,6}\s+", "", nonempty_lines[0].strip())
     if first_line == block.heading.strip():
@@ -365,20 +388,38 @@ def validate_lesson_candidate(
             maximumBlocks=spec.composition_policy.maximum_blocks,
             actualBlocks=block_count,
         )
-    case_kind_by_key: dict[str, str] = {}
+    # `case_kind` is block-local: some values describe provenance
+    # (empirical/primary-source/hypothetical), while others describe how the
+    # case is taught (worked example/counterexample/learner transfer). The same
+    # case may therefore legitimately use different kinds across blocks. Only
+    # reject an actual provenance contradiction; do not make pedagogical uses
+    # mutually exclusive identity labels.
+    case_provenance_by_key: dict[str, str] = {}
+    case_keys: set[str] = set()
     for block in candidate.blocks:
         if not block.case_kind:
             continue
-        existing_kind = case_kind_by_key.setdefault(block.case_key, block.case_kind)
-        if existing_kind != block.case_kind:
+        case_keys.add(block.case_key)
+        provenance = {
+            "empirical_case": "factual",
+            "primary_source_case": "factual",
+            "hypothetical_example": "hypothetical",
+        }.get(block.case_kind)
+        if not provenance:
+            continue
+        existing_provenance = case_provenance_by_key.setdefault(
+            block.case_key,
+            provenance,
+        )
+        if existing_provenance != provenance:
             _reject(
-                "CONTENT_CASE_IDENTITY_CONFLICT",
-                "同一案例身份声明了不同的案例类型",
+                "CONTENT_CASE_PROVENANCE_CONFLICT",
+                "同一案例不能同时声明为事实案例和假设案例",
                 caseKey=block.case_key,
-                expectedCaseKind=existing_kind,
-                actualCaseKind=block.case_kind,
+                expectedCaseProvenance=existing_provenance,
+                actualCaseProvenance=provenance,
             )
-    case_count = len(case_kind_by_key)
+    case_count = len(case_keys)
     if case_count < spec.composition_policy.case_policy.minimum_distinct_cases:
         _reject(
             "CONTENT_COMPOSITION_CASES_MISSING",
@@ -416,7 +457,7 @@ def validate_lesson_candidate(
         if expected_case_kind and block.case_kind != expected_case_kind:
             _reject(
                 "CONTENT_CASE_KIND_INVALID",
-                "案例职责必须声明匹配的案例真实性类型",
+                "案例职责必须声明匹配的当前教学用途",
                 blockKey=block.block_key,
                 role=block.role,
                 expectedCaseKind=expected_case_kind,
@@ -623,6 +664,7 @@ def publish_lesson_candidate(
     quiz_generation: int,
     superseded_content: ContentVersion | None = None,
     superseded_quiz: QuizSet | None = None,
+    standard_package_version_id: str | None = None,
 ) -> PublishedLesson:
     """Stage all authoritative rows in the caller's single transaction."""
 
@@ -640,15 +682,20 @@ def publish_lesson_candidate(
         prompt_version=LESSON_GENERATION_PROMPT_VERSION,
         generation_mode=spec.generation_mode,
         rights_status=(
-            "reviewed" if spec.generation_mode == "rights_grounded" else "not_applicable"
+            "reviewed"
+            if standard_package_version_id or spec.generation_mode == "rights_grounded"
+            else "not_applicable"
         ),
         factual_status=(
-            "claim_grounded"
+            "reviewed"
+            if standard_package_version_id
+            else "claim_grounded"
             if spec.knowledge_context.get("status") == "ready"
             else "unreviewed"
         ),
-        ai_generated=True,
+        ai_generated=not bool(standard_package_version_id),
         generation_run_id=generation_run.id,
+        standard_package_version_id=standard_package_version_id,
     )
     db.add(content)
     db.flush()
@@ -712,7 +759,11 @@ def publish_lesson_candidate(
                 trust_state=(
                     "claim_grounded" if block.claim_version_ids else "model_synthesis"
                 ),
-                generation_method=spec.generation_mode,
+                generation_method=(
+                    "reviewed_standard_package"
+                    if standard_package_version_id
+                    else spec.generation_mode
+                ),
                 assessment_eligible=bool(block.assessment_target_ids),
             )
         )
@@ -752,11 +803,12 @@ def publish_lesson_candidate(
     content.labeling_metadata_json = _dump(
         {
             "schemaVersion": AI_CONTENT_LABEL_SCHEMA_VERSION,
-            "generatedContent": True,
+            "generatedContent": not bool(standard_package_version_id),
             "serviceProvider": "Slow",
             "contentId": content.id,
             "generationRunId": generation_run.id,
             "generationMode": content.generation_mode,
+            "standardPackageVersionId": standard_package_version_id,
             "rightsStatus": content.rights_status,
             "factualStatus": content.factual_status,
             "model": generation_run.model,
@@ -803,6 +855,14 @@ def publish_lesson_candidate(
             "correct": question.correct,
             "explanation": question.explanation,
             "difficulty": question.difficulty,
+            "distractorDiagnostics": [
+                {
+                    "optionIndex": item.option_index,
+                    "causeCode": item.cause_code,
+                    "rationale": item.rationale,
+                }
+                for item in question.distractor_diagnostics
+            ],
             "claim_block_indexes": [
                 block_index_by_key[key] for key in question.evidence_block_keys
             ],

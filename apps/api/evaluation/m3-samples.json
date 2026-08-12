@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "m3_sample_freeze_v1",
+  "frozenAt": "2026-08-12T00:00:00+08:00",
+  "manifestHash": "75c73b2a629320d9e16af29759aeac31e625d1eda9094d5a6f2eb0acc87bb14d",
+  "samples": [
+    {"id":"fq-concept","knowledgeForm":"formal_quantitative","task":"concept","title":"条件概率与联合概率的对象区别"},
+    {"id":"fq-mechanism","knowledgeForm":"formal_quantitative","task":"mechanism","title":"贝叶斯更新为何改变后验概率"},
+    {"id":"fq-boundary","knowledgeForm":"formal_quantitative","task":"boundary","title":"期望的线性与独立性边界"},
+    {"id":"fq-transfer","knowledgeForm":"formal_quantitative","task":"transfer","title":"用矩阵变换分析新坐标问题"},
+    {"id":"tp-concept","knowledgeForm":"technical_procedural","task":"concept","title":"事务隔离级别解决的并发问题"},
+    {"id":"tp-mechanism","knowledgeForm":"technical_procedural","task":"mechanism","title":"Kubernetes 调度过滤与评分链"},
+    {"id":"tp-boundary","knowledgeForm":"technical_procedural","task":"boundary","title":"TCP 流量控制与拥塞控制边界"},
+    {"id":"tp-transfer","knowledgeForm":"technical_procedural","task":"transfer","title":"把编译流水线用于定位新错误"},
+    {"id":"sc-concept","knowledgeForm":"scientific_causal","task":"concept","title":"自然选择中的适应度概念"},
+    {"id":"sc-mechanism","knowledgeForm":"scientific_causal","task":"mechanism","title":"温室气体如何改变辐射平衡"},
+    {"id":"sc-boundary","knowledgeForm":"scientific_causal","task":"boundary","title":"相关、机制与因果主张的边界"},
+    {"id":"sc-transfer","knowledgeForm":"scientific_causal","task":"transfer","title":"用负反馈解释新的稳态系统"},
+    {"id":"th-concept","knowledgeForm":"textual_historical","task":"concept","title":"叙述视角与作者立场的区别"},
+    {"id":"th-mechanism","knowledgeForm":"textual_historical","task":"mechanism","title":"史料互证如何增强解释"},
+    {"id":"th-boundary","knowledgeForm":"textual_historical","task":"boundary","title":"历史因果解释与目的论边界"},
+    {"id":"th-transfer","knowledgeForm":"textual_historical","task":"transfer","title":"把修辞分析迁移到新文本"},
+    {"id":"sn-concept","knowledgeForm":"social_normative","task":"concept","title":"混杂变量与中介变量的区别"},
+    {"id":"sn-mechanism","knowledgeForm":"social_normative","task":"mechanism","title":"抽样偏差如何扭曲调查结论"},
+    {"id":"sn-boundary","knowledgeForm":"social_normative","task":"boundary","title":"实证结论与规范判断的边界"},
+    {"id":"sn-transfer","knowledgeForm":"social_normative","task":"transfer","title":"在新政策案例中权衡公平与效率"}
+  ]
+}

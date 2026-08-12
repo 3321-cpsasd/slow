@@ -15,7 +15,7 @@ export type ProductEventName =
   | 'frontend_error';
 
 type ProductEventContext = {
-  view?: '' | 'home' | 'shelf' | 'learn' | 'profile';
+  view?: '' | 'home' | 'shelf' | 'learn' | 'profile' | 'knowledge';
   entityType?: '' | 'shelf' | 'series' | 'book' | 'chapter' | 'section';
   entityId?: string;
   properties?: Record<string, string | number | boolean>;

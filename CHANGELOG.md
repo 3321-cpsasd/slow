@@ -6,12 +6,27 @@ Slow 的重要变更记录在这里。本项目采用 [Keep a Changelog](https:/
 
 ## [Unreleased] · 未发布
 
-- Hardened recovery-code re-authentication with the existing password lockout policy, rejected conflicting case kinds for one stable case identity, and prevented stale preference-save responses from updating a newer explanation request.
-- 恢复码二次认证现已复用密码锁定策略；同一稳定案例身份若声明冲突类型将拒绝发布；过期的偏好保存响应也不会再改写新的讲法请求。
+- Reframed M3 model outages as an explicit fail-closed Agent state with safe retry, user-facing disclosure, and pilot evidence requirements; reviewed standard-content fallback is now an optional continuity tier instead of a production prerequisite.
+- M3 现将模型不可用视为 Agent 可明确呈现的失败关闭状态，要求安全重试、用户可见提示与真实试点证据；人工审核的标准内容 fallback 改为可选连续性等级，不再是生产试点前置条件。
+- Hardened recovery-code re-authentication with the existing password lockout policy, rejected factual-versus-hypothetical provenance conflicts without treating compatible teaching uses as exclusive case identities, and prevented stale preference-save responses from updating a newer explanation request.
+- 恢复码二次认证现已复用密码锁定策略；同一稳定案例只有在事实来源与假设来源冲突时才拒绝发布，兼容的教学用途不再被误判为互斥身份；过期的偏好保存响应也不会再改写新的讲法请求。
 - Serialized SQLite password verification with `BEGIN IMMEDIATE`, so concurrent failures cannot lose lockout increments when row-level locks are unavailable.
 - SQLite 密码校验现使用 `BEGIN IMMEDIATE` 串行化；在不支持行锁时，并发失败也不会丢失锁定计数。
+- Decoupled paragraph feedback from lesson mutation: submitting layout or content feedback now records an immutable observation and returns immediately, while any lesson regeneration remains an explicit recovery action.
+- 段落反馈不再隐式触发教材改写：排版或内容反馈只记录不可变事实并立即返回；需要整节重生成时，必须由用户通过独立恢复操作显式发起。
+- Rendered mixed prose and fenced code according to their Markdown boundaries even when a lesson block carries the `code` presentation hint, and reject unclosed code fences before publication.
+- 带 `code` 展示提示的正文块现在仍按 Markdown 边界区分说明文字与围栏代码；未闭合的代码围栏会在发布前被拒绝。
 
 ### Added · 新增
+
+- Completed the ADR-0012 MVP loop with publication-gated node rubrics, a personal knowledge-map API and responsive evidence field, rebuildable evidence-only learner profile summaries, task-scoped teaching actions shared by future generation and review, and a versioned BKT registry with offline time-split calibration, shadow activation, and fail-closed online promotion.
+- 完成 ADR-0012 的 MVP 核心闭环：知识节点量规发布门禁、个人知识版图 API 与响应式证据场、可重建的纯证据画像摘要、生成与复习共享的任务级教学动作，以及包含离线时间切分校准、影子运行和失败关闭上线门禁的版本化 BKT 参数注册链。
+
+- Implemented the first ADR-0012 vertical slice: rebuildable per-user knowledge-node ranks, explicit node-local capability rubrics and natural ceilings, evidence-star deduplication, append-only rank qualification, immutable post-quiz knowledge settlements, and responsive “knowledge seal” feedback on the real quiz result page.
+- 实现 ADR-0012 首条纵向切片：可重建的用户知识节点段位、显式节点局部能力量规与自然上限、证据星去重、追加式段位资格事件、不可变测验后知识结算，以及真实结果页上的响应式“知识印记”反馈。
+
+- Added ADR-0012 and the matching product DNA constraints for an on-demand shared knowledge universe, per-user knowledge subgraphs, three-layer learning memory, evidence-backed ranks, wake-up states, and post-assessment knowledge settlement.
+- 新增 ADR-0012 及配套产品底层约束，确立按需扩张的共享知识宇宙、用户个人知识子网、三层学习记忆、证据驱动段位、待唤醒状态与验证后知识结算。
 
 - Added ADR-0001 as the authoritative design for single-call lesson-and-quiz generation, deterministic Learning Contract gates, separated generation-attempt audit, and atomic publication of user-visible content.
 - 新增 ADR-0001，确立正文与测验一次生成、Learning Contract 确定性门禁、生成尝试审计分离及用户可见内容原子发布的权威设计。

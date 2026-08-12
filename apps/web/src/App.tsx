@@ -14,6 +14,20 @@ import { api, ApiError } from './api/client';
 import { telemetry } from './telemetry';
 import { ProfileOnboardingFlow } from './ProfileOnboardingFlow';
 import { DailyModeDialog, DailyModeHeader } from './DailyMode';
+import {
+  LessonReaderHeader,
+  LessonReaderTabs,
+  type ReaderTab,
+} from './features/lesson/ReaderChrome';
+import {
+  type ExplanationStyle,
+  type PresetExplanationStyle,
+} from './features/lesson/LessonBlockTools';
+import { LessonBlockBody, LessonContentBlock } from './features/lesson/LessonContentBlock';
+import { PathDecisionBanner } from './features/learning/PathDecisionBanner';
+import { useStudyActivity } from './features/study/useStudyActivity';
+import { AppBusyStatus, AppStatusRegion } from './features/shell/AppStatusRegion';
+import { useModalFocus } from './features/system/useModalFocus';
 import type {
   AskMeDiscussion,
   AiRuntime,
@@ -34,8 +48,12 @@ import type {
   LearningTask,
   LearningProfile,
   LearningPreferences,
+  KnowledgeSettlement,
+  KnowledgeMap,
+  KnowledgeMapNode,
   Note as NoteType,
   NoteContent,
+  NoteVerificationAnnotation,
   QaHistory,
   QuizResult,
   ReviewResult,
@@ -45,25 +63,18 @@ import type {
   Series,
   Shelf,
   ShelfCreateInput,
+  StudyActivitySummary,
 } from './model/types';
 
-type View = 'home' | 'shelf' | 'learn' | 'profile';
-type ReaderTab = 'content' | 'quiz' | 'note';
+type View = 'home' | 'shelf' | 'learn' | 'profile' | 'knowledge';
 type AppRoute =
   | { view: 'home' }
   | { view: 'profile'; section: 'profile' | 'account' }
+  | { view: 'knowledge' }
   | { view: 'shelf'; shelfId: string }
   | { view: 'learn'; seriesId: string; sectionId: string | null };
 type TextQuote = { text: string; blockId: string };
 type SelectionPopup = TextQuote & { top: number; left: number };
-type PresetExplanationStyle =
-  | 'worked_example'
-  | 'diagram'
-  | 'analogy'
-  | 'derivation'
-  | 'precise'
-  | 'concise';
-type ExplanationStyle = PresetExplanationStyle | 'custom';
 type ExplanationRequest = {
   requestId: string;
   blockId: string;
@@ -171,6 +182,7 @@ const routeFromLocation = (): AppRoute => {
         : 'profile',
     };
   }
+  if (parts[0] === 'knowledge' && parts.length === 1) return { view: 'knowledge' };
   if (parts[0] === 'shelves' && parts[1] && parts.length === 2) {
     return { view: 'shelf', shelfId: parts[1] };
   }
@@ -212,6 +224,21 @@ const GENERATION_STAGE_LABELS: Record<string, string> = {
   persisted: '已经完成',
   failed: '准备失败',
 };
+
+type FailureWithCode = { errorCode?: string | null } | null | undefined;
+
+const isAiGenerationFailure = (failure: FailureWithCode) => (
+  failure?.errorCode?.startsWith('AI_') === true
+);
+
+const generationFailureMessage = (
+  failure: FailureWithCode,
+  subject = '本节内容',
+) => (
+  isAiGenerationFailure(failure)
+    ? `AI 本次没有完成${subject}生成，未完成的内容不会发布。请稍后重新准备。`
+    : `${subject}本次没有准备完成，未完成的内容不会发布。请稍后重新准备。`
+);
 
 const formatElapsed = (milliseconds: number) => {
   const seconds = Math.max(0, Math.floor(milliseconds / 1000));
@@ -348,6 +375,7 @@ export default function App() {
   const [section, setSection] = useState<Section | null>(null);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [showAiSettings, setShowAiSettings] = useState(false);
   const [feedbackTarget, setFeedbackTarget] = useState<FeedbackTarget | null>(null);
   const [bookReplan, setBookReplan] = useState<{ book: Book; proposal: BookReplanProposal } | null>(null);
@@ -364,6 +392,7 @@ export default function App() {
   const [dailyModeExpiredDuringActivity, setDailyModeExpiredDuringActivity] = useState(false);
   const [pendingSectionId, setPendingSectionId] = useState('');
   const [generatingChapterId, setGeneratingChapterId] = useState('');
+  const [dismissedPathAlertSeriesId, setDismissedPathAlertSeriesId] = useState('');
   const chapterGenerationRequests = useRef(new Set<string>());
   const userMenuRef = useRef<HTMLDivElement | null>(null);
   const lastViewedSection = useRef('');
@@ -416,6 +445,12 @@ export default function App() {
       setAuthChecked(true);
     }
   };
+
+  useEffect(() => {
+    if (!notice) return undefined;
+    const timer = window.setTimeout(() => setNotice(''), 4800);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
 
   useEffect(() => {
     const clearUserState = () => {
@@ -710,6 +745,21 @@ export default function App() {
 
   const goHome = () => showHome('push');
 
+  const returnToShelf = () => {
+    if (!shelf) {
+      goHome();
+      return;
+    }
+    routeRequestVersion.current += 1;
+    updateBrowserLocation(shelfPath(shelf.id), 'push');
+    setShowUserMenu(false);
+    setSeries(null);
+    setSection(null);
+    setActivityDailyMode(null);
+    setDailyModeExpiredDuringActivity(false);
+    setView('shelf');
+  };
+
   const openProfileCenter = (nextSection: 'profile' | 'account' = 'profile') => {
     routeRequestVersion.current += 1;
     const nextUrl = nextSection === 'account' ? '/profile?section=account' : '/profile';
@@ -720,6 +770,16 @@ export default function App() {
     setSeries(null);
     setSection(null);
     setView('profile');
+  };
+
+  const openKnowledgeMap = () => {
+    routeRequestVersion.current += 1;
+    updateBrowserLocation('/knowledge', 'push');
+    setShowUserMenu(false);
+    setShelf(null);
+    setSeries(null);
+    setSection(null);
+    setView('knowledge');
   };
 
   const changeProfileSection = (nextSection: 'profile' | 'account') => {
@@ -790,7 +850,12 @@ export default function App() {
         `daily-mode-${crypto.randomUUID()}`,
       );
       setData((current) => current ? { ...current, dailyMode: updated } : current);
-      if (source === 'header_toggle' && section) setActivityDailyMode(mode);
+      if (source === 'header_toggle') {
+        if (section) setActivityDailyMode(mode);
+        setNotice(mode === 'fast'
+          ? '已切换为快速阅读：当前只展示关键段落和 30 秒自检。'
+          : '已切换为完整阅读：当前展示本节全部正文。');
+      }
       setDailyModeExpiredDuringActivity(false);
       setDailyModeDialogOpen(false);
       if (pendingSectionId) {
@@ -880,7 +945,7 @@ export default function App() {
             applyOpenedSection(openedSection, fallbackSectionId);
             setSection(openedSection);
           }
-          setError('第一节暂未准备完成，请重试。');
+          setError(generationFailureMessage(task, '第一节内容'));
           return true;
         }
         await new Promise((resolve) => window.setTimeout(resolve, 1000));
@@ -1014,9 +1079,21 @@ export default function App() {
   };
 
   const generateSection = async (sectionId: string) => {
-    const value = await run('正在准备并检查本节内容…', () => api.prepareSection(sectionId));
-    setSection(value);
-    await refreshSeries();
+    try {
+      const value = await run('正在准备并检查本节内容…', () => api.prepareSection(sectionId));
+      setSection(value);
+      await refreshSeries();
+    } catch (reason) {
+      if (!(reason instanceof ApiError) || !reason.retryable) throw reason;
+      try {
+        const failed = await api.section(sectionId);
+        setSection(failed);
+        setError('');
+        await refreshSeries();
+      } catch {
+        setError(generationFailureMessage(null));
+      }
+    }
   };
 
   const regenerateSection = async (sectionId: string) => {
@@ -1064,6 +1141,13 @@ export default function App() {
     if (route.view === 'profile') {
       setProfileSection(route.section);
       setView('profile');
+      setShelf(null);
+      setSeries(null);
+      setSection(null);
+      return;
+    }
+    if (route.view === 'knowledge') {
+      setView('knowledge');
       setShelf(null);
       setSeries(null);
       setSection(null);
@@ -1158,8 +1242,28 @@ export default function App() {
     return (
       <div className="app-shell auth-shell">
         <header className="auth-header">
-          <span className="brand"><span className="brand-mark"><i /></span><b>slow</b></span>
-          <span>AI 原生个人学习系统</span>
+          <div className="auth-header-left">
+            <span className="brand"><span className="brand-mark"><i /></span><b>slow</b></span>
+            <a
+              className="github-repo-link"
+              href="https://github.com/3321-cpsasd/slow"
+              target="_blank"
+              rel="noreferrer"
+              aria-label="在新标签页打开 Slow GitHub 仓库"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 2C6.48 2 2 6.59 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.1.68-.22.68-.49 0-.24-.01-1.05-.02-1.9-2.78.62-3.37-1.21-3.37-1.21-.45-1.18-1.11-1.49-1.11-1.49-.91-.64.07-.62.07-.62 1 .07 1.53 1.05 1.53 1.05.89 1.57 2.34 1.11 2.91.85.09-.66.35-1.11.64-1.37-2.22-.26-4.56-1.14-4.56-5.07 0-1.12.39-2.04 1.03-2.76-.1-.26-.45-1.31.1-2.72 0 0 .84-.28 2.75 1.05A9.31 9.31 0 0 1 12 6.11a9.3 9.3 0 0 1 2.5.35c1.91-1.33 2.75-1.05 2.75-1.05.55 1.41.2 2.46.1 2.72.64.72 1.03 1.64 1.03 2.76 0 3.94-2.34 4.8-4.57 5.06.36.32.68.94.68 1.89 0 1.37-.01 2.47-.01 2.81 0 .27.18.59.69.49A10.27 10.27 0 0 0 22 12.25C22 6.59 17.52 2 12 2Z" />
+              </svg>
+              <span className="github-repo-identity">
+                <span>3321-cpsasd</span>
+                <i aria-hidden="true">/</i>
+                <strong>slow</strong>
+              </span>
+              <span className="github-repo-mobile-label">GitHub</span>
+              <span className="github-repo-external" aria-hidden="true">↗</span>
+            </a>
+          </div>
+          <span className="auth-header-tagline">AI 原生个人学习系统</span>
         </header>
         <main className="auth-main">
           <section className="auth-story">
@@ -1496,6 +1600,18 @@ export default function App() {
       )
     ),
   );
+  const currentMilestonePath = data?.milestoneDashboard.path || null;
+  const activeMilestonePath = currentMilestonePath?.seriesId === series?.id
+    ? currentMilestonePath
+    : null;
+  const pathDecisionKey = activeMilestonePath
+    ? `${activeMilestonePath.seriesId}:${activeMilestonePath.version}:${data?.milestoneDashboard.goal.profileVersion}:${activeMilestonePath.goalAligned}`
+    : '';
+  const pathNeedsDecision = Boolean(
+    activeMilestonePath
+    && (activeMilestonePath.status === 'proposed' || !activeMilestonePath.goalAligned)
+    && dismissedPathAlertSeriesId !== pathDecisionKey,
+  );
 
   return (
     <div className="app-shell">
@@ -1516,6 +1632,8 @@ export default function App() {
           </div>
         ) : view === 'profile' ? (
           <small>个人中心</small>
+        ) : view === 'knowledge' ? (
+          <small>我的知识版图</small>
         ) : (
           <small>一步一步，学成自己的书</small>
         )}
@@ -1534,7 +1652,7 @@ export default function App() {
               onActivate={activateDailyMode}
             />
           )}
-          {busy && <span className="busy-indicator"><i />{busy}</span>}
+          <AppBusyStatus message={busy} />
           {AI_RUNTIME_SETTINGS_ENABLED && (
             <button className="quiet-button ai-settings-trigger" onClick={() => setShowAiSettings(true)}>
               <span aria-hidden="true" />
@@ -1542,7 +1660,13 @@ export default function App() {
             </button>
           )}
           {view === 'learn' && (
-            <button className="quiet-button" onClick={goHome}>返回书架</button>
+            <button
+              className="quiet-button"
+              aria-label={shelf ? `返回${shelf.name}书架` : '返回全部书架'}
+              onClick={returnToShelf}
+            >
+              返回当前书架
+            </button>
           )}
           <div className="user-menu-shell" ref={userMenuRef}>
             <button
@@ -1571,6 +1695,9 @@ export default function App() {
                 <button role="menuitem" onClick={() => openProfileCenter('profile')}>
                   <span><b>个人中心</b><small>学习画像与学习节奏</small></span><i aria-hidden="true">→</i>
                 </button>
+                <button role="menuitem" onClick={openKnowledgeMap}>
+                  <span><b>知识版图</b><small>能力段位、保持状态与目标覆盖</small></span><i aria-hidden="true">→</i>
+                </button>
                 <button role="menuitem" onClick={() => openProfileCenter('account')}>
                   <span><b>账号与数据</b><small>身份、数据归属与安全</small></span><i aria-hidden="true">→</i>
                 </button>
@@ -1583,8 +1710,13 @@ export default function App() {
         </div>
       </header>
 
-      <main className={view === 'learn' ? 'learn-main' : view === 'profile' ? 'profile-main' : 'marketing-main'}>
-        {error && <div className="global-error">{error}</div>}
+      <AppStatusRegion
+        error={error}
+        notice={notice}
+        onDismissError={() => setError('')}
+        onDismissNotice={() => setNotice('')}
+      />
+      <main className={view === 'learn' ? 'learn-main' : view === 'profile' ? 'profile-main' : view === 'knowledge' ? 'knowledge-main' : 'marketing-main'}>
         {view === 'home' && (
           <Home
             data={data}
@@ -1651,32 +1783,33 @@ export default function App() {
             onRequestExit={requestAccountExit}
           />
         )}
+        {view === 'knowledge' && data && (
+          <KnowledgeMapPage
+            series={data.shelves.flatMap((item) => item.series.map((entry) => ({
+              id: entry.id,
+              title: entry.title,
+              shelfName: item.name,
+            })))}
+            onBack={goHome}
+          />
+        )}
         {view === 'learn' && series && (
           <>
-            {((data?.milestoneDashboard.path?.seriesId === series.id
-              && (data.milestoneDashboard.path.status === 'proposed' || !data.milestoneDashboard.path.goalAligned))
+            {(pathNeedsDecision
               || (series.initializationTask && series.initializationTask.status !== 'succeeded')) && (
               <div className="workspace-alert-stack">
-                {data?.milestoneDashboard.path?.seriesId === series.id
-                  && (data.milestoneDashboard.path.status === 'proposed' || !data.milestoneDashboard.path.goalAligned) && (
-                  <div className="path-confirm-alert" role="status">
-                    <i className="path-confirm-mark" aria-hidden="true">✓</i>
-                    <span>
-                      <b>{data.milestoneDashboard.path.goalAligned ? '学习路径待确认' : '你的学习目标有变化'}</b>
-                      <small>{data.milestoneDashboard.path.goalAligned
-                        ? '确认后，这个系列会按当前目标记录里程碑。'
-                        : '如果这个系列仍适合你，可以继续沿用当前路径。'}</small>
-                    </span>
-                    <button
-                      className="secondary-button"
-                      onClick={async () => {
-                        await run('正在确认里程碑路径…', () => api.confirmMilestonePath(series.id));
-                        setData(await api.bootstrap());
-                      }}
-                    >
-                      {data.milestoneDashboard.path.goalAligned ? '确认路径' : '继续沿用'}
-                    </button>
-                  </div>
+                {pathNeedsDecision && activeMilestonePath && (
+                  <PathDecisionBanner
+                    path={activeMilestonePath}
+                    goalStatement={data?.milestoneDashboard.goal.statement || ''}
+                    busy={busy === '正在确认学习路径…'}
+                    onDismiss={() => setDismissedPathAlertSeriesId(pathDecisionKey)}
+                    onReviewGoal={() => openProfileCenter('profile')}
+                    onConfirm={async () => {
+                      await run('正在确认学习路径…', () => api.confirmMilestonePath(series.id));
+                      setData(await api.bootstrap());
+                    }}
+                  />
                 )}
                 {series.initializationTask
                   && series.initializationTask.status !== 'succeeded' && (
@@ -1692,7 +1825,7 @@ export default function App() {
                     succeeded: '已完成',
                   }[series.initializationTask.status]}：
                   {series.initializationTask.status === 'failed'
-                    ? '暂时没有准备完成，可以重新尝试。'
+                    ? generationFailureMessage(series.initializationTask, '第一节内容')
                     : '准备中'}
                 </span>
                 {series.initializationTask.retryable && (
@@ -1766,6 +1899,7 @@ export default function App() {
                   block,
                 });
               }}
+              onGlobalFeedback={() => setFeedbackTarget({ scope: 'global' })}
               onQaVisibilityChange={setLearningQaOpen}
             />
           </>
@@ -1795,7 +1929,7 @@ export default function App() {
       {AI_RUNTIME_SETTINGS_ENABLED && showAiSettings && (
         <AiSettingsDialog onClose={() => setShowAiSettings(false)} />
       )}
-      {!(view === 'learn' && learningQaOpen) && (
+      {!(view === 'learn' && section) && !learningQaOpen && (
         <button
           className="global-feedback-tab"
           aria-label="反馈产品问题或建议"
@@ -1808,8 +1942,6 @@ export default function App() {
         <FeedbackDialog
           target={feedbackTarget}
           view={view}
-          onSectionChange={setSection}
-          onRefreshSeries={refreshSeries}
           onClose={() => setFeedbackTarget(null)}
         />
       )}
@@ -2043,14 +2175,10 @@ function FeedbackTypeDropdown({
 function FeedbackDialog({
   target,
   view,
-  onSectionChange,
-  onRefreshSeries,
   onClose,
 }: {
   target: FeedbackTarget;
   view: View;
-  onSectionChange: (section: Section) => void;
-  onRefreshSeries: () => Promise<void>;
   onClose: () => void;
 }) {
   const options = target.scope === 'content_block'
@@ -2072,9 +2200,6 @@ function FeedbackDialog({
   const [message, setMessage] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
-  const [repairText, setRepairText] = useState('');
-  const [repairFeedbackId, setRepairFeedbackId] = useState('');
-  const [repairFailed, setRepairFailed] = useState(false);
   const [status, setStatus] = useState('');
   const dialogRef = useRef<HTMLElement | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
@@ -2129,31 +2254,6 @@ function FeedbackDialog({
     };
   }, [target.scope]);
 
-  const streamRepair = async (feedbackId: string) => {
-    setSubmitting(true);
-    setSubmitted(true);
-    setRepairFailed(false);
-    setRepairText('');
-    setStatus('');
-    try {
-      await api.streamFeedbackRepair(
-        feedbackId,
-        (delta) => setRepairText((current) => current + delta),
-      );
-      if (target.scope === 'content_block') {
-        const updated = await api.section(target.sectionId);
-        onSectionChange(updated);
-        await onRefreshSeries();
-        setStatus('已替换');
-      }
-    } catch (reason) {
-      setRepairFailed(true);
-      setStatus(reason instanceof Error ? reason.message : '补救没有完成，请重试。');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setSubmitting(true);
@@ -2178,28 +2278,13 @@ function FeedbackDialog({
           key: crypto.randomUUID(),
         };
       }
-      const receipt = await api.submitFeedback(payload, submissionRef.current.key);
+      await api.submitFeedback(payload, submissionRef.current.key);
       setSubmitted(true);
-      if (target.scope === 'global') {
-        setStatus('已收到。');
-        closeTimerRef.current = window.setTimeout(() => onCloseRef.current(), 900);
-        return;
-      }
-      const regeneration = receipt.regeneration;
-      if (regeneration.status === 'stream_ready') {
-        setRepairFeedbackId(receipt.id);
-        await streamRepair(receipt.id);
-        return;
-      }
-      const blockedMessages: Record<string, string> = {
-        FEEDBACK_CONTENT_VERSION_STALE: '当前正文已更新；请刷新后再反馈一次。',
-        SECTION_CONTENT_MISSING: '这段正文已不可用；请刷新后再试。',
-      };
-      setStatus(
-        blockedMessages[regeneration.reasonCode || '']
-        || '这段正文暂时无法补救。',
-      );
       setSubmitting(false);
+      setStatus(target.scope === 'content_block'
+        ? '反馈已收到。当前正文不会被改动，你可以继续学习。'
+        : '已收到。');
+      closeTimerRef.current = window.setTimeout(() => onCloseRef.current(), 5000);
     } catch (reason) {
       setStatus(reason instanceof Error ? reason.message : '反馈没有提交成功，请稍后重试。');
       setSubmitting(false);
@@ -2256,28 +2341,12 @@ function FeedbackDialog({
             />
             <small>请勿填写密码、API Key 或其他敏感信息 · {message.length}/4000</small>
           </label>}
-          {submitted && target.scope === 'content_block' && (
-            <div className={`feedback-repair-answer ${repairFailed ? 'failed' : ''}`} aria-live="polite">
-              {repairText ? (
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{repairText}</ReactMarkdown>
-              ) : submitting ? (
-                <span className="feedback-repair-listening">正在回应<span aria-hidden="true">…</span></span>
-              ) : null}
-              {submitting && repairText && <i className="stream-caret" aria-hidden="true" />}
-            </div>
-          )}
           {status && <p className="feedback-status" role="status">{status}</p>}
           <div className="dialog-actions">
             <button type="button" className="quiet-button" disabled={submitting} onClick={onClose}>{submitted ? '关闭' : '取消'}</button>
-            {repairFailed && repairFeedbackId ? (
-              <button type="button" className="primary-button" disabled={submitting} onClick={() => streamRepair(repairFeedbackId)}>
-                {submitting ? '正在回应…' : '重试补救'}
-              </button>
-            ) : (
-              <button className="primary-button" disabled={submitting || submitted || ((target.scope === 'global' || feedbackType === 'other') && message.trim().length < 2)}>
-                {submitting ? '正在送出…' : submitted ? '已提交' : '发送反馈'}
-              </button>
-            )}
+            <button className="primary-button" disabled={submitting || submitted || ((target.scope === 'global' || feedbackType === 'other') && message.trim().length < 2)}>
+              {submitting ? '正在送出…' : submitted ? '已提交' : '发送反馈'}
+            </button>
           </div>
         </form>
       </section>
@@ -2513,6 +2582,135 @@ function bookContainsSection(book: Book, sectionId: string | null | undefined) {
   );
 }
 
+const studyActivityLabels = {
+  reading_thinking: '阅读与思考',
+  verification_review: '验证与复习',
+  ask_ai: 'Ask AI',
+} as const;
+
+function studyMinutes(seconds: number) {
+  if (seconds <= 0) return '0';
+  return String(Math.max(1, Math.round(seconds / 60)));
+}
+
+function StudyTimeSummary({
+  summary,
+  loading,
+}: {
+  summary: StudyActivitySummary | null;
+  loading: boolean;
+}) {
+  const [view, setView] = useState<'activity' | 'timeline'>('activity');
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const shellRef = useRef<HTMLDivElement>(null);
+  const open = hovered || focused || pinned;
+
+  useEffect(() => {
+    if (!pinned) return undefined;
+    const close = (event: MouseEvent) => {
+      if (!shellRef.current?.contains(event.target as Node)) setPinned(false);
+    };
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') setPinned(false);
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [pinned]);
+
+  const totalSeconds = summary?.totalSeconds || 0;
+  const categories = summary?.categories.filter((item) => item.seconds > 0) || [];
+  const episodes = summary?.episodes || [];
+  const localTime = (value: string) => new Intl.DateTimeFormat('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(new Date(value));
+
+  return (
+    <div
+      className="study-time-shell"
+      ref={shellRef}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onFocus={() => setFocused(true)}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false);
+      }}
+    >
+      <button
+        type="button"
+        className="study-time-trigger"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls="study-time-popover"
+        onClick={() => setPinned((value) => !value)}
+      >
+        <span>今天已投入</span>
+        <strong>{loading && !summary ? '—' : studyMinutes(totalSeconds)}</strong>
+        <em>分钟</em>
+      </button>
+      {open && (
+        <section
+          className="study-time-popover"
+          id="study-time-popover"
+          role="dialog"
+          aria-label="今天的学习投入"
+        >
+          <h2>今天的学习投入</h2>
+          <div className="study-time-view-switch" role="tablist" aria-label="学习投入查看方式">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === 'activity'}
+              className={view === 'activity' ? 'active' : ''}
+              onClick={() => setView('activity')}
+            >按活动</button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === 'timeline'}
+              className={view === 'timeline' ? 'active' : ''}
+              onClick={() => setView('timeline')}
+            >时间线</button>
+          </div>
+          {view === 'activity' ? (
+            categories.length ? (
+              <ul className="study-time-rows">
+                {categories.map((item) => (
+                  <li key={item.activityKind}>
+                    <span>{studyActivityLabels[item.activityKind]}</span>
+                    <strong>{studyMinutes(item.seconds)} 分钟</strong>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="study-time-empty">今天还没有学习记录</p>
+            )
+          ) : episodes.length ? (
+            <ol className="study-time-timeline">
+              {episodes.map((episode) => (
+                <li key={`${episode.startedAt}-${episode.endedAt}`}>
+                  <time dateTime={episode.startedAt}>{localTime(episode.startedAt)}</time>
+                  <span>开始</span>
+                  <strong>学了 {studyMinutes(episode.durationSeconds)} 分钟</strong>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="study-time-empty">今天还没有学习记录</p>
+          )}
+        </section>
+      )}
+    </div>
+  );
+}
+
 function Home({
   data,
   dailyMode,
@@ -2540,10 +2738,33 @@ function Home({
   const [reviewAnswers, setReviewAnswers] = useState<number[][]>([]);
   const [reviewBusy, setReviewBusy] = useState('正在读取到期复习…');
   const [reviewError, setReviewError] = useState('');
+  const [studyToday, setStudyToday] = useState<StudyActivitySummary | null>(null);
+  const [studyTodayLoading, setStudyTodayLoading] = useState(true);
   const pendingReviews = dueReviews?.items.filter(
     (item) => item.status === 'presented' || item.status === 'started',
   ) || [];
   const currentReview = pendingReviews[0] || null;
+
+  useEffect(() => {
+    let current = true;
+    const loadStudyToday = async () => {
+      try {
+        const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+        const value = await api.studyActivityToday(timezone);
+        if (current) setStudyToday(value);
+      } catch {
+        // The dashboard stays usable if the estimate is temporarily unavailable.
+      } finally {
+        if (current) setStudyTodayLoading(false);
+      }
+    };
+    void loadStudyToday();
+    const timer = window.setInterval(loadStudyToday, 60_000);
+    return () => {
+      current = false;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   const loadDueReviews = async () => {
     setReviewBusy('正在读取到期复习…');
@@ -2653,6 +2874,7 @@ function Home({
           <h1>把正在学的，<br /><em>放回眼前。</em></h1>
         </div>
         <div className="library-hero-aside">
+          <StudyTimeSummary summary={studyToday} loading={studyTodayLoading} />
           <p className="library-summary">
             <strong>{shelfCount}</strong> 个领域 · <strong>{seriesCount}</strong> 个学习系列 · <strong>{bookCount}</strong> 本教材
           </p>
@@ -3097,6 +3319,192 @@ function parseProfileDomains(value: string) {
       .map((item) => item.trim())
       .filter(Boolean),
   )).slice(0, 6);
+}
+
+const KNOWLEDGE_RANK_SHORT:Record<KnowledgeMapNode['rank'],string> = {
+  unranked: '待验证', bronze: '青铜', silver: '白银', gold: '黄金',
+  platinum: '铂金', diamond: '钻石', master: '大师',
+};
+
+function KnowledgeMapPage({
+  series,
+  onBack,
+}: {
+  series:{id:string;title:string;shelfName:string}[];
+  onBack:()=>void;
+}) {
+  const [scope, setScope] = useState('');
+  const [map, setMap] = useState<KnowledgeMap | null>(null);
+  const [selectedId, setSelectedId] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setError('');
+    void api.knowledgeMap(scope || undefined).then((value) => {
+      if (!alive) return;
+      setMap(value);
+      setSelectedId((current) => (
+        value.nodes.some((item) => item.conceptRevisionId === current)
+          ? current
+          : value.nodes[0]?.conceptRevisionId || ''
+      ));
+    }).catch((reason) => {
+      if (alive) setError(reason instanceof Error ? reason.message : '知识版图暂时无法加载');
+    }).finally(() => {
+      if (alive) setLoading(false);
+    });
+    return () => { alive = false; };
+  }, [scope]);
+
+  const selected = map?.nodes.find((item) => item.conceptRevisionId === selectedId) || null;
+  const positioned = useMemo(() => {
+    const nodes = map?.nodes || [];
+    return nodes.map((node, index) => {
+      const column = index % 3;
+      const row = Math.floor(index / 3);
+      return {
+        node,
+        x: 130 + column * 220 + (row % 2 ? 28 : 0),
+        y: 92 + row * 150 + (column === 1 ? 34 : 0),
+      };
+    });
+  }, [map]);
+  const coordinates = new Map(positioned.map((item) => [item.node.conceptRevisionId, item]));
+  const coverage = map ? Math.round(map.progress.coveragePpm / 10_000) : 0;
+
+  return (
+    <section className="knowledge-map-page" aria-labelledby="knowledge-map-title">
+      <header className="knowledge-map-hero">
+        <button type="button" className="knowledge-map-back" onClick={onBack}>← 返回书架</button>
+        <div className="knowledge-map-title-row">
+          <div>
+            <p className="eyebrow">MY KNOWLEDGE FIELD · 由正式证据生长</p>
+            <h1 id="knowledge-map-title">不是读到了哪里，<br />是能力真正长到了哪里。</h1>
+            <p>{map?.message || '正在重建你的个人知识子网…'}</p>
+          </div>
+          <label className="knowledge-scope-picker">
+            <span>观察范围</span>
+            <select value={scope} onChange={(event) => setScope(event.target.value)}>
+              <option value="">全部学习目标</option>
+              {series.map((item) => (
+                <option key={item.id} value={item.id}>{item.shelfName} · {item.title}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="knowledge-progress-strip" aria-label={`能力路线覆盖 ${coverage}%`}>
+          <div className="knowledge-progress-number"><strong>{coverage}</strong><span>%</span></div>
+          <div className="knowledge-progress-copy">
+            <span>能力路线覆盖</span>
+            <div><i style={{ width: `${coverage}%` }} /></div>
+            <small>{map?.progress.verifiedTargets || 0} / {map?.progress.requiredTargets || 0} 项正式目标已有合格证据</small>
+          </div>
+          <dl>
+            <div><dt>{map?.progress.activeNodes || 0}</dt><dd>可随时调用</dd></div>
+            <div><dt>{map?.progress.needsWakeNodes || 0}</dt><dd>待唤醒</dd></div>
+            <div><dt>{map?.progress.reassessmentNodes || 0}</dt><dd>待补强</dd></div>
+          </dl>
+        </div>
+      </header>
+
+      {loading ? (
+        <div className="knowledge-map-status"><i />正在从学习证据重建版图…</div>
+      ) : error ? (
+        <div className="knowledge-map-status is-error" role="alert">{error}</div>
+      ) : !map?.nodes.length ? (
+        <div className="knowledge-map-empty">
+          <span aria-hidden="true">◎</span>
+          <h2>第一颗知识坐标还在形成</h2>
+          <p>{map?.message}</p>
+          {Boolean(map?.excluded.provisionalTargetCount) && <small>已有 {map?.excluded.provisionalTargetCount} 项旧目标尚未完成正式知识坐标绑定，因此没有被拿来虚构段位。</small>}
+        </div>
+      ) : (
+        <div className="knowledge-map-workspace">
+          <div className="knowledge-constellation" aria-label="知识节点关系图">
+            <div className="knowledge-constellation-heading">
+              <div><span>个人子网</span><b>{map.nodes.length} 个能力节点</b></div>
+              <small>连线来自已发布知识关系；点击节点查看证据范围</small>
+            </div>
+            <svg viewBox={`0 0 700 ${Math.max(430, Math.ceil(positioned.length / 3) * 150 + 80)}`} role="img" aria-label="能力节点关系">
+              <defs>
+                <pattern id="knowledge-grid" width="28" height="28" patternUnits="userSpaceOnUse">
+                  <circle cx="1" cy="1" r="1" fill="currentColor" />
+                </pattern>
+              </defs>
+              <rect width="100%" height="100%" fill="url(#knowledge-grid)" className="knowledge-grid" />
+              {map.edges.map((edge) => {
+                const from = coordinates.get(edge.from);
+                const to = coordinates.get(edge.to);
+                if (!from || !to) return null;
+                return <g key={edge.id} className="knowledge-edge"><line x1={from.x} y1={from.y} x2={to.x} y2={to.y} /><text x={(from.x + to.x) / 2} y={(from.y + to.y) / 2 - 8}>{edge.label}</text></g>;
+              })}
+              {positioned.map(({ node, x, y }) => (
+                <g
+                  key={node.conceptRevisionId}
+                  className={`knowledge-node rank-${node.rank} activation-${node.activation}${selectedId === node.conceptRevisionId ? ' is-selected' : ''}`}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${node.label}，${node.rankLabel}，${node.nextAction.label}`}
+                  onClick={() => setSelectedId(node.conceptRevisionId)}
+                  onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') setSelectedId(node.conceptRevisionId); }}
+                >
+                  <circle cx={x} cy={y} r="42" className="knowledge-node-halo" />
+                  <circle cx={x} cy={y} r="30" className="knowledge-node-core" />
+                  <text x={x} y={y + 4} className="knowledge-node-rank">{KNOWLEDGE_RANK_SHORT[node.rank]}</text>
+                  <text x={x} y={y + 61} className="knowledge-node-label">{node.label.length > 11 ? `${node.label.slice(0, 10)}…` : node.label}</text>
+                  {node.activation === 'due' && <text x={x + 31} y={y - 28} className="knowledge-node-signal">唤</text>}
+                  {node.activation === 'reassessment' && <text x={x + 31} y={y - 28} className="knowledge-node-signal">补</text>}
+                </g>
+              ))}
+            </svg>
+          </div>
+
+          <aside className="knowledge-node-ledger" aria-live="polite">
+            {selected && (
+              <>
+                <div className={`knowledge-ledger-seal rank-${selected.rank}`}>
+                  <span>{KNOWLEDGE_RANK_SHORT[selected.rank]}</span>
+                  <small>{'★'.repeat(selected.stars)}{'☆'.repeat(Math.max(0, 3 - selected.stars))}</small>
+                </div>
+                <p className="eyebrow">EVIDENCE LEDGER</p>
+                <h2>{selected.label}</h2>
+                <p className="knowledge-capability-scope">本节点只衡量：{selected.capabilityScope}</p>
+                <div className="knowledge-ledger-state">
+                  <span>{selected.rankLabel}</span>
+                  <i>→</i>
+                  <span className={`activation-${selected.activation}`}>{selected.nextAction.label}</span>
+                </div>
+                <dl>
+                  <div><dt>{selected.independentEvidenceCount}</dt><dd>独立证据</dd></div>
+                  <div><dt>{selected.verifiedTargetCount}/{selected.targetCount}</dt><dd>目标验证</dd></div>
+                  <div><dt>{selected.stabilityDays} 天</dt><dd>当前稳定期</dd></div>
+                </dl>
+                <div className="knowledge-ceiling-note">
+                  <span>这项能力的自然上限</span>
+                  <b>{selected.rankCeilingLabel}</b>
+                  <small>{selected.atCeiling ? '本节点已满阶；更复杂的能力会作为新的知识节点出现。' : '继续学习不会靠重复刷题升级，而要出现更深、独立的新证据。'}</small>
+                </div>
+                {selected.routeContexts[0] && (
+                  <div className="knowledge-route-origin">
+                    <span>进入你版图的路线</span>
+                    <b>{selected.routeContexts[0].seriesTitle}</b>
+                    <small>{selected.routeContexts[0].bookTitle} · {selected.routeContexts[0].sectionTitle}</small>
+                  </div>
+                )}
+              </>
+            )}
+          </aside>
+        </div>
+      )}
+      <footer className="knowledge-map-footnote">
+        <b>这里不显示 AI 猜测。</b>
+        <span>正文互动帮助理解，但只有节末测验、Ask Me 与合格的延迟复习会改变正式段位；后台发现生疏时，会明确显示为“待唤醒”。</span>
+      </footer>
+    </section>
+  );
 }
 
 function ProfileCenterPage({
@@ -3571,15 +3979,11 @@ function ShelfPage({
   const [showPlan, setShowPlan] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Series | null>(null);
   const [deleting, setDeleting] = useState(false);
-
-  useEffect(() => {
-    if (!deleteTarget) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !deleting) setDeleteTarget(null);
-    };
-    document.addEventListener('keydown', closeOnEscape);
-    return () => document.removeEventListener('keydown', closeOnEscape);
-  }, [deleteTarget, deleting]);
+  const deleteDialogRef = useModalFocus<HTMLElement>({
+    open: Boolean(deleteTarget),
+    canClose: !deleting,
+    onRequestClose: () => setDeleteTarget(null),
+  });
 
   return (
     <section className="landing-section">
@@ -3591,9 +3995,16 @@ function ShelfPage({
         <div>
           <h1>{shelf.name}</h1>
         </div>
-        <button className="primary-button" onClick={() => setShowPlan(!showPlan)}>＋ 创建学习系列</button>
+        <button
+          className={showPlan ? 'secondary-button' : 'primary-button'}
+          aria-expanded={showPlan}
+          aria-controls="create-series-form"
+          onClick={() => setShowPlan(!showPlan)}
+        >
+          {showPlan ? '取消创建' : '＋ 创建学习系列'}
+        </button>
       </div>
-      {showPlan && <PlanForm profile={profile} submit={onCreate} />}
+      {showPlan && <PlanForm profile={profile} submit={onCreate} onCancel={() => setShowPlan(false)} />}
       <div className="series-shelf-heading">
         <span>学习系列</span>
       </div>
@@ -3618,6 +4029,9 @@ function ShelfPage({
                 <span className="series-volume-progress">
                   <i><b style={{ width: `${item.progress}%` }} /></i>
                   <small>{item.progress}%</small>
+                </span>
+                <span className="series-volume-action">
+                  {item.progress > 0 ? '继续学习' : '进入系列'} <i aria-hidden="true">→</i>
                 </span>
               </button>
               <button
@@ -3648,17 +4062,20 @@ function ShelfPage({
           }}
         >
           <section
+            ref={deleteDialogRef}
             className="delete-confirm"
             role="dialog"
             aria-modal="true"
             aria-labelledby="delete-series-title"
+            aria-describedby="delete-series-description"
+            tabIndex={-1}
           >
             <span className="delete-confirm-icon"><TrashIcon size={20} /></span>
             <p className="eyebrow">删除学习系列</p>
             <h2 id="delete-series-title">{deleteTarget.title}</h2>
-            <p>该系列及其书、章节会从书架和学习入口中移除。已有学习记录会保留，但当前界面暂不支持恢复。</p>
+            <p id="delete-series-description">该系列及其书、章节会从书架和学习入口中移除。已有学习记录会保留，但当前界面暂不支持恢复。</p>
             <div>
-              <button className="quiet-button" disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button>
+              <button data-dialog-initial-focus className="quiet-button" disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button>
               <button
                 className="danger-button"
                 disabled={deleting}
@@ -3693,7 +4110,15 @@ function TrashIcon({ size = 16 }: { size?: number }) {
   );
 }
 
-function PlanForm({ profile, submit }: { profile: LearningProfile; submit: (body: object, idempotencyKey: string) => Promise<void> }) {
+function PlanForm({
+  profile,
+  submit,
+  onCancel,
+}: {
+  profile: LearningProfile;
+  submit: (body: object, idempotencyKey: string) => Promise<void>;
+  onCancel: () => void;
+}) {
   const depthOptions = [
     { value: 'overview', label: '快速了解', description: '建立基本认识，抓住核心概念' },
     { value: 'deep', label: '深入理解', description: '理解原理、边界和典型应用' },
@@ -3726,7 +4151,7 @@ function PlanForm({ profile, submit }: { profile: LearningProfile; submit: (body
     }
   };
   return (
-    <form className="plan-form" onSubmit={send}>
+    <form className="plan-form" id="create-series-form" onSubmit={send}>
       <label>
         学习内容
         <input required disabled={submitting} value={topic} onChange={(event) => setTopic(event.target.value)} placeholder="输入你想学习的内容" />
@@ -3762,7 +4187,10 @@ function PlanForm({ profile, submit }: { profile: LearningProfile; submit: (body
         ))}
         {formError && <p className="plan-form-error" id="plan-depth-error" role="alert">{formError}</p>}
       </fieldset>
-      <button className="primary-button" disabled={submitting}>{submitting ? '正在生成，请稍候…' : '生成目录方案'}</button>
+      <div className="plan-form-actions">
+        <button type="button" className="quiet-button" disabled={submitting} onClick={onCancel}>取消</button>
+        <button className="primary-button" disabled={submitting}>{submitting ? '正在生成，请稍候…' : '生成目录方案'}</button>
+      </div>
     </form>
   );
 }
@@ -3960,6 +4388,7 @@ function LearningWorkspace({
   onRefreshSeries,
   onDeleteBook,
   onFeedbackBlock,
+  onGlobalFeedback,
   onQaVisibilityChange,
 }: {
   userId: string;
@@ -3978,6 +4407,7 @@ function LearningWorkspace({
   onRefreshSeries: () => Promise<void>;
   onDeleteBook: (bookId: string) => Promise<void>;
   onFeedbackBlock: (block: Block) => void;
+  onGlobalFeedback: () => void;
   onQaVisibilityChange: (open: boolean) => void;
 }) {
   const [selectedBlockId, setSelectedBlockId] = useState('');
@@ -3987,6 +4417,8 @@ function LearningWorkspace({
   const [auxiliaryExclusive, setAuxiliaryExclusive] = useState(() => window.matchMedia('(max-width: 1180px)').matches);
   const [directoryHidden, setDirectoryHidden] = useState(() => window.matchMedia('(max-width: 900px)').matches);
   const [qaHidden, setQaHidden] = useState(true);
+  const [readerTab, setReaderTab] = useState<ReaderTab>('content');
+  const [askAiStreaming, setAskAiStreaming] = useState(false);
   const [layoutRatios, setLayoutRatios] = useState(() => readWorkspaceLayoutRatios(userId));
   const [directoryWidth, setDirectoryWidth] = useState(() => clampWorkspacePanelWidth(
     'directory',
@@ -4010,9 +4442,22 @@ function LearningWorkspace({
   } | null>(null);
   panelLayoutRef.current = { directoryWidth, qaWidth, directoryHidden, qaHidden, layoutRatios };
 
+  const qaAvailable = readerTab !== 'quiz';
+  const effectiveQaHidden = qaHidden || !qaAvailable;
+  const studyActivityKind = !effectiveQaHidden
+    ? 'ask_ai'
+    : readerTab === 'quiz'
+      ? 'verification_review'
+      : 'reading_thinking';
+  const studyActivity = useStudyActivity({
+    sectionId: section?.content ? section.id : null,
+    activityKind: studyActivityKind,
+    keepActive: askAiStreaming,
+  });
+
   useEffect(() => {
-    onQaVisibilityChange(!qaHidden);
-  }, [onQaVisibilityChange, qaHidden]);
+    onQaVisibilityChange(!effectiveQaHidden);
+  }, [onQaVisibilityChange, effectiveQaHidden]);
 
   useEffect(() => () => onQaVisibilityChange(false), [onQaVisibilityChange]);
 
@@ -4093,6 +4538,7 @@ function LearningWorkspace({
     setDirectoryHidden((hidden) => !hidden);
   };
   const toggleQa = () => {
+    if (!qaAvailable) return;
     if ((compactLayout || auxiliaryExclusive) && qaHidden) setDirectoryHidden(true);
     setQaHidden((hidden) => !hidden);
   };
@@ -4241,9 +4687,9 @@ function LearningWorkspace({
     <div
       ref={workspaceRef}
       style={workspaceStyle}
-      className={`learning-workspace mode-${dailyMode} ${directoryHidden ? 'directory-collapsed' : ''} ${qaHidden ? 'qa-collapsed' : ''} ${resizingPanel ? 'is-resizing' : ''}`}
+      className={`learning-workspace mode-${dailyMode} ${directoryHidden ? 'directory-collapsed' : ''} ${effectiveQaHidden ? 'qa-collapsed' : ''} ${qaAvailable ? '' : 'assessment-focus'} ${resizingPanel ? 'is-resizing' : ''}`}
     >
-      {compactLayout && (!directoryHidden || !qaHidden) && (
+      {compactLayout && (!directoryHidden || !effectiveQaHidden) && (
         <button
           className="panel-backdrop"
           aria-label="关闭侧栏"
@@ -4271,10 +4717,18 @@ function LearningWorkspace({
         series={series}
         section={section}
         dailyMode={dailyMode}
+        studySessionSeconds={studyActivity.sessionSeconds}
+        studyPaused={studyActivity.paused}
+        onResumeStudy={studyActivity.resume}
         directoryHidden={directoryHidden}
-        qaHidden={qaHidden}
+        qaHidden={effectiveQaHidden}
+        qaAvailable={qaAvailable}
         onToggleDirectory={toggleDirectory}
         onToggleQa={toggleQa}
+        onTabChange={(nextTab) => {
+          setReaderTab(nextTab);
+          if (nextTab === 'quiz') setQaHidden(true);
+        }}
         location={location}
         selectedBlockId={activeBlockId}
         onSelectBlock={selectBlock}
@@ -4290,6 +4744,7 @@ function LearningWorkspace({
         onSectionChange={onSectionChange}
         onRefreshSeries={onRefreshSeries}
         onFeedbackBlock={onFeedbackBlock}
+        onGlobalFeedback={onGlobalFeedback}
         onRestorePersonalPresentation={async (block) => {
           if (!section?.content || !block.personalPresentation) return;
           await api.restorePersonalPresentation(section.id, block.id, section.content.id);
@@ -4354,7 +4809,7 @@ function LearningWorkspace({
         key={section?.id || 'empty'}
         section={section}
         dailyMode={dailyMode}
-        hidden={qaHidden}
+        hidden={effectiveQaHidden}
         onClose={() => setQaHidden(true)}
         selectedBlockId={activeBlockId}
         selectedQuote={selectedQuote}
@@ -4362,8 +4817,9 @@ function LearningWorkspace({
         onClearQuote={() => setSelectedQuote(null)}
         explanationRequest={explanationRequest}
         onSectionChange={onSectionChange}
+        onStreamingChange={setAskAiStreaming}
       />
-      {(['directory', 'qa'] as const).map((panel) => {
+      {(['directory', ...(qaAvailable ? ['qa' as const] : [])] as const).map((panel) => {
         const hidden = panel === 'directory' ? directoryHidden : qaHidden;
         const width = panel === 'directory' ? directoryWidth : qaWidth;
         const sizing = workspacePanelSizing[panel];
@@ -4469,15 +4925,11 @@ function DirectoryPanel({
 }) {
   const [deleteTarget, setDeleteTarget] = useState<Book | null>(null);
   const [deleting, setDeleting] = useState(false);
-
-  useEffect(() => {
-    if (!deleteTarget) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !deleting) setDeleteTarget(null);
-    };
-    document.addEventListener('keydown', closeOnEscape);
-    return () => document.removeEventListener('keydown', closeOnEscape);
-  }, [deleteTarget, deleting]);
+  const deleteDialogRef = useModalFocus<HTMLElement>({
+    open: Boolean(deleteTarget),
+    canClose: !deleting,
+    onRequestClose: () => setDeleteTarget(null),
+  });
 
   return (
     <aside className="directory-panel" id="course-directory-panel" aria-label="课程目录" hidden={hidden}>
@@ -4527,21 +4979,24 @@ function DirectoryPanel({
           }}
         >
           <section
+            ref={deleteDialogRef}
             className="delete-confirm"
             role="dialog"
             aria-modal="true"
             aria-labelledby="delete-book-title"
+            aria-describedby="delete-book-description"
+            tabIndex={-1}
           >
             <span className="delete-confirm-icon"><TrashIcon size={20} /></span>
             <p className="eyebrow">删除书籍</p>
             <h2 id="delete-book-title">{deleteTarget.title}</h2>
-            <p>
+            <p id="delete-book-description">
               书籍及其章节会从学习入口中移除，已有学习记录会保留。
               {series.books.length === 1 ? '这是系列中的最后一本书，删除后该系列也会从书架隐藏。' : ''}
               当前界面暂不支持恢复。
             </p>
             <div>
-              <button className="quiet-button" disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button>
+              <button data-dialog-initial-focus className="quiet-button" disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button>
               <button
                 className="danger-button"
                 disabled={deleting}
@@ -4752,10 +5207,15 @@ function ReaderPanel({
   series,
   section,
   dailyMode,
+  studySessionSeconds,
+  studyPaused,
+  onResumeStudy,
   directoryHidden,
   qaHidden,
+  qaAvailable,
   onToggleDirectory,
   onToggleQa,
+  onTabChange,
   location,
   selectedBlockId,
   onSelectBlock,
@@ -4766,16 +5226,22 @@ function ReaderPanel({
   onSectionChange,
   onRefreshSeries,
   onFeedbackBlock,
+  onGlobalFeedback,
   onRestorePersonalPresentation,
   onExplainBlock,
 }: {
   series: Series;
   section: Section | null;
   dailyMode: DailyMode;
+  studySessionSeconds: number;
+  studyPaused: boolean;
+  onResumeStudy: () => void;
   directoryHidden: boolean;
   qaHidden: boolean;
+  qaAvailable: boolean;
   onToggleDirectory: () => void;
   onToggleQa: () => void;
+  onTabChange: (tab: ReaderTab) => void;
   location: ReturnType<typeof findSectionLocation>;
   selectedBlockId: string;
   onSelectBlock: (blockId: string) => void;
@@ -4786,6 +5252,7 @@ function ReaderPanel({
   onSectionChange: (section: Section) => void;
   onRefreshSeries: () => Promise<void>;
   onFeedbackBlock: (block: Block) => void;
+  onGlobalFeedback: () => void;
   onRestorePersonalPresentation: (block: Block) => Promise<void>;
   onExplainBlock: (block: Block, style: ExplanationStyle, customQuestion?: string) => void;
 }) {
@@ -4798,9 +5265,16 @@ function ReaderPanel({
   const [reviewTargetBlockId, setReviewTargetBlockId] = useState('');
   const readerScrollRef = useRef<HTMLDivElement>(null);
   const reviewHighlightTimerRef = useRef<number | null>(null);
+  const regenerationDialogRef = useModalFocus<HTMLElement>({
+    open: regenerationConfirmOpen,
+    canClose: !regenerating,
+    onRequestClose: () => setRegenerationConfirmOpen(false),
+  });
 
   useEffect(() => {
-    setTab(section?.status === 'completed' && section.note ? 'note' : 'content');
+    const initialTab = section?.status === 'completed' && section.note ? 'note' : 'content';
+    setTab(initialTab);
+    onTabChange(initialTab);
     setSelectionPopup(null);
     setRegenerationConfirmOpen(false);
     setReviewTargetBlockId('');
@@ -4834,6 +5308,7 @@ function ReaderPanel({
         entityId: section.id,
       });
     }
+    onTabChange(nextTab);
     setTab(nextTab);
     requestAnimationFrame(() => {
       if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
@@ -4850,6 +5325,7 @@ function ReaderPanel({
     }
 
     onSelectBlock(blockId);
+    onTabChange('content');
     setTab('content');
     setSelectionPopup(null);
     setReviewTargetBlockId(blockId);
@@ -4920,6 +5396,7 @@ function ReaderPanel({
         <ReaderPanelToggles
           directoryHidden={directoryHidden}
           qaHidden={qaHidden}
+          qaAvailable={qaAvailable}
           onToggleDirectory={onToggleDirectory}
           onToggleQa={onToggleQa}
         />
@@ -4933,86 +5410,87 @@ function ReaderPanel({
       <ReaderPanelToggles
         directoryHidden={directoryHidden}
         qaHidden={qaHidden}
+        qaAvailable={qaAvailable}
         onToggleDirectory={onToggleDirectory}
         onToggleQa={onToggleQa}
       />
-      <div className="reader-toolbar">
-        <div>
-          <p className="breadcrumb">
-            第 {location?.book.position} 本
-            <i>›</i>
-            第 {location?.chapter.position} 章 · {location?.chapter.title}
-            <i>›</i>
-            {location?.chapter.position}.{section.position}
-          </p>
-          <h1>{section.title}</h1>
-        </div>
-        <div className="reader-toolbar-actions">
-          <span className={`lesson-status ${section.status}`}>
-            {section.status === 'completed'
-              ? '已验证'
-              : section.status === 'available'
-                ? '学习中'
-                : section.status === 'preparing'
-                  ? '准备中'
-                  : '未解锁'}
-          </span>
-          {section.content && section.bestScore === 0 && section.totalScore === 0 && (
-            <button
-              className="quiet-button regenerate-trigger"
-              disabled={regenerating}
-              onClick={() => setRegenerationConfirmOpen(true)}
-            >
-              重新生成本节
-            </button>
+      <LessonReaderHeader
+        bookPosition={location?.book.position}
+        chapterPosition={location?.chapter.position}
+        chapterTitle={location?.chapter.title}
+        sectionPosition={section.position}
+        title={section.title}
+        sessionSeconds={studySessionSeconds}
+        status={
+          !section.content && section.generation?.status === 'failed'
+            ? 'failed'
+            : section.status
+        }
+        canRegenerate={Boolean(section.content && section.bestScore === 0 && section.totalScore === 0)}
+        regenerating={regenerating}
+        onRequestRegenerate={() => setRegenerationConfirmOpen(true)}
+        onFeedback={onGlobalFeedback}
+      />
+
+      <LessonReaderTabs
+        active={tab}
+        quizAvailable={Boolean(section.quiz)}
+        noteAvailable={Boolean(section.note)}
+        completed={section.status === 'completed'}
+        onChange={switchTab}
+      />
+
+      <div className="reader-scroll-shell">
+        <div
+          className="reader-scroll"
+          id="reader-tabpanel"
+          role="tabpanel"
+          aria-labelledby={`reader-tab-${tab}`}
+          ref={readerScrollRef}
+          onMouseUp={captureTextSelection}
+          onKeyUp={captureTextSelection}
+          onScroll={() => setSelectionPopup(null)}
+        >
+          {tab === 'content' && (
+            <LessonContent
+              section={section}
+              dailyMode={dailyMode}
+              selectedBlockId={selectedBlockId}
+              reviewTargetBlockId={reviewTargetBlockId}
+              onGenerate={onGenerate}
+              onStartQuiz={() => switchTab('quiz')}
+              onFeedbackBlock={onFeedbackBlock}
+              onRestorePersonalPresentation={onRestorePersonalPresentation}
+              onExplainBlock={onExplainBlock}
+            />
+          )}
+          {tab === 'quiz' && section.quiz && (
+            <Quiz
+              key={section.quiz.id}
+              section={section}
+              onUpgrade={() => setRegenerationConfirmOpen(true)}
+              onSectionChange={onSectionChange}
+              onRefreshSeries={onRefreshSeries}
+              onSelectSection={onSelectSection}
+              onReviewContent={reviewContent}
+              onSubmissionComplete={() => {
+                if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
+              }}
+            />
+          )}
+          {tab === 'note' && section.note && (
+            <Note sectionId={section.id} note={section.note} onSaved={onSectionChange} />
           )}
         </div>
-      </div>
-
-      <div className="reader-tabs" role="tablist">
-        <button className={tab === 'content' ? 'active' : ''} onClick={() => switchTab('content')}>正文</button>
-        <button className={tab === 'quiz' ? 'active' : ''} disabled={!section.quiz} onClick={() => switchTab('quiz')}>
-          {section.status === 'completed' ? '验证结果' : '验证'}
-        </button>
-        <button className={tab === 'note' ? 'active' : ''} disabled={!section.note} onClick={() => switchTab('note')}>笔记</button>
-      </div>
-
-      <div
-        className="reader-scroll"
-        ref={readerScrollRef}
-        onMouseUp={captureTextSelection}
-        onKeyUp={captureTextSelection}
-        onScroll={() => setSelectionPopup(null)}
-      >
-        {tab === 'content' && (
-          <LessonContent
-            section={section}
-            dailyMode={dailyMode}
-            selectedBlockId={selectedBlockId}
-            reviewTargetBlockId={reviewTargetBlockId}
-            onGenerate={onGenerate}
-            onStartQuiz={() => switchTab('quiz')}
-            onFeedbackBlock={onFeedbackBlock}
-            onRestorePersonalPresentation={onRestorePersonalPresentation}
-            onExplainBlock={onExplainBlock}
-          />
-        )}
-        {tab === 'quiz' && section.quiz && (
-          <Quiz
-            key={section.quiz.id}
-            section={section}
-            onUpgrade={() => setRegenerationConfirmOpen(true)}
-            onSectionChange={onSectionChange}
-            onRefreshSeries={onRefreshSeries}
-            onSelectSection={onSelectSection}
-            onReviewContent={reviewContent}
-            onSubmissionComplete={() => {
-              if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
-            }}
-          />
-        )}
-        {tab === 'note' && section.note && (
-          <Note sectionId={section.id} note={section.note} onSaved={onSectionChange} />
+        {studyPaused && (
+          <button
+            type="button"
+            className="reader-study-pause"
+            onClick={onResumeStudy}
+          >
+            <span>刚才是在思考吗？</span>
+            <small>轻触、滚动或按任意键继续</small>
+          </button>
         )}
       </div>
       {regenerationConfirmOpen && (
@@ -5023,14 +5501,17 @@ function ReaderPanel({
           }}
         >
           <section
+            ref={regenerationDialogRef}
             className="delete-confirm regenerate-confirm"
             role="dialog"
             aria-modal="true"
             aria-labelledby="regenerate-section-title"
+            aria-describedby="regenerate-section-description"
+            tabIndex={-1}
           >
             <p className="eyebrow">重新生成本节</p>
             <h2 id="regenerate-section-title">{section.title}</h2>
-            <p>已完成验证的内容无法重新生成。</p>
+            <p id="regenerate-section-description">重新生成会替换当前正文和验证题；已完成验证的内容无法重新生成。</p>
             {regenerating && (
               <div className="regeneration-progress" aria-live="polite">
                 <span><i />{GENERATION_STAGE_LABELS[generationStage] || '正在处理'}</span>
@@ -5038,7 +5519,7 @@ function ReaderPanel({
               </div>
             )}
             <div>
-              <button className="quiet-button" disabled={regenerating} onClick={() => setRegenerationConfirmOpen(false)}>取消</button>
+              <button data-dialog-initial-focus className="quiet-button" disabled={regenerating} onClick={() => setRegenerationConfirmOpen(false)}>取消</button>
               <button
                 className="primary-button"
                 disabled={regenerating}
@@ -5092,7 +5573,7 @@ function SeriesRoutePreview({ series }: { series: Series }) {
   const firstBook = series.books[0];
   const firstChapter = firstBook?.chapters[0];
   const statusCopy = taskStatus === 'failed'
-    ? '第一节暂未准备完成。'
+    ? generationFailureMessage(series.initializationTask, '第一节内容')
     : taskStatus === 'pending'
       ? '排队中'
       : taskStatus === 'running'
@@ -5162,11 +5643,13 @@ function SeriesRoutePreview({ series }: { series: Series }) {
 function ReaderPanelToggles({
   directoryHidden,
   qaHidden,
+  qaAvailable,
   onToggleDirectory,
   onToggleQa,
 }: {
   directoryHidden: boolean;
   qaHidden: boolean;
+  qaAvailable: boolean;
   onToggleDirectory: () => void;
   onToggleQa: () => void;
 }) {
@@ -5194,7 +5677,7 @@ function ReaderPanelToggles({
           ‹
         </button>
       )}
-      {qaHidden && (
+      {qaAvailable && qaHidden && (
         <button
           className="reader-qa-trigger"
           aria-controls="section-qa-panel"
@@ -5204,7 +5687,7 @@ function ReaderPanelToggles({
           Ask AI
         </button>
       )}
-      {!qaHidden && (
+      {qaAvailable && !qaHidden && (
         <button
           className="reader-rail-toggle qa-toggle"
           aria-controls="section-qa-panel"
@@ -5286,7 +5769,7 @@ function LessonContent({
         </div>
         {section.generation?.status === 'failed' && (
           <div className="inline-error">
-            上次准备失败，请重试。
+            {generationFailureMessage(section.generation)}
           </div>
         )}
         <button className="primary-button large" onClick={onGenerate}>
@@ -5341,11 +5824,12 @@ function LessonContent({
         </aside>
       )}
       {shownBlocks.map((block) => (
-        <ContentBlock
+        <LessonContentBlock
           key={block.id}
           block={block}
           selected={block.id === selectedBlockId}
           reviewTarget={block.id === reviewTargetBlockId}
+          explanationOptions={explanationOptionsForBlock(block.kind)}
           onFeedback={() => onFeedbackBlock(block)}
           onRestorePersonalPresentation={() => onRestorePersonalPresentation(block)}
           onExplain={(style, customQuestion) => onExplainBlock(block, style, customQuestion)}
@@ -5388,232 +5872,6 @@ function LessonContent({
   );
 }
 
-function ContentBlock({
-  block,
-  selected,
-  reviewTarget,
-  onFeedback,
-  onRestorePersonalPresentation,
-  onExplain,
-}: {
-  block: Block;
-  selected: boolean;
-  reviewTarget: boolean;
-  onFeedback: () => void;
-  onRestorePersonalPresentation: () => Promise<void>;
-  onExplain: (style: ExplanationStyle, customQuestion?: string) => void;
-}) {
-  const [explanationMenuOpen, setExplanationMenuOpen] = useState(false);
-  const [customExplanation, setCustomExplanation] = useState('');
-  const explanationMenuRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!explanationMenuOpen) return undefined;
-    const closeOnOutsidePress = (event: MouseEvent) => {
-      if (!explanationMenuRef.current?.contains(event.target as Node)) {
-        setExplanationMenuOpen(false);
-      }
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setExplanationMenuOpen(false);
-    };
-    document.addEventListener('mousedown', closeOnOutsidePress);
-    document.addEventListener('keydown', closeOnEscape);
-    return () => {
-      document.removeEventListener('mousedown', closeOnOutsidePress);
-      document.removeEventListener('keydown', closeOnEscape);
-    };
-  }, [explanationMenuOpen]);
-  const labels: Record<string, string> = {
-    text: '阅读',
-    bullet_list: '要点',
-    ordered_steps: '步骤',
-    diagram: '图解',
-    table: '对照',
-    code: '演练',
-    formula: '推导',
-  };
-  const roleLabels: Record<string, string> = {
-    core_instruction: '核心依据',
-    conclusion: '核心依据',
-    prerequisite_scaffold: '必要前置',
-    context: '背景',
-    mechanism: '机制',
-    derivation: '推导',
-    worked_example: '逐步示例',
-    empirical_case: '真实案例',
-    primary_source: '原始材料',
-    evidence_analysis: '证据分析',
-    comparison: '对照',
-    alternative_interpretation: '另一种解释',
-    counterargument: '反方观点',
-    counterexample: '反例',
-    boundary: '适用边界',
-    application: '应用',
-    transfer: '迁移',
-    practice: '练习',
-    synthesis: '综合',
-    summary: '回顾',
-  };
-  return (
-    <section
-      className={`content-block role-${block.role} ${selected ? 'selected' : ''} ${reviewTarget ? 'review-target' : ''}`}
-      data-block-id={block.id}
-      tabIndex={-1}
-    >
-      {reviewTarget && <span className="review-target-label">错题依据</span>}
-      <div className="block-meta">
-        <b>{labels[block.kind] || '阅读'}</b>
-        {roleLabels[block.role] && <span>{roleLabels[block.role]}</span>}
-      </div>
-      <div className="block-actions">
-        <div className="block-explanation-control" ref={explanationMenuRef}>
-          <button
-            className="block-explanation-button"
-            type="button"
-            aria-expanded={explanationMenuOpen}
-            aria-haspopup="dialog"
-            onClick={() => setExplanationMenuOpen((open) => !open)}
-          >
-            <span aria-hidden="true">↻</span> 换个讲法
-          </button>
-          {explanationMenuOpen && (
-            <div className="block-explanation-menu" role="dialog" aria-label={`换一种方式理解“${block.heading}”`}>
-              <header>
-                <b>这段想怎么讲？</b>
-              </header>
-              <div className="block-explanation-presets">
-                {explanationOptionsForBlock(block.kind).map((option) => (
-                  <button
-                    type="button"
-                    key={option.style}
-                    onClick={() => {
-                      onExplain(option.style);
-                      setExplanationMenuOpen(false);
-                    }}
-                  >
-                    <b>{option.label}</b>
-                  </button>
-                ))}
-              </div>
-              <form
-                className="block-explanation-custom"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  const instruction = customExplanation.trim();
-                  if (instruction.length < 2) return;
-                  onExplain('custom', instruction);
-                  setCustomExplanation('');
-                  setExplanationMenuOpen(false);
-                }}
-              >
-                <label htmlFor={`custom-explanation-${block.id}`}>我更想要的风格</label>
-                <div>
-                  <input
-                    id={`custom-explanation-${block.id}`}
-                    value={customExplanation}
-                    maxLength={240}
-                    placeholder="例如：像讲故事一样，少用术语"
-                    onChange={(event) => setCustomExplanation(event.target.value)}
-                  />
-                  <button type="submit" disabled={customExplanation.trim().length < 2}>按这个讲</button>
-                </div>
-              </form>
-            </div>
-          )}
-        </div>
-        <button
-          className="block-feedback-button"
-          type="button"
-          aria-label={`反馈“${block.heading}”这一段`}
-          onClick={onFeedback}
-        >
-          <span aria-hidden="true">↳</span> 反馈
-        </button>
-      </div>
-      <h2>{block.heading}</h2>
-      <BlockBody block={block} />
-      {block.personalPresentation && (
-        <aside className="personal-presentation" aria-label="我的另一种讲法">
-          <header>
-            <span>我的另一种讲法</span>
-            <button type="button" onClick={() => void onRestorePersonalPresentation()}>移除</button>
-          </header>
-          <BlockBody block={block} content={block.personalPresentation.content} />
-        </aside>
-      )}
-    </section>
-  );
-}
-
-function BlockBody({ block, content = block.content }: { block: Block; content?: string }) {
-  if (block.kind === 'code') {
-    return <pre className="code-block"><code>{content}</code></pre>;
-  }
-  const markdown = block.kind === 'table'
-    ? normalizeTableMarkdown(content)
-    : block.kind === 'text'
-      ? normalizeLessonTextMarkdown(content)
-      : content;
-  return (
-    <div className={`content-markdown kind-${block.kind}`}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
-    </div>
-  );
-}
-
-function normalizeLessonTextMarkdown(content: string): string {
-  const normalized = content.replace(/\r\n?/g, '\n').trim();
-  const hasAuthoredStructure = /\n\s*\n/.test(normalized)
-    || /(^|\n)\s*(?:#{1,6}\s|[-+*]\s+|\d+[.)]\s+|>\s+|```)/m.test(normalized);
-  if (normalized.length < 200 || hasAuthoredStructure) return normalized;
-
-  const sentences = normalized
-    .match(/[^。！？]+[。！？]+|[^。！？]+$/g)
-    ?.map((sentence) => sentence.trim())
-    .filter(Boolean) || [];
-  if (sentences.length < 4) return normalized;
-
-  const paragraphCount = Math.min(
-    3,
-    Math.floor(sentences.length / 2),
-    Math.max(2, Math.ceil(normalized.length / 150)),
-  );
-  if (paragraphCount < 2) return normalized;
-
-  const paragraphs: string[] = [];
-  let cursor = 0;
-  for (let index = 0; index < paragraphCount; index += 1) {
-    const remainingSentences = sentences.length - cursor;
-    const remainingParagraphs = paragraphCount - index;
-    const take = Math.ceil(remainingSentences / remainingParagraphs);
-    paragraphs.push(sentences.slice(cursor, cursor + take).join(''));
-    cursor += take;
-  }
-  return paragraphs.join('\n\n');
-}
-
-function normalizeTableMarkdown(content: string): string {
-  const lines = content.trim().split(/\r?\n/).filter((line) => line.trim());
-  if (lines.length < 2) return content;
-
-  const cells = (line: string) => line
-    .trim()
-    .replace(/^\|/, '')
-    .replace(/\|$/, '')
-    .split('|')
-    .map((cell) => cell.trim());
-  const columnCount = cells(lines[0]).length;
-  if (columnCount < 2) return content;
-
-  const possibleDivider = cells(lines[1]);
-  const hasDivider = possibleDivider.length === columnCount
-    && possibleDivider.every((cell) => /^:?-{3,}:?$/.test(cell));
-  if (!hasDivider) {
-    lines.splice(1, 0, Array.from({ length: columnCount }, () => '---').join(' | '));
-  }
-  return lines.join('\n');
-}
-
 function Quiz({
   section,
   onUpgrade,
@@ -5639,6 +5897,9 @@ function Quiz({
       !section.quiz.governance?.allowed ||
       !section.quiz.governance?.assessmentEligible
     ),
+  );
+  const hasMultipleChoice = Boolean(
+    section.quiz?.questions.some((question) => question.selectionMode === 'multiple'),
   );
   const [answers, setAnswers] = useState<number[][]>(() => {
     const empty = section.quiz?.questions.map(() => []) || [];
@@ -6003,7 +6264,11 @@ function Quiz({
       <p className="eyebrow">完成验证后解锁下一节</p>
       <h2>小节验证</h2>
       <p className="quiz-rule">答对至少 80%，且关键题达到要求即可继续；错题会用于安排重点巩固。</p>
-      <p className="quiz-draft-note">单选题只能选择一个答案，多选题可选择多个。</p>
+      <p className="quiz-draft-note">
+        {hasMultipleChoice
+          ? '标为“多选”的题目可以选择多个答案，其余题目只能选择一个答案。'
+          : '每道题只有一个答案，选择最符合本节内容的一项。'}
+      </p>
       {quizGovernanceBlocked && (
         <aside className="quiz-governance-notice" role="alert">
           <b>这节内容需要升级后才能验证</b>
@@ -6043,7 +6308,7 @@ function Quiz({
               {item.blocks.map((block) => (
                 <div key={block.id}>
                   <h3>{block.heading}</h3>
-                  <BlockBody block={block} />
+                  <LessonBlockBody block={block} />
                 </div>
               ))}
             </section>
@@ -6171,8 +6436,9 @@ function QuizReview({
     if (task.type === 'remediation_generation') return '补充教学';
     return '后续内容';
   })));
+  const aiFailedTask = failedWorkflowTasks.find(isAiGenerationFailure);
   const failedTaskSummary = failedTaskLabels.length
-    ? `${failedTaskLabels.join('和')}暂未准备完成。`
+    ? generationFailureMessage(aiFailedTask, failedTaskLabels.join('和'))
     : '后续内容暂未准备完成。';
   const nextSectionReady = Boolean(
     result.passed && nextSectionTask?.status === 'succeeded' && nextSectionId,
@@ -6199,6 +6465,8 @@ function QuizReview({
           {result.passed ? '查看解析或回到正文。' : '先查看下面的错题解析。'}
         </p>
       </header>
+
+      <KnowledgeSettlementCard settlement={result.knowledgeSettlement} />
 
       {wrongIndexes.length > 0 && (
         <nav className="wrong-question-nav" aria-label="错题导航">
@@ -6296,7 +6564,9 @@ function QuizReview({
           nextSectionReady ? (
             <>
               <span>下一节已准备好</span>
-              {noteTask?.status === 'failed' && <small>个人笔记暂未更新。</small>}
+              {noteTask?.status === 'failed' && (
+                <small>{generationFailureMessage(noteTask, '个人笔记')}</small>
+              )}
               <div className="remediation-readiness-actions">
                 {noteTask?.status === 'failed' && noteTask.retryable && (
                   <button
@@ -6393,6 +6663,100 @@ function QuizReview({
   );
 }
 
+function KnowledgeSettlementCard({
+  settlement,
+}: {
+  settlement?: KnowledgeSettlement | null;
+}) {
+  if (!settlement?.updates.length) return null;
+  const priority = {
+    rank_up: 0,
+    star_up: 1,
+    reactivated: 2,
+    needs_reinforcement: 3,
+    confirmed: 4,
+  } as const;
+  const updates = [...settlement.updates].sort(
+    (left, right) => priority[left.change] - priority[right.change],
+  );
+  const stateLabel = {
+    rank_up: '段位提升',
+    star_up: '证据增加',
+    reactivated: '重新唤醒',
+    needs_reinforcement: '需要巩固',
+    confirmed: '能力确认',
+  } as const;
+
+  return (
+    <section className="knowledge-settlement" aria-labelledby="knowledge-settlement-title">
+      <div className="knowledge-settlement-heading">
+        <div>
+          <span>知识印记</span>
+          <h3 id="knowledge-settlement-title">本节留下的成长</h3>
+        </div>
+        <small>只记录正式验证，不把阅读时长算成掌握</small>
+      </div>
+      <div className="knowledge-settlement-list">
+        {updates.map((update) => {
+          const tier = update.after.rankLabel.split(' · ')[0];
+          const rankChanged = update.change === 'rank_up';
+          return (
+            <article
+              className={`knowledge-rank-update ${rankChanged ? 'rank-up' : update.change}`}
+              data-rank={update.after.rank}
+              key={update.conceptRevisionId}
+            >
+              <div
+                className="knowledge-rank-seal"
+                aria-label={`当前段位：${update.after.rankLabel}，${update.after.stars} 颗证据星`}
+              >
+                <small>{rankChanged ? 'NEW RANK' : 'KNOWLEDGE'}</small>
+                <strong>{tier}</strong>
+                <i aria-hidden="true">知</i>
+              </div>
+              <div className="knowledge-rank-copy">
+                <div className="knowledge-rank-meta">
+                  <span>{stateLabel[update.change]}</span>
+                  <em>{update.label}</em>
+                </div>
+                <h4>
+                  {rankChanged && update.before.rank !== 'unranked' && (
+                    <small>{update.before.rankLabel}</small>
+                  )}
+                  {rankChanged && update.before.rank !== 'unranked' && <i>→</i>}
+                  {update.after.rankLabel}
+                </h4>
+                <p>{update.message}</p>
+                {update.after.capabilityScope && (
+                  <div className="knowledge-capability-scope">
+                    <span>这枚段位只对应</span>
+                    <b>{update.after.capabilityScope}</b>
+                    {update.after.atCeiling && <small>本节点已满阶</small>}
+                  </div>
+                )}
+                <div
+                  className="knowledge-evidence-stars"
+                  aria-label={`当前 ${update.after.stars} 颗证据星，最多 3 颗`}
+                >
+                  <span>证据星</span>
+                  {[1, 2, 3].map((star) => (
+                    <i className={star <= update.after.stars ? 'filled' : ''} key={star} aria-hidden="true">◆</i>
+                  ))}
+                  <small>
+                    {update.change === 'confirmed'
+                      ? '本次未重复累计'
+                      : `${update.after.independentEvidenceCount} 次独立验证`}
+                  </small>
+                </div>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 const NOTE_LIST_FIELDS: { key: keyof NoteContent; label: string; hint: string }[] = [
   { key: 'core_mechanism', label: '核心机制', hint: '每行写一个机制' },
   { key: 'personal_gaps', label: '仍需留意', hint: '每行写一个需要继续巩固的点' },
@@ -6401,6 +6765,27 @@ const NOTE_LIST_FIELDS: { key: keyof NoteContent; label: string; hint: string }[
   { key: 'sources', label: '参考来源', hint: '每行写一个来源' },
   { key: 'unresolved', label: '尚未解决', hint: '每行写一个待解决问题' },
 ];
+
+function noteVerificationLabel(annotation: NoteVerificationAnnotation): string {
+  switch (annotation.claimStatus) {
+    case 'retained':
+      return '掌握稳固';
+    case 'verified_delayed':
+      return annotation.retentionRounds >= 2 ? '掌握稳固' : '复习验证通过';
+    case 'verified_immediate':
+      return '待复习验证';
+    case 'contradicted':
+      return '建议重新巩固';
+    case 'learning':
+      return '还需继续学习';
+    case 'unobserved':
+      return '尚未完成测验';
+    default:
+      if (annotation.retentionRounds >= 2) return '掌握稳固';
+      if (annotation.retentionRounds >= 1) return '复习验证通过';
+      return '学习情况待更新';
+  }
+}
 
 function noteList(content: NoteContent, key: keyof NoteContent) {
   const value = content[key];
@@ -6541,15 +6926,16 @@ function Note({
       </article>
 
       <aside className="note-verification" aria-label="本节掌握情况">
-        <header><b>本节掌握情况</b></header>
+        <header><b>本节掌握情况</b><span>会根据测验与复习表现更新</span></header>
+        <p>这里只显示 Slow 内的学习验证记录，不会改写上面的笔记。</p>
         {note.verificationAnnotations.length === 0 ? (
-          <small>目前还没有可显示的掌握情况。</small>
+          <small>完成本节测验后，这里会显示学习情况。</small>
         ) : (
           <ul>
             {note.verificationAnnotations.map((annotation) => (
               <li key={annotation.assessmentTargetId}>
                 <span><b>{annotation.objective}</b></span>
-                <em>{annotation.pKnown >= 0.8 ? '掌握稳固' : annotation.pKnown >= 0.55 ? '继续巩固' : '尚未验证'}</em>
+                <em>{noteVerificationLabel(annotation)}</em>
               </li>
             ))}
           </ul>
@@ -6876,6 +7262,7 @@ function QaPanel({
   onClearQuote,
   explanationRequest,
   onSectionChange,
+  onStreamingChange,
 }: {
   section: Section | null;
   dailyMode: DailyMode;
@@ -6887,6 +7274,7 @@ function QaPanel({
   onClearQuote: () => void;
   explanationRequest: ExplanationRequest | null;
   onSectionChange: (section: Section) => void;
+  onStreamingChange: (streaming: boolean) => void;
 }) {
   const [threadId, setThreadId] = useState<string>();
   const [newQuestion, setNewQuestion] = useState(false);
@@ -6900,6 +7288,7 @@ function QaPanel({
   const [preferenceError, setPreferenceError] = useState('');
   const [adoptingExchange, setAdoptingExchange] = useState('');
   const [adoptedExchange, setAdoptedExchange] = useState('');
+  const [confirmedPreference, setConfirmedPreference] = useState<Record<string, boolean>>({});
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const explanationRequestRef = useRef('');
@@ -6908,6 +7297,11 @@ function QaPanel({
     section?.content?.blocks.find((block) => block.id === selectedBlockId) ??
     section?.content?.blocks[0];
   const effectiveBlockId = selectedBlock?.id ?? selectedBlockId;
+
+  useEffect(() => {
+    onStreamingChange(asking && !hidden);
+    return () => onStreamingChange(false);
+  }, [asking, hidden, onStreamingChange]);
 
   useEffect(() => {
     if (selectedQuote) composerRef.current?.focus();
@@ -7220,6 +7614,41 @@ function QaPanel({
                           }
                         }}
                       >还是不清楚</button>
+                      {message.explanationStyle !== 'custom' && (
+                        <button
+                          className={confirmedPreference[message.id] ? 'selected' : ''}
+                          disabled={!message.preferenceRequestEventId || confirmedPreference[message.id]}
+                          onClick={async () => {
+                            if (!message.preferenceRequestEventId || !message.explanationStyle) return;
+                            const dimensions = {
+                              worked_example: 'example', diagram: 'diagram', analogy: 'analogy',
+                              derivation: 'derivation', precise: 'precision', concise: 'concise',
+                            } as const;
+                            const dimension = dimensions[
+                              message.explanationStyle as PresetExplanationStyle
+                            ];
+                            setPreferenceError('');
+                            try {
+                              await api.decideLearningPreference({
+                                decisionKey: crypto.randomUUID(),
+                                requestEventId: message.preferenceRequestEventId,
+                                dimension,
+                                scopeKind: 'global',
+                                state: 'confirmed',
+                              });
+                              setConfirmedPreference((current) => ({ ...current, [message.id]: true }));
+                              telemetry.track('explanation_style_remembered', {
+                                view: 'learn', entityType: 'section', entityId: section.id,
+                                properties: { style: message.explanationStyle },
+                              });
+                            } catch (reason) {
+                              setPreferenceError(reason instanceof Error ? reason.message : '偏好暂未保存，请重试。');
+                            }
+                          }}
+                        >
+                          {confirmedPreference[message.id] ? '以后会优先这样讲' : '以后优先这样讲'}
+                        </button>
+                      )}
                       <button
                         className="replace"
                         disabled={adoptingExchange === message.id || adoptedExchange === message.id || Boolean(styleFeedback[message.id]) || !message.threadId || !message.answerMessageId || !message.preferenceRequestEventId || !section.content}

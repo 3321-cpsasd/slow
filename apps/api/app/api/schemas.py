@@ -166,7 +166,7 @@ class ProductEventCreate(ApiModel):
     event_name: ProductEventName
     occurred_at: datetime
     page_path: str = Field(default="/", min_length=1, max_length=500)
-    view: Literal["", "home", "shelf", "learn", "profile"] = ""
+    view: Literal["", "home", "shelf", "learn", "profile", "knowledge"] = ""
     entity_type: Literal["", "shelf", "series", "book", "chapter", "section"] = ""
     entity_id: str = Field(default="", max_length=160, pattern=r"^[A-Za-z0-9_.:-]*$")
     properties: dict[str, str | int | float | bool] = Field(default_factory=dict)
@@ -187,6 +187,29 @@ class ProductEventBatch(ApiModel):
     )
 
     events: list[ProductEventCreate] = Field(min_length=1, max_length=25)
+
+
+class StudyActivityHeartbeat(ApiModel):
+    model_config = ConfigDict(
+        alias_generator=camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+    event_id: str = Field(min_length=8, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
+    client_session_id: str = Field(
+        min_length=8,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+    client_sequence: int = Field(ge=0, le=2_147_483_647)
+    activity_kind: Literal[
+        "reading_thinking",
+        "verification_review",
+        "ask_ai",
+    ]
+    section_id: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9_.:-]+$")
+    timezone: str = Field(min_length=1, max_length=64)
 
 
 ProfileStage = Literal[
@@ -224,6 +247,24 @@ class LearningPreferenceEvidenceCreate(ApiModel):
     style: Literal["worked_example", "diagram", "analogy", "derivation", "precise", "concise", "custom"]
     signal: Literal["requested", "helpful", "unclear"]
     custom_instruction: str | None = Field(default=None, max_length=240)
+
+
+class LearningPreferenceDecisionCreate(ApiModel):
+    decision_key: str = Field(min_length=8, max_length=128)
+    request_event_id: str = Field(min_length=8, max_length=128)
+    dimension: Literal[
+        "example", "diagram", "analogy", "derivation", "precision", "concise",
+        "plain_language", "humor",
+    ]
+    scope_kind: Literal["global", "shelf"] = "shelf"
+    shelf_id: str | None = Field(default=None, min_length=1, max_length=160)
+    state: Literal["confirmed", "cleared"] = "confirmed"
+
+    @model_validator(mode="after")
+    def validate_scope(self):
+        if (self.scope_kind == "shelf") != bool(self.shelf_id):
+            raise ValueError("书架范围的偏好决定必须绑定书架")
+        return self
 
 
 class PersonalPresentationAdopt(ApiModel):
@@ -327,7 +368,7 @@ class FeedbackCreate(ApiModel):
     ]
     message: str = Field(default="", max_length=4000)
     page_path: str = Field(default="/", max_length=500)
-    view: Literal["", "home", "shelf", "learn", "profile"] = ""
+    view: Literal["", "home", "shelf", "learn", "profile", "knowledge"] = ""
     section_id: str | None = Field(default=None, max_length=160)
     content_version_id: str | None = Field(default=None, max_length=160)
     block_id: str | None = Field(default=None, max_length=160)

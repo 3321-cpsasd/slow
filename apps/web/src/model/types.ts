@@ -37,6 +37,17 @@ export type DailyModeState = {
   version:number;
   serverNow:string;
 };
+export type StudyActivityKind = 'reading_thinking'|'verification_review'|'ask_ai';
+export type StudyActivitySummary = {
+  date:string;
+  timezone:string;
+  totalSeconds:number;
+  categories:{activityKind:StudyActivityKind;seconds:number}[];
+  episodes:{startedAt:string;endedAt:string;durationSeconds:number}[];
+  measurementRuleVersion:string;
+  estimated:true;
+  serverNow:string;
+};
 export type Bootstrap = {
   user:{id:string;name:string};
   shelves:Shelf[];
@@ -217,6 +228,8 @@ export type LearningPreferenceProjection = {
     contextCount:number;
     active:boolean;
   }[];
+  suggestedPreferences:Record<string,unknown>;
+  confirmedPreferences:Record<string,unknown>;
   effectivePreferences:Record<string,unknown>;
 };
 export type FeedbackReceipt = {
@@ -225,17 +238,10 @@ export type FeedbackReceipt = {
   scope:'global'|'content_block';
   createdAt:string;
   regeneration:{
-    status:'stream_ready'|'queued'|'blocked'|'not_applicable';
+    status:'recorded_only'|'queued'|'blocked'|'not_applicable';
     reasonCode:string|null;
     task:LearningTask|null;
   };
-};
-export type FeedbackRepairResult = {
-  feedbackId:string;
-  contentVersionId:string;
-  contentVersion:number;
-  contentBlockId:string;
-  replayed:boolean;
 };
 export type Question = {
   prompt:string;
@@ -276,6 +282,42 @@ export type DueReviews = {
   selectedCount:number;
   ruleVersion:string;
   items:ReviewAssignmentItem[];
+};
+export type KnowledgeMapNode = {
+  conceptRevisionId:string;
+  label:string;
+  rank:'unranked'|'bronze'|'silver'|'gold'|'platinum'|'diamond'|'master';
+  rankOrder:number;
+  rankLabel:string;
+  meaning:string;
+  capabilityScope:string;
+  rankCeiling:string;
+  rankCeilingLabel:string;
+  atCeiling:boolean;
+  stars:number;
+  activation:'learning'|'active'|'due'|'reassessment';
+  stabilityDays:number;
+  nextDueAt:string|null;
+  evidenceCount:number;
+  independentEvidenceCount:number;
+  targetCount:number;
+  verifiedTargetCount:number;
+  required:boolean;
+  routeContexts:{seriesId:string;seriesTitle:string;bookId:string;bookTitle:string;chapterId:string;chapterTitle:string;sectionId:string;sectionTitle:string;required:boolean;contractVersionId:string}[];
+  nextAction:{kind:'reinforce'|'wake'|'learn'|'maintain'|'advance';label:string};
+};
+export type KnowledgeMap = {
+  schemaVersion:'personal_knowledge_map_v1';
+  ruleVersion:string;
+  rankRuleVersion:string;
+  availability:'ready'|'partial'|'not_ready';
+  scope:{seriesId:string|null;series:{id:string;title:string;shelfId:string;shelfName:string}[];definition:string};
+  progress:{verifiedTargets:number;requiredTargets:number;coveragePpm:number;activeNodes:number;needsWakeNodes:number;reassessmentNodes:number;rankCounts:Record<string,number>;basis:string};
+  learnerProfile:{nodeCount?:number;rankedNodeCount?:number;activeNodeCount?:number;needsAttentionNodeCount?:number;evidenceCount?:number;independentEvidenceCount?:number;profileRuleVersion?:string;sourceObservationWatermark?:number};
+  nodes:KnowledgeMapNode[];
+  edges:{id:string;from:string;to:string;type:string;label:string}[];
+  excluded:{provisionalTargetCount:number;missingRubricNodeCount:number};
+  message:string;
 };
 export type ReviewSession = {
   assignmentId:string;
@@ -415,6 +457,49 @@ export type LearningTask = {
   createdAt?:string;
   updatedAt?:string;
 };
+export type KnowledgeRank =
+  | 'unranked'
+  | 'bronze'
+  | 'silver'
+  | 'gold'
+  | 'platinum'
+  | 'diamond'
+  | 'master';
+export type KnowledgeNodeView = {
+  conceptRevisionId:string;
+  label:string;
+  rank:KnowledgeRank;
+  rankOrder:number;
+  rankLabel:string;
+  meaning:string;
+  capabilityScope?:string;
+  rankPolicyVersion?:string;
+  rankCeiling?:KnowledgeRank;
+  rankCeilingLabel?:string;
+  atCeiling?:boolean;
+  stars:number;
+  highestRank:KnowledgeRank;
+  highestStars:number;
+  activation:'learning'|'active'|'due'|'reassessment';
+  stabilityDays:number;
+  nextDueAt:string|null;
+  evidenceCount:number;
+  independentEvidenceCount:number;
+  rankRuleVersion:string;
+  sourceObservationWatermark:number;
+};
+export type KnowledgeSettlement = {
+  settlementId:string;
+  ruleVersion:string;
+  updates:{
+    conceptRevisionId:string;
+    label:string;
+    before:KnowledgeNodeView;
+    after:KnowledgeNodeView;
+    change:'rank_up'|'star_up'|'needs_reinforcement'|'reactivated'|'confirmed';
+    message:string;
+  }[];
+};
 export type QuizResult = {
   attemptId:string;
   score:number;
@@ -430,6 +515,7 @@ export type QuizResult = {
     missedOptions?:number[];
     incorrectOptions?:number[];
   }[];
+  knowledgeSettlement?:KnowledgeSettlement|null;
   questions?:Question[];
   remediation:Remediation|null;
   nextQuiz:Section['quiz'];

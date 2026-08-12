@@ -10,6 +10,7 @@ from app.infrastructure.tables import (
     Chapter,
     ContentVersion,
     LearningPlan,
+    LearningTask,
     Section,
     Series,
     Shelf,
@@ -141,6 +142,23 @@ def test_global_feedback_is_an_immutable_user_scoped_fact():
             }
 
 
+def test_global_feedback_accepts_knowledge_view():
+    with feedback_client() as client:
+        response = client.post(
+            "/api/feedback",
+            headers=feedback_headers("knowledge-feedback-key"),
+            json={
+                "scope": "global",
+                "feedbackType": "experience",
+                "message": "知识版图反馈",
+                "pagePath": "/knowledge",
+                "view": "knowledge",
+            },
+        )
+
+        assert response.status_code == 201
+
+
 def test_content_feedback_binds_the_exact_visible_content_block():
     with feedback_client() as client:
         section_id, content_version_id, block = visible_content(client)
@@ -162,7 +180,7 @@ def test_content_feedback_binds_the_exact_visible_content_block():
 
         assert response.status_code == 201
         assert response.json()["regeneration"] == {
-            "status": "stream_ready",
+            "status": "recorded_only",
             "reasonCode": None,
             "task": None,
         }
@@ -173,6 +191,14 @@ def test_content_feedback_binds_the_exact_visible_content_block():
             assert feedback.block_id == block["id"]
             assert feedback.feedback_type == "layout"
             assert len(feedback.block_snapshot_hash) == 64
+            assert db.scalar(
+                select(func.count()).select_from(ContentVersion)
+            ) == 1
+            assert db.scalar(
+                select(func.count()).select_from(LearningTask).where(
+                    LearningTask.task_type == "content_feedback_regeneration"
+                )
+            ) == 0
 
 
 def test_content_feedback_rejects_a_block_outside_the_bound_version():

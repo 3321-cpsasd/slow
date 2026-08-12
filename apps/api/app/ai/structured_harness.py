@@ -77,6 +77,7 @@ def trace_entry(
     outcome: str,
     token_budgets: list[int] | None = None,
     repair_attempts: int | None = None,
+    failure_code: str | None = None,
 ) -> dict:
     entry = {
         "schema": schema.__name__,
@@ -96,4 +97,6 @@ def trace_entry(
     }
     if token_budgets is not None:
         entry["tokenBudgets"] = token_budgets
+    if failure_code:
+        entry["failureCode"] = failure_code
     return entry
