@@ -166,7 +166,7 @@ class ProductEventCreate(ApiModel):
     event_name: ProductEventName
     occurred_at: datetime
     page_path: str = Field(default="/", min_length=1, max_length=500)
-    view: Literal["", "home", "shelf", "learn", "profile"] = ""
+    view: Literal["", "home", "shelf", "learn", "profile", "knowledge"] = ""
     entity_type: Literal["", "shelf", "series", "book", "chapter", "section"] = ""
     entity_id: str = Field(default="", max_length=160, pattern=r"^[A-Za-z0-9_.:-]*$")
     properties: dict[str, str | int | float | bool] = Field(default_factory=dict)
@@ -368,7 +368,7 @@ class FeedbackCreate(ApiModel):
     ]
     message: str = Field(default="", max_length=4000)
     page_path: str = Field(default="/", max_length=500)
-    view: Literal["", "home", "shelf", "learn", "profile"] = ""
+    view: Literal["", "home", "shelf", "learn", "profile", "knowledge"] = ""
     section_id: str | None = Field(default=None, max_length=160)
     content_version_id: str | None = Field(default=None, max_length=160)
     block_id: str | None = Field(default=None, max_length=160)
