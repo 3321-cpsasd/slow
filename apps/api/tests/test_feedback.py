@@ -159,6 +159,23 @@ def test_global_feedback_accepts_knowledge_view():
         assert response.status_code == 201
 
 
+def test_global_feedback_accepts_review_view():
+    with feedback_client() as client:
+        response = client.post(
+            "/api/feedback",
+            headers=feedback_headers("review-feedback-key"),
+            json={
+                "scope": "global",
+                "feedbackType": "experience",
+                "message": "复习中心反馈",
+                "pagePath": "/review",
+                "view": "review",
+            },
+        )
+
+        assert response.status_code == 201
+
+
 def test_content_feedback_binds_the_exact_visible_content_block():
     with feedback_client() as client:
         section_id, content_version_id, block = visible_content(client)

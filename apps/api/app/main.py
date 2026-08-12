@@ -28,7 +28,7 @@ from .ai.fallback_adapter import FallbackAiAdapter
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ResumeUpdate, ReviewSubmit, ShelfCreate, StudyActivityHeartbeat
+from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ReinforcementRespond, ResumeUpdate, ReviewSubmit, ShelfCreate, StudyActivityHeartbeat
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -1625,6 +1625,42 @@ def create_app(
         s: SlowService = Depends(service),
     ):
         return s.submit_review(assignment_id, body, idempotency_key)
+
+    @app.post("/api/reviews/{assignment_id}/reinforcement")
+    async def start_review_reinforcement(
+        assignment_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return await s.start_review_reinforcement(assignment_id)
+
+    @app.post("/api/knowledge-targets/{target_id}/reinforcement")
+    async def start_target_reinforcement(
+        target_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return await s.start_target_reinforcement(target_id)
+
+    @app.get("/api/reinforcements/active")
+    def active_reinforcement(
+        s: SlowService = Depends(service),
+    ):
+        return s.active_reinforcement()
+
+    @app.get("/api/reinforcements/{run_id}")
+    def reinforcement_run(
+        run_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return s.reinforcement_run(run_id)
+
+    @app.post("/api/reinforcements/{run_id}/respond")
+    def respond_reinforcement(
+        run_id: str,
+        body: ReinforcementRespond,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return s.respond_reinforcement(run_id, body, idempotency_key)
 
     @app.post("/api/reviews/{assignment_id}/skip")
     def skip_review(

@@ -301,6 +301,7 @@ export type KnowledgeMapNode = {
   evidenceCount:number;
   independentEvidenceCount:number;
   targetCount:number;
+  recommendedTargetId:string;
   verifiedTargetCount:number;
   required:boolean;
   routeContexts:{seriesId:string;seriesTitle:string;bookId:string;bookTitle:string;chapterId:string;chapterTitle:string;sectionId:string;sectionTitle:string;required:boolean;contractVersionId:string}[];
@@ -337,6 +338,41 @@ export type ReviewResult = {
   passed:boolean;
   results:QuizResult['results'];
   retentionQualification:{status:string;ruleVersion:string;reasons:string[]};
+  reinforcement:{available:boolean;reason:'wake_failed'|'not_needed'};
+};
+export type ReinforcementActivity = {
+  activityKey:'diagnose'|'repair'|'recompose'|'verify';
+  type:'diagnose'|'repair'|'recompose'|'verify';
+  evidenceRole:'diagnostic'|'instructional'|'run_only'|'formal_immediate';
+  payload:{
+    heading:string;
+    prompt?:string;
+    content?:string;
+    case?:{heading:string;content:string;source:string}|null;
+    round?:number;
+    options?:{code:string;label:string}[];
+    hypothesis?:{
+      causeCode:string;
+      label:string;
+      status:'supported'|'tentative'|'abstained';
+      confidence:number;
+      evidenceCount:number;
+      message:string;
+    };
+    question?:Question;
+  };
+};
+export type ReinforcementRun = {
+  runId:string;
+  status:'preparing'|'active'|'completed'|'replan_required';
+  state:'prepare'|'diagnose'|'repair'|'recompose'|'verify'|'complete'|'replan_required';
+  objective:string;
+  entryMode:'wake_failure'|'active_reinforcement';
+  progress:{stage:number;totalStages:number;activityCount:number;maxActivities:number;repairRounds:number;maxRepairRounds:number};
+  evidenceBoundary:string;
+  currentActivity:ReinforcementActivity|null;
+  feedback:{kind:string;message:string;correct?:boolean}|null;
+  outcome:{kind:'recovered'|'needsReplan';message:string}|null;
 };
 export type Generation = {id:string;operation:string;attempt:number;status:string;model:string;trace:Record<string,unknown>;errorCode?:string;error?:string;startedAt:string;finishedAt?:string;durationMs:number};
 export type SourceVerification = {url:string;reachable:boolean;statusCode:number;pinned:boolean;verificationStatus?:'verified'|'server_unverifiable'|'failed'};

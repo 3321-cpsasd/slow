@@ -833,6 +833,20 @@ def _record_qualification_events(
             "retention": ("candidate", "server-qualified governed delayed unassisted novel review"),
             "rank": ("eligible_grouped", "assignment-bound novel review may strengthen the knowledge rank"),
         }
+    elif qualification_profile == "reinforcement_verification" and governance_ineligible:
+        statuses = {
+            "gate": ("ineligible", "reinforcement cannot rewrite the section gate"),
+            "mastery": ("ineligible", "verification item is not governance-qualified"),
+            "retention": ("ineligible", "same-session reinforcement is not delayed retention evidence"),
+            "rank": ("ineligible", "verification item is not governance-qualified"),
+        }
+    elif qualification_profile == "reinforcement_verification":
+        statuses = {
+            "gate": ("ineligible", "reinforcement cannot rewrite the section gate"),
+            "mastery": ("eligible_grouped", "unassisted final verification updates mastery once"),
+            "retention": ("ineligible", "same-session verification is not delayed retention evidence"),
+            "rank": ("eligible_grouped", "novel unassisted final verification may strengthen rank"),
+        }
     elif governance_ineligible:
         statuses = {
             # Defense in depth: even if a caller bypasses the submission

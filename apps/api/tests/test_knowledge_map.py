@@ -11,7 +11,10 @@ from app.infrastructure.tables import (
     LearningContractAssessmentTarget, LearningContractVersion,
     LearningMissionVersion, LearningPlan, Section, Series, Shelf, User, now,
 )
-from app.modules.learning.knowledge_map import KnowledgeMapService
+from app.modules.learning.knowledge_map import (
+    KnowledgeMapService,
+    _recommended_target_id,
+)
 
 
 def _session() -> Session:
@@ -63,3 +66,17 @@ def test_personal_map_rejects_another_users_series() -> None:
         with pytest.raises(AppError) as error:
             KnowledgeMapService(db, user_id="other_user").view(series_id="series_map")
         assert error.value.code == "SERIES_NOT_FOUND"
+
+
+def test_recommended_target_prefers_newest_failed_wake_for_multi_target_node() -> None:
+    assert _recommended_target_id(
+        {"target_alpha", "target_beta"},
+        ["target_unrelated", "target_beta", "target_alpha"],
+    ) == "target_beta"
+
+
+def test_recommended_target_has_stable_fallback_without_failed_wake() -> None:
+    assert _recommended_target_id(
+        {"target_beta", "target_alpha"},
+        [],
+    ) == "target_alpha"
