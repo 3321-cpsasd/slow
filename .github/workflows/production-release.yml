@@ -1,0 +1,125 @@
+name: Production release
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-release
+  cancel-in-progress: false
+
+env:
+  RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+
+jobs:
+  publish-images:
+    name: Publish ${{ matrix.component }} image
+    if: >-
+      vars.ENABLE_PRODUCTION_DEPLOY == 'true' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      (github.event.workflow_run.event == 'push' ||
+       github.event.workflow_run.event == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        component:
+          - api
+          - web
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/${{ matrix.component }}.Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}-${{ matrix.component }}:${{ env.RELEASE_SHA }}
+            ghcr.io/${{ github.repository }}-${{ matrix.component }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.RELEASE_SHA }}
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+
+  deploy-production:
+    name: Deploy production
+    if: >-
+      always() &&
+      vars.ENABLE_PRODUCTION_DEPLOY == 'true' &&
+      needs.publish-images.result == 'success'
+    needs:
+      - publish-images
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    permissions:
+      contents: read
+      packages: read
+    env:
+      ECS_HOST: ${{ secrets.ECS_HOST }}
+      ECS_PORT: ${{ secrets.ECS_PORT }}
+      ECS_USER: ${{ secrets.ECS_USER }}
+      ECS_SSH_KEY: ${{ secrets.ECS_SSH_KEY }}
+      ECS_KNOWN_HOSTS: ${{ secrets.ECS_KNOWN_HOSTS }}
+      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      WEB_ORIGIN: ${{ vars.WEB_ORIGIN }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_SHA }}
+      - name: Configure SSH
+        shell: bash
+        run: |
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$ECS_SSH_KEY" > "$HOME/.ssh/ecs_key"
+          chmod 600 "$HOME/.ssh/ecs_key"
+          printf '%s\n' "$ECS_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+      - name: Upload deployment definition
+        shell: bash
+        run: |
+          scp -P "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
+            deploy/compose.prod.yml \
+            "$ECS_USER@$ECS_HOST:/opt/slow/compose.prod.yml"
+          scp -P "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
+            deploy/compose.sqlite-rollback.yml \
+            "$ECS_USER@$ECS_HOST:/opt/slow/compose.sqlite-rollback.yml"
+          scp -P "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
+            deploy/scripts/remote-deploy.sh \
+            "$ECS_USER@$ECS_HOST:/opt/slow/remote-deploy.sh"
+          scp -P "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
+            deploy/scripts/create-demo-user.sh \
+            "$ECS_USER@$ECS_HOST:/opt/slow/create-demo-user.sh"
+          scp -P "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
+            deploy/scripts/cutover-sqlite-to-postgres.sh \
+            "$ECS_USER@$ECS_HOST:/opt/slow/cutover-sqlite-to-postgres.sh"
+      - name: Pull and deploy release
+        shell: bash
+        run: |
+          printf '%s' "$GHCR_TOKEN" | ssh -p "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
+            "$ECS_USER@$ECS_HOST" \
+            "docker login ghcr.io -u '$GITHUB_ACTOR' --password-stdin"
+          ssh -p "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
+            "$ECS_USER@$ECS_HOST" \
+            "chmod 700 /opt/slow/remote-deploy.sh /opt/slow/create-demo-user.sh /opt/slow/cutover-sqlite-to-postgres.sh && APP_VERSION='$RELEASE_SHA' REGISTRY='ghcr.io' IMAGE_NAME='$GITHUB_REPOSITORY' WEB_ORIGIN='$WEB_ORIGIN' /opt/slow/remote-deploy.sh"

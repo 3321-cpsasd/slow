@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+    paths:
+      - ".dockerignore"
+      - "apps/api/**"
+      - "apps/web/**"
+      - "deploy/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17.6-alpine
+        env:
+          POSTGRES_DB: slow_test
+          POSTGRES_USER: slow_test
+          POSTGRES_PASSWORD: slow_test_only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U slow_test -d slow_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      POSTGRES_TEST_DATABASE_URL: postgresql+psycopg://slow_test:slow_test_only@127.0.0.1:5432/slow_test
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: apps/api/requirements.txt
+      - name: Install API dependencies
+        run: pip install -r apps/api/requirements.txt
+      - name: Run API tests
+        run: PYTHONPATH=apps/api pytest -q apps/api/tests
+
+  web-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: apps/web/pnpm-lock.yaml
+      - name: Install Web dependencies
+        working-directory: apps/web
+        run: pnpm install --frozen-lockfile
+      - name: Build Web
+        working-directory: apps/web
+        run: pnpm build
+
+  ops-checks:
+    name: Ops tests and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: apps/ops/pnpm-lock.yaml
+      - name: Install Ops dependencies
+        working-directory: apps/ops
+        run: pnpm install --frozen-lockfile
+      - name: Test Ops
+        working-directory: apps/ops
+        run: pnpm test
+      - name: Build Ops
+        working-directory: apps/ops
+        run: pnpm build
