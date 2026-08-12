@@ -1,4 +1,5 @@
 import itertools
+import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -512,6 +513,24 @@ class V2FakeAi(FakeAi):
         )
 
 
+class V2FailingHarnessAi(V2FakeAi):
+    async def generate_lesson(self, lesson_spec):
+        raise RuntimeError("simulated v2 provider failure")
+
+    def structured_trace(self):
+        return [
+            {
+                "schema": "GeneratedLessonSlotCandidate",
+                "attempts": 1,
+                "repairAttempts": 0,
+                "outcome": "provider_failed",
+                "invalidOutputDigests": [],
+                "lastValidationIssues": [],
+                "tokenBudgets": [12_000],
+            }
+        ]
+
+
 def test_default_v2_route_uses_one_model_call_and_publishes_both_artifacts():
     ai = V2FakeAi()
     with TestClient(
@@ -539,6 +558,31 @@ def test_default_v2_route_uses_one_model_call_and_publishes_both_artifacts():
                     AssessmentItemVersion.quiz_set_id == lesson["quiz"]["id"],
                 )
             ) == 4
+
+
+def test_v2_failure_persists_safe_structured_harness_audit():
+    ai = V2FailingHarnessAi()
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            ai,
+            AcceptingSourceVerifier(),
+        ),
+        raise_server_exceptions=False,
+    ) as client:
+        series = create_series(client)
+        task = wait_for_task(client, series["initializationTask"]["taskId"])
+        with client.app.state.sessions() as db:
+            run = db.scalar(
+                select(GenerationRun).order_by(GenerationRun.started_at.desc())
+            )
+            trace = json.loads(run.trace_json)
+
+            assert task["status"] == "failed"
+            assert run.status == "failed"
+            assert trace["stage"] == "failed"
+            assert trace["aiHarness"] == ai.structured_trace()
+            assert "simulated v2 provider failure" not in run.trace_json
 
 
 def test_v2_route_rejects_unbound_content_before_formal_persistence():

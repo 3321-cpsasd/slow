@@ -434,6 +434,38 @@ def test_openai_chat_lesson_maps_provider_failures_for_fallback_routing():
     assert error.retryable is True
 
 
+def test_openai_chat_lesson_v2_traces_safe_failure_code():
+    async def run():
+        adapter = OpenAiAdapter(
+            "",
+            "qwen3.8-max-preview",
+            capabilities=ProviderCapabilities(
+                protocol="openai",
+                api_mode="chat_completions",
+                structured_output=True,
+                streaming=True,
+                reasoning_mode="required",
+            ),
+        )
+
+        async def fail(*_args, **_kwargs):
+            raise AiError(
+                "provider returned no final content",
+                code="AI_EMPTY_RESPONSE",
+            )
+
+        adapter._chat_parse_once = fail
+        with pytest.raises(AiError) as raised:
+            await adapter.generate_lesson(_lesson_spec())
+        return raised.value, adapter.structured_trace()
+
+    error, trace = asyncio.run(run())
+    assert error.code == "AI_STRUCTURED_OUTPUT_FAILED"
+    assert trace[0]["outcome"] == "provider_failed"
+    assert trace[0]["failureCode"] == "AI_EMPTY_RESPONSE"
+    assert "provider returned no final content" not in json.dumps(trace)
+
+
 def test_openai_chat_lesson_v2_does_not_repair_an_invalid_candidate():
     async def run():
         adapter, completions = await chat_adapter(['{"decision":"candidate"}'])

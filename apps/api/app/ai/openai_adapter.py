@@ -5,7 +5,7 @@ from contextvars import ContextVar
 from urllib.parse import urlparse
 from openai import AsyncOpenAI
 from pydantic import ValidationError
-from ..core.errors import AiError
+from ..core.errors import AiError, safe_error_code
 from .contracts import (
     AskMeDiscussionTurn,
     AskMeTurn,
@@ -474,6 +474,7 @@ class OpenAiAdapter:
                 raise
             except Exception as error:
                 self.usage_recorder.fail(invocation_id, error)
+                provider_error = self._provider_error(error)
                 if isinstance(error, ValidationError):
                     self._record_structured_trace(
                         trace_entry(
@@ -482,6 +483,7 @@ class OpenAiAdapter:
                             invalid_outputs=[],
                             last_error=error,
                             outcome="failed",
+                            failure_code="AI_STRUCTURED_OUTPUT_INVALID",
                         )
                     )
                 else:
@@ -492,9 +494,13 @@ class OpenAiAdapter:
                             invalid_outputs=[],
                             last_error=None,
                             outcome="provider_failed",
+                            failure_code=(
+                                provider_error.code
+                                if provider_error
+                                else safe_error_code(error)
+                            ),
                         )
                     )
-                provider_error = self._provider_error(error)
                 if provider_error:
                     raise provider_error from error
                 raise AiError(
@@ -575,6 +581,7 @@ class OpenAiAdapter:
                     outcome="provider_failed",
                     token_budgets=token_budgets,
                     repair_attempts=repair_attempt_count,
+                    failure_code=provider_error.code,
                 )
             )
             raise provider_error from chat_error
@@ -588,6 +595,7 @@ class OpenAiAdapter:
                     outcome="failed",
                     token_budgets=token_budgets,
                     repair_attempts=repair_attempt_count,
+                    failure_code=chat_error.code,
                 )
             )
             raise chat_error
@@ -601,6 +609,7 @@ class OpenAiAdapter:
                     outcome="failed",
                     token_budgets=token_budgets,
                     repair_attempts=repair_attempt_count,
+                    failure_code="AI_STRUCTURED_OUTPUT_INVALID",
                 )
             )
         raise AiError(
@@ -892,6 +901,7 @@ class OpenAiAdapter:
                     outcome="failed",
                     token_budgets=[output_tokens],
                     repair_attempts=0,
+                    failure_code="AI_STRUCTURED_OUTPUT_INVALID",
                 )
             )
             raise AiError(
@@ -899,6 +909,7 @@ class OpenAiAdapter:
                 code="AI_STRUCTURED_OUTPUT_INVALID",
             ) from error
         except Exception as error:
+            provider_error = self._provider_error(error)
             self._record_structured_trace(
                 trace_entry(
                     schema=GeneratedLessonSlotCandidate,
@@ -908,9 +919,13 @@ class OpenAiAdapter:
                     outcome="provider_failed",
                     token_budgets=[output_tokens],
                     repair_attempts=0,
+                    failure_code=(
+                        provider_error.code
+                        if provider_error
+                        else safe_error_code(error)
+                    ),
                 )
             )
-            provider_error = self._provider_error(error)
             if provider_error:
                 raise provider_error from error
             raise AiError(

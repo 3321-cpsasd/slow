@@ -36,6 +36,7 @@ import type {
   LearningPreferences,
   Note as NoteType,
   NoteContent,
+  NoteVerificationAnnotation,
   QaHistory,
   QuizResult,
   ReviewResult,
@@ -6402,6 +6403,27 @@ const NOTE_LIST_FIELDS: { key: keyof NoteContent; label: string; hint: string }[
   { key: 'unresolved', label: '尚未解决', hint: '每行写一个待解决问题' },
 ];
 
+function noteVerificationLabel(annotation: NoteVerificationAnnotation): string {
+  switch (annotation.claimStatus) {
+    case 'retained':
+      return '掌握稳固';
+    case 'verified_delayed':
+      return annotation.retentionRounds >= 2 ? '掌握稳固' : '复习验证通过';
+    case 'verified_immediate':
+      return '待复习验证';
+    case 'contradicted':
+      return '建议重新巩固';
+    case 'learning':
+      return '还需继续学习';
+    case 'unobserved':
+      return '尚未完成测验';
+    default:
+      if (annotation.retentionRounds >= 2) return '掌握稳固';
+      if (annotation.retentionRounds >= 1) return '复习验证通过';
+      return '学习情况待更新';
+  }
+}
+
 function noteList(content: NoteContent, key: keyof NoteContent) {
   const value = content[key];
   return Array.isArray(value)
@@ -6541,15 +6563,16 @@ function Note({
       </article>
 
       <aside className="note-verification" aria-label="本节掌握情况">
-        <header><b>本节掌握情况</b></header>
+        <header><b>本节掌握情况</b><span>会根据测验与复习表现更新</span></header>
+        <p>这里只显示 Slow 内的学习验证记录，不会改写上面的笔记。</p>
         {note.verificationAnnotations.length === 0 ? (
-          <small>目前还没有可显示的掌握情况。</small>
+          <small>完成本节测验后，这里会显示学习情况。</small>
         ) : (
           <ul>
             {note.verificationAnnotations.map((annotation) => (
               <li key={annotation.assessmentTargetId}>
                 <span><b>{annotation.objective}</b></span>
-                <em>{annotation.pKnown >= 0.8 ? '掌握稳固' : annotation.pKnown >= 0.55 ? '继续巩固' : '尚未验证'}</em>
+                <em>{noteVerificationLabel(annotation)}</em>
               </li>
             ))}
           </ul>
