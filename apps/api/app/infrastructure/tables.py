@@ -2355,6 +2355,130 @@ class KnowledgeStateProjection(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class KnowledgeNodeStateProjection(Base):
+    """Rebuildable user state for one published knowledge identity.
+
+    Target-level BKT projections remain the measurement layer.  This row is the
+    user-facing aggregation that turns qualified, attributable evidence into a
+    rank, stars and a wake-up state without making the UI an authority.
+    """
+
+    __tablename__ = "knowledge_node_state_projections"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "concept_revision_id",
+            name="uq_knowledge_node_state_user_concept",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    concept_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("concept_revisions.id"), index=True
+    )
+    current_rank: Mapped[str] = mapped_column(
+        String(24), default="unranked", index=True
+    )
+    current_rank_order: Mapped[int] = mapped_column(Integer, default=0)
+    current_stars: Mapped[int] = mapped_column(Integer, default=0)
+    highest_rank: Mapped[str] = mapped_column(
+        String(24), default="unranked", index=True
+    )
+    highest_rank_order: Mapped[int] = mapped_column(Integer, default=0)
+    highest_stars: Mapped[int] = mapped_column(Integer, default=0)
+    activation_state: Mapped[str] = mapped_column(
+        String(24), default="learning", index=True
+    )
+    stability_days: Mapped[int] = mapped_column(Integer, default=1)
+    next_due_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    last_qualified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    evidence_count: Mapped[int] = mapped_column(Integer, default=0)
+    independent_evidence_count: Mapped[int] = mapped_column(Integer, default=0)
+    uncertainty_ppm: Mapped[int] = mapped_column(Integer, default=1000000)
+    rank_rule_version: Mapped[str] = mapped_column(
+        String(40), default="knowledge_rank_v2"
+    )
+    projection_version: Mapped[int] = mapped_column(Integer, default=1)
+    source_observation_watermark: Mapped[int] = mapped_column(Integer, default=0)
+    rebuilt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class LearnerKnowledgeProfileProjection(Base):
+    """Rebuildable, evidence-only third-layer learner profile.
+
+    This projection deliberately stores structural summaries rather than AI
+    diagnoses.  Every field can be reproduced from node and target projections.
+    """
+
+    __tablename__ = "learner_knowledge_profile_projections"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_learner_knowledge_profile_user"),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    summary_json: Mapped[str] = mapped_column(Text, default="{}")
+    evidence_count: Mapped[int] = mapped_column(Integer, default=0)
+    independent_evidence_count: Mapped[int] = mapped_column(Integer, default=0)
+    profile_rule_version: Mapped[str] = mapped_column(
+        String(40), default="learner_knowledge_profile_v1"
+    )
+    projection_version: Mapped[int] = mapped_column(Integer, default=1)
+    source_observation_watermark: Mapped[int] = mapped_column(Integer, default=0)
+    rebuilt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class BktParameterSetVersion(Base):
+    """Immutable candidate or baseline BKT parameter artifact."""
+
+    __tablename__ = "bkt_parameter_set_versions"
+    version: Mapped[str] = mapped_column(String(80), primary_key=True)
+    scope_kind: Mapped[str] = mapped_column(String(32), index=True)
+    scope_key: Mapped[str] = mapped_column(String(160), index=True)
+    parameters_json: Mapped[str] = mapped_column(Text)
+    training_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    evaluation_json: Mapped[str] = mapped_column(Text, default="{}")
+    provenance_mode: Mapped[str] = mapped_column(String(40), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
+class BktParameterActivationEvent(Base):
+    """Append-only shadow/online activation audit for a parameter artifact."""
+
+    __tablename__ = "bkt_parameter_activation_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "scope_kind",
+            "scope_key",
+            "deployment_mode",
+            "sequence",
+            name="uq_bkt_activation_scope_mode_sequence",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    scope_kind: Mapped[str] = mapped_column(String(32), index=True)
+    scope_key: Mapped[str] = mapped_column(String(160), index=True)
+    deployment_mode: Mapped[str] = mapped_column(String(16), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    parameter_set_version: Mapped[str] = mapped_column(
+        ForeignKey("bkt_parameter_set_versions.version"), index=True
+    )
+    previous_parameter_set_version: Mapped[str] = mapped_column(
+        String(80), default=""
+    )
+    decision_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
 class ReviewState(Base):
     __tablename__ = "review_states"
     __table_args__ = (

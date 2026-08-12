@@ -1603,6 +1603,13 @@ def create_app(
     ):
         return s.due_reviews(daily_budget)
 
+    @app.get("/api/knowledge-map")
+    def knowledge_map(
+        series_id: str | None = Query(default=None),
+        s: SlowService = Depends(service),
+    ):
+        return s.knowledge_map(series_id)
+
     @app.post("/api/reviews/{assignment_id}/start")
     async def start_review(
         assignment_id: str,

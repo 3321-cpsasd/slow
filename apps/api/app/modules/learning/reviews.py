@@ -33,6 +33,7 @@ from ...infrastructure.tables import (
     now,
 )
 from .assessment import record_scoring_facts
+from .knowledge_ranks import knowledge_node_views_for_targets
 from .content_governance_store import (
     bind_remediation_questions_to_source_claims,
     governance_view_for_quiz,
@@ -389,6 +390,11 @@ class ReviewAssignmentService:
                 )
             ).all()
         } if assignments else {}
+        node_views = knowledge_node_views_for_targets(
+            self.db,
+            user_id=self.user_id,
+            target_ids=set(targets),
+        )
         return {
             "selectionRunId": selection.id,
             "asOf": _utc(selection.as_of).isoformat(),
@@ -408,6 +414,9 @@ class ReviewAssignmentService:
                     "basePriority": item.base_priority,
                     "effectivePriority": item.effective_priority,
                     "quizSetId": item.review_quiz_set_id,
+                    "knowledgeNode": node_views.get(
+                        targets[item.assessment_target_id].concept_revision_id or ""
+                    ),
                 }
                 for item in assignments
             ],

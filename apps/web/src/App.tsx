@@ -48,6 +48,9 @@ import type {
   LearningTask,
   LearningProfile,
   LearningPreferences,
+  KnowledgeSettlement,
+  KnowledgeMap,
+  KnowledgeMapNode,
   Note as NoteType,
   NoteContent,
   NoteVerificationAnnotation,
@@ -63,10 +66,11 @@ import type {
   StudyActivitySummary,
 } from './model/types';
 
-type View = 'home' | 'shelf' | 'learn' | 'profile';
+type View = 'home' | 'shelf' | 'learn' | 'profile' | 'knowledge';
 type AppRoute =
   | { view: 'home' }
   | { view: 'profile'; section: 'profile' | 'account' }
+  | { view: 'knowledge' }
   | { view: 'shelf'; shelfId: string }
   | { view: 'learn'; seriesId: string; sectionId: string | null };
 type TextQuote = { text: string; blockId: string };
@@ -178,6 +182,7 @@ const routeFromLocation = (): AppRoute => {
         : 'profile',
     };
   }
+  if (parts[0] === 'knowledge' && parts.length === 1) return { view: 'knowledge' };
   if (parts[0] === 'shelves' && parts[1] && parts.length === 2) {
     return { view: 'shelf', shelfId: parts[1] };
   }
@@ -767,6 +772,16 @@ export default function App() {
     setView('profile');
   };
 
+  const openKnowledgeMap = () => {
+    routeRequestVersion.current += 1;
+    updateBrowserLocation('/knowledge', 'push');
+    setShowUserMenu(false);
+    setShelf(null);
+    setSeries(null);
+    setSection(null);
+    setView('knowledge');
+  };
+
   const changeProfileSection = (nextSection: 'profile' | 'account') => {
     const nextUrl = nextSection === 'account' ? '/profile?section=account' : '/profile';
     window.history.replaceState({}, '', nextUrl);
@@ -1126,6 +1141,13 @@ export default function App() {
     if (route.view === 'profile') {
       setProfileSection(route.section);
       setView('profile');
+      setShelf(null);
+      setSeries(null);
+      setSection(null);
+      return;
+    }
+    if (route.view === 'knowledge') {
+      setView('knowledge');
       setShelf(null);
       setSeries(null);
       setSection(null);
@@ -1610,6 +1632,8 @@ export default function App() {
           </div>
         ) : view === 'profile' ? (
           <small>个人中心</small>
+        ) : view === 'knowledge' ? (
+          <small>我的知识版图</small>
         ) : (
           <small>一步一步，学成自己的书</small>
         )}
@@ -1671,6 +1695,9 @@ export default function App() {
                 <button role="menuitem" onClick={() => openProfileCenter('profile')}>
                   <span><b>个人中心</b><small>学习画像与学习节奏</small></span><i aria-hidden="true">→</i>
                 </button>
+                <button role="menuitem" onClick={openKnowledgeMap}>
+                  <span><b>知识版图</b><small>能力段位、保持状态与目标覆盖</small></span><i aria-hidden="true">→</i>
+                </button>
                 <button role="menuitem" onClick={() => openProfileCenter('account')}>
                   <span><b>账号与数据</b><small>身份、数据归属与安全</small></span><i aria-hidden="true">→</i>
                 </button>
@@ -1689,7 +1716,7 @@ export default function App() {
         onDismissError={() => setError('')}
         onDismissNotice={() => setNotice('')}
       />
-      <main className={view === 'learn' ? 'learn-main' : view === 'profile' ? 'profile-main' : 'marketing-main'}>
+      <main className={view === 'learn' ? 'learn-main' : view === 'profile' ? 'profile-main' : view === 'knowledge' ? 'knowledge-main' : 'marketing-main'}>
         {view === 'home' && (
           <Home
             data={data}
@@ -1754,6 +1781,16 @@ export default function App() {
             onRotateRecoveryCode={async (currentPassword) => (await api.rotateRecoveryCode(currentPassword)).recoveryCode}
             privacy={auth.privacy}
             onRequestExit={requestAccountExit}
+          />
+        )}
+        {view === 'knowledge' && data && (
+          <KnowledgeMapPage
+            series={data.shelves.flatMap((item) => item.series.map((entry) => ({
+              id: entry.id,
+              title: entry.title,
+              shelfName: item.name,
+            })))}
+            onBack={goHome}
           />
         )}
         {view === 'learn' && series && (
@@ -3282,6 +3319,192 @@ function parseProfileDomains(value: string) {
       .map((item) => item.trim())
       .filter(Boolean),
   )).slice(0, 6);
+}
+
+const KNOWLEDGE_RANK_SHORT:Record<KnowledgeMapNode['rank'],string> = {
+  unranked: '待验证', bronze: '青铜', silver: '白银', gold: '黄金',
+  platinum: '铂金', diamond: '钻石', master: '大师',
+};
+
+function KnowledgeMapPage({
+  series,
+  onBack,
+}: {
+  series:{id:string;title:string;shelfName:string}[];
+  onBack:()=>void;
+}) {
+  const [scope, setScope] = useState('');
+  const [map, setMap] = useState<KnowledgeMap | null>(null);
+  const [selectedId, setSelectedId] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setError('');
+    void api.knowledgeMap(scope || undefined).then((value) => {
+      if (!alive) return;
+      setMap(value);
+      setSelectedId((current) => (
+        value.nodes.some((item) => item.conceptRevisionId === current)
+          ? current
+          : value.nodes[0]?.conceptRevisionId || ''
+      ));
+    }).catch((reason) => {
+      if (alive) setError(reason instanceof Error ? reason.message : '知识版图暂时无法加载');
+    }).finally(() => {
+      if (alive) setLoading(false);
+    });
+    return () => { alive = false; };
+  }, [scope]);
+
+  const selected = map?.nodes.find((item) => item.conceptRevisionId === selectedId) || null;
+  const positioned = useMemo(() => {
+    const nodes = map?.nodes || [];
+    return nodes.map((node, index) => {
+      const column = index % 3;
+      const row = Math.floor(index / 3);
+      return {
+        node,
+        x: 130 + column * 220 + (row % 2 ? 28 : 0),
+        y: 92 + row * 150 + (column === 1 ? 34 : 0),
+      };
+    });
+  }, [map]);
+  const coordinates = new Map(positioned.map((item) => [item.node.conceptRevisionId, item]));
+  const coverage = map ? Math.round(map.progress.coveragePpm / 10_000) : 0;
+
+  return (
+    <section className="knowledge-map-page" aria-labelledby="knowledge-map-title">
+      <header className="knowledge-map-hero">
+        <button type="button" className="knowledge-map-back" onClick={onBack}>← 返回书架</button>
+        <div className="knowledge-map-title-row">
+          <div>
+            <p className="eyebrow">MY KNOWLEDGE FIELD · 由正式证据生长</p>
+            <h1 id="knowledge-map-title">不是读到了哪里，<br />是能力真正长到了哪里。</h1>
+            <p>{map?.message || '正在重建你的个人知识子网…'}</p>
+          </div>
+          <label className="knowledge-scope-picker">
+            <span>观察范围</span>
+            <select value={scope} onChange={(event) => setScope(event.target.value)}>
+              <option value="">全部学习目标</option>
+              {series.map((item) => (
+                <option key={item.id} value={item.id}>{item.shelfName} · {item.title}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="knowledge-progress-strip" aria-label={`能力路线覆盖 ${coverage}%`}>
+          <div className="knowledge-progress-number"><strong>{coverage}</strong><span>%</span></div>
+          <div className="knowledge-progress-copy">
+            <span>能力路线覆盖</span>
+            <div><i style={{ width: `${coverage}%` }} /></div>
+            <small>{map?.progress.verifiedTargets || 0} / {map?.progress.requiredTargets || 0} 项正式目标已有合格证据</small>
+          </div>
+          <dl>
+            <div><dt>{map?.progress.activeNodes || 0}</dt><dd>可随时调用</dd></div>
+            <div><dt>{map?.progress.needsWakeNodes || 0}</dt><dd>待唤醒</dd></div>
+            <div><dt>{map?.progress.reassessmentNodes || 0}</dt><dd>待补强</dd></div>
+          </dl>
+        </div>
+      </header>
+
+      {loading ? (
+        <div className="knowledge-map-status"><i />正在从学习证据重建版图…</div>
+      ) : error ? (
+        <div className="knowledge-map-status is-error" role="alert">{error}</div>
+      ) : !map?.nodes.length ? (
+        <div className="knowledge-map-empty">
+          <span aria-hidden="true">◎</span>
+          <h2>第一颗知识坐标还在形成</h2>
+          <p>{map?.message}</p>
+          {Boolean(map?.excluded.provisionalTargetCount) && <small>已有 {map?.excluded.provisionalTargetCount} 项旧目标尚未完成正式知识坐标绑定，因此没有被拿来虚构段位。</small>}
+        </div>
+      ) : (
+        <div className="knowledge-map-workspace">
+          <div className="knowledge-constellation" aria-label="知识节点关系图">
+            <div className="knowledge-constellation-heading">
+              <div><span>个人子网</span><b>{map.nodes.length} 个能力节点</b></div>
+              <small>连线来自已发布知识关系；点击节点查看证据范围</small>
+            </div>
+            <svg viewBox={`0 0 700 ${Math.max(430, Math.ceil(positioned.length / 3) * 150 + 80)}`} role="img" aria-label="能力节点关系">
+              <defs>
+                <pattern id="knowledge-grid" width="28" height="28" patternUnits="userSpaceOnUse">
+                  <circle cx="1" cy="1" r="1" fill="currentColor" />
+                </pattern>
+              </defs>
+              <rect width="100%" height="100%" fill="url(#knowledge-grid)" className="knowledge-grid" />
+              {map.edges.map((edge) => {
+                const from = coordinates.get(edge.from);
+                const to = coordinates.get(edge.to);
+                if (!from || !to) return null;
+                return <g key={edge.id} className="knowledge-edge"><line x1={from.x} y1={from.y} x2={to.x} y2={to.y} /><text x={(from.x + to.x) / 2} y={(from.y + to.y) / 2 - 8}>{edge.label}</text></g>;
+              })}
+              {positioned.map(({ node, x, y }) => (
+                <g
+                  key={node.conceptRevisionId}
+                  className={`knowledge-node rank-${node.rank} activation-${node.activation}${selectedId === node.conceptRevisionId ? ' is-selected' : ''}`}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${node.label}，${node.rankLabel}，${node.nextAction.label}`}
+                  onClick={() => setSelectedId(node.conceptRevisionId)}
+                  onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') setSelectedId(node.conceptRevisionId); }}
+                >
+                  <circle cx={x} cy={y} r="42" className="knowledge-node-halo" />
+                  <circle cx={x} cy={y} r="30" className="knowledge-node-core" />
+                  <text x={x} y={y + 4} className="knowledge-node-rank">{KNOWLEDGE_RANK_SHORT[node.rank]}</text>
+                  <text x={x} y={y + 61} className="knowledge-node-label">{node.label.length > 11 ? `${node.label.slice(0, 10)}…` : node.label}</text>
+                  {node.activation === 'due' && <text x={x + 31} y={y - 28} className="knowledge-node-signal">唤</text>}
+                  {node.activation === 'reassessment' && <text x={x + 31} y={y - 28} className="knowledge-node-signal">补</text>}
+                </g>
+              ))}
+            </svg>
+          </div>
+
+          <aside className="knowledge-node-ledger" aria-live="polite">
+            {selected && (
+              <>
+                <div className={`knowledge-ledger-seal rank-${selected.rank}`}>
+                  <span>{KNOWLEDGE_RANK_SHORT[selected.rank]}</span>
+                  <small>{'★'.repeat(selected.stars)}{'☆'.repeat(Math.max(0, 3 - selected.stars))}</small>
+                </div>
+                <p className="eyebrow">EVIDENCE LEDGER</p>
+                <h2>{selected.label}</h2>
+                <p className="knowledge-capability-scope">本节点只衡量：{selected.capabilityScope}</p>
+                <div className="knowledge-ledger-state">
+                  <span>{selected.rankLabel}</span>
+                  <i>→</i>
+                  <span className={`activation-${selected.activation}`}>{selected.nextAction.label}</span>
+                </div>
+                <dl>
+                  <div><dt>{selected.independentEvidenceCount}</dt><dd>独立证据</dd></div>
+                  <div><dt>{selected.verifiedTargetCount}/{selected.targetCount}</dt><dd>目标验证</dd></div>
+                  <div><dt>{selected.stabilityDays} 天</dt><dd>当前稳定期</dd></div>
+                </dl>
+                <div className="knowledge-ceiling-note">
+                  <span>这项能力的自然上限</span>
+                  <b>{selected.rankCeilingLabel}</b>
+                  <small>{selected.atCeiling ? '本节点已满阶；更复杂的能力会作为新的知识节点出现。' : '继续学习不会靠重复刷题升级，而要出现更深、独立的新证据。'}</small>
+                </div>
+                {selected.routeContexts[0] && (
+                  <div className="knowledge-route-origin">
+                    <span>进入你版图的路线</span>
+                    <b>{selected.routeContexts[0].seriesTitle}</b>
+                    <small>{selected.routeContexts[0].bookTitle} · {selected.routeContexts[0].sectionTitle}</small>
+                  </div>
+                )}
+              </>
+            )}
+          </aside>
+        </div>
+      )}
+      <footer className="knowledge-map-footnote">
+        <b>这里不显示 AI 猜测。</b>
+        <span>正文互动帮助理解，但只有节末测验、Ask Me 与合格的延迟复习会改变正式段位；后台发现生疏时，会明确显示为“待唤醒”。</span>
+      </footer>
+    </section>
+  );
 }
 
 function ProfileCenterPage({
@@ -6243,6 +6466,8 @@ function QuizReview({
         </p>
       </header>
 
+      <KnowledgeSettlementCard settlement={result.knowledgeSettlement} />
+
       {wrongIndexes.length > 0 && (
         <nav className="wrong-question-nav" aria-label="错题导航">
           <span>跳转错题</span>
@@ -6433,6 +6658,100 @@ function QuizReview({
             <span><i />正在准备补充教学</span>
           </>
         )}
+      </div>
+    </section>
+  );
+}
+
+function KnowledgeSettlementCard({
+  settlement,
+}: {
+  settlement?: KnowledgeSettlement | null;
+}) {
+  if (!settlement?.updates.length) return null;
+  const priority = {
+    rank_up: 0,
+    star_up: 1,
+    reactivated: 2,
+    needs_reinforcement: 3,
+    confirmed: 4,
+  } as const;
+  const updates = [...settlement.updates].sort(
+    (left, right) => priority[left.change] - priority[right.change],
+  );
+  const stateLabel = {
+    rank_up: '段位提升',
+    star_up: '证据增加',
+    reactivated: '重新唤醒',
+    needs_reinforcement: '需要巩固',
+    confirmed: '能力确认',
+  } as const;
+
+  return (
+    <section className="knowledge-settlement" aria-labelledby="knowledge-settlement-title">
+      <div className="knowledge-settlement-heading">
+        <div>
+          <span>知识印记</span>
+          <h3 id="knowledge-settlement-title">本节留下的成长</h3>
+        </div>
+        <small>只记录正式验证，不把阅读时长算成掌握</small>
+      </div>
+      <div className="knowledge-settlement-list">
+        {updates.map((update) => {
+          const tier = update.after.rankLabel.split(' · ')[0];
+          const rankChanged = update.change === 'rank_up';
+          return (
+            <article
+              className={`knowledge-rank-update ${rankChanged ? 'rank-up' : update.change}`}
+              data-rank={update.after.rank}
+              key={update.conceptRevisionId}
+            >
+              <div
+                className="knowledge-rank-seal"
+                aria-label={`当前段位：${update.after.rankLabel}，${update.after.stars} 颗证据星`}
+              >
+                <small>{rankChanged ? 'NEW RANK' : 'KNOWLEDGE'}</small>
+                <strong>{tier}</strong>
+                <i aria-hidden="true">知</i>
+              </div>
+              <div className="knowledge-rank-copy">
+                <div className="knowledge-rank-meta">
+                  <span>{stateLabel[update.change]}</span>
+                  <em>{update.label}</em>
+                </div>
+                <h4>
+                  {rankChanged && update.before.rank !== 'unranked' && (
+                    <small>{update.before.rankLabel}</small>
+                  )}
+                  {rankChanged && update.before.rank !== 'unranked' && <i>→</i>}
+                  {update.after.rankLabel}
+                </h4>
+                <p>{update.message}</p>
+                {update.after.capabilityScope && (
+                  <div className="knowledge-capability-scope">
+                    <span>这枚段位只对应</span>
+                    <b>{update.after.capabilityScope}</b>
+                    {update.after.atCeiling && <small>本节点已满阶</small>}
+                  </div>
+                )}
+                <div
+                  className="knowledge-evidence-stars"
+                  aria-label={`当前 ${update.after.stars} 颗证据星，最多 3 颗`}
+                >
+                  <span>证据星</span>
+                  {[1, 2, 3].map((star) => (
+                    <i className={star <= update.after.stars ? 'filled' : ''} key={star} aria-hidden="true">◆</i>
+                  ))}
+                  <small>
+                    {update.change === 'confirmed'
+                      ? '本次未重复累计'
+                      : `${update.after.independentEvidenceCount} 次独立验证`}
+                  </small>
+                </div>
+              </div>
+            </article>
+          );
+        })}
       </div>
     </section>
   );

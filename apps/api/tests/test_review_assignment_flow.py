@@ -214,6 +214,7 @@ def test_review_assignment_materializes_once_and_submits_candidate(tmp_path):
                 "gate": "ineligible",
                 "mastery": "eligible_grouped",
                 "retention": "candidate",
+                "rank": "eligible_grouped",
             }
             assert db.scalar(
                 select(func.count(ReviewAssignmentEventRecord.id)).where(

@@ -19,6 +19,15 @@ Slow 的重要变更记录在这里。本项目采用 [Keep a Changelog](https:/
 
 ### Added · 新增
 
+- Completed the ADR-0012 MVP loop with publication-gated node rubrics, a personal knowledge-map API and responsive evidence field, rebuildable evidence-only learner profile summaries, task-scoped teaching actions shared by future generation and review, and a versioned BKT registry with offline time-split calibration, shadow activation, and fail-closed online promotion.
+- 完成 ADR-0012 的 MVP 核心闭环：知识节点量规发布门禁、个人知识版图 API 与响应式证据场、可重建的纯证据画像摘要、生成与复习共享的任务级教学动作，以及包含离线时间切分校准、影子运行和失败关闭上线门禁的版本化 BKT 参数注册链。
+
+- Implemented the first ADR-0012 vertical slice: rebuildable per-user knowledge-node ranks, explicit node-local capability rubrics and natural ceilings, evidence-star deduplication, append-only rank qualification, immutable post-quiz knowledge settlements, and responsive “knowledge seal” feedback on the real quiz result page.
+- 实现 ADR-0012 首条纵向切片：可重建的用户知识节点段位、显式节点局部能力量规与自然上限、证据星去重、追加式段位资格事件、不可变测验后知识结算，以及真实结果页上的响应式“知识印记”反馈。
+
+- Added ADR-0012 and the matching product DNA constraints for an on-demand shared knowledge universe, per-user knowledge subgraphs, three-layer learning memory, evidence-backed ranks, wake-up states, and post-assessment knowledge settlement.
+- 新增 ADR-0012 及配套产品底层约束，确立按需扩张的共享知识宇宙、用户个人知识子网、三层学习记忆、证据驱动段位、待唤醒状态与验证后知识结算。
+
 - Added ADR-0001 as the authoritative design for single-call lesson-and-quiz generation, deterministic Learning Contract gates, separated generation-attempt audit, and atomic publication of user-visible content.
 - 新增 ADR-0001，确立正文与测验一次生成、Learning Contract 确定性门禁、生成尝试审计分离及用户可见内容原子发布的权威设计。
 

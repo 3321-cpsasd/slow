@@ -269,6 +269,9 @@ export const api = {
     {method:'POST'},
   ),
   dueReviews:(dailyBudget=10)=>call<import('../model/types').DueReviews>(`/api/reviews/due?daily_budget=${dailyBudget}`),
+  knowledgeMap:(seriesId?:string)=>call<import('../model/types').KnowledgeMap>(
+    `/api/knowledge-map${seriesId ? `?series_id=${encodeURIComponent(seriesId)}` : ''}`,
+  ),
   startReview:(assignmentId:string)=>call<import('../model/types').ReviewSession>(`/api/reviews/${assignmentId}/start`,{method:'POST'}),
   submitReview:(assignmentId:string,answers:number[][],idempotencyKey:string)=>call<import('../model/types').ReviewResult>(`/api/reviews/${assignmentId}/submit`,{
     method:'POST',
