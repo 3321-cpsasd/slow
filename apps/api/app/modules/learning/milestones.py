@@ -286,7 +286,16 @@ class MilestoneService:
                     item for item in (milestone or {}).get("criteria", [])
                     if item.get("chapterId") == chapter["id"]
                 ),
-                criterion,
+                None,
+            )
+            section_objectives = section.get("objectives") or []
+            reason = (
+                section_objectives[0]
+                if section_objectives
+                else matched.get("statement")
+                if matched
+                else chapter.get("objective")
+                or "推进当前里程碑"
             )
             return {
                 "seriesId": series["id"],
@@ -296,7 +305,7 @@ class MilestoneService:
                 "sectionTitle": section["title"],
                 "question": section["question"],
                 "estimatedMinutes": 20,
-                "reason": matched.get("statement", "推进当前里程碑") if matched else "推进当前里程碑",
+                "reason": reason,
             }
         return {
             "seriesId": series["id"],

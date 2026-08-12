@@ -14,6 +14,19 @@ import { api, ApiError } from './api/client';
 import { telemetry } from './telemetry';
 import { ProfileOnboardingFlow } from './ProfileOnboardingFlow';
 import { DailyModeDialog, DailyModeHeader } from './DailyMode';
+import {
+  LessonReaderHeader,
+  LessonReaderTabs,
+  type ReaderTab,
+} from './features/lesson/ReaderChrome';
+import {
+  type ExplanationStyle,
+  type PresetExplanationStyle,
+} from './features/lesson/LessonBlockTools';
+import { LessonBlockBody, LessonContentBlock } from './features/lesson/LessonContentBlock';
+import { PathDecisionBanner } from './features/learning/PathDecisionBanner';
+import { AppBusyStatus, AppStatusRegion } from './features/shell/AppStatusRegion';
+import { useModalFocus } from './features/system/useModalFocus';
 import type {
   AskMeDiscussion,
   AiRuntime,
@@ -49,7 +62,6 @@ import type {
 } from './model/types';
 
 type View = 'home' | 'shelf' | 'learn' | 'profile';
-type ReaderTab = 'content' | 'quiz' | 'note';
 type AppRoute =
   | { view: 'home' }
   | { view: 'profile'; section: 'profile' | 'account' }
@@ -57,14 +69,6 @@ type AppRoute =
   | { view: 'learn'; seriesId: string; sectionId: string | null };
 type TextQuote = { text: string; blockId: string };
 type SelectionPopup = TextQuote & { top: number; left: number };
-type PresetExplanationStyle =
-  | 'worked_example'
-  | 'diagram'
-  | 'analogy'
-  | 'derivation'
-  | 'precise'
-  | 'concise';
-type ExplanationStyle = PresetExplanationStyle | 'custom';
 type ExplanationRequest = {
   requestId: string;
   blockId: string;
@@ -364,6 +368,7 @@ export default function App() {
   const [section, setSection] = useState<Section | null>(null);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [showAiSettings, setShowAiSettings] = useState(false);
   const [feedbackTarget, setFeedbackTarget] = useState<FeedbackTarget | null>(null);
   const [bookReplan, setBookReplan] = useState<{ book: Book; proposal: BookReplanProposal } | null>(null);
@@ -380,6 +385,7 @@ export default function App() {
   const [dailyModeExpiredDuringActivity, setDailyModeExpiredDuringActivity] = useState(false);
   const [pendingSectionId, setPendingSectionId] = useState('');
   const [generatingChapterId, setGeneratingChapterId] = useState('');
+  const [dismissedPathAlertSeriesId, setDismissedPathAlertSeriesId] = useState('');
   const chapterGenerationRequests = useRef(new Set<string>());
   const userMenuRef = useRef<HTMLDivElement | null>(null);
   const lastViewedSection = useRef('');
@@ -432,6 +438,12 @@ export default function App() {
       setAuthChecked(true);
     }
   };
+
+  useEffect(() => {
+    if (!notice) return undefined;
+    const timer = window.setTimeout(() => setNotice(''), 4800);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
 
   useEffect(() => {
     const clearUserState = () => {
@@ -726,6 +738,21 @@ export default function App() {
 
   const goHome = () => showHome('push');
 
+  const returnToShelf = () => {
+    if (!shelf) {
+      goHome();
+      return;
+    }
+    routeRequestVersion.current += 1;
+    updateBrowserLocation(shelfPath(shelf.id), 'push');
+    setShowUserMenu(false);
+    setSeries(null);
+    setSection(null);
+    setActivityDailyMode(null);
+    setDailyModeExpiredDuringActivity(false);
+    setView('shelf');
+  };
+
   const openProfileCenter = (nextSection: 'profile' | 'account' = 'profile') => {
     routeRequestVersion.current += 1;
     const nextUrl = nextSection === 'account' ? '/profile?section=account' : '/profile';
@@ -806,7 +833,12 @@ export default function App() {
         `daily-mode-${crypto.randomUUID()}`,
       );
       setData((current) => current ? { ...current, dailyMode: updated } : current);
-      if (source === 'header_toggle' && section) setActivityDailyMode(mode);
+      if (source === 'header_toggle') {
+        if (section) setActivityDailyMode(mode);
+        setNotice(mode === 'fast'
+          ? '已切换为快速阅读：当前只展示关键段落和 30 秒自检。'
+          : '已切换为完整阅读：当前展示本节全部正文。');
+      }
       setDailyModeExpiredDuringActivity(false);
       setDailyModeDialogOpen(false);
       if (pendingSectionId) {
@@ -1174,8 +1206,28 @@ export default function App() {
     return (
       <div className="app-shell auth-shell">
         <header className="auth-header">
-          <span className="brand"><span className="brand-mark"><i /></span><b>slow</b></span>
-          <span>AI 原生个人学习系统</span>
+          <div className="auth-header-left">
+            <span className="brand"><span className="brand-mark"><i /></span><b>slow</b></span>
+            <a
+              className="github-repo-link"
+              href="https://github.com/3321-cpsasd/slow"
+              target="_blank"
+              rel="noreferrer"
+              aria-label="在新标签页打开 Slow GitHub 仓库"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 2C6.48 2 2 6.59 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.1.68-.22.68-.49 0-.24-.01-1.05-.02-1.9-2.78.62-3.37-1.21-3.37-1.21-.45-1.18-1.11-1.49-1.11-1.49-.91-.64.07-.62.07-.62 1 .07 1.53 1.05 1.53 1.05.89 1.57 2.34 1.11 2.91.85.09-.66.35-1.11.64-1.37-2.22-.26-4.56-1.14-4.56-5.07 0-1.12.39-2.04 1.03-2.76-.1-.26-.45-1.31.1-2.72 0 0 .84-.28 2.75 1.05A9.31 9.31 0 0 1 12 6.11a9.3 9.3 0 0 1 2.5.35c1.91-1.33 2.75-1.05 2.75-1.05.55 1.41.2 2.46.1 2.72.64.72 1.03 1.64 1.03 2.76 0 3.94-2.34 4.8-4.57 5.06.36.32.68.94.68 1.89 0 1.37-.01 2.47-.01 2.81 0 .27.18.59.69.49A10.27 10.27 0 0 0 22 12.25C22 6.59 17.52 2 12 2Z" />
+              </svg>
+              <span className="github-repo-identity">
+                <span>3321-cpsasd</span>
+                <i aria-hidden="true">/</i>
+                <strong>slow</strong>
+              </span>
+              <span className="github-repo-mobile-label">GitHub</span>
+              <span className="github-repo-external" aria-hidden="true">↗</span>
+            </a>
+          </div>
+          <span className="auth-header-tagline">AI 原生个人学习系统</span>
         </header>
         <main className="auth-main">
           <section className="auth-story">
@@ -1512,6 +1564,18 @@ export default function App() {
       )
     ),
   );
+  const currentMilestonePath = data?.milestoneDashboard.path || null;
+  const activeMilestonePath = currentMilestonePath?.seriesId === series?.id
+    ? currentMilestonePath
+    : null;
+  const pathDecisionKey = activeMilestonePath
+    ? `${activeMilestonePath.seriesId}:${activeMilestonePath.version}:${data?.milestoneDashboard.goal.profileVersion}:${activeMilestonePath.goalAligned}`
+    : '';
+  const pathNeedsDecision = Boolean(
+    activeMilestonePath
+    && (activeMilestonePath.status === 'proposed' || !activeMilestonePath.goalAligned)
+    && dismissedPathAlertSeriesId !== pathDecisionKey,
+  );
 
   return (
     <div className="app-shell">
@@ -1550,7 +1614,7 @@ export default function App() {
               onActivate={activateDailyMode}
             />
           )}
-          {busy && <span className="busy-indicator"><i />{busy}</span>}
+          <AppBusyStatus message={busy} />
           {AI_RUNTIME_SETTINGS_ENABLED && (
             <button className="quiet-button ai-settings-trigger" onClick={() => setShowAiSettings(true)}>
               <span aria-hidden="true" />
@@ -1558,7 +1622,13 @@ export default function App() {
             </button>
           )}
           {view === 'learn' && (
-            <button className="quiet-button" onClick={goHome}>返回书架</button>
+            <button
+              className="quiet-button"
+              aria-label={shelf ? `返回${shelf.name}书架` : '返回全部书架'}
+              onClick={returnToShelf}
+            >
+              返回当前书架
+            </button>
           )}
           <div className="user-menu-shell" ref={userMenuRef}>
             <button
@@ -1599,8 +1669,13 @@ export default function App() {
         </div>
       </header>
 
+      <AppStatusRegion
+        error={error}
+        notice={notice}
+        onDismissError={() => setError('')}
+        onDismissNotice={() => setNotice('')}
+      />
       <main className={view === 'learn' ? 'learn-main' : view === 'profile' ? 'profile-main' : 'marketing-main'}>
-        {error && <div className="global-error">{error}</div>}
         {view === 'home' && (
           <Home
             data={data}
@@ -1669,30 +1744,21 @@ export default function App() {
         )}
         {view === 'learn' && series && (
           <>
-            {((data?.milestoneDashboard.path?.seriesId === series.id
-              && (data.milestoneDashboard.path.status === 'proposed' || !data.milestoneDashboard.path.goalAligned))
+            {(pathNeedsDecision
               || (series.initializationTask && series.initializationTask.status !== 'succeeded')) && (
               <div className="workspace-alert-stack">
-                {data?.milestoneDashboard.path?.seriesId === series.id
-                  && (data.milestoneDashboard.path.status === 'proposed' || !data.milestoneDashboard.path.goalAligned) && (
-                  <div className="path-confirm-alert" role="status">
-                    <i className="path-confirm-mark" aria-hidden="true">✓</i>
-                    <span>
-                      <b>{data.milestoneDashboard.path.goalAligned ? '学习路径待确认' : '你的学习目标有变化'}</b>
-                      <small>{data.milestoneDashboard.path.goalAligned
-                        ? '确认后，这个系列会按当前目标记录里程碑。'
-                        : '如果这个系列仍适合你，可以继续沿用当前路径。'}</small>
-                    </span>
-                    <button
-                      className="secondary-button"
-                      onClick={async () => {
-                        await run('正在确认里程碑路径…', () => api.confirmMilestonePath(series.id));
-                        setData(await api.bootstrap());
-                      }}
-                    >
-                      {data.milestoneDashboard.path.goalAligned ? '确认路径' : '继续沿用'}
-                    </button>
-                  </div>
+                {pathNeedsDecision && activeMilestonePath && (
+                  <PathDecisionBanner
+                    path={activeMilestonePath}
+                    goalStatement={data?.milestoneDashboard.goal.statement || ''}
+                    busy={busy === '正在确认学习路径…'}
+                    onDismiss={() => setDismissedPathAlertSeriesId(pathDecisionKey)}
+                    onReviewGoal={() => openProfileCenter('profile')}
+                    onConfirm={async () => {
+                      await run('正在确认学习路径…', () => api.confirmMilestonePath(series.id));
+                      setData(await api.bootstrap());
+                    }}
+                  />
                 )}
                 {series.initializationTask
                   && series.initializationTask.status !== 'succeeded' && (
@@ -1782,6 +1848,7 @@ export default function App() {
                   block,
                 });
               }}
+              onGlobalFeedback={() => setFeedbackTarget({ scope: 'global' })}
               onQaVisibilityChange={setLearningQaOpen}
             />
           </>
@@ -1811,7 +1878,7 @@ export default function App() {
       {AI_RUNTIME_SETTINGS_ENABLED && showAiSettings && (
         <AiSettingsDialog onClose={() => setShowAiSettings(false)} />
       )}
-      {!(view === 'learn' && learningQaOpen) && (
+      {view !== 'learn' && !learningQaOpen && (
         <button
           className="global-feedback-tab"
           aria-label="反馈产品问题或建议"
@@ -3587,15 +3654,11 @@ function ShelfPage({
   const [showPlan, setShowPlan] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Series | null>(null);
   const [deleting, setDeleting] = useState(false);
-
-  useEffect(() => {
-    if (!deleteTarget) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !deleting) setDeleteTarget(null);
-    };
-    document.addEventListener('keydown', closeOnEscape);
-    return () => document.removeEventListener('keydown', closeOnEscape);
-  }, [deleteTarget, deleting]);
+  const deleteDialogRef = useModalFocus<HTMLElement>({
+    open: Boolean(deleteTarget),
+    canClose: !deleting,
+    onRequestClose: () => setDeleteTarget(null),
+  });
 
   return (
     <section className="landing-section">
@@ -3607,9 +3670,16 @@ function ShelfPage({
         <div>
           <h1>{shelf.name}</h1>
         </div>
-        <button className="primary-button" onClick={() => setShowPlan(!showPlan)}>＋ 创建学习系列</button>
+        <button
+          className={showPlan ? 'secondary-button' : 'primary-button'}
+          aria-expanded={showPlan}
+          aria-controls="create-series-form"
+          onClick={() => setShowPlan(!showPlan)}
+        >
+          {showPlan ? '取消创建' : '＋ 创建学习系列'}
+        </button>
       </div>
-      {showPlan && <PlanForm profile={profile} submit={onCreate} />}
+      {showPlan && <PlanForm profile={profile} submit={onCreate} onCancel={() => setShowPlan(false)} />}
       <div className="series-shelf-heading">
         <span>学习系列</span>
       </div>
@@ -3634,6 +3704,9 @@ function ShelfPage({
                 <span className="series-volume-progress">
                   <i><b style={{ width: `${item.progress}%` }} /></i>
                   <small>{item.progress}%</small>
+                </span>
+                <span className="series-volume-action">
+                  {item.progress > 0 ? '继续学习' : '进入系列'} <i aria-hidden="true">→</i>
                 </span>
               </button>
               <button
@@ -3664,17 +3737,20 @@ function ShelfPage({
           }}
         >
           <section
+            ref={deleteDialogRef}
             className="delete-confirm"
             role="dialog"
             aria-modal="true"
             aria-labelledby="delete-series-title"
+            aria-describedby="delete-series-description"
+            tabIndex={-1}
           >
             <span className="delete-confirm-icon"><TrashIcon size={20} /></span>
             <p className="eyebrow">删除学习系列</p>
             <h2 id="delete-series-title">{deleteTarget.title}</h2>
-            <p>该系列及其书、章节会从书架和学习入口中移除。已有学习记录会保留，但当前界面暂不支持恢复。</p>
+            <p id="delete-series-description">该系列及其书、章节会从书架和学习入口中移除。已有学习记录会保留，但当前界面暂不支持恢复。</p>
             <div>
-              <button className="quiet-button" disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button>
+              <button data-dialog-initial-focus className="quiet-button" disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button>
               <button
                 className="danger-button"
                 disabled={deleting}
@@ -3709,7 +3785,15 @@ function TrashIcon({ size = 16 }: { size?: number }) {
   );
 }
 
-function PlanForm({ profile, submit }: { profile: LearningProfile; submit: (body: object, idempotencyKey: string) => Promise<void> }) {
+function PlanForm({
+  profile,
+  submit,
+  onCancel,
+}: {
+  profile: LearningProfile;
+  submit: (body: object, idempotencyKey: string) => Promise<void>;
+  onCancel: () => void;
+}) {
   const depthOptions = [
     { value: 'overview', label: '快速了解', description: '建立基本认识，抓住核心概念' },
     { value: 'deep', label: '深入理解', description: '理解原理、边界和典型应用' },
@@ -3742,7 +3826,7 @@ function PlanForm({ profile, submit }: { profile: LearningProfile; submit: (body
     }
   };
   return (
-    <form className="plan-form" onSubmit={send}>
+    <form className="plan-form" id="create-series-form" onSubmit={send}>
       <label>
         学习内容
         <input required disabled={submitting} value={topic} onChange={(event) => setTopic(event.target.value)} placeholder="输入你想学习的内容" />
@@ -3778,7 +3862,10 @@ function PlanForm({ profile, submit }: { profile: LearningProfile; submit: (body
         ))}
         {formError && <p className="plan-form-error" id="plan-depth-error" role="alert">{formError}</p>}
       </fieldset>
-      <button className="primary-button" disabled={submitting}>{submitting ? '正在生成，请稍候…' : '生成目录方案'}</button>
+      <div className="plan-form-actions">
+        <button type="button" className="quiet-button" disabled={submitting} onClick={onCancel}>取消</button>
+        <button className="primary-button" disabled={submitting}>{submitting ? '正在生成，请稍候…' : '生成目录方案'}</button>
+      </div>
     </form>
   );
 }
@@ -3976,6 +4063,7 @@ function LearningWorkspace({
   onRefreshSeries,
   onDeleteBook,
   onFeedbackBlock,
+  onGlobalFeedback,
   onQaVisibilityChange,
 }: {
   userId: string;
@@ -3994,6 +4082,7 @@ function LearningWorkspace({
   onRefreshSeries: () => Promise<void>;
   onDeleteBook: (bookId: string) => Promise<void>;
   onFeedbackBlock: (block: Block) => void;
+  onGlobalFeedback: () => void;
   onQaVisibilityChange: (open: boolean) => void;
 }) {
   const [selectedBlockId, setSelectedBlockId] = useState('');
@@ -4003,6 +4092,7 @@ function LearningWorkspace({
   const [auxiliaryExclusive, setAuxiliaryExclusive] = useState(() => window.matchMedia('(max-width: 1180px)').matches);
   const [directoryHidden, setDirectoryHidden] = useState(() => window.matchMedia('(max-width: 900px)').matches);
   const [qaHidden, setQaHidden] = useState(true);
+  const [readerTab, setReaderTab] = useState<ReaderTab>('content');
   const [layoutRatios, setLayoutRatios] = useState(() => readWorkspaceLayoutRatios(userId));
   const [directoryWidth, setDirectoryWidth] = useState(() => clampWorkspacePanelWidth(
     'directory',
@@ -4026,9 +4116,12 @@ function LearningWorkspace({
   } | null>(null);
   panelLayoutRef.current = { directoryWidth, qaWidth, directoryHidden, qaHidden, layoutRatios };
 
+  const qaAvailable = readerTab !== 'quiz';
+  const effectiveQaHidden = qaHidden || !qaAvailable;
+
   useEffect(() => {
-    onQaVisibilityChange(!qaHidden);
-  }, [onQaVisibilityChange, qaHidden]);
+    onQaVisibilityChange(!effectiveQaHidden);
+  }, [onQaVisibilityChange, effectiveQaHidden]);
 
   useEffect(() => () => onQaVisibilityChange(false), [onQaVisibilityChange]);
 
@@ -4109,6 +4202,7 @@ function LearningWorkspace({
     setDirectoryHidden((hidden) => !hidden);
   };
   const toggleQa = () => {
+    if (!qaAvailable) return;
     if ((compactLayout || auxiliaryExclusive) && qaHidden) setDirectoryHidden(true);
     setQaHidden((hidden) => !hidden);
   };
@@ -4257,9 +4351,9 @@ function LearningWorkspace({
     <div
       ref={workspaceRef}
       style={workspaceStyle}
-      className={`learning-workspace mode-${dailyMode} ${directoryHidden ? 'directory-collapsed' : ''} ${qaHidden ? 'qa-collapsed' : ''} ${resizingPanel ? 'is-resizing' : ''}`}
+      className={`learning-workspace mode-${dailyMode} ${directoryHidden ? 'directory-collapsed' : ''} ${effectiveQaHidden ? 'qa-collapsed' : ''} ${qaAvailable ? '' : 'assessment-focus'} ${resizingPanel ? 'is-resizing' : ''}`}
     >
-      {compactLayout && (!directoryHidden || !qaHidden) && (
+      {compactLayout && (!directoryHidden || !effectiveQaHidden) && (
         <button
           className="panel-backdrop"
           aria-label="关闭侧栏"
@@ -4288,9 +4382,14 @@ function LearningWorkspace({
         section={section}
         dailyMode={dailyMode}
         directoryHidden={directoryHidden}
-        qaHidden={qaHidden}
+        qaHidden={effectiveQaHidden}
+        qaAvailable={qaAvailable}
         onToggleDirectory={toggleDirectory}
         onToggleQa={toggleQa}
+        onTabChange={(nextTab) => {
+          setReaderTab(nextTab);
+          if (nextTab === 'quiz') setQaHidden(true);
+        }}
         location={location}
         selectedBlockId={activeBlockId}
         onSelectBlock={selectBlock}
@@ -4306,6 +4405,7 @@ function LearningWorkspace({
         onSectionChange={onSectionChange}
         onRefreshSeries={onRefreshSeries}
         onFeedbackBlock={onFeedbackBlock}
+        onGlobalFeedback={onGlobalFeedback}
         onRestorePersonalPresentation={async (block) => {
           if (!section?.content || !block.personalPresentation) return;
           await api.restorePersonalPresentation(section.id, block.id, section.content.id);
@@ -4370,7 +4470,7 @@ function LearningWorkspace({
         key={section?.id || 'empty'}
         section={section}
         dailyMode={dailyMode}
-        hidden={qaHidden}
+        hidden={effectiveQaHidden}
         onClose={() => setQaHidden(true)}
         selectedBlockId={activeBlockId}
         selectedQuote={selectedQuote}
@@ -4379,7 +4479,7 @@ function LearningWorkspace({
         explanationRequest={explanationRequest}
         onSectionChange={onSectionChange}
       />
-      {(['directory', 'qa'] as const).map((panel) => {
+      {(['directory', ...(qaAvailable ? ['qa' as const] : [])] as const).map((panel) => {
         const hidden = panel === 'directory' ? directoryHidden : qaHidden;
         const width = panel === 'directory' ? directoryWidth : qaWidth;
         const sizing = workspacePanelSizing[panel];
@@ -4485,15 +4585,11 @@ function DirectoryPanel({
 }) {
   const [deleteTarget, setDeleteTarget] = useState<Book | null>(null);
   const [deleting, setDeleting] = useState(false);
-
-  useEffect(() => {
-    if (!deleteTarget) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !deleting) setDeleteTarget(null);
-    };
-    document.addEventListener('keydown', closeOnEscape);
-    return () => document.removeEventListener('keydown', closeOnEscape);
-  }, [deleteTarget, deleting]);
+  const deleteDialogRef = useModalFocus<HTMLElement>({
+    open: Boolean(deleteTarget),
+    canClose: !deleting,
+    onRequestClose: () => setDeleteTarget(null),
+  });
 
   return (
     <aside className="directory-panel" id="course-directory-panel" aria-label="课程目录" hidden={hidden}>
@@ -4543,21 +4639,24 @@ function DirectoryPanel({
           }}
         >
           <section
+            ref={deleteDialogRef}
             className="delete-confirm"
             role="dialog"
             aria-modal="true"
             aria-labelledby="delete-book-title"
+            aria-describedby="delete-book-description"
+            tabIndex={-1}
           >
             <span className="delete-confirm-icon"><TrashIcon size={20} /></span>
             <p className="eyebrow">删除书籍</p>
             <h2 id="delete-book-title">{deleteTarget.title}</h2>
-            <p>
+            <p id="delete-book-description">
               书籍及其章节会从学习入口中移除，已有学习记录会保留。
               {series.books.length === 1 ? '这是系列中的最后一本书，删除后该系列也会从书架隐藏。' : ''}
               当前界面暂不支持恢复。
             </p>
             <div>
-              <button className="quiet-button" disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button>
+              <button data-dialog-initial-focus className="quiet-button" disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button>
               <button
                 className="danger-button"
                 disabled={deleting}
@@ -4770,8 +4869,10 @@ function ReaderPanel({
   dailyMode,
   directoryHidden,
   qaHidden,
+  qaAvailable,
   onToggleDirectory,
   onToggleQa,
+  onTabChange,
   location,
   selectedBlockId,
   onSelectBlock,
@@ -4782,6 +4883,7 @@ function ReaderPanel({
   onSectionChange,
   onRefreshSeries,
   onFeedbackBlock,
+  onGlobalFeedback,
   onRestorePersonalPresentation,
   onExplainBlock,
 }: {
@@ -4790,8 +4892,10 @@ function ReaderPanel({
   dailyMode: DailyMode;
   directoryHidden: boolean;
   qaHidden: boolean;
+  qaAvailable: boolean;
   onToggleDirectory: () => void;
   onToggleQa: () => void;
+  onTabChange: (tab: ReaderTab) => void;
   location: ReturnType<typeof findSectionLocation>;
   selectedBlockId: string;
   onSelectBlock: (blockId: string) => void;
@@ -4802,6 +4906,7 @@ function ReaderPanel({
   onSectionChange: (section: Section) => void;
   onRefreshSeries: () => Promise<void>;
   onFeedbackBlock: (block: Block) => void;
+  onGlobalFeedback: () => void;
   onRestorePersonalPresentation: (block: Block) => Promise<void>;
   onExplainBlock: (block: Block, style: ExplanationStyle, customQuestion?: string) => void;
 }) {
@@ -4814,9 +4919,16 @@ function ReaderPanel({
   const [reviewTargetBlockId, setReviewTargetBlockId] = useState('');
   const readerScrollRef = useRef<HTMLDivElement>(null);
   const reviewHighlightTimerRef = useRef<number | null>(null);
+  const regenerationDialogRef = useModalFocus<HTMLElement>({
+    open: regenerationConfirmOpen,
+    canClose: !regenerating,
+    onRequestClose: () => setRegenerationConfirmOpen(false),
+  });
 
   useEffect(() => {
-    setTab(section?.status === 'completed' && section.note ? 'note' : 'content');
+    const initialTab = section?.status === 'completed' && section.note ? 'note' : 'content';
+    setTab(initialTab);
+    onTabChange(initialTab);
     setSelectionPopup(null);
     setRegenerationConfirmOpen(false);
     setReviewTargetBlockId('');
@@ -4850,6 +4962,7 @@ function ReaderPanel({
         entityId: section.id,
       });
     }
+    onTabChange(nextTab);
     setTab(nextTab);
     requestAnimationFrame(() => {
       if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
@@ -4866,6 +4979,7 @@ function ReaderPanel({
     }
 
     onSelectBlock(blockId);
+    onTabChange('content');
     setTab('content');
     setSelectionPopup(null);
     setReviewTargetBlockId(blockId);
@@ -4936,6 +5050,7 @@ function ReaderPanel({
         <ReaderPanelToggles
           directoryHidden={directoryHidden}
           qaHidden={qaHidden}
+          qaAvailable={qaAvailable}
           onToggleDirectory={onToggleDirectory}
           onToggleQa={onToggleQa}
         />
@@ -4949,52 +5064,36 @@ function ReaderPanel({
       <ReaderPanelToggles
         directoryHidden={directoryHidden}
         qaHidden={qaHidden}
+        qaAvailable={qaAvailable}
         onToggleDirectory={onToggleDirectory}
         onToggleQa={onToggleQa}
       />
-      <div className="reader-toolbar">
-        <div>
-          <p className="breadcrumb">
-            第 {location?.book.position} 本
-            <i>›</i>
-            第 {location?.chapter.position} 章 · {location?.chapter.title}
-            <i>›</i>
-            {location?.chapter.position}.{section.position}
-          </p>
-          <h1>{section.title}</h1>
-        </div>
-        <div className="reader-toolbar-actions">
-          <span className={`lesson-status ${section.status}`}>
-            {section.status === 'completed'
-              ? '已验证'
-              : section.status === 'available'
-                ? '学习中'
-                : section.status === 'preparing'
-                  ? '准备中'
-                  : '未解锁'}
-          </span>
-          {section.content && section.bestScore === 0 && section.totalScore === 0 && (
-            <button
-              className="quiet-button regenerate-trigger"
-              disabled={regenerating}
-              onClick={() => setRegenerationConfirmOpen(true)}
-            >
-              重新生成本节
-            </button>
-          )}
-        </div>
-      </div>
+      <LessonReaderHeader
+        bookPosition={location?.book.position}
+        chapterPosition={location?.chapter.position}
+        chapterTitle={location?.chapter.title}
+        sectionPosition={section.position}
+        title={section.title}
+        status={section.status}
+        canRegenerate={Boolean(section.content && section.bestScore === 0 && section.totalScore === 0)}
+        regenerating={regenerating}
+        onRequestRegenerate={() => setRegenerationConfirmOpen(true)}
+        onFeedback={onGlobalFeedback}
+      />
 
-      <div className="reader-tabs" role="tablist">
-        <button className={tab === 'content' ? 'active' : ''} onClick={() => switchTab('content')}>正文</button>
-        <button className={tab === 'quiz' ? 'active' : ''} disabled={!section.quiz} onClick={() => switchTab('quiz')}>
-          {section.status === 'completed' ? '验证结果' : '验证'}
-        </button>
-        <button className={tab === 'note' ? 'active' : ''} disabled={!section.note} onClick={() => switchTab('note')}>笔记</button>
-      </div>
+      <LessonReaderTabs
+        active={tab}
+        quizAvailable={Boolean(section.quiz)}
+        noteAvailable={Boolean(section.note)}
+        completed={section.status === 'completed'}
+        onChange={switchTab}
+      />
 
       <div
         className="reader-scroll"
+        id="reader-tabpanel"
+        role="tabpanel"
+        aria-labelledby={`reader-tab-${tab}`}
         ref={readerScrollRef}
         onMouseUp={captureTextSelection}
         onKeyUp={captureTextSelection}
@@ -5039,14 +5138,17 @@ function ReaderPanel({
           }}
         >
           <section
+            ref={regenerationDialogRef}
             className="delete-confirm regenerate-confirm"
             role="dialog"
             aria-modal="true"
             aria-labelledby="regenerate-section-title"
+            aria-describedby="regenerate-section-description"
+            tabIndex={-1}
           >
             <p className="eyebrow">重新生成本节</p>
             <h2 id="regenerate-section-title">{section.title}</h2>
-            <p>已完成验证的内容无法重新生成。</p>
+            <p id="regenerate-section-description">重新生成会替换当前正文和验证题；已完成验证的内容无法重新生成。</p>
             {regenerating && (
               <div className="regeneration-progress" aria-live="polite">
                 <span><i />{GENERATION_STAGE_LABELS[generationStage] || '正在处理'}</span>
@@ -5054,7 +5156,7 @@ function ReaderPanel({
               </div>
             )}
             <div>
-              <button className="quiet-button" disabled={regenerating} onClick={() => setRegenerationConfirmOpen(false)}>取消</button>
+              <button data-dialog-initial-focus className="quiet-button" disabled={regenerating} onClick={() => setRegenerationConfirmOpen(false)}>取消</button>
               <button
                 className="primary-button"
                 disabled={regenerating}
@@ -5178,11 +5280,13 @@ function SeriesRoutePreview({ series }: { series: Series }) {
 function ReaderPanelToggles({
   directoryHidden,
   qaHidden,
+  qaAvailable,
   onToggleDirectory,
   onToggleQa,
 }: {
   directoryHidden: boolean;
   qaHidden: boolean;
+  qaAvailable: boolean;
   onToggleDirectory: () => void;
   onToggleQa: () => void;
 }) {
@@ -5210,7 +5314,7 @@ function ReaderPanelToggles({
           ‹
         </button>
       )}
-      {qaHidden && (
+      {qaAvailable && qaHidden && (
         <button
           className="reader-qa-trigger"
           aria-controls="section-qa-panel"
@@ -5220,7 +5324,7 @@ function ReaderPanelToggles({
           Ask AI
         </button>
       )}
-      {!qaHidden && (
+      {qaAvailable && !qaHidden && (
         <button
           className="reader-rail-toggle qa-toggle"
           aria-controls="section-qa-panel"
@@ -5357,11 +5461,12 @@ function LessonContent({
         </aside>
       )}
       {shownBlocks.map((block) => (
-        <ContentBlock
+        <LessonContentBlock
           key={block.id}
           block={block}
           selected={block.id === selectedBlockId}
           reviewTarget={block.id === reviewTargetBlockId}
+          explanationOptions={explanationOptionsForBlock(block.kind)}
           onFeedback={() => onFeedbackBlock(block)}
           onRestorePersonalPresentation={() => onRestorePersonalPresentation(block)}
           onExplain={(style, customQuestion) => onExplainBlock(block, style, customQuestion)}
@@ -5404,232 +5509,6 @@ function LessonContent({
   );
 }
 
-function ContentBlock({
-  block,
-  selected,
-  reviewTarget,
-  onFeedback,
-  onRestorePersonalPresentation,
-  onExplain,
-}: {
-  block: Block;
-  selected: boolean;
-  reviewTarget: boolean;
-  onFeedback: () => void;
-  onRestorePersonalPresentation: () => Promise<void>;
-  onExplain: (style: ExplanationStyle, customQuestion?: string) => void;
-}) {
-  const [explanationMenuOpen, setExplanationMenuOpen] = useState(false);
-  const [customExplanation, setCustomExplanation] = useState('');
-  const explanationMenuRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!explanationMenuOpen) return undefined;
-    const closeOnOutsidePress = (event: MouseEvent) => {
-      if (!explanationMenuRef.current?.contains(event.target as Node)) {
-        setExplanationMenuOpen(false);
-      }
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setExplanationMenuOpen(false);
-    };
-    document.addEventListener('mousedown', closeOnOutsidePress);
-    document.addEventListener('keydown', closeOnEscape);
-    return () => {
-      document.removeEventListener('mousedown', closeOnOutsidePress);
-      document.removeEventListener('keydown', closeOnEscape);
-    };
-  }, [explanationMenuOpen]);
-  const labels: Record<string, string> = {
-    text: '阅读',
-    bullet_list: '要点',
-    ordered_steps: '步骤',
-    diagram: '图解',
-    table: '对照',
-    code: '演练',
-    formula: '推导',
-  };
-  const roleLabels: Record<string, string> = {
-    core_instruction: '核心依据',
-    conclusion: '核心依据',
-    prerequisite_scaffold: '必要前置',
-    context: '背景',
-    mechanism: '机制',
-    derivation: '推导',
-    worked_example: '逐步示例',
-    empirical_case: '真实案例',
-    primary_source: '原始材料',
-    evidence_analysis: '证据分析',
-    comparison: '对照',
-    alternative_interpretation: '另一种解释',
-    counterargument: '反方观点',
-    counterexample: '反例',
-    boundary: '适用边界',
-    application: '应用',
-    transfer: '迁移',
-    practice: '练习',
-    synthesis: '综合',
-    summary: '回顾',
-  };
-  return (
-    <section
-      className={`content-block role-${block.role} ${selected ? 'selected' : ''} ${reviewTarget ? 'review-target' : ''}`}
-      data-block-id={block.id}
-      tabIndex={-1}
-    >
-      {reviewTarget && <span className="review-target-label">错题依据</span>}
-      <div className="block-meta">
-        <b>{labels[block.kind] || '阅读'}</b>
-        {roleLabels[block.role] && <span>{roleLabels[block.role]}</span>}
-      </div>
-      <div className="block-actions">
-        <div className="block-explanation-control" ref={explanationMenuRef}>
-          <button
-            className="block-explanation-button"
-            type="button"
-            aria-expanded={explanationMenuOpen}
-            aria-haspopup="dialog"
-            onClick={() => setExplanationMenuOpen((open) => !open)}
-          >
-            <span aria-hidden="true">↻</span> 换个讲法
-          </button>
-          {explanationMenuOpen && (
-            <div className="block-explanation-menu" role="dialog" aria-label={`换一种方式理解“${block.heading}”`}>
-              <header>
-                <b>这段想怎么讲？</b>
-              </header>
-              <div className="block-explanation-presets">
-                {explanationOptionsForBlock(block.kind).map((option) => (
-                  <button
-                    type="button"
-                    key={option.style}
-                    onClick={() => {
-                      onExplain(option.style);
-                      setExplanationMenuOpen(false);
-                    }}
-                  >
-                    <b>{option.label}</b>
-                  </button>
-                ))}
-              </div>
-              <form
-                className="block-explanation-custom"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  const instruction = customExplanation.trim();
-                  if (instruction.length < 2) return;
-                  onExplain('custom', instruction);
-                  setCustomExplanation('');
-                  setExplanationMenuOpen(false);
-                }}
-              >
-                <label htmlFor={`custom-explanation-${block.id}`}>我更想要的风格</label>
-                <div>
-                  <input
-                    id={`custom-explanation-${block.id}`}
-                    value={customExplanation}
-                    maxLength={240}
-                    placeholder="例如：像讲故事一样，少用术语"
-                    onChange={(event) => setCustomExplanation(event.target.value)}
-                  />
-                  <button type="submit" disabled={customExplanation.trim().length < 2}>按这个讲</button>
-                </div>
-              </form>
-            </div>
-          )}
-        </div>
-        <button
-          className="block-feedback-button"
-          type="button"
-          aria-label={`反馈“${block.heading}”这一段`}
-          onClick={onFeedback}
-        >
-          <span aria-hidden="true">↳</span> 反馈
-        </button>
-      </div>
-      <h2>{block.heading}</h2>
-      <BlockBody block={block} />
-      {block.personalPresentation && (
-        <aside className="personal-presentation" aria-label="我的另一种讲法">
-          <header>
-            <span>我的另一种讲法</span>
-            <button type="button" onClick={() => void onRestorePersonalPresentation()}>移除</button>
-          </header>
-          <BlockBody block={block} content={block.personalPresentation.content} />
-        </aside>
-      )}
-    </section>
-  );
-}
-
-function BlockBody({ block, content = block.content }: { block: Block; content?: string }) {
-  if (block.kind === 'code') {
-    return <pre className="code-block"><code>{content}</code></pre>;
-  }
-  const markdown = block.kind === 'table'
-    ? normalizeTableMarkdown(content)
-    : block.kind === 'text'
-      ? normalizeLessonTextMarkdown(content)
-      : content;
-  return (
-    <div className={`content-markdown kind-${block.kind}`}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
-    </div>
-  );
-}
-
-function normalizeLessonTextMarkdown(content: string): string {
-  const normalized = content.replace(/\r\n?/g, '\n').trim();
-  const hasAuthoredStructure = /\n\s*\n/.test(normalized)
-    || /(^|\n)\s*(?:#{1,6}\s|[-+*]\s+|\d+[.)]\s+|>\s+|```)/m.test(normalized);
-  if (normalized.length < 200 || hasAuthoredStructure) return normalized;
-
-  const sentences = normalized
-    .match(/[^。！？]+[。！？]+|[^。！？]+$/g)
-    ?.map((sentence) => sentence.trim())
-    .filter(Boolean) || [];
-  if (sentences.length < 4) return normalized;
-
-  const paragraphCount = Math.min(
-    3,
-    Math.floor(sentences.length / 2),
-    Math.max(2, Math.ceil(normalized.length / 150)),
-  );
-  if (paragraphCount < 2) return normalized;
-
-  const paragraphs: string[] = [];
-  let cursor = 0;
-  for (let index = 0; index < paragraphCount; index += 1) {
-    const remainingSentences = sentences.length - cursor;
-    const remainingParagraphs = paragraphCount - index;
-    const take = Math.ceil(remainingSentences / remainingParagraphs);
-    paragraphs.push(sentences.slice(cursor, cursor + take).join(''));
-    cursor += take;
-  }
-  return paragraphs.join('\n\n');
-}
-
-function normalizeTableMarkdown(content: string): string {
-  const lines = content.trim().split(/\r?\n/).filter((line) => line.trim());
-  if (lines.length < 2) return content;
-
-  const cells = (line: string) => line
-    .trim()
-    .replace(/^\|/, '')
-    .replace(/\|$/, '')
-    .split('|')
-    .map((cell) => cell.trim());
-  const columnCount = cells(lines[0]).length;
-  if (columnCount < 2) return content;
-
-  const possibleDivider = cells(lines[1]);
-  const hasDivider = possibleDivider.length === columnCount
-    && possibleDivider.every((cell) => /^:?-{3,}:?$/.test(cell));
-  if (!hasDivider) {
-    lines.splice(1, 0, Array.from({ length: columnCount }, () => '---').join(' | '));
-  }
-  return lines.join('\n');
-}
-
 function Quiz({
   section,
   onUpgrade,
@@ -5655,6 +5534,9 @@ function Quiz({
       !section.quiz.governance?.allowed ||
       !section.quiz.governance?.assessmentEligible
     ),
+  );
+  const hasMultipleChoice = Boolean(
+    section.quiz?.questions.some((question) => question.selectionMode === 'multiple'),
   );
   const [answers, setAnswers] = useState<number[][]>(() => {
     const empty = section.quiz?.questions.map(() => []) || [];
@@ -6019,7 +5901,11 @@ function Quiz({
       <p className="eyebrow">完成验证后解锁下一节</p>
       <h2>小节验证</h2>
       <p className="quiz-rule">答对至少 80%，且关键题达到要求即可继续；错题会用于安排重点巩固。</p>
-      <p className="quiz-draft-note">单选题只能选择一个答案，多选题可选择多个。</p>
+      <p className="quiz-draft-note">
+        {hasMultipleChoice
+          ? '标为“多选”的题目可以选择多个答案，其余题目只能选择一个答案。'
+          : '每道题只有一个答案，选择最符合本节内容的一项。'}
+      </p>
       {quizGovernanceBlocked && (
         <aside className="quiz-governance-notice" role="alert">
           <b>这节内容需要升级后才能验证</b>
@@ -6059,7 +5945,7 @@ function Quiz({
               {item.blocks.map((block) => (
                 <div key={block.id}>
                   <h3>{block.heading}</h3>
-                  <BlockBody block={block} />
+                  <LessonBlockBody block={block} />
                 </div>
               ))}
             </section>
