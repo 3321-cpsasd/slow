@@ -4,6 +4,45 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
+def _workflow(name: str) -> str:
+    return (PROJECT_ROOT / ".github/workflows" / name).read_text(encoding="utf-8")
+
+
+def test_ci_is_isolated_from_release_and_cancels_stale_pr_runs():
+    ci = _workflow("ci.yml")
+
+    assert not (PROJECT_ROOT / ".github/workflows/pipeline.yml").exists()
+    assert "name: CI" in ci
+    assert "pull_request:" in ci
+    assert "cancel-in-progress: true" in ci
+    assert "POSTGRES_TEST_DATABASE_URL" in ci
+    assert "apps/web/pnpm-lock.yaml" in ci
+    assert "apps/ops/pnpm-lock.yaml" in ci
+    assert "packages: write" not in ci
+    assert "ECS_SSH_KEY" not in ci
+
+
+def test_deployments_only_consume_successful_verified_main_commits():
+    production = _workflow("production-release.yml")
+    demo = _workflow("demo-deploy.yml")
+
+    for workflow in (production, demo):
+        assert "workflow_run:" in workflow
+        assert "\n  workflow_dispatch:\n" not in workflow
+        assert "workflow_run.conclusion == 'success'" in workflow
+        assert "workflow_run.event == 'push'" in workflow
+        assert "workflow_run.event == 'workflow_dispatch'" in workflow
+        assert "workflow_run.head_branch == 'main'" in workflow
+        assert "RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}" in workflow
+
+    assert "vars.ENABLE_PRODUCTION_DEPLOY == 'true'" in production
+    assert "packages: write" in production
+    assert "max-parallel: 1" in production
+    assert "vars.ENABLE_ECS_DEMO_DEPLOY == 'true'" in demo
+    assert "vars.ENABLE_PRODUCTION_DEPLOY != 'true'" in demo
+    assert "publish-images" not in demo
+
+
 def test_login_rate_limit_uses_path_without_query_string():
     nginx_config = (PROJECT_ROOT / "deploy/nginx/default.conf").read_text(
         encoding="utf-8"

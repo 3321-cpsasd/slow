@@ -2199,9 +2199,13 @@ def test_local_maintenance_regenerates_remediation_as_a_new_revision(client):
 
 
 def test_quiz_response_does_not_wait_for_post_quiz_ai(tmp_path):
+    note_started = Event()
+    release_note = Event()
+
     class SlowPostQuizAi(FakeAi):
         async def note(self, request):
-            await asyncio.sleep(0.4)
+            note_started.set()
+            await asyncio.to_thread(release_note.wait)
             return await super().note(request)
 
     storage = LocalAttachmentStorage(tmp_path / "slow-task-attachments")
@@ -2220,19 +2224,24 @@ def test_quiz_response_does_not_wait_for_post_quiz_ai(tmp_path):
         section = non_blocking.post(
             f"/api/sections/{chapter['sections'][0]['id']}/generate"
         ).json()
-        started = time.monotonic()
-        response = non_blocking.post(
-            f"/api/sections/{section['id']}/quiz",
-            json={
-                "quizSetId": section["quiz"]["id"],
-                "answers": [[1] for _ in section["quiz"]["questions"]],
-            },
-        )
-        elapsed = time.monotonic() - started
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            response_future = pool.submit(
+                non_blocking.post,
+                f"/api/sections/{section['id']}/quiz",
+                json={
+                    "quizSetId": section["quiz"]["id"],
+                    "answers": [[1] for _ in section["quiz"]["questions"]],
+                },
+            )
+            try:
+                response = response_future.result(timeout=5)
+                assert note_started.wait(timeout=5)
+                assert not release_note.is_set()
+            finally:
+                release_note.set()
 
         assert response.status_code == 200
         assert response.json()["passed"] is True
-        assert elapsed < 0.25
         assert {
             task["type"] for task in response.json()["workflowTasks"]
         } == {"note_generation", "next_section_preload"}

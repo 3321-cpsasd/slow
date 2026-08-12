@@ -1,0 +1,53 @@
+name: Demo deployment
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demo-deployment
+  cancel-in-progress: false
+
+env:
+  RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
+
+jobs:
+  deploy-ecs-demo:
+    name: Deploy demo ECS
+    if: >-
+      vars.ENABLE_ECS_DEMO_DEPLOY == 'true' &&
+      vars.ENABLE_PRODUCTION_DEPLOY != 'true' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      (github.event.workflow_run.event == 'push' ||
+       github.event.workflow_run.event == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: demo
+    env:
+      ECS_HOST: ${{ secrets.ECS_HOST }}
+      ECS_PORT: ${{ secrets.ECS_PORT }}
+      ECS_USER: ${{ secrets.ECS_USER }}
+      ECS_SSH_KEY: ${{ secrets.ECS_SSH_KEY }}
+      ECS_KNOWN_HOSTS: ${{ secrets.ECS_KNOWN_HOSTS }}
+    steps:
+      - name: Configure SSH
+        shell: bash
+        run: |
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$ECS_SSH_KEY" > "$HOME/.ssh/ecs_key"
+          chmod 600 "$HOME/.ssh/ecs_key"
+          printf '%s\n' "$ECS_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+      - name: Deploy verified main commit on ECS
+        shell: bash
+        run: |
+          ssh -p "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
+            "$ECS_USER@$ECS_HOST" \
+            "deploy $RELEASE_SHA"
