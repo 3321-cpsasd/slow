@@ -10,6 +10,8 @@
 </p>
 
 <p align="center">
+  <a href="https://slow.net.cn">访问产品 / Live site</a> ·
+  <a href="mailto:alpha@slow.net.cn">申请 Alpha 测试 / Request access</a> ·
   <a href="#中文">中文</a> · <a href="#english">English</a>
 </p>
 
@@ -20,6 +22,11 @@
 Slow 是一个 AI 原生个人学习应用。它把学习目标组织为可阅读、可验证、可持续推进的个性化教材，而不是只生成一份静态计划。
 
 课程、生成、目录和学习证据共同遵守 [`用户 → 书架 → 系列（学习目标） → 书 → 章 → 节`](PRODUCT_DNA.md) 的领域契约；内容块只是节内结构，不是目录或解锁层级。正文与测验生成遵循 [ADR-0001](docs/decisions/0001-lesson-generation-v2.md)。
+
+### 申请 Alpha 测试
+
+Slow 目前采用邀请制测试。如果你希望体验产品，请发送邮件至
+[alpha@slow.net.cn](mailto:alpha@slow.net.cn)，简单说明你想学习的主题；我们会在审核后回复注册邀请码。
 
 ### 当前能力
 
@@ -176,6 +183,11 @@ python operations_report.py --include-identifiers
 ## English
 
 Slow is an AI-native personal learning application. It turns a learning goal into structured material that learners can study, verify, and continue over time instead of stopping at a static plan.
+
+### Request Alpha access
+
+Slow is currently invite-only. To try the product, email
+[alpha@slow.net.cn](mailto:alpha@slow.net.cn) with a short note about what you want to learn. We will review the request and reply with a registration invite code.
 
 ### Highlights
 
