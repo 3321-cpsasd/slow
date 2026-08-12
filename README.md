@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="https://slow.net.cn">访问产品 / Live site</a> ·
   <a href="#中文">中文</a> · <a href="#english">English</a>
 </p>
 
