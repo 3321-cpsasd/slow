@@ -1878,7 +1878,7 @@ export default function App() {
       {AI_RUNTIME_SETTINGS_ENABLED && showAiSettings && (
         <AiSettingsDialog onClose={() => setShowAiSettings(false)} />
       )}
-      {view !== 'learn' && !learningQaOpen && (
+      {!(view === 'learn' && section) && !learningQaOpen && (
         <button
           className="global-feedback-tab"
           aria-label="反馈产品问题或建议"
