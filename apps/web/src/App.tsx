@@ -6900,6 +6900,7 @@ function QaPanel({
   const [preferenceError, setPreferenceError] = useState('');
   const [adoptingExchange, setAdoptingExchange] = useState('');
   const [adoptedExchange, setAdoptedExchange] = useState('');
+  const [confirmedPreference, setConfirmedPreference] = useState<Record<string, boolean>>({});
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const explanationRequestRef = useRef('');
@@ -7220,6 +7221,41 @@ function QaPanel({
                           }
                         }}
                       >还是不清楚</button>
+                      {message.explanationStyle !== 'custom' && (
+                        <button
+                          className={confirmedPreference[message.id] ? 'selected' : ''}
+                          disabled={!message.preferenceRequestEventId || confirmedPreference[message.id]}
+                          onClick={async () => {
+                            if (!message.preferenceRequestEventId || !message.explanationStyle) return;
+                            const dimensions = {
+                              worked_example: 'example', diagram: 'diagram', analogy: 'analogy',
+                              derivation: 'derivation', precise: 'precision', concise: 'concise',
+                            } as const;
+                            const dimension = dimensions[
+                              message.explanationStyle as PresetExplanationStyle
+                            ];
+                            setPreferenceError('');
+                            try {
+                              await api.decideLearningPreference({
+                                decisionKey: crypto.randomUUID(),
+                                requestEventId: message.preferenceRequestEventId,
+                                dimension,
+                                scopeKind: 'global',
+                                state: 'confirmed',
+                              });
+                              setConfirmedPreference((current) => ({ ...current, [message.id]: true }));
+                              telemetry.track('explanation_style_remembered', {
+                                view: 'learn', entityType: 'section', entityId: section.id,
+                                properties: { style: message.explanationStyle },
+                              });
+                            } catch (reason) {
+                              setPreferenceError(reason instanceof Error ? reason.message : '偏好暂未保存，请重试。');
+                            }
+                          }}
+                        >
+                          {confirmedPreference[message.id] ? '以后会优先这样讲' : '以后优先这样讲'}
+                        </button>
+                      )}
                       <button
                         className="replace"
                         disabled={adoptingExchange === message.id || adoptedExchange === message.id || Boolean(styleFeedback[message.id]) || !message.threadId || !message.answerMessageId || !message.preferenceRequestEventId || !section.content}

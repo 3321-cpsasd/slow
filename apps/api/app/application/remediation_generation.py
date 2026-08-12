@@ -79,6 +79,7 @@ def publish_remediation_candidate(
     remediation_blocks: Sequence[dict],
     failed_target_ids: set[str],
     strategy: str,
+    diagnosis_snapshot: Sequence[dict] = (),
     superseded_remediation: Remediation | None = None,
 ) -> PublishedRemediation:
     """Validate a remediation candidate and stage its authoritative rows."""
@@ -348,6 +349,7 @@ def publish_remediation_candidate(
             sorted(target_by_id[target_id][1].objective_statement for target_id in failed_target_ids)
         ),
         strategy=strategy,
+        diagnosis_snapshot_json=_dump(list(diagnosis_snapshot)),
     )
     db.add(remediation)
 

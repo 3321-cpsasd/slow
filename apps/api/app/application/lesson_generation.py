@@ -623,6 +623,7 @@ def publish_lesson_candidate(
     quiz_generation: int,
     superseded_content: ContentVersion | None = None,
     superseded_quiz: QuizSet | None = None,
+    standard_package_version_id: str | None = None,
 ) -> PublishedLesson:
     """Stage all authoritative rows in the caller's single transaction."""
 
@@ -640,15 +641,20 @@ def publish_lesson_candidate(
         prompt_version=LESSON_GENERATION_PROMPT_VERSION,
         generation_mode=spec.generation_mode,
         rights_status=(
-            "reviewed" if spec.generation_mode == "rights_grounded" else "not_applicable"
+            "reviewed"
+            if standard_package_version_id or spec.generation_mode == "rights_grounded"
+            else "not_applicable"
         ),
         factual_status=(
-            "claim_grounded"
+            "reviewed"
+            if standard_package_version_id
+            else "claim_grounded"
             if spec.knowledge_context.get("status") == "ready"
             else "unreviewed"
         ),
-        ai_generated=True,
+        ai_generated=not bool(standard_package_version_id),
         generation_run_id=generation_run.id,
+        standard_package_version_id=standard_package_version_id,
     )
     db.add(content)
     db.flush()
@@ -712,7 +718,11 @@ def publish_lesson_candidate(
                 trust_state=(
                     "claim_grounded" if block.claim_version_ids else "model_synthesis"
                 ),
-                generation_method=spec.generation_mode,
+                generation_method=(
+                    "reviewed_standard_package"
+                    if standard_package_version_id
+                    else spec.generation_mode
+                ),
                 assessment_eligible=bool(block.assessment_target_ids),
             )
         )
@@ -752,11 +762,12 @@ def publish_lesson_candidate(
     content.labeling_metadata_json = _dump(
         {
             "schemaVersion": AI_CONTENT_LABEL_SCHEMA_VERSION,
-            "generatedContent": True,
+            "generatedContent": not bool(standard_package_version_id),
             "serviceProvider": "Slow",
             "contentId": content.id,
             "generationRunId": generation_run.id,
             "generationMode": content.generation_mode,
+            "standardPackageVersionId": standard_package_version_id,
             "rightsStatus": content.rights_status,
             "factualStatus": content.factual_status,
             "model": generation_run.model,
@@ -803,6 +814,14 @@ def publish_lesson_candidate(
             "correct": question.correct,
             "explanation": question.explanation,
             "difficulty": question.difficulty,
+            "distractorDiagnostics": [
+                {
+                    "optionIndex": item.option_index,
+                    "causeCode": item.cause_code,
+                    "rationale": item.rationale,
+                }
+                for item in question.distractor_diagnostics
+            ],
             "claim_block_indexes": [
                 block_index_by_key[key] for key in question.evidence_block_keys
             ],

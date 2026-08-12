@@ -8,13 +8,14 @@ import re
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ...core.errors import AppError
 from ...infrastructure.tables import (
     ContentVersion,
+    LearningPreferenceDecision,
     LearningPreferenceEvidence,
     PersonalBlockPresentation,
     QaMessage,
@@ -188,6 +189,79 @@ class LearningPreferenceService:
             shelf_id=shelf_id,
             source_qa_message_id=body.answer_message_id,
         )
+
+    def decide(self, body) -> dict:
+        """Persist an explicit user decision before applying it to generation."""
+
+        payload = body.model_dump(by_alias=True)
+        request_hash = sha256(_json(payload).encode("utf-8")).hexdigest()
+        existing = self.db.scalar(
+            select(LearningPreferenceDecision).where(
+                LearningPreferenceDecision.user_id == self.user_id,
+                LearningPreferenceDecision.decision_key == body.decision_key,
+            )
+        )
+        if existing:
+            if existing.request_hash != request_hash:
+                raise AppError(
+                    "偏好决定编号已被用于不同内容",
+                    code="PREFERENCE_DECISION_IDEMPOTENCY_CONFLICT",
+                    status=409,
+                )
+            return self.projection(shelf_id=body.shelf_id, recorded=False)
+
+        source = self.db.scalar(
+            select(LearningPreferenceEvidence).where(
+                LearningPreferenceEvidence.user_id == self.user_id,
+                LearningPreferenceEvidence.event_id == body.request_event_id,
+                LearningPreferenceEvidence.signal == "requested",
+            )
+        )
+        if not source:
+            raise AppError(
+                "找不到对应的讲法请求",
+                code="PREFERENCE_DECISION_SOURCE_NOT_FOUND",
+                status=404,
+            )
+        dimensions = _load(source.dimensions_json, {})
+        if body.dimension not in dimensions:
+            raise AppError(
+                "这次讲法没有提供该偏好依据",
+                code="PREFERENCE_DECISION_DIMENSION_INVALID",
+                status=409,
+            )
+        if body.scope_kind == "shelf" and source.shelf_id != body.shelf_id:
+            raise AppError(
+                "偏好决定与当前书架不一致",
+                code="PREFERENCE_DECISION_SCOPE_INVALID",
+                status=409,
+            )
+        occurred_at = self.clock()
+        decision_sequence = (
+            self.db.scalar(
+                select(func.max(LearningPreferenceDecision.decision_sequence)).where(
+                    LearningPreferenceDecision.user_id == self.user_id
+                )
+            )
+            or 0
+        ) + 1
+        self.db.add(
+            LearningPreferenceDecision(
+                id=f"preference_decision_{uuid4().hex}",
+                user_id=self.user_id,
+                decision_key=body.decision_key,
+                decision_sequence=decision_sequence,
+                scope_kind=body.scope_kind,
+                shelf_id=body.shelf_id if body.scope_kind == "shelf" else None,
+                dimension=body.dimension,
+                state=body.state,
+                source_evidence_id=source.id,
+                request_hash=request_hash,
+                created_at=occurred_at,
+            )
+        )
+        self.db.commit()
+        return self.projection(shelf_id=body.shelf_id, recorded=True)
 
     def _record(
         self,
@@ -406,10 +480,15 @@ class LearningPreferenceService:
                 "contextCount": context_count,
                 "active": active,
             })
+        suggested = self._effective_preferences(dimensions)
+        confirmed = self._confirmed_preferences(shelf_id=shelf_id)
         result = {
             "updatedAt": self.clock().isoformat(),
             "dimensions": dimensions,
-            "effectivePreferences": self._effective_preferences(dimensions),
+            "suggestedPreferences": suggested,
+            "confirmedPreferences": confirmed,
+            # Compatibility field: only explicit authority is effective.
+            "effectivePreferences": confirmed,
         }
         if recorded is not None:
             result["recorded"] = recorded
@@ -439,17 +518,49 @@ class LearningPreferenceService:
         return [*ordinary, *terminal_by_request.values()]
 
     def effective_preferences(self, explicit: dict, *, shelf_id: str | None = None) -> dict:
-        inferred = self.projection(shelf_id=shelf_id)["effectivePreferences"]
+        confirmed = self._confirmed_preferences(shelf_id=shelf_id)
         result = dict(explicit)
-        if result.get("openingStyle", "auto") == "auto" and inferred.get("openingStyle"):
-            result["openingStyle"] = inferred["openingStyle"]
-        if result.get("explanationDensity", "auto") == "auto" and inferred.get("explanationDensity"):
-            result["explanationDensity"] = inferred["explanationDensity"]
+        if result.get("openingStyle", "auto") == "auto" and confirmed.get("openingStyle"):
+            result["openingStyle"] = confirmed["openingStyle"]
+        if result.get("explanationDensity", "auto") == "auto" and confirmed.get("explanationDensity"):
+            result["explanationDensity"] = confirmed["explanationDensity"]
         explicit_formats = list(result.get("formatPreferences") or [])
-        result["formatPreferences"] = list(dict.fromkeys(explicit_formats + inferred.get("formatPreferences", [])))[:5]
-        if inferred.get("styleGuidance"):
-            result["styleGuidance"] = inferred["styleGuidance"]
+        result["formatPreferences"] = list(dict.fromkeys(explicit_formats + confirmed.get("formatPreferences", [])))[:5]
+        if confirmed.get("styleGuidance"):
+            result["styleGuidance"] = confirmed["styleGuidance"]
         return result
+
+    def _confirmed_preferences(self, *, shelf_id: str | None) -> dict:
+        rows = list(
+            self.db.scalars(
+                select(LearningPreferenceDecision)
+                .where(LearningPreferenceDecision.user_id == self.user_id)
+                .order_by(
+                    LearningPreferenceDecision.decision_sequence,
+                )
+            )
+        )
+        latest: dict[tuple[str, str | None, str], LearningPreferenceDecision] = {}
+        for row in rows:
+            key = (row.scope_kind, row.shelf_id, row.dimension)
+            latest[key] = row
+        active: set[str] = {
+            dimension
+            for (scope_kind, scope_shelf_id, dimension), row in latest.items()
+            if scope_kind == "global" and scope_shelf_id is None and row.state == "confirmed"
+        }
+        if shelf_id:
+            for (scope_kind, scope_shelf_id, dimension), row in latest.items():
+                if scope_kind != "shelf" or scope_shelf_id != shelf_id:
+                    continue
+                if row.state == "confirmed":
+                    active.add(dimension)
+                else:
+                    active.discard(dimension)
+        return self._effective_preferences([
+            {"key": key, "active": True, "score": 1.0}
+            for key in sorted(active)
+        ])
 
     def _stats(self, rows: list[LearningPreferenceEvidence]) -> dict[str, dict]:
         current = _aware(self.clock())

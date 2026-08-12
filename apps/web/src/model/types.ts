@@ -217,6 +217,8 @@ export type LearningPreferenceProjection = {
     contextCount:number;
     active:boolean;
   }[];
+  suggestedPreferences:Record<string,unknown>;
+  confirmedPreferences:Record<string,unknown>;
   effectivePreferences:Record<string,unknown>;
 };
 export type FeedbackReceipt = {

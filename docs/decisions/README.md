@@ -42,3 +42,4 @@
 | [ADR-0007](0007-user-interface-expression-boundary.md) | Accepted，已实现首轮收敛 | 普通用户界面与内部治理、运行和审计机制的表达边界 |
 | [ADR-0008](0008-section-continuity-and-recovery.md) | Accepted，第一阶段已实现 | 一节内容缓冲、统一重新准备入口和 Recovery Agent 权限边界 |
 | [ADR-0009](0009-adaptive-lesson-composition.md) | Accepted，已实现 | 跨知识类型的动态正文编排、段落职责和案例可信边界 |
+| [ADR-0011](0011-m3-pilot-readiness.md) | Accepted，实施中 | 正式试点路线连续性、五类错因、补救有效性、跨类型质量与偏好授权 |

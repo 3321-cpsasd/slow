@@ -28,13 +28,13 @@ from .ai.fallback_adapter import FallbackAiAdapter
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceEvidenceCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ResumeUpdate, ReviewSubmit, ShelfCreate
+from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ResumeUpdate, ReviewSubmit, ShelfCreate
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
 from .demo_personas import LOCAL_DEMO_PERSONAS
 from .infrastructure.database import build_database
-from .infrastructure.tables import Base, LearningTask, QuizAttempt, Remediation, User, now
+from .infrastructure.tables import Base, LearningTask, QuizAttempt, Remediation, Shelf, User, now
 from .modules.learning.tasks import claim_task, heartbeat_task, recoverable_task_ids
 from .modules.feedback.service import FeedbackService
 from .modules.telemetry.service import ProductEventService
@@ -1100,6 +1100,23 @@ def create_app(
             body,
             shelf_id=context.shelf.id,
         )
+
+    @app.post("/api/learning-preferences/decisions", status_code=201)
+    def decide_learning_preference(
+        body: LearningPreferenceDecisionCreate,
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        ProfileService(session, scope.user_id).require_complete()
+        if body.scope_kind == "shelf":
+            shelf = session.get(Shelf, body.shelf_id)
+            if not shelf or shelf.user_id != scope.user_id:
+                raise AppError(
+                    "找不到这个书架",
+                    code="PREFERENCE_DECISION_SHELF_NOT_FOUND",
+                    status=404,
+                )
+        return LearningPreferenceService(session, scope.user_id).decide(body)
 
     @app.post("/api/sections/{section_id}/personal-presentation", status_code=201)
     def adopt_personal_presentation(

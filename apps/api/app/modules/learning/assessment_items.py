@@ -7,6 +7,7 @@ Newly published quizzes use ``AssessmentItemVersion`` as the scoring authority.
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from collections.abc import Callable, Sequence
 
 from sqlalchemy import select
@@ -16,12 +17,20 @@ from ...core.errors import AppError
 from ...infrastructure.tables import (
     AssessmentItemEvidenceBlock,
     AssessmentItemVersion,
+    AssessmentDistractorDiagnostic,
     ContentBlockVersion,
     QuizSet,
 )
 
 
 VERSIONED_LEGACY_QUIZ_SCHEMA = "versioned_legacy_quiz_v1"
+DIAGNOSTIC_CAUSES = {
+    "prerequisite_gap",
+    "concept_confusion",
+    "mechanism_reasoning_break",
+    "boundary_comparison_error",
+    "application_transfer_failure",
+}
 
 
 def _dump(value) -> str:
@@ -89,6 +98,7 @@ def publish_assessment_item_versions(
     item_keys: set[str] = set()
     payloads: list[dict] = []
     pending_bindings: list[tuple[str, str]] = []
+    pending_diagnostics: list[tuple[str, int, str, str, str]] = []
     for position, (question, evidence_block_ids) in enumerate(
         zip(questions, evidence_block_ids_by_position, strict=True)
     ):
@@ -114,6 +124,54 @@ def publish_assessment_item_versions(
         payload["itemKey"] = item_key
         payload["assessmentTargetId"] = target_id
         payload["evidenceBlockIds"] = normalized_evidence_ids
+        diagnostics = payload.get("distractorDiagnostics")
+        if diagnostics is None:
+            diagnostics = payload.get("distractor_diagnostics", [])
+            payload["distractorDiagnostics"] = [
+                {
+                    "optionIndex": item.get("option_index"),
+                    "causeCode": item.get("cause_code"),
+                    "rationale": item.get("rationale", ""),
+                }
+                for item in diagnostics
+            ]
+            payload.pop("distractor_diagnostics", None)
+            diagnostics = payload["distractorDiagnostics"]
+        options = payload.get("options", [])
+        correct = set(payload.get("correct", []))
+        seen_diagnostic_indexes: set[int] = set()
+        for diagnostic in diagnostics:
+            option_index = diagnostic.get("optionIndex")
+            cause_code = str(diagnostic.get("causeCode") or "")
+            rationale = str(diagnostic.get("rationale") or "")
+            if (
+                not isinstance(option_index, int)
+                or isinstance(option_index, bool)
+                or option_index < 0
+                or option_index >= len(options)
+                or option_index in correct
+                or option_index in seen_diagnostic_indexes
+                or cause_code not in DIAGNOSTIC_CAUSES
+            ):
+                raise AppError(
+                    "题目的错误选项诊断绑定无效",
+                    code="ASSESSMENT_DISTRACTOR_DIAGNOSTIC_INVALID",
+                    status=502,
+                )
+            seen_diagnostic_indexes.add(option_index)
+            pending_diagnostics.append((
+                item_id,
+                option_index,
+                sha256(str(options[option_index]).encode("utf-8")).hexdigest(),
+                cause_code,
+                rationale,
+            ))
+        if diagnostics and seen_diagnostic_indexes != set(range(len(options))) - correct:
+            raise AppError(
+                "题目的错误选项诊断覆盖不完整",
+                code="ASSESSMENT_DISTRACTOR_DIAGNOSTIC_INCOMPLETE",
+                status=502,
+            )
         payloads.append(payload)
         db.add(
             AssessmentItemVersion(
@@ -137,6 +195,15 @@ def publish_assessment_item_versions(
                 content_block_version_id=block_id,
             )
         )
+    for item_id, option_index, option_hash, cause_code, rationale in pending_diagnostics:
+        db.add(AssessmentDistractorDiagnostic(
+            id=uid("distractor_diagnostic"),
+            assessment_item_version_id=item_id,
+            option_index=option_index,
+            option_hash=option_hash,
+            cause_code=cause_code,
+            rationale=rationale,
+        ))
     quiz.questions_json = _dump(payloads)
     return payloads
 

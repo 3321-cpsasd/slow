@@ -226,6 +226,24 @@ class LearningPreferenceEvidenceCreate(ApiModel):
     custom_instruction: str | None = Field(default=None, max_length=240)
 
 
+class LearningPreferenceDecisionCreate(ApiModel):
+    decision_key: str = Field(min_length=8, max_length=128)
+    request_event_id: str = Field(min_length=8, max_length=128)
+    dimension: Literal[
+        "example", "diagram", "analogy", "derivation", "precision", "concise",
+        "plain_language", "humor",
+    ]
+    scope_kind: Literal["global", "shelf"] = "shelf"
+    shelf_id: str | None = Field(default=None, min_length=1, max_length=160)
+    state: Literal["confirmed", "cleared"] = "confirmed"
+
+    @model_validator(mode="after")
+    def validate_scope(self):
+        if (self.scope_kind == "shelf") != bool(self.shelf_id):
+            raise ValueError("书架范围的偏好决定必须绑定书架")
+        return self
+
+
 class PersonalPresentationAdopt(ApiModel):
     event_id: str = Field(min_length=8, max_length=128)
     request_event_id: str = Field(min_length=8, max_length=128)

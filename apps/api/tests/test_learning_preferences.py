@@ -7,7 +7,11 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.schemas import LearningPreferenceEvidenceCreate, PersonalPresentationAdopt
+from app.api.schemas import (
+    LearningPreferenceDecisionCreate,
+    LearningPreferenceEvidenceCreate,
+    PersonalPresentationAdopt,
+)
 from app.core.errors import AppError
 from app.infrastructure.tables import (
     Base,
@@ -73,7 +77,7 @@ def evidence(event_id, *, section_id="section_1", style="worked_example", signal
     )
 
 
-def test_repeated_helpful_evidence_activates_only_across_multiple_sections():
+def test_repeated_helpful_evidence_only_suggests_until_user_confirms():
     db = database()
     clock = lambda: datetime(2026, 8, 11, tzinfo=timezone.utc)
     service = LearningPreferenceService(db, "user_a", clock=clock)
@@ -89,7 +93,28 @@ def test_repeated_helpful_evidence_activates_only_across_multiple_sections():
     assert example["positiveOutcomes"] == 3
     assert example["contextCount"] == 2
     assert example["active"] is True
-    assert result["effectivePreferences"]["formatPreferences"] == ["worked_example"]
+    assert result["suggestedPreferences"]["formatPreferences"] == ["worked_example"]
+    assert result["confirmedPreferences"]["formatPreferences"] == []
+    assert result["effectivePreferences"]["formatPreferences"] == []
+
+    confirmed = service.decide(LearningPreferenceDecisionCreate(
+        decisionKey="preference_decision_1",
+        requestEventId="request_03",
+        dimension="example",
+        scopeKind="global",
+        state="confirmed",
+    ))
+    assert confirmed["confirmedPreferences"]["formatPreferences"] == ["worked_example"]
+    assert confirmed["effectivePreferences"]["formatPreferences"] == ["worked_example"]
+
+    cleared = service.decide(LearningPreferenceDecisionCreate(
+        decisionKey="preference_decision_2",
+        requestEventId="request_03",
+        dimension="example",
+        scopeKind="global",
+        state="cleared",
+    ))
+    assert cleared["effectivePreferences"]["formatPreferences"] == []
 
 
 def test_custom_text_is_reduced_to_bounded_features_and_not_retained():

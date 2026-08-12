@@ -19,6 +19,7 @@ from app.application.lesson_generation import (
     publish_lesson_candidate,
     validate_lesson_candidate,
 )
+from app.application.standard_content import StandardContentService
 from app.infrastructure.tables import (
     AssessmentItemEvidenceBlock,
     AssessmentItemVersion,
@@ -29,6 +30,8 @@ from app.infrastructure.tables import (
     LearningContractVersion,
     QuizSet,
     Section,
+    SectionFallbackBinding,
+    StandardLessonPackageVersion,
 )
 from app.main import create_app
 from app.core.errors import AppError
@@ -399,6 +402,45 @@ def test_atomic_publisher_normalizes_explicit_bindings_and_rolls_back():
         db.rollback()
         assert db.scalar(select(func.count()).select_from(ContentVersion)) == 0
         assert db.scalar(select(func.count()).select_from(QuizSet)) == 0
+
+
+def test_standard_package_requires_exact_contract_and_reuses_normal_gate():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        section = Section(
+            id="section_1", chapter_id="chapter_1", position=1,
+            title="稳定绑定", question="为什么需要稳定绑定？", objectives_json="[]",
+        )
+        contract = LearningContractVersion(
+            id="contract_1", section_id=section.id, mission_version_id="mission_1",
+            version=3, section_question_snapshot=section.question,
+            target_depth="deep", boundaries_json="[]", generation_context_json="{}",
+            provenance_mode="native_m2", lineage_status="confirmed", contract_hash="hash",
+        )
+        db.add_all([section, contract])
+        service = StandardContentService(db)
+        package = service.publish_package(
+            package_key="stable-binding", version=1, title="稳定绑定标准内容",
+            spec=spec(), candidate=candidate(), review={"status": "approved", "reviewer": "fixture"},
+        )
+        binding = service.bind(
+            section=section, contract=contract, spec=spec(), package=package
+        )
+        fallback, loaded_package = service.fallback_candidate(
+            contract=contract, spec=spec()
+        )
+        assert binding.standard_package_version_id == package.id
+        assert loaded_package.id == package.id
+        assert validate_lesson_candidate(spec(), fallback)
+
+        mismatched = spec()
+        mismatched.section["question"] = "另一个问题"
+        with pytest.raises(AppError) as raised:
+            service.fallback_candidate(contract=contract, spec=mismatched)
+        assert raised.value.code == "GUARANTEED_ROUTE_FALLBACK_MISSING"
+        assert db.scalar(select(func.count()).select_from(StandardLessonPackageVersion)) == 1
+        assert db.scalar(select(func.count()).select_from(SectionFallbackBinding)) == 1
 
 
 class V2FakeAi(FakeAi):

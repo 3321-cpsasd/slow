@@ -12,7 +12,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0053_lesson_case_identity"
+HEAD_REVISION = "0054_m3_pilot_foundations"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -189,8 +189,15 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
             "user_daily_mode_states",
             "daily_mode_events",
             "learning_preference_evidence",
+            "learning_preference_decisions",
             "personal_block_presentations",
             "alpha_registration_quotas",
+            "standard_lesson_package_versions",
+            "standard_lesson_package_targets",
+            "section_fallback_bindings",
+            "route_admission_decisions",
+            "assessment_distractor_diagnostics",
+            "remediation_diagnoses",
         }.issubset(trustworthy_tables)
         qa_message_columns = {
             row[1]
@@ -296,6 +303,9 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
         "request_source",
     }.issubset(qa_message_columns)
     assert "terminal_request_key" in preference_evidence_columns
+    assert "continuity_tier" in series_columns
+    assert "standard_package_version_id" in content_columns
+    assert "diagnosis_snapshot_json" in remediation_columns
     assert {
         "teaching_moves_json",
         "case_kind",

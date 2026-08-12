@@ -228,6 +228,49 @@ class LearningPreferenceEvidence(Base):
     )
 
 
+class LearningPreferenceDecision(Base):
+    """Append-only user authority for future teaching preferences."""
+
+    __tablename__ = "learning_preference_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "decision_key",
+            name="uq_learning_preference_decisions_user_key",
+        ),
+        UniqueConstraint(
+            "user_id",
+            "decision_sequence",
+            name="uq_learning_preference_decisions_user_sequence",
+        ),
+        Index(
+            "ix_learning_preference_decisions_scope",
+            "user_id",
+            "scope_kind",
+            "shelf_id",
+            "dimension",
+            "created_at",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    decision_key: Mapped[str] = mapped_column(String(128))
+    decision_sequence: Mapped[int] = mapped_column(Integer)
+    scope_kind: Mapped[str] = mapped_column(String(16), index=True)
+    shelf_id: Mapped[str | None] = mapped_column(
+        ForeignKey("shelves.id"), nullable=True, index=True
+    )
+    dimension: Mapped[str] = mapped_column(String(32), index=True)
+    state: Mapped[str] = mapped_column(String(16), index=True)
+    source_evidence_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_preference_evidence.id"), nullable=True, index=True
+    )
+    request_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
 class PersonalBlockPresentation(Base):
     """A reversible user-local reading layer over an immutable published block."""
 
@@ -1017,6 +1060,9 @@ class Series(Base):
     initial_mission_version_id: Mapped[str | None] = mapped_column(
         ForeignKey("learning_mission_versions.id"), nullable=True, index=True
     )
+    continuity_tier: Mapped[str] = mapped_column(
+        String(24), default="recoverable", index=True
+    )
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
 
@@ -1091,6 +1137,106 @@ class LearningContractVersion(Base):
     lineage_status: Mapped[str] = mapped_column(String(32), default="verified", index=True)
     contract_hash: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class StandardLessonPackageVersion(Base):
+    """Reviewed reusable lesson source for a canonical contract signature."""
+
+    __tablename__ = "standard_lesson_package_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "package_key",
+            "version",
+            name="uq_standard_lesson_package_key_version",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    package_key: Mapped[str] = mapped_column(String(160), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(300))
+    contract_signature: Mapped[str] = mapped_column(String(64), index=True)
+    contract_snapshot_json: Mapped[str] = mapped_column(Text)
+    composition_policy_json: Mapped[str] = mapped_column(Text, default="{}")
+    blocks_json: Mapped[str] = mapped_column(Text)
+    questions_json: Mapped[str] = mapped_column(Text)
+    sources_json: Mapped[str] = mapped_column(Text, default="[]")
+    status: Mapped[str] = mapped_column(String(24), default="candidate", index=True)
+    review_status: Mapped[str] = mapped_column(
+        String(24), default="pending", index=True
+    )
+    rights_status: Mapped[str] = mapped_column(String(32), default="reviewed")
+    factual_status: Mapped[str] = mapped_column(String(32), default="reviewed")
+    schema_version: Mapped[str] = mapped_column(String(48))
+    rule_version: Mapped[str] = mapped_column(String(48))
+    output_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    review_json: Mapped[str] = mapped_column(Text, default="{}")
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class StandardLessonPackageTarget(Base):
+    __tablename__ = "standard_lesson_package_targets"
+    __table_args__ = (
+        UniqueConstraint(
+            "package_version_id",
+            "position",
+            name="uq_standard_lesson_package_target_position",
+        ),
+        UniqueConstraint(
+            "package_version_id",
+            "assessment_target_id",
+            name="uq_standard_lesson_package_target_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    package_version_id: Mapped[str] = mapped_column(
+        ForeignKey("standard_lesson_package_versions.id"), index=True
+    )
+    assessment_target_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_targets.id"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    required: Mapped[bool] = mapped_column(Boolean, default=True)
+    verification_policy: Mapped[str] = mapped_column(String(48))
+    target_depth: Mapped[str] = mapped_column(String(32))
+
+
+class SectionFallbackBinding(Base):
+    __tablename__ = "section_fallback_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "learning_contract_version_id",
+            name="uq_section_fallback_binding_contract",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    learning_contract_version_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), index=True
+    )
+    standard_package_version_id: Mapped[str] = mapped_column(
+        ForeignKey("standard_lesson_package_versions.id"), index=True
+    )
+    contract_signature: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class RouteAdmissionDecision(Base):
+    __tablename__ = "route_admission_decisions"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    series_id: Mapped[str] = mapped_column(ForeignKey("series.id"), index=True)
+    allowed: Mapped[bool] = mapped_column(Boolean, index=True)
+    covered_contracts: Mapped[int] = mapped_column(Integer, default=0)
+    required_contracts: Mapped[int] = mapped_column(Integer, default=0)
+    reasons_json: Mapped[str] = mapped_column(Text, default="[]")
+    rule_version: Mapped[str] = mapped_column(String(48), index=True)
+    input_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
 
 
 class LearningContractConcept(Base):
@@ -1337,6 +1483,11 @@ class ContentVersion(Base):
     ai_generated: Mapped[bool] = mapped_column(Boolean, default=True)
     generation_run_id: Mapped[str | None] = mapped_column(
         ForeignKey("generation_runs.id"), nullable=True, index=True
+    )
+    standard_package_version_id: Mapped[str | None] = mapped_column(
+        ForeignKey("standard_lesson_package_versions.id"),
+        nullable=True,
+        index=True,
     )
     output_hash: Mapped[str] = mapped_column(String(64), default="")
     labeling_metadata_json: Mapped[str] = mapped_column(Text, default="{}")
@@ -1754,6 +1905,28 @@ class AssessmentItemVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class AssessmentDistractorDiagnostic(Base):
+    """Immutable diagnostic meaning attached to one incorrect option."""
+
+    __tablename__ = "assessment_distractor_diagnostics"
+    __table_args__ = (
+        UniqueConstraint(
+            "assessment_item_version_id",
+            "option_index",
+            name="uq_assessment_distractor_item_option",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    assessment_item_version_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_item_versions.id"), index=True
+    )
+    option_index: Mapped[int] = mapped_column(Integer)
+    option_hash: Mapped[str] = mapped_column(String(64))
+    cause_code: Mapped[str] = mapped_column(String(48), index=True)
+    rationale: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class AssessmentItemEvidenceBlock(Base):
     """Question-to-taught-block evidence binding validated before publish."""
 
@@ -1809,6 +1982,34 @@ class QuizAttempt(Base):
     response_json: Mapped[str] = mapped_column(Text, default="")
     workflow_error_code: Mapped[str] = mapped_column(String(80), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class RemediationDiagnosis(Base):
+    """Append-only evidence-based diagnosis for one failed target."""
+
+    __tablename__ = "remediation_diagnoses"
+    __table_args__ = (
+        UniqueConstraint(
+            "attempt_id",
+            "assessment_target_id",
+            "rule_version",
+            name="uq_remediation_diagnosis_attempt_target_rule",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    attempt_id: Mapped[str] = mapped_column(ForeignKey("quiz_attempts.id"), index=True)
+    assessment_target_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_targets.id"), index=True
+    )
+    cause_code: Mapped[str] = mapped_column(String(48), index=True)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    evidence_json: Mapped[str] = mapped_column(Text, default="[]")
+    input_hash: Mapped[str] = mapped_column(String(64))
+    rule_version: Mapped[str] = mapped_column(String(48), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
 
 
 class AssessmentTarget(Base):
@@ -2268,6 +2469,7 @@ class Remediation(Base):
     blocks_json: Mapped[str] = mapped_column(Text)
     objectives_json: Mapped[str] = mapped_column(Text)
     strategy: Mapped[str] = mapped_column(String(40))
+    diagnosis_snapshot_json: Mapped[str] = mapped_column(Text, default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

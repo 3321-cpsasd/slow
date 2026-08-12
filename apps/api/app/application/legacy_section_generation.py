@@ -43,6 +43,10 @@ from ..modules.learning.assessment_items import (
     publish_assessment_item_versions,
 )
 from ..modules.learning.contracts import ensure_learning_contract, open_run_section
+from ..modules.learning.remediation_diagnosis import (
+    choose_remediation_strategy,
+    diagnose_failed_attempt,
+)
 from ..modules.learning.content_governance_store import (
     generated_claim_verification_candidates,
     persist_generated_governance,
@@ -434,6 +438,7 @@ async def generate_legacy_section(
             else []
         )
         remediation_targets: set[str] = set()
+        remediation_diagnoses: list[dict] = []
         if retry and retry_attempt_id:
             failed_attempt = self.db.get(QuizAttempt, retry_attempt_id)
             failed_quiz = (
@@ -456,24 +461,14 @@ async def generate_legacy_section(
                     )
                     if question.get("assessmentTargetId") in remediation_targets
                 ]
+                remediation_diagnoses = diagnose_failed_attempt(
+                    self.db, failed_attempt
+                )
         book = self._book_for_section(section)
-        remediation_count = (
-            self.db.scalar(
-                select(func.count(func.distinct(Remediation.attempt_id)))
-                .select_from(Remediation)
-                .where(Remediation.section_id == section.id)
-            )
-            if retry
-            else 0
-        )
         remediation_strategy = (
             superseded_remediation.strategy
             if superseded_remediation
-            else [
-                "paragraph_locator",
-                "alternative_explanation",
-                "prerequisite_supplement",
-            ][min(remediation_count, 2)]
+            else choose_remediation_strategy(remediation_diagnoses)
             if retry
             else None
         )
@@ -540,6 +535,7 @@ async def generate_legacy_section(
         regeneration_trace["contextManifest"] = context_pack.manifest()
         if retry:
             lesson_request["remediationStrategy"] = remediation_strategy
+            lesson_request["remediationDiagnosis"] = remediation_diagnoses
             if remediation_targets:
                 lesson_request["assessmentTargets"] = [
                     item
@@ -1160,6 +1156,7 @@ async def generate_legacy_section(
                 remediation_blocks=remediation_blocks,
                 failed_target_ids=remediation_targets,
                 strategy=remediation_strategy,
+                diagnosis_snapshot=remediation_diagnoses,
                 superseded_remediation=superseded_remediation,
             )
             quiz = published_remediation.quiz

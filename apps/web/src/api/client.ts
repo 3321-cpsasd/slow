@@ -265,6 +265,9 @@ export const api = {
   recordPreferenceEvidence:(body:object)=>call<import('../model/types').LearningPreferenceProjection>('/api/learning-preferences/evidence',{
     method:'POST',body:JSON.stringify(body),
   }),
+  decideLearningPreference:(body:object)=>call<import('../model/types').LearningPreferenceProjection>('/api/learning-preferences/decisions',{
+    method:'POST',body:JSON.stringify(body),
+  }),
   adoptPersonalPresentation:(sectionId:string,body:object)=>call<{id:string;status:'active';projection:import('../model/types').LearningPreferenceProjection}>(`/api/sections/${sectionId}/personal-presentation`,{
     method:'POST',body:JSON.stringify(body),
   }),
