@@ -58,6 +58,7 @@ import type {
   QuizResult,
   ReviewResult,
   ReviewSession,
+  ReinforcementRun,
   Section,
   SectionSummary,
   Series,
@@ -66,11 +67,12 @@ import type {
   StudyActivitySummary,
 } from './model/types';
 
-type View = 'home' | 'shelf' | 'learn' | 'profile' | 'knowledge';
+type View = 'home' | 'shelf' | 'learn' | 'profile' | 'knowledge' | 'review';
 type AppRoute =
   | { view: 'home' }
   | { view: 'profile'; section: 'profile' | 'account' }
   | { view: 'knowledge' }
+  | { view: 'review' }
   | { view: 'shelf'; shelfId: string }
   | { view: 'learn'; seriesId: string; sectionId: string | null };
 type TextQuote = { text: string; blockId: string };
@@ -183,6 +185,7 @@ const routeFromLocation = (): AppRoute => {
     };
   }
   if (parts[0] === 'knowledge' && parts.length === 1) return { view: 'knowledge' };
+  if (parts[0] === 'review' && parts.length === 1) return { view: 'review' };
   if (parts[0] === 'shelves' && parts[1] && parts.length === 2) {
     return { view: 'shelf', shelfId: parts[1] };
   }
@@ -486,6 +489,8 @@ export default function App() {
       telemetry.track('learning_viewed', { view: 'learn', entityType: 'series', entityId: series.id });
     } else if (view === 'profile') {
       telemetry.track('profile_viewed', { view: 'profile' });
+    } else if (view === 'review') {
+      telemetry.track('review_center_viewed', { view: 'review' });
     }
   }, [auth?.privacy.status, data, view, shelf?.id, series?.id]);
 
@@ -780,6 +785,16 @@ export default function App() {
     setSeries(null);
     setSection(null);
     setView('knowledge');
+  };
+
+  const openReviewCenter = () => {
+    routeRequestVersion.current += 1;
+    updateBrowserLocation('/review', 'push');
+    setShowUserMenu(false);
+    setShelf(null);
+    setSeries(null);
+    setSection(null);
+    setView('review');
   };
 
   const changeProfileSection = (nextSection: 'profile' | 'account') => {
@@ -1148,6 +1163,13 @@ export default function App() {
     }
     if (route.view === 'knowledge') {
       setView('knowledge');
+      setShelf(null);
+      setSeries(null);
+      setSection(null);
+      return;
+    }
+    if (route.view === 'review') {
+      setView('review');
       setShelf(null);
       setSeries(null);
       setSection(null);
@@ -1634,6 +1656,8 @@ export default function App() {
           <small>个人中心</small>
         ) : view === 'knowledge' ? (
           <small>我的知识版图</small>
+        ) : view === 'review' ? (
+          <small>复习与补强</small>
         ) : (
           <small>一步一步，学成自己的书</small>
         )}
@@ -1698,6 +1722,9 @@ export default function App() {
                 <button role="menuitem" onClick={openKnowledgeMap}>
                   <span><b>知识版图</b><small>能力段位、保持状态与目标覆盖</small></span><i aria-hidden="true">→</i>
                 </button>
+                <button role="menuitem" onClick={openReviewCenter}>
+                  <span><b>复习与补强</b><small>快速唤醒知识，修复薄弱连接</small></span><i aria-hidden="true">→</i>
+                </button>
                 <button role="menuitem" onClick={() => openProfileCenter('account')}>
                   <span><b>账号与数据</b><small>身份、数据归属与安全</small></span><i aria-hidden="true">→</i>
                 </button>
@@ -1716,13 +1743,14 @@ export default function App() {
         onDismissError={() => setError('')}
         onDismissNotice={() => setNotice('')}
       />
-      <main className={view === 'learn' ? 'learn-main' : view === 'profile' ? 'profile-main' : view === 'knowledge' ? 'knowledge-main' : 'marketing-main'}>
+      <main className={view === 'learn' ? 'learn-main' : view === 'profile' ? 'profile-main' : view === 'knowledge' ? 'knowledge-main' : view === 'review' ? 'review-main' : 'marketing-main'}>
         {view === 'home' && (
           <Home
             data={data}
             dailyMode={data?.dailyMode?.dailyMode || data?.dailyMode?.lastDailyMode || 'slow'}
             onOpen={openShelf}
             onContinue={openSeries}
+            onOpenReview={openReviewCenter}
             onCreate={async (body) => {
               const value = await run('正在创建书架…', () => api.createShelf(body));
               setData((current) => current
@@ -1791,7 +1819,11 @@ export default function App() {
               shelfName: item.name,
             })))}
             onBack={goHome}
+            onOpenReview={openReviewCenter}
           />
+        )}
+        {view === 'review' && (
+          <ReviewCenterPage onBack={goHome} />
         )}
         {view === 'learn' && series && (
           <>
@@ -2711,60 +2743,20 @@ function StudyTimeSummary({
   );
 }
 
-function Home({
-  data,
-  dailyMode,
-  onOpen,
-  onContinue,
-  onCreate,
-}: {
-  data: Bootstrap | null;
-  dailyMode: DailyMode;
-  onOpen: (shelf: Shelf) => void;
-  onContinue: (seriesId: string) => Promise<void>;
-  onCreate: (body: ShelfCreateInput) => Promise<void>;
-}) {
-  const [showCreate, setShowCreate] = useState(false);
-  const dashboard = data?.milestoneDashboard;
-  const shelfCount = data?.shelves.length || 0;
-  const seriesCount = data?.shelves.reduce((total, item) => total + item.series.length, 0) || 0;
-  const bookCount = data?.shelves.reduce(
-    (total, item) => total + item.series.reduce((count, itemSeries) => count + itemSeries.books.length, 0),
-    0,
-  ) || 0;
+function useReviewWorkspace() {
   const [dueReviews, setDueReviews] = useState<DueReviews | null>(null);
   const [reviewSession, setReviewSession] = useState<ReviewSession | null>(null);
   const [reviewResult, setReviewResult] = useState<ReviewResult | null>(null);
+  const [reinforcement, setReinforcement] = useState<ReinforcementRun | null>(null);
+  const [reinforcementAnswer, setReinforcementAnswer] = useState<number[]>([]);
+  const [reinforcementText, setReinforcementText] = useState('');
   const [reviewAnswers, setReviewAnswers] = useState<number[][]>([]);
   const [reviewBusy, setReviewBusy] = useState('正在读取到期复习…');
   const [reviewError, setReviewError] = useState('');
-  const [studyToday, setStudyToday] = useState<StudyActivitySummary | null>(null);
-  const [studyTodayLoading, setStudyTodayLoading] = useState(true);
   const pendingReviews = dueReviews?.items.filter(
     (item) => item.status === 'presented' || item.status === 'started',
   ) || [];
   const currentReview = pendingReviews[0] || null;
-
-  useEffect(() => {
-    let current = true;
-    const loadStudyToday = async () => {
-      try {
-        const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-        const value = await api.studyActivityToday(timezone);
-        if (current) setStudyToday(value);
-      } catch {
-        // The dashboard stays usable if the estimate is temporarily unavailable.
-      } finally {
-        if (current) setStudyTodayLoading(false);
-      }
-    };
-    void loadStudyToday();
-    const timer = window.setInterval(loadStudyToday, 60_000);
-    return () => {
-      current = false;
-      window.clearInterval(timer);
-    };
-  }, []);
 
   const loadDueReviews = async () => {
     setReviewBusy('正在读取到期复习…');
@@ -2780,6 +2772,9 @@ function Home({
 
   useEffect(() => {
     void loadDueReviews();
+    void api.activeReinforcement().then((value) => {
+      if (value) setReinforcement(value);
+    }).catch(() => undefined);
   }, []);
 
   const startDueReview = async () => {
@@ -2791,6 +2786,7 @@ function Home({
       setReviewSession(value);
       setReviewAnswers(value.quiz.questions.map(() => []));
       setReviewResult(null);
+      setReinforcement(null);
       setDueReviews((current) => current ? {
         ...current,
         items: current.items.map((item) => item.assignmentId === value.assignmentId
@@ -2804,11 +2800,7 @@ function Home({
     }
   };
 
-  const chooseReviewAnswer = (
-    questionIndex: number,
-    optionIndex: number,
-    mode: 'single' | 'multiple',
-  ) => {
+  const chooseReviewAnswer = (questionIndex: number, optionIndex: number, mode: 'single' | 'multiple') => {
     setReviewAnswers((current) => current.map((answer, index) => {
       if (index !== questionIndex) return answer;
       if (mode === 'single') return [optionIndex];
@@ -2865,7 +2857,253 @@ function Home({
     setReviewSession(null);
     setReviewResult(null);
     setReviewAnswers([]);
+    setReinforcement(null);
+    setReinforcementAnswer([]);
+    setReinforcementText('');
   };
+
+  const startReinforcement = async () => {
+    if (!reviewResult) return;
+    setReviewBusy('正在为这个断点准备一条短路径…');
+    setReviewError('');
+    try {
+      const value = await api.startReviewReinforcement(reviewResult.assignmentId);
+      setReinforcement(value);
+      setReinforcementAnswer([]);
+      setReinforcementText('');
+    } catch (reason) {
+      setReviewError(reason instanceof Error ? reason.message : '补强路径准备失败。');
+    } finally {
+      setReviewBusy('');
+    }
+  };
+
+  const submitReinforcementStep = async () => {
+    const activity = reinforcement?.currentActivity;
+    if (!reinforcement || !activity) return;
+    setReviewBusy('正在衔接下一步…');
+    setReviewError('');
+    try {
+      const value = await api.respondReinforcement(
+        reinforcement.runId,
+        {
+          activityKey: activity.activityKey,
+          selectedOptions: reinforcementAnswer,
+          responseText: reinforcementText,
+          acknowledged: activity.type === 'diagnose',
+        },
+        `reinforcement-${reinforcement.runId}-${reinforcement.progress.activityCount + 1}`,
+      );
+      setReinforcement(value);
+      setReinforcementAnswer([]);
+      setReinforcementText('');
+    } catch (reason) {
+      setReviewError(reason instanceof Error ? reason.message : '这一步暂时无法保存。');
+    } finally {
+      setReviewBusy('');
+    }
+  };
+
+  return {
+    dueReviews, pendingReviews, currentReview, reviewSession, reviewResult, reinforcement,
+    reinforcementAnswer, reinforcementText, reviewAnswers, reviewBusy, reviewError,
+    setReinforcementAnswer, setReinforcementText, loadDueReviews, startDueReview,
+    chooseReviewAnswer, submitDueReview, skipDueReview, continueReviewQueue,
+    startReinforcement, submitReinforcementStep,
+  };
+}
+
+function ReviewCenterPage({ onBack }: { onBack: () => void }) {
+  const {
+    pendingReviews, currentReview, reviewSession, reviewResult, reinforcement,
+    reinforcementAnswer, reinforcementText, reviewAnswers, reviewBusy, reviewError,
+    setReinforcementAnswer, setReinforcementText, loadDueReviews, startDueReview,
+    chooseReviewAnswer, submitDueReview, skipDueReview, continueReviewQueue,
+    startReinforcement, submitReinforcementStep,
+  } = useReviewWorkspace();
+  const activity = reinforcement?.currentActivity;
+  const stage = reinforcement?.outcome
+    ? 5
+    : activity?.type === 'verify'
+      ? 5
+      : activity?.type === 'recompose'
+        ? 4
+        : activity?.type === 'repair'
+          ? 3
+          : activity?.type === 'diagnose'
+            ? 2
+            : reviewSession
+              ? 1
+              : 0;
+
+  return (
+    <section className="review-center-page" aria-labelledby="review-center-title">
+      <header className="review-center-hero">
+        <button type="button" className="review-center-back" onClick={onBack}>← 返回书架</button>
+        <div className="review-center-title-row">
+          <div>
+            <p className="eyebrow">RECALL STUDIO · 只处理已经学过的知识</p>
+            <h1 id="review-center-title">快速找回，<br /><em>只在断点处停留。</em></h1>
+            <p>先用一道新题检查能否调用；答不稳时，再根据这次薄弱点补一个案例，最后独立验证。</p>
+          </div>
+          <div className="review-center-contract">
+            <span>一次 5–10 分钟</span>
+            <b>唤醒不是重学，补强不是刷题。</b>
+            <small>只有最后的独立验证会形成新的掌握证据。</small>
+          </div>
+        </div>
+        <ol className="review-trace" aria-label={`当前位于第 ${stage || 1} 阶段`}>
+          {['快速唤醒', '定位断点', '案例补强', '重组推理', '独立验证'].map((label, index) => (
+            <li key={label} className={stage >= index + 1 ? 'is-reached' : ''}><i /><span>{label}</span></li>
+          ))}
+        </ol>
+      </header>
+
+      <div className="review-center-layout">
+        <aside className="review-center-queue">
+          <header><div><span>今日队列</span><b>{pendingReviews.length} 项</b></div><small>跨书架按到期程度排序</small></header>
+          {reinforcement && (
+            <button type="button" className="review-queue-item is-active">
+              <i>补</i><span><b>{reinforcement.objective}</b><small>补强进行中 · 继续当前一步</small></span>
+            </button>
+          )}
+          {!reinforcement && pendingReviews.map((item, index) => (
+            <button type="button" className={`review-queue-item ${index === 0 ? 'is-active' : ''}`} key={item.assignmentId}>
+              <i>{String(index + 1).padStart(2, '0')}</i><span><b>{item.objective}</b><small>{item.status === 'started' ? '已开始' : '等待唤醒'}</small></span>
+            </button>
+          ))}
+          {!reviewBusy && !reinforcement && pendingReviews.length === 0 && (
+            <div className="review-queue-clear"><i>✓</i><b>今日队列已清空</b><small>下一次到期时，这里会自动出现。</small></div>
+          )}
+          <div className="review-method-note"><span>本次方法</span><ol><li><b>01</b> 快速过关键连接</li><li><b>02</b> 只补薄弱案例</li><li><b>03</b> 换题独立校验</li></ol></div>
+        </aside>
+
+        <main className="review-workbench" aria-live="polite">
+          {reviewBusy ? (
+            <div className="review-workbench-status"><i /><span>正在衔接</span><h2>{reviewBusy}</h2></div>
+          ) : reviewError ? (
+            <div className="review-workbench-status is-error" role="alert"><span>暂时中断</span><h2>这一步没有保存</h2><p>{reviewError}</p><button onClick={() => void loadDueReviews()}>重新读取</button></div>
+          ) : reinforcement?.outcome ? (
+            <div className={`review-workbench-outcome is-${reinforcement.outcome.kind}`}>
+              <span>{reinforcement.outcome.kind === 'recovered' ? '连接已恢复' : '本轮已停止'}</span>
+              <h2>{reinforcement.outcome.kind === 'recovered' ? '这次不是记住答案，是真正重新会用了。' : '不继续堆题，下一步拆回前置能力。'}</h2>
+              <p>{reinforcement.outcome.message}</p>
+              <button onClick={continueReviewQueue}>处理下一项 <i aria-hidden="true">→</i></button>
+            </div>
+          ) : reinforcement && activity ? (
+            <div className={`review-workbench-activity is-${activity.type}`}>
+              <header><span>{activity.type === 'diagnose' ? '定位断点' : activity.type === 'repair' ? '案例补强' : activity.type === 'recompose' ? '重组推理' : '独立验证'}</span><small>{reinforcement.progress.activityCount} / {reinforcement.progress.maxActivities} 步已用</small></header>
+              <p className="review-workbench-objective">当前知识点 · <b>{reinforcement.objective}</b></p>
+              <h2>{activity.payload.heading}</h2>
+              {reinforcement.feedback && <div className={`reinforcement-feedback is-${reinforcement.feedback.kind}`}>{reinforcement.feedback.message}</div>}
+              {activity.type === 'diagnose' && (
+                <div className="review-agent-diagnosis">
+                  <div className={`review-diagnosis-signal is-${activity.payload.hypothesis?.status || 'abstained'}`}>
+                    <span>{activity.payload.hypothesis?.status === 'supported' ? '多条证据一致' : activity.payload.hypothesis?.status === 'tentative' ? '一条待验证线索' : 'Agent 暂不判断'}</span>
+                    <small>不会直接写入画像</small>
+                  </div>
+                  <h3>{activity.payload.hypothesis?.label}</h3>
+                  <p>{activity.payload.hypothesis?.message}</p>
+                  <div className="review-diagnosis-next"><i aria-hidden="true">→</i><span>{activity.payload.prompt}</span></div>
+                </div>
+              )}
+              {activity.type === 'repair' && (
+                <div className="review-repair-layout">
+                  <div className="review-quick-pass"><span>30 秒快速过</span><p>{activity.payload.content}</p></div>
+                  {activity.payload.case && (
+                    <div className="review-targeted-case">
+                      <header><span>针对刚才断点的案例</span><small>{activity.payload.case.source}</small></header>
+                      <h3>{activity.payload.case.heading}</h3>
+                      <p>{activity.payload.case.content}</p>
+                    </div>
+                  )}
+                  <label className="reinforcement-recall"><span>{activity.payload.prompt}</span><textarea value={reinforcementText} onChange={(event) => setReinforcementText(event.target.value)} placeholder="用你自己的话写一句…" rows={3} /></label>
+                </div>
+              )}
+              {(activity.type === 'recompose' || activity.type === 'verify') && activity.payload.question && (
+                <fieldset><legend>{activity.payload.question.prompt}</legend>{activity.payload.question.options.map((option, index) => (
+                  <label key={index}><input type={activity.payload.question?.selectionMode === 'multiple' ? 'checkbox' : 'radio'} name={`reinforcement-${reinforcement.runId}-${activity.activityKey}`} checked={reinforcementAnswer.includes(index)} onChange={() => setReinforcementAnswer((current) => activity.payload.question?.selectionMode === 'multiple' ? current.includes(index) ? current.filter((item) => item !== index) : [...current, index].sort() : [index])} /><span>{option}</span></label>
+                ))}</fieldset>
+              )}
+              <button className="review-workbench-next" disabled={activity.type === 'repair' ? reinforcementText.trim().length < 6 : activity.type === 'diagnose' ? false : reinforcementAnswer.length === 0} onClick={() => void submitReinforcementStep()}>{activity.type === 'diagnose' ? '查看针对性案例' : activity.type === 'verify' ? '提交独立验证' : '进入下一步'} <i aria-hidden="true">→</i></button>
+              <p className="review-evidence-boundary"><i aria-hidden="true">◇</i>{reinforcement.evidenceBoundary}</p>
+            </div>
+          ) : reviewResult ? (
+            <div className="review-workbench-result">
+              <span>{reviewResult.passed ? '快速唤醒完成' : '发现一个具体断点'}</span><h2>{reviewResult.score} / {reviewResult.total}</h2>
+              {reviewResult.reinforcement.available ? <><p>不重复刚才那道题。接下来只补这项能力缺失的连接与案例，再换题独立验证。</p><button onClick={() => void startReinforcement()}>开始针对性补强 <i aria-hidden="true">→</i></button></> : <button onClick={continueReviewQueue}>{pendingReviews.length ? '处理下一项' : '完成今日复习'} <i aria-hidden="true">→</i></button>}
+            </div>
+          ) : reviewSession ? (
+            <div className="review-workbench-quiz">
+              <header><span>快速唤醒</span><small>先凭记忆作答，不翻正文</small></header>
+              <p className="review-workbench-objective">正在检查 · <b>{currentReview?.objective || reviewSession.quiz.questions[0]?.objective}</b></p>
+              {reviewSession.quiz.questions.map((question, questionIndex) => (
+                <fieldset key={`${reviewSession.quiz.id}-${questionIndex}`}><legend>{question.prompt}</legend>{question.options.map((option, optionIndex) => (
+                  <label key={optionIndex}><input type={question.selectionMode === 'multiple' ? 'checkbox' : 'radio'} name={`review-${reviewSession.quiz.id}-${questionIndex}`} checked={reviewAnswers[questionIndex]?.includes(optionIndex) || false} onChange={() => chooseReviewAnswer(questionIndex, optionIndex, question.selectionMode)} /><span>{option}</span></label>
+                ))}</fieldset>
+              ))}
+              <button className="review-workbench-next" disabled={reviewAnswers.some((answer) => answer.length === 0)} onClick={() => void submitDueReview()}>检查能否调用 <i aria-hidden="true">→</i></button>
+            </div>
+          ) : currentReview ? (
+            <div className="review-workbench-ready"><span>下一项 · 预计 3 分钟</span><h2>{currentReview.objective}</h2><p>先快速过一遍关键连接，然后用一道新题检查是否还能独立调用。只有答不稳，才会进入补强。</p><div><button onClick={() => void startDueReview()}>{currentReview.status === 'started' ? '继续快速唤醒' : '开始快速唤醒'} <i aria-hidden="true">→</i></button>{currentReview.status !== 'started' && <button onClick={() => void skipDueReview()}>今天跳过</button>}</div></div>
+          ) : (
+            <div className="review-workbench-status is-clear"><span>今日完成</span><h2>需要找回的知识都处理好了。</h2><p>这里不会为了维持连续感制造练习；等新的复习证据到期再回来。</p><button onClick={onBack}>返回书架</button></div>
+          )}
+        </main>
+      </div>
+    </section>
+  );
+}
+
+function Home({
+  data,
+  dailyMode,
+  onOpen,
+  onContinue,
+  onOpenReview,
+  onCreate,
+}: {
+  data: Bootstrap | null;
+  dailyMode: DailyMode;
+  onOpen: (shelf: Shelf) => void;
+  onContinue: (seriesId: string) => Promise<void>;
+  onOpenReview: () => void;
+  onCreate: (body: ShelfCreateInput) => Promise<void>;
+}) {
+  const [showCreate, setShowCreate] = useState(false);
+  const dashboard = data?.milestoneDashboard;
+  const shelfCount = data?.shelves.length || 0;
+  const seriesCount = data?.shelves.reduce((total, item) => total + item.series.length, 0) || 0;
+  const bookCount = data?.shelves.reduce(
+    (total, item) => total + item.series.reduce((count, itemSeries) => count + itemSeries.books.length, 0),
+    0,
+  ) || 0;
+  const [studyToday, setStudyToday] = useState<StudyActivitySummary | null>(null);
+  const [studyTodayLoading, setStudyTodayLoading] = useState(true);
+  const {
+    pendingReviews, currentReview, reinforcement, reviewBusy, reviewError, loadDueReviews,
+  } = useReviewWorkspace();
+
+  useEffect(() => {
+    let current = true;
+    const loadStudyToday = async () => {
+      try {
+        const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+        const value = await api.studyActivityToday(timezone);
+        if (current) setStudyToday(value);
+      } catch {
+        // The dashboard stays usable if the estimate is temporarily unavailable.
+      } finally {
+        if (current) setStudyTodayLoading(false);
+      }
+    };
+    void loadStudyToday();
+    const timer = window.setInterval(loadStudyToday, 60_000);
+    return () => {
+      current = false;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   return (
     <section className={`library-dashboard mode-${dailyMode}`}>
@@ -2915,92 +3153,35 @@ function Home({
           )}
         </article>
 
-        <article className="library-focus-card review-focus-card">
+        <article className="library-focus-card review-entry-card">
           <header>
-            <span className="focus-card-label">{dailyMode === 'fast' && currentReview ? 'Fast 模式优先 · 待复习' : '待复习'}</span>
+            <span className="focus-card-label">复习与补强</span>
             <small>跨书架</small>
           </header>
           {reviewBusy ? (
-            <div className="review-empty-state" aria-live="polite">
-              <span>正在同步</span>
-              <h2>{reviewBusy}</h2>
-            </div>
+            <div className="review-entry-copy"><span>正在同步</span><h2>整理今天需要找回的知识</h2></div>
           ) : reviewError ? (
-            <div className="review-empty-state review-error-state" role="alert">
-              <span>读取失败</span>
-              <h2>暂时无法打开复习</h2>
-              <p>{reviewError}</p>
-              <button onClick={() => void loadDueReviews()}>重新读取</button>
-            </div>
-          ) : reviewResult ? (
-            <div className="review-result-state" aria-live="polite">
-              <span>{reviewResult.passed ? '已完成' : '完成本次复习'}</span>
-              <h2>{reviewResult.score} / {reviewResult.total}</h2>
-              <button onClick={continueReviewQueue}>
-                {pendingReviews.length ? '继续下一项' : '完成今日复习'} <span aria-hidden="true">→</span>
-              </button>
-            </div>
-          ) : reviewSession ? (
-            <div className="review-session-state">
-              <div className="review-objective-label">到期概念</div>
-              <p>{currentReview?.objective || reviewSession.quiz.questions[0]?.objective}</p>
-              {reviewSession.quiz.questions.map((question, questionIndex) => (
-                <fieldset key={`${reviewSession.quiz.id}-${questionIndex}`}>
-                  <legend>{question.prompt}</legend>
-                  {question.options.map((option, optionIndex) => (
-                    <label key={optionIndex}>
-                      <input
-                        type={question.selectionMode === 'multiple' ? 'checkbox' : 'radio'}
-                        name={`review-${reviewSession.quiz.id}-${questionIndex}`}
-                        checked={reviewAnswers[questionIndex]?.includes(optionIndex) || false}
-                        onChange={() => chooseReviewAnswer(
-                          questionIndex,
-                          optionIndex,
-                          question.selectionMode,
-                        )}
-                      />
-                      <span>{option}</span>
-                    </label>
-                  ))}
-                </fieldset>
-              ))}
-              <button
-                className="review-submit-button"
-                disabled={reviewAnswers.some((answer) => answer.length === 0)}
-                onClick={() => void submitDueReview()}
-              >
-                保存复习结果 <span aria-hidden="true">→</span>
-              </button>
+            <div className="review-entry-copy is-error"><span>读取失败</span><h2>今天的复习队列暂时没有取到</h2><button onClick={() => void loadDueReviews()}>重新读取</button></div>
+          ) : reinforcement ? (
+            <div className="review-entry-copy">
+              <span>补强进行中 · {reinforcement.progress.activityCount}/{reinforcement.progress.maxActivities}</span>
+              <h2>{reinforcement.objective}</h2>
+              <p>断点已经定位，回到专用工作台继续当前一步。</p>
+              <button onClick={onOpenReview}>继续补强 <i aria-hidden="true">→</i></button>
             </div>
           ) : currentReview ? (
-            <div className="review-ready-state">
-              <span>{pendingReviews.length} 项到期</span>
+            <div className="review-entry-copy">
+              <span>{pendingReviews.length} 项需要唤醒</span>
               <h2>{currentReview.objective}</h2>
-              <div className="review-ready-actions">
-                <button onClick={() => void startDueReview()}>
-                  {currentReview.status === 'started' ? '继续复习' : '开始复习'} <span aria-hidden="true">→</span>
-                </button>
-                {currentReview.status !== 'started' && (
-                  <button onClick={() => void skipDueReview()}>今天跳过</button>
-                )}
-              </div>
+              <p>先快速找回关键概念；答不稳时，再进入针对性案例与独立校验。</p>
+              <button onClick={onOpenReview}>进入复习中心 <i aria-hidden="true">→</i></button>
             </div>
           ) : (
-            <div className="review-empty-state review-clear-state">
-              <span>今日已清空</span>
-              <h2>没有到期的复习</h2>
-            </div>
+            <div className="review-entry-copy is-clear"><span>今日已清空</span><h2>暂时没有需要唤醒的知识</h2><button onClick={onOpenReview}>查看复习中心 <i aria-hidden="true">→</i></button></div>
           )}
-          <div className="review-cadence" aria-label="复习间隔">
-            <span>复习节奏</span>
-            <ol>
-              <li>1 天</li>
-              <li>3 天</li>
-              <li>7 天</li>
-              <li>14 天</li>
-            </ol>
-          </div>
+          <div className="review-entry-rail" aria-hidden="true"><i /><i /><i /></div>
         </article>
+
       </div>
 
       <section className="library-catalog" aria-labelledby="library-catalog-title">
@@ -3329,15 +3510,18 @@ const KNOWLEDGE_RANK_SHORT:Record<KnowledgeMapNode['rank'],string> = {
 function KnowledgeMapPage({
   series,
   onBack,
+  onOpenReview,
 }: {
   series:{id:string;title:string;shelfName:string}[];
   onBack:()=>void;
+  onOpenReview:()=>void;
 }) {
   const [scope, setScope] = useState('');
   const [map, setMap] = useState<KnowledgeMap | null>(null);
   const [selectedId, setSelectedId] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [actionBusy, setActionBusy] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -3374,6 +3558,25 @@ function KnowledgeMapPage({
   }, [map]);
   const coordinates = new Map(positioned.map((item) => [item.node.conceptRevisionId, item]));
   const coverage = map ? Math.round(map.progress.coveragePpm / 10_000) : 0;
+
+  const startSelectedReinforcement = async () => {
+    if (actionBusy) return;
+    if (selected?.nextAction.kind === 'wake') {
+      onOpenReview();
+      return;
+    }
+    if (!selected?.recommendedTargetId) return;
+    setActionBusy(true);
+    setError('');
+    try {
+      await api.startTargetReinforcement(selected.recommendedTargetId);
+      onOpenReview();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '暂时无法开始补强');
+    } finally {
+      setActionBusy(false);
+    }
+  };
 
   return (
     <section className="knowledge-map-page" aria-labelledby="knowledge-map-title">
@@ -3493,6 +3696,12 @@ function KnowledgeMapPage({
                     <b>{selected.routeContexts[0].seriesTitle}</b>
                     <small>{selected.routeContexts[0].bookTitle} · {selected.routeContexts[0].sectionTitle}</small>
                   </div>
+                )}
+                {(selected.nextAction.kind === 'reinforce' || selected.nextAction.kind === 'wake') && (
+                  <button className="knowledge-reinforce-entry" disabled={actionBusy} onClick={() => void startSelectedReinforcement()}>
+                    {actionBusy ? '正在准备短路径…' : selected.nextAction.label}
+                    <span aria-hidden="true">→</span>
+                  </button>
                 )}
               </>
             )}

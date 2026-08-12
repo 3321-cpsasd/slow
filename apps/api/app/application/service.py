@@ -64,6 +64,7 @@ from ..modules.learning.missions import MissionService
 from ..modules.learning.knowledge_map import KnowledgeMapService
 from ..modules.learning.knowledge_ranks import knowledge_node_views_for_targets
 from ..modules.learning.reviews import ReviewAssignmentService
+from ..modules.learning.reinforcements import ReinforcementService
 from ..modules.learning.contracts import (
     open_run_section,
 )
@@ -1535,6 +1536,41 @@ class SlowService:
             body.answers,
             idempotency_key=idempotency_key,
         )
+
+    async def start_review_reinforcement(self, assignment_id: str):
+        return await ReinforcementService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+        ).start_for_review(assignment_id)
+
+    async def start_target_reinforcement(self, target_id: str):
+        return await ReinforcementService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+        ).start_for_target(target_id)
+
+    def reinforcement_run(self, run_id: str):
+        return ReinforcementService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+        ).view(run_id)
+
+    def active_reinforcement(self):
+        return ReinforcementService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+        ).active()
+
+    def respond_reinforcement(self, run_id: str, body, idempotency_key=None):
+        return ReinforcementService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+        ).respond(run_id, body, idempotency_key=idempotency_key)
 
     def skip_review(self, assignment_id: str):
         return ReviewAssignmentService(

@@ -2612,6 +2612,139 @@ class ReviewAssignmentEventRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class ReinforcementRun(Base):
+    """Server-owned bounded recovery run for one assessment target."""
+
+    __tablename__ = "reinforcement_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_review_assignment_id",
+            name="uq_reinforcement_runs_review_assignment",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    assessment_target_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_targets.id"), index=True
+    )
+    source_review_assignment_id: Mapped[str | None] = mapped_column(
+        ForeignKey("review_assignments.id"), nullable=True, index=True
+    )
+    source_learning_run_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_runs.id"), index=True
+    )
+    source_section_id: Mapped[str] = mapped_column(
+        ForeignKey("sections.id"), index=True
+    )
+    learning_contract_version_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), index=True
+    )
+    content_version_id: Mapped[str] = mapped_column(
+        ForeignKey("content_versions.id"), index=True
+    )
+    entry_mode: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    current_state: Mapped[str] = mapped_column(String(32), index=True)
+    current_activity_key: Mapped[str] = mapped_column(String(64))
+    activity_count: Mapped[int] = mapped_column(Integer, default=0)
+    repair_rounds: Mapped[int] = mapped_column(Integer, default=0)
+    max_activities: Mapped[int] = mapped_column(Integer, default=5)
+    max_repair_rounds: Mapped[int] = mapped_column(Integer, default=2)
+    confirmed_cause_code: Mapped[str] = mapped_column(String(48), default="")
+    state_rule_version: Mapped[str] = mapped_column(String(48))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class ReinforcementPackageVersion(Base):
+    """Immutable published package; AI output is authoritative only after validation."""
+
+    __tablename__ = "reinforcement_package_versions"
+    __table_args__ = (
+        UniqueConstraint("run_id", "version", name="uq_reinforcement_package_run_version"),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("reinforcement_runs.id"), index=True)
+    generation_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_runs.id"), nullable=True, index=True
+    )
+    verification_quiz_set_id: Mapped[str] = mapped_column(
+        ForeignKey("quiz_sets.id"), unique=True
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    schema_version: Mapped[str] = mapped_column(String(48))
+    prompt_version: Mapped[str] = mapped_column(String(48))
+    input_hash: Mapped[str] = mapped_column(String(64))
+    output_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ReinforcementActivityVersion(Base):
+    """Immutable activity definition inside a published reinforcement package."""
+
+    __tablename__ = "reinforcement_activity_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "package_version_id", "activity_key",
+            name="uq_reinforcement_activity_package_key",
+        ),
+        UniqueConstraint(
+            "package_version_id", "position",
+            name="uq_reinforcement_activity_package_position",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    package_version_id: Mapped[str] = mapped_column(
+        ForeignKey("reinforcement_package_versions.id"), index=True
+    )
+    assessment_target_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_targets.id"), index=True
+    )
+    activity_key: Mapped[str] = mapped_column(String(64))
+    position: Mapped[int] = mapped_column(Integer)
+    activity_type: Mapped[str] = mapped_column(String(32), index=True)
+    assistance_mode: Mapped[str] = mapped_column(String(32))
+    evidence_role: Mapped[str] = mapped_column(String(32))
+    payload_json: Mapped[str] = mapped_column(Text)
+    signature: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ReinforcementEventRecord(Base):
+    """Append-only interaction and state-transition fact for a recovery run."""
+
+    __tablename__ = "reinforcement_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id", "idempotency_key",
+            name="uq_reinforcement_events_run_idempotency",
+        ),
+    )
+    sequence: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[str] = mapped_column(String, unique=True, index=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("reinforcement_runs.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    event_type: Mapped[str] = mapped_column(String(32), index=True)
+    activity_key: Mapped[str] = mapped_column(String(64))
+    state_before: Mapped[str] = mapped_column(String(32))
+    state_after: Mapped[str] = mapped_column(String(32))
+    response_json: Mapped[str] = mapped_column(Text, default="{}")
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
+    assistance_mode: Mapped[str] = mapped_column(String(32))
+    source_observation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("assessment_observations.id"), nullable=True, index=True
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    rule_version: Mapped[str] = mapped_column(String(48))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class Remediation(Base):
     __tablename__ = "remediations"
     id: Mapped[str] = mapped_column(String, primary_key=True)

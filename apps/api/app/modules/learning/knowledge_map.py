@@ -18,6 +18,8 @@ from ...infrastructure.tables import (
     KnowledgeStateProjection,
     LearningContractAssessmentTarget,
     LearningContractVersion,
+    QuizAttempt,
+    ReviewAssignment,
     Section,
     Series,
     Shelf,
@@ -38,6 +40,22 @@ RELATION_LABELS = {
     "refines": "进一步细化",
     "part_of": "组成",
 }
+
+
+def _recommended_target_id(
+    concept_target_ids: set[str],
+    failed_review_target_ids: list[str],
+) -> str:
+    """Prefer the newest failed wake that can actually authorize reinforcement."""
+
+    return next(
+        (
+            target_id
+            for target_id in failed_review_target_ids
+            if target_id in concept_target_ids
+        ),
+        sorted(concept_target_ids)[0] if concept_target_ids else "",
+    )
 
 
 def _next_action(node: dict) -> dict:
@@ -205,6 +223,28 @@ class KnowledgeMapService:
             if target.concept_revision_id in node_views:
                 targets_by_concept[target.concept_revision_id].add(target_id)
 
+        # A node can represent several assessment targets. Reinforcement is only
+        # authorized by a submitted failed wake, so an arbitrary target id can
+        # make an otherwise actionable node return 409. Keep the query ordered
+        # newest-first and select the first failed target belonging to each node.
+        failed_review_target_ids = list(self.db.scalars(
+            select(ReviewAssignment.assessment_target_id)
+            .join(
+                QuizAttempt,
+                QuizAttempt.id == ReviewAssignment.submitted_attempt_id,
+            )
+            .where(
+                ReviewAssignment.user_id == self.user_id,
+                ReviewAssignment.assessment_target_id.in_(set(formal_targets)),
+                ReviewAssignment.status == "submitted",
+                QuizAttempt.passed.is_(False),
+            )
+            .order_by(
+                ReviewAssignment.updated_at.desc(),
+                ReviewAssignment.id.desc(),
+            )
+        )) if formal_targets else []
+
         nodes = []
         for concept_id, node in sorted(
             node_views.items(),
@@ -227,6 +267,10 @@ class KnowledgeMapService:
                         paths.append(path)
             nodes.append({
                 **node,
+                "recommendedTargetId": _recommended_target_id(
+                    concept_target_ids,
+                    failed_review_target_ids,
+                ),
                 "targetCount": len(concept_target_ids),
                 "verifiedTargetCount": len(verified_ids),
                 "required": bool(concept_target_ids & required_target_ids),
