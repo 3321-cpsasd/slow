@@ -25,6 +25,7 @@ import {
 } from './features/lesson/LessonBlockTools';
 import { LessonBlockBody, LessonContentBlock } from './features/lesson/LessonContentBlock';
 import { PathDecisionBanner } from './features/learning/PathDecisionBanner';
+import { useStudyActivity } from './features/study/useStudyActivity';
 import { AppBusyStatus, AppStatusRegion } from './features/shell/AppStatusRegion';
 import { useModalFocus } from './features/system/useModalFocus';
 import type {
@@ -59,6 +60,7 @@ import type {
   Series,
   Shelf,
   ShelfCreateInput,
+  StudyActivitySummary,
 } from './model/types';
 
 type View = 'home' | 'shelf' | 'learn' | 'profile';
@@ -1062,9 +1064,21 @@ export default function App() {
   };
 
   const generateSection = async (sectionId: string) => {
-    const value = await run('正在准备并检查本节内容…', () => api.prepareSection(sectionId));
-    setSection(value);
-    await refreshSeries();
+    try {
+      const value = await run('正在准备并检查本节内容…', () => api.prepareSection(sectionId));
+      setSection(value);
+      await refreshSeries();
+    } catch (reason) {
+      if (!(reason instanceof ApiError) || !reason.retryable) throw reason;
+      try {
+        const failed = await api.section(sectionId);
+        setSection(failed);
+        setError('');
+        await refreshSeries();
+      } catch {
+        setError(generationFailureMessage(null));
+      }
+    }
   };
 
   const regenerateSection = async (sectionId: string) => {
@@ -1891,8 +1905,6 @@ export default function App() {
         <FeedbackDialog
           target={feedbackTarget}
           view={view}
-          onSectionChange={setSection}
-          onRefreshSeries={refreshSeries}
           onClose={() => setFeedbackTarget(null)}
         />
       )}
@@ -2126,14 +2138,10 @@ function FeedbackTypeDropdown({
 function FeedbackDialog({
   target,
   view,
-  onSectionChange,
-  onRefreshSeries,
   onClose,
 }: {
   target: FeedbackTarget;
   view: View;
-  onSectionChange: (section: Section) => void;
-  onRefreshSeries: () => Promise<void>;
   onClose: () => void;
 }) {
   const options = target.scope === 'content_block'
@@ -2155,9 +2163,6 @@ function FeedbackDialog({
   const [message, setMessage] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
-  const [repairText, setRepairText] = useState('');
-  const [repairFeedbackId, setRepairFeedbackId] = useState('');
-  const [repairFailed, setRepairFailed] = useState(false);
   const [status, setStatus] = useState('');
   const dialogRef = useRef<HTMLElement | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
@@ -2212,31 +2217,6 @@ function FeedbackDialog({
     };
   }, [target.scope]);
 
-  const streamRepair = async (feedbackId: string) => {
-    setSubmitting(true);
-    setSubmitted(true);
-    setRepairFailed(false);
-    setRepairText('');
-    setStatus('');
-    try {
-      await api.streamFeedbackRepair(
-        feedbackId,
-        (delta) => setRepairText((current) => current + delta),
-      );
-      if (target.scope === 'content_block') {
-        const updated = await api.section(target.sectionId);
-        onSectionChange(updated);
-        await onRefreshSeries();
-        setStatus('已替换');
-      }
-    } catch (reason) {
-      setRepairFailed(true);
-      setStatus(reason instanceof Error ? reason.message : '补救没有完成，请重试。');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setSubmitting(true);
@@ -2261,28 +2241,13 @@ function FeedbackDialog({
           key: crypto.randomUUID(),
         };
       }
-      const receipt = await api.submitFeedback(payload, submissionRef.current.key);
+      await api.submitFeedback(payload, submissionRef.current.key);
       setSubmitted(true);
-      if (target.scope === 'global') {
-        setStatus('已收到。');
-        closeTimerRef.current = window.setTimeout(() => onCloseRef.current(), 900);
-        return;
-      }
-      const regeneration = receipt.regeneration;
-      if (regeneration.status === 'stream_ready') {
-        setRepairFeedbackId(receipt.id);
-        await streamRepair(receipt.id);
-        return;
-      }
-      const blockedMessages: Record<string, string> = {
-        FEEDBACK_CONTENT_VERSION_STALE: '当前正文已更新；请刷新后再反馈一次。',
-        SECTION_CONTENT_MISSING: '这段正文已不可用；请刷新后再试。',
-      };
-      setStatus(
-        blockedMessages[regeneration.reasonCode || '']
-        || '这段正文暂时无法补救。',
-      );
       setSubmitting(false);
+      setStatus(target.scope === 'content_block'
+        ? '反馈已收到。当前正文不会被改动，你可以继续学习。'
+        : '已收到。');
+      closeTimerRef.current = window.setTimeout(() => onCloseRef.current(), 5000);
     } catch (reason) {
       setStatus(reason instanceof Error ? reason.message : '反馈没有提交成功，请稍后重试。');
       setSubmitting(false);
@@ -2339,28 +2304,12 @@ function FeedbackDialog({
             />
             <small>请勿填写密码、API Key 或其他敏感信息 · {message.length}/4000</small>
           </label>}
-          {submitted && target.scope === 'content_block' && (
-            <div className={`feedback-repair-answer ${repairFailed ? 'failed' : ''}`} aria-live="polite">
-              {repairText ? (
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{repairText}</ReactMarkdown>
-              ) : submitting ? (
-                <span className="feedback-repair-listening">正在回应<span aria-hidden="true">…</span></span>
-              ) : null}
-              {submitting && repairText && <i className="stream-caret" aria-hidden="true" />}
-            </div>
-          )}
           {status && <p className="feedback-status" role="status">{status}</p>}
           <div className="dialog-actions">
             <button type="button" className="quiet-button" disabled={submitting} onClick={onClose}>{submitted ? '关闭' : '取消'}</button>
-            {repairFailed && repairFeedbackId ? (
-              <button type="button" className="primary-button" disabled={submitting} onClick={() => streamRepair(repairFeedbackId)}>
-                {submitting ? '正在回应…' : '重试补救'}
-              </button>
-            ) : (
-              <button className="primary-button" disabled={submitting || submitted || ((target.scope === 'global' || feedbackType === 'other') && message.trim().length < 2)}>
-                {submitting ? '正在送出…' : submitted ? '已提交' : '发送反馈'}
-              </button>
-            )}
+            <button className="primary-button" disabled={submitting || submitted || ((target.scope === 'global' || feedbackType === 'other') && message.trim().length < 2)}>
+              {submitting ? '正在送出…' : submitted ? '已提交' : '发送反馈'}
+            </button>
           </div>
         </form>
       </section>
@@ -2596,6 +2545,135 @@ function bookContainsSection(book: Book, sectionId: string | null | undefined) {
   );
 }
 
+const studyActivityLabels = {
+  reading_thinking: '阅读与思考',
+  verification_review: '验证与复习',
+  ask_ai: 'Ask AI',
+} as const;
+
+function studyMinutes(seconds: number) {
+  if (seconds <= 0) return '0';
+  return String(Math.max(1, Math.round(seconds / 60)));
+}
+
+function StudyTimeSummary({
+  summary,
+  loading,
+}: {
+  summary: StudyActivitySummary | null;
+  loading: boolean;
+}) {
+  const [view, setView] = useState<'activity' | 'timeline'>('activity');
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const shellRef = useRef<HTMLDivElement>(null);
+  const open = hovered || focused || pinned;
+
+  useEffect(() => {
+    if (!pinned) return undefined;
+    const close = (event: MouseEvent) => {
+      if (!shellRef.current?.contains(event.target as Node)) setPinned(false);
+    };
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') setPinned(false);
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [pinned]);
+
+  const totalSeconds = summary?.totalSeconds || 0;
+  const categories = summary?.categories.filter((item) => item.seconds > 0) || [];
+  const episodes = summary?.episodes || [];
+  const localTime = (value: string) => new Intl.DateTimeFormat('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(new Date(value));
+
+  return (
+    <div
+      className="study-time-shell"
+      ref={shellRef}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onFocus={() => setFocused(true)}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false);
+      }}
+    >
+      <button
+        type="button"
+        className="study-time-trigger"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls="study-time-popover"
+        onClick={() => setPinned((value) => !value)}
+      >
+        <span>今天已投入</span>
+        <strong>{loading && !summary ? '—' : studyMinutes(totalSeconds)}</strong>
+        <em>分钟</em>
+      </button>
+      {open && (
+        <section
+          className="study-time-popover"
+          id="study-time-popover"
+          role="dialog"
+          aria-label="今天的学习投入"
+        >
+          <h2>今天的学习投入</h2>
+          <div className="study-time-view-switch" role="tablist" aria-label="学习投入查看方式">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === 'activity'}
+              className={view === 'activity' ? 'active' : ''}
+              onClick={() => setView('activity')}
+            >按活动</button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === 'timeline'}
+              className={view === 'timeline' ? 'active' : ''}
+              onClick={() => setView('timeline')}
+            >时间线</button>
+          </div>
+          {view === 'activity' ? (
+            categories.length ? (
+              <ul className="study-time-rows">
+                {categories.map((item) => (
+                  <li key={item.activityKind}>
+                    <span>{studyActivityLabels[item.activityKind]}</span>
+                    <strong>{studyMinutes(item.seconds)} 分钟</strong>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="study-time-empty">今天还没有学习记录</p>
+            )
+          ) : episodes.length ? (
+            <ol className="study-time-timeline">
+              {episodes.map((episode) => (
+                <li key={`${episode.startedAt}-${episode.endedAt}`}>
+                  <time dateTime={episode.startedAt}>{localTime(episode.startedAt)}</time>
+                  <span>开始</span>
+                  <strong>学了 {studyMinutes(episode.durationSeconds)} 分钟</strong>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="study-time-empty">今天还没有学习记录</p>
+          )}
+        </section>
+      )}
+    </div>
+  );
+}
+
 function Home({
   data,
   dailyMode,
@@ -2623,10 +2701,33 @@ function Home({
   const [reviewAnswers, setReviewAnswers] = useState<number[][]>([]);
   const [reviewBusy, setReviewBusy] = useState('正在读取到期复习…');
   const [reviewError, setReviewError] = useState('');
+  const [studyToday, setStudyToday] = useState<StudyActivitySummary | null>(null);
+  const [studyTodayLoading, setStudyTodayLoading] = useState(true);
   const pendingReviews = dueReviews?.items.filter(
     (item) => item.status === 'presented' || item.status === 'started',
   ) || [];
   const currentReview = pendingReviews[0] || null;
+
+  useEffect(() => {
+    let current = true;
+    const loadStudyToday = async () => {
+      try {
+        const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+        const value = await api.studyActivityToday(timezone);
+        if (current) setStudyToday(value);
+      } catch {
+        // The dashboard stays usable if the estimate is temporarily unavailable.
+      } finally {
+        if (current) setStudyTodayLoading(false);
+      }
+    };
+    void loadStudyToday();
+    const timer = window.setInterval(loadStudyToday, 60_000);
+    return () => {
+      current = false;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   const loadDueReviews = async () => {
     setReviewBusy('正在读取到期复习…');
@@ -2736,6 +2837,7 @@ function Home({
           <h1>把正在学的，<br /><em>放回眼前。</em></h1>
         </div>
         <div className="library-hero-aside">
+          <StudyTimeSummary summary={studyToday} loading={studyTodayLoading} />
           <p className="library-summary">
             <strong>{shelfCount}</strong> 个领域 · <strong>{seriesCount}</strong> 个学习系列 · <strong>{bookCount}</strong> 本教材
           </p>
@@ -4093,6 +4195,7 @@ function LearningWorkspace({
   const [directoryHidden, setDirectoryHidden] = useState(() => window.matchMedia('(max-width: 900px)').matches);
   const [qaHidden, setQaHidden] = useState(true);
   const [readerTab, setReaderTab] = useState<ReaderTab>('content');
+  const [askAiStreaming, setAskAiStreaming] = useState(false);
   const [layoutRatios, setLayoutRatios] = useState(() => readWorkspaceLayoutRatios(userId));
   const [directoryWidth, setDirectoryWidth] = useState(() => clampWorkspacePanelWidth(
     'directory',
@@ -4118,6 +4221,16 @@ function LearningWorkspace({
 
   const qaAvailable = readerTab !== 'quiz';
   const effectiveQaHidden = qaHidden || !qaAvailable;
+  const studyActivityKind = !effectiveQaHidden
+    ? 'ask_ai'
+    : readerTab === 'quiz'
+      ? 'verification_review'
+      : 'reading_thinking';
+  const studyActivity = useStudyActivity({
+    sectionId: section?.content ? section.id : null,
+    activityKind: studyActivityKind,
+    keepActive: askAiStreaming,
+  });
 
   useEffect(() => {
     onQaVisibilityChange(!effectiveQaHidden);
@@ -4381,6 +4494,9 @@ function LearningWorkspace({
         series={series}
         section={section}
         dailyMode={dailyMode}
+        studySessionSeconds={studyActivity.sessionSeconds}
+        studyPaused={studyActivity.paused}
+        onResumeStudy={studyActivity.resume}
         directoryHidden={directoryHidden}
         qaHidden={effectiveQaHidden}
         qaAvailable={qaAvailable}
@@ -4478,6 +4594,7 @@ function LearningWorkspace({
         onClearQuote={() => setSelectedQuote(null)}
         explanationRequest={explanationRequest}
         onSectionChange={onSectionChange}
+        onStreamingChange={setAskAiStreaming}
       />
       {(['directory', ...(qaAvailable ? ['qa' as const] : [])] as const).map((panel) => {
         const hidden = panel === 'directory' ? directoryHidden : qaHidden;
@@ -4867,6 +4984,9 @@ function ReaderPanel({
   series,
   section,
   dailyMode,
+  studySessionSeconds,
+  studyPaused,
+  onResumeStudy,
   directoryHidden,
   qaHidden,
   qaAvailable,
@@ -4890,6 +5010,9 @@ function ReaderPanel({
   series: Series;
   section: Section | null;
   dailyMode: DailyMode;
+  studySessionSeconds: number;
+  studyPaused: boolean;
+  onResumeStudy: () => void;
   directoryHidden: boolean;
   qaHidden: boolean;
   qaAvailable: boolean;
@@ -5074,7 +5197,12 @@ function ReaderPanel({
         chapterTitle={location?.chapter.title}
         sectionPosition={section.position}
         title={section.title}
-        status={section.status}
+        sessionSeconds={studySessionSeconds}
+        status={
+          !section.content && section.generation?.status === 'failed'
+            ? 'failed'
+            : section.status
+        }
         canRegenerate={Boolean(section.content && section.bestScore === 0 && section.totalScore === 0)}
         regenerating={regenerating}
         onRequestRegenerate={() => setRegenerationConfirmOpen(true)}
@@ -5089,45 +5217,57 @@ function ReaderPanel({
         onChange={switchTab}
       />
 
-      <div
-        className="reader-scroll"
-        id="reader-tabpanel"
-        role="tabpanel"
-        aria-labelledby={`reader-tab-${tab}`}
-        ref={readerScrollRef}
-        onMouseUp={captureTextSelection}
-        onKeyUp={captureTextSelection}
-        onScroll={() => setSelectionPopup(null)}
-      >
-        {tab === 'content' && (
-          <LessonContent
-            section={section}
-            dailyMode={dailyMode}
-            selectedBlockId={selectedBlockId}
-            reviewTargetBlockId={reviewTargetBlockId}
-            onGenerate={onGenerate}
-            onStartQuiz={() => switchTab('quiz')}
-            onFeedbackBlock={onFeedbackBlock}
-            onRestorePersonalPresentation={onRestorePersonalPresentation}
-            onExplainBlock={onExplainBlock}
-          />
-        )}
-        {tab === 'quiz' && section.quiz && (
-          <Quiz
-            key={section.quiz.id}
-            section={section}
-            onUpgrade={() => setRegenerationConfirmOpen(true)}
-            onSectionChange={onSectionChange}
-            onRefreshSeries={onRefreshSeries}
-            onSelectSection={onSelectSection}
-            onReviewContent={reviewContent}
-            onSubmissionComplete={() => {
-              if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
-            }}
-          />
-        )}
-        {tab === 'note' && section.note && (
-          <Note sectionId={section.id} note={section.note} onSaved={onSectionChange} />
+      <div className="reader-scroll-shell">
+        <div
+          className="reader-scroll"
+          id="reader-tabpanel"
+          role="tabpanel"
+          aria-labelledby={`reader-tab-${tab}`}
+          ref={readerScrollRef}
+          onMouseUp={captureTextSelection}
+          onKeyUp={captureTextSelection}
+          onScroll={() => setSelectionPopup(null)}
+        >
+          {tab === 'content' && (
+            <LessonContent
+              section={section}
+              dailyMode={dailyMode}
+              selectedBlockId={selectedBlockId}
+              reviewTargetBlockId={reviewTargetBlockId}
+              onGenerate={onGenerate}
+              onStartQuiz={() => switchTab('quiz')}
+              onFeedbackBlock={onFeedbackBlock}
+              onRestorePersonalPresentation={onRestorePersonalPresentation}
+              onExplainBlock={onExplainBlock}
+            />
+          )}
+          {tab === 'quiz' && section.quiz && (
+            <Quiz
+              key={section.quiz.id}
+              section={section}
+              onUpgrade={() => setRegenerationConfirmOpen(true)}
+              onSectionChange={onSectionChange}
+              onRefreshSeries={onRefreshSeries}
+              onSelectSection={onSelectSection}
+              onReviewContent={reviewContent}
+              onSubmissionComplete={() => {
+                if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
+              }}
+            />
+          )}
+          {tab === 'note' && section.note && (
+            <Note sectionId={section.id} note={section.note} onSaved={onSectionChange} />
+          )}
+        </div>
+        {studyPaused && (
+          <button
+            type="button"
+            className="reader-study-pause"
+            onClick={onResumeStudy}
+          >
+            <span>刚才是在思考吗？</span>
+            <small>轻触、滚动或按任意键继续</small>
+          </button>
         )}
       </div>
       {regenerationConfirmOpen && (
@@ -6803,6 +6943,7 @@ function QaPanel({
   onClearQuote,
   explanationRequest,
   onSectionChange,
+  onStreamingChange,
 }: {
   section: Section | null;
   dailyMode: DailyMode;
@@ -6814,6 +6955,7 @@ function QaPanel({
   onClearQuote: () => void;
   explanationRequest: ExplanationRequest | null;
   onSectionChange: (section: Section) => void;
+  onStreamingChange: (streaming: boolean) => void;
 }) {
   const [threadId, setThreadId] = useState<string>();
   const [newQuestion, setNewQuestion] = useState(false);
@@ -6836,6 +6978,11 @@ function QaPanel({
     section?.content?.blocks.find((block) => block.id === selectedBlockId) ??
     section?.content?.blocks[0];
   const effectiveBlockId = selectedBlock?.id ?? selectedBlockId;
+
+  useEffect(() => {
+    onStreamingChange(asking && !hidden);
+    return () => onStreamingChange(false);
+  }, [asking, hidden, onStreamingChange]);
 
   useEffect(() => {
     if (selectedQuote) composerRef.current?.focus();

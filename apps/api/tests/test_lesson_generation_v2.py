@@ -213,6 +213,13 @@ def test_standard_blocks_accept_mixed_gfm_regardless_of_presentation_hint():
             "| 模型 | 提供推理能力 |\n\n"
             "表格之后可以继续解释结论。"
         ),
+        "code": (
+            "下面先说明这段程序的目的。\n\n"
+            "```python\n"
+            "result = bind(target_id='stable')\n"
+            "```\n\n"
+            "代码之后的文字仍然属于普通正文。"
+        ),
     }
 
     for kind, content in markdown_samples.items():
@@ -220,6 +227,28 @@ def test_standard_blocks_accept_mixed_gfm_regardless_of_presentation_hint():
         value.blocks[0].kind = kind
         value.blocks[0].content = content
         validate_lesson_candidate(spec(), value)
+
+
+def test_unclosed_markdown_code_fence_is_rejected_before_publication():
+    value = candidate()
+    value.blocks[0].kind = "code"
+    value.blocks[0].content = (
+        "下面先说明这段程序的目的。\n\n"
+        "```python\n"
+        "result = bind(target_id='stable')\n\n"
+        "这句话原本应该显示在代码块外。"
+    )
+
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(spec(), value)
+
+    assert raised.value.code == "CONTENT_BLOCK_LAYOUT_INVALID"
+    assert raised.value.location == {
+        "blockKey": "b1",
+        "kind": "code",
+        "rule": "unclosed_code_fence",
+        "schemaVersion": "generated_lesson_composition_candidate_v7",
+    }
 
 
 def _grounded_spec():
@@ -604,6 +633,35 @@ def test_v2_route_rejects_unbound_content_before_formal_persistence():
             assert db.scalar(select(func.count()).select_from(QuizSet)) == 0
 
 
+def test_v2_candidate_gate_failure_is_exposed_as_retryable():
+    ai = V2FakeAi(invalid_target=True)
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            ai,
+            AcceptingSourceVerifier(),
+        ),
+        raise_server_exceptions=False,
+    ) as client:
+        series = create_series(client)
+        assert wait_for_task(
+            client,
+            series["initializationTask"]["taskId"],
+        )["status"] == "failed"
+        refreshed = client.get(f"/api/series/{series['id']}").json()
+        section_id = refreshed["books"][0]["chapters"][0]["sections"][0]["id"]
+
+        response = client.post(f"/api/sections/{section_id}/prepare")
+
+        assert response.status_code == 502, response.json()
+        assert response.json()["code"] == "CONTENT_ASSESSMENT_TARGET_UNBOUND"
+        assert response.json()["retryable"] is True
+        state = client.get(f"/api/sections/{section_id}").json()
+        assert state["content"] is None
+        assert state["quiz"] is None
+        assert state["generation"]["status"] == "failed"
+
+
 def test_v2_route_rejects_invalid_layout_before_formal_persistence():
     ai = V2FakeAi(invalid_layout=True)
     with TestClient(
@@ -648,7 +706,7 @@ def test_legacy_content_never_claims_current_boundary_validation():
         legacy = client.get(f"/api/sections/{section_id}").json()
         assert legacy["content"]["boundaryValidation"] == {
             "status": "legacy",
-            "ruleVersion": "lesson_candidate_gate_v11",
+            "ruleVersion": "lesson_candidate_gate_v12",
         }
 
 

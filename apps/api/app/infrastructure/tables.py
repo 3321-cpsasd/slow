@@ -141,6 +141,37 @@ class ProductEvent(Base):
     )
 
 
+class StudyActivityPulse(Base):
+    """Append-only authority used to rebuild estimated study-time intervals."""
+
+    __tablename__ = "study_activity_pulses"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "event_id",
+            name="uq_study_activity_pulses_user_event",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    event_id: Mapped[str] = mapped_column(String(80))
+    client_session_id: Mapped[str] = mapped_column(String(80), index=True)
+    client_sequence: Mapped[int] = mapped_column(Integer)
+    activity_kind: Mapped[str] = mapped_column(String(32), index=True)
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    learning_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_runs.id"), nullable=True, index=True
+    )
+    timezone_snapshot: Mapped[str] = mapped_column(String(64))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    measurement_rule_version: Mapped[str] = mapped_column(
+        String(40), default="study_time_v1"
+    )
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
 class UserProfile(Base):
     __tablename__ = "user_profiles"
     user_id: Mapped[str] = mapped_column(

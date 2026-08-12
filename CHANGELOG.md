@@ -8,10 +8,14 @@ Slow 的重要变更记录在这里。本项目采用 [Keep a Changelog](https:/
 
 - Reframed M3 model outages as an explicit fail-closed Agent state with safe retry, user-facing disclosure, and pilot evidence requirements; reviewed standard-content fallback is now an optional continuity tier instead of a production prerequisite.
 - M3 现将模型不可用视为 Agent 可明确呈现的失败关闭状态，要求安全重试、用户可见提示与真实试点证据；人工审核的标准内容 fallback 改为可选连续性等级，不再是生产试点前置条件。
-- Hardened recovery-code re-authentication with the existing password lockout policy, rejected conflicting case kinds for one stable case identity, and prevented stale preference-save responses from updating a newer explanation request.
-- 恢复码二次认证现已复用密码锁定策略；同一稳定案例身份若声明冲突类型将拒绝发布；过期的偏好保存响应也不会再改写新的讲法请求。
+- Hardened recovery-code re-authentication with the existing password lockout policy, rejected factual-versus-hypothetical provenance conflicts without treating compatible teaching uses as exclusive case identities, and prevented stale preference-save responses from updating a newer explanation request.
+- 恢复码二次认证现已复用密码锁定策略；同一稳定案例只有在事实来源与假设来源冲突时才拒绝发布，兼容的教学用途不再被误判为互斥身份；过期的偏好保存响应也不会再改写新的讲法请求。
 - Serialized SQLite password verification with `BEGIN IMMEDIATE`, so concurrent failures cannot lose lockout increments when row-level locks are unavailable.
 - SQLite 密码校验现使用 `BEGIN IMMEDIATE` 串行化；在不支持行锁时，并发失败也不会丢失锁定计数。
+- Decoupled paragraph feedback from lesson mutation: submitting layout or content feedback now records an immutable observation and returns immediately, while any lesson regeneration remains an explicit recovery action.
+- 段落反馈不再隐式触发教材改写：排版或内容反馈只记录不可变事实并立即返回；需要整节重生成时，必须由用户通过独立恢复操作显式发起。
+- Rendered mixed prose and fenced code according to their Markdown boundaries even when a lesson block carries the `code` presentation hint, and reject unclosed code fences before publication.
+- 带 `code` 展示提示的正文块现在仍按 Markdown 边界区分说明文字与围栏代码；未闭合的代码围栏会在发布前被拒绝。
 
 ### Added · 新增
 

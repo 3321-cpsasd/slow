@@ -189,6 +189,29 @@ class ProductEventBatch(ApiModel):
     events: list[ProductEventCreate] = Field(min_length=1, max_length=25)
 
 
+class StudyActivityHeartbeat(ApiModel):
+    model_config = ConfigDict(
+        alias_generator=camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+    event_id: str = Field(min_length=8, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
+    client_session_id: str = Field(
+        min_length=8,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+    client_sequence: int = Field(ge=0, le=2_147_483_647)
+    activity_kind: Literal[
+        "reading_thinking",
+        "verification_review",
+        "ask_ai",
+    ]
+    section_id: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9_.:-]+$")
+    timezone: str = Field(min_length=1, max_length=64)
+
+
 ProfileStage = Literal[
     "exploring",
     "beginner",

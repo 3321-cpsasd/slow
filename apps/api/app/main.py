@@ -28,7 +28,7 @@ from .ai.fallback_adapter import FallbackAiAdapter
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ResumeUpdate, ReviewSubmit, ShelfCreate
+from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ResumeUpdate, ReviewSubmit, ShelfCreate, StudyActivityHeartbeat
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -36,6 +36,7 @@ from .demo_personas import LOCAL_DEMO_PERSONAS
 from .infrastructure.database import build_database
 from .infrastructure.tables import Base, LearningTask, QuizAttempt, Remediation, Shelf, User, now
 from .modules.learning.tasks import claim_task, heartbeat_task, recoverable_task_ids
+from .modules.learning.study_activity import StudyActivityService
 from .modules.feedback.service import FeedbackService
 from .modules.telemetry.service import ProductEventService
 from .modules.library.context import ActiveLearningContextResolver
@@ -1084,6 +1085,30 @@ def create_app(
         session: Session = Depends(db),
     ):
         return ProductEventService(session, scope.user_id).append(body.events)
+
+    @app.post("/api/study-activity/heartbeat", status_code=202)
+    def record_study_activity(
+        body: StudyActivityHeartbeat,
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        ProfileService(session, scope.user_id).require_complete()
+        return StudyActivityService(
+            session,
+            user_id=scope.user_id,
+        ).heartbeat(body)
+
+    @app.get("/api/study-activity/today")
+    def study_activity_today(
+        timezone_name: str = Query(alias="timezone", min_length=1, max_length=64),
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        ProfileService(session, scope.user_id).require_complete()
+        return StudyActivityService(
+            session,
+            user_id=scope.user_id,
+        ).today(timezone_name)
 
     @app.post("/api/learning-preferences/evidence", status_code=202)
     def record_learning_preference_evidence(

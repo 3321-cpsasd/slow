@@ -1,52 +1,51 @@
-# Study mode dialog design QA
+# Study time design QA
 
-- Source visual truth: `/Users/pix/worker/slow/prototypes/study-mode-dialog.html`
-- Source assets: `/Users/pix/worker/slow/prototypes/assets/study-mode-rabbit.png`, `/Users/pix/worker/slow/prototypes/assets/study-mode-turtle.png`
-- Rendered implementation: `http://127.0.0.1:5173/`
-- Implementation screenshot: `/tmp/slow-visual-qa.63YiXN/implementation-final-1470x835.png`
-- Desktop viewport: 1470 × 835 CSS px, device pixel ratio 1, screenshot 1470 × 835 px
-- Mobile viewport: 390 × 844 CSS px, device pixel ratio 1, screenshot `/tmp/slow-visual-qa.63YiXN/implementation-mobile-390x844.png`
-- State: initial mode unselected, 1 hour selected, primary action disabled
-
-## Full-view comparison evidence
-
-The controlled browser opened and captured the React implementation at the target desktop and mobile viewports. The source HTML could not be opened by that browser because local `file://` navigation is blocked by its URL safety policy. The source therefore has no browser-rendered screenshot or independently measured pixel dimensions in this run.
-
-The implementation ports the source DOM hierarchy, copy, mascot assets, colors, spacing values, breakpoints, selected-state fills, diagonal divider, duration controls, expiry preview, and primary action directly into the production component. The desktop dialog measured 1060 × 577.63 CSS px, with a 330 px versus arena, matching the source CSS specifications.
-
-## Focused region evidence
-
-- Rabbit asset rendered at 155 × 125 CSS px and turtle asset at 200 × 125 CSS px on desktop, matching the source slots.
-- At 390 × 844, the page had `body.scrollWidth = 390`, so no horizontal overflow was present.
-- Fast/Slow selection worked by mouse and arrow keys; duration selection worked by mouse and arrow keys.
-- Submitting Slow for 3 hours closed the dialog and updated the header state through the real local API.
-- The header duration popover opened, accepted a new duration, and closed after the update.
-- Browser console errors: none.
-
-## Comparison history
-
-1. The supplied production screenshot showed the old text-heavy Fast/Slow cards and character circles rather than the source prototype's rabbit and turtle mascots.
-2. The React dialog was replaced with the source prototype's structure and assets, and the header control was aligned with the same prototype.
-3. Desktop and mobile implementation captures showed the expected mascot, diagonal VS, selected fill, duration preview, disabled/enabled CTA, and responsive stacked layout.
-4. A final source-to-implementation image comparison could not be completed because the source HTML capture was blocked.
+- Source visual truth: `/Users/pix/.codex/generated_images/019ff67e-84cb-7ac3-a943-b3d7432e5cd7/exec-c26b8af2-517d-4bd1-9c67-f725dceafa3f.png`
+- Implementation screenshot: `/private/tmp/slow-study-home-activity.png`
+- Timeline screenshot: `/private/tmp/slow-study-home-timeline.png`
+- Reader with Ask AI screenshot: `/private/tmp/slow-study-reader-ask-ai.png`
+- Mobile screenshot: `/private/tmp/slow-study-home-mobile.png`
+- Full comparison evidence: `/private/tmp/slow-study-design-qa-full.jpg`
+- Focused comparison evidence: `/private/tmp/slow-study-design-qa-focus.jpg`
+- Viewport: 1488 × 1059 CSS px, device scale factor 1; responsive check at 390 × 844 CSS px
+- Source pixels: 1485 × 1059; normalized to 1488 × 1059 with 3 px white padding
+- Implementation pixels: 1488 × 1059
+- State: homepage, study-time popover open, “按活动” selected, real server-derived data
 
 ## Findings
 
-- No actionable P0/P1/P2 issue was found in the rendered implementation itself.
-- Formal visual equivalence remains unverified until the source HTML and implementation can be captured at the same viewport and placed into one comparison image.
+No actionable P0, P1, or P2 differences remain in the study-time feature.
 
-## Primary interactions tested
+- Fonts and typography: the total is the dominant element, the popover title and rows retain the existing Slow editorial hierarchy, and utility labels use the existing UI font stack.
+- Spacing and layout rhythm: the total, inventory summary, create action, segmented switch, and detail rows follow the selected hierarchy. The implementation preserves the repository’s existing page width and real content density rather than replacing the whole dashboard with the generated screen.
+- Colors and visual tokens: forest green, warm paper background, rules, and low elevation map to existing Slow tokens and the selected visual.
+- Image quality and asset fidelity: the changed surface contains no raster imagery or missing custom assets. The existing brand mark and decorative dashboard elements were preserved.
+- Copy and content: “今天已投入”, “按活动”, “时间线”, the three activity labels, and the timeline wording match the approved direction. The rejected explanatory footer is absent.
 
-- Fast and Slow selection
-- Mode selection by arrow keys from the initial unselected state
-- Four duration choices and keyboard traversal
-- Disabled and enabled primary-action states
-- Real local submission and dialog close
-- Header duration popover update
-- Desktop and mobile responsive layouts
+P3 follow-up: the generated concept includes a small pointer notch between the popover and total. The implementation uses proximity and shared focus state instead, avoiding an extra decorative shape; anchoring remains clear.
 
-## Final result
+## Interaction and browser checks
 
-final result: blocked
+- Hover/focus/click trigger opens the popover; click pins it; outside click and Escape close it.
+- “按活动 / 时间线” switches in place without moving the dashboard.
+- A real reading interval appeared in the total, category view, and timeline from the same server facts.
+- Opening Ask AI added Ask AI time while leaving the reader and right panel unobscured.
+- Mobile tap state remains within the 390 px viewport.
+- Browser console errors and warnings checked: none.
 
-Blocker: the controlled browser's URL policy prevents opening the local source HTML, so the required same-viewport source capture is unavailable.
+## Comparison history
+
+1. Initial browser render exposed a P1 hierarchy issue: the total used an undefined font token, so the number rendered at normal button size.
+2. The total was corrected to the project’s `--font-ui` stack and recaptured at the same viewport.
+3. Post-fix full and focused comparisons show the intended dominant number, visible segmented switch, compact rows, and stable surrounding layout. No P0/P1/P2 findings remain.
+
+## Implementation checklist
+
+- [x] Desktop total and popover
+- [x] Activity and timeline states
+- [x] Responsive mobile state
+- [x] Reader session time and Ask AI coexistence
+- [x] Keyboard focus and Escape behavior
+- [x] Console check
+
+final result: passed

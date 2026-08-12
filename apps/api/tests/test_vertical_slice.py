@@ -3605,7 +3605,7 @@ def test_content_feedback_streams_the_model_repair_and_rebinds_only_content(clie
     assert submitted.status_code == 201, submitted.json()
     receipt = submitted.json()
     assert receipt["regeneration"] == {
-        "status": "stream_ready",
+        "status": "recorded_only",
         "reasonCode": None,
         "task": None,
     }
@@ -3715,7 +3715,7 @@ def test_content_feedback_repairs_legacy_contract_bound_content(client):
 
     assert submitted.status_code == 201, submitted.json()
     receipt = submitted.json()
-    assert receipt["regeneration"]["status"] == "stream_ready"
+    assert receipt["regeneration"]["status"] == "recorded_only"
     events = sse_events(
         client.post(f"/api/feedback/{receipt['id']}/repair/stream")
     )
@@ -3763,7 +3763,7 @@ def test_content_feedback_after_assessment_repairs_without_rewriting_evidence(cl
 
     assert submitted.status_code == 201
     receipt = submitted.json()
-    assert receipt["regeneration"]["status"] == "stream_ready"
+    assert receipt["regeneration"]["status"] == "recorded_only"
     events = sse_events(
         client.post(f"/api/feedback/{receipt['id']}/repair/stream")
     )

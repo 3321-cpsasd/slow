@@ -37,6 +37,17 @@ export type DailyModeState = {
   version:number;
   serverNow:string;
 };
+export type StudyActivityKind = 'reading_thinking'|'verification_review'|'ask_ai';
+export type StudyActivitySummary = {
+  date:string;
+  timezone:string;
+  totalSeconds:number;
+  categories:{activityKind:StudyActivityKind;seconds:number}[];
+  episodes:{startedAt:string;endedAt:string;durationSeconds:number}[];
+  measurementRuleVersion:string;
+  estimated:true;
+  serverNow:string;
+};
 export type Bootstrap = {
   user:{id:string;name:string};
   shelves:Shelf[];
@@ -227,17 +238,10 @@ export type FeedbackReceipt = {
   scope:'global'|'content_block';
   createdAt:string;
   regeneration:{
-    status:'stream_ready'|'queued'|'blocked'|'not_applicable';
+    status:'recorded_only'|'queued'|'blocked'|'not_applicable';
     reasonCode:string|null;
     task:LearningTask|null;
   };
-};
-export type FeedbackRepairResult = {
-  feedbackId:string;
-  contentVersionId:string;
-  contentVersion:number;
-  contentBlockId:string;
-  replayed:boolean;
 };
 export type Question = {
   prompt:string;
