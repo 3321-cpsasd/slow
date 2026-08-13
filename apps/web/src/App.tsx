@@ -6010,10 +6010,10 @@ function LessonContent({
 
   return (
     <article className="lesson-document">
-      <div className="lesson-question">
+      <section className="lesson-question" aria-label="本节问题">
         <span>本节问题</span>
-        <h2>{section.question}</h2>
-      </div>
+        <p>{section.question}</p>
+      </section>
       <p className="content-trust-note">
         {section.content.generationMode === 'demo'
           ? '演示内容 · 仅用于体验学习流程'
