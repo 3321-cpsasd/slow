@@ -79,6 +79,11 @@ type AppRoute =
   | { view: 'learn'; seriesId: string; sectionId: string | null };
 type TextQuote = { text: string; blockId: string };
 type SelectionPopup = TextQuote & { top: number; left: number };
+type BookReplanState = {
+  book: Book;
+  proposal: BookReplanProposal | null;
+  status: 'preparing' | 'ready' | 'failed';
+};
 type ExplanationRequest = {
   requestId: string;
   blockId: string;
@@ -401,7 +406,7 @@ export default function App() {
   const [notice, setNotice] = useState('');
   const [showAiSettings, setShowAiSettings] = useState(false);
   const [feedbackTarget, setFeedbackTarget] = useState<FeedbackTarget | null>(null);
-  const [bookReplan, setBookReplan] = useState<{ book: Book; proposal: BookReplanProposal } | null>(null);
+  const [bookReplan, setBookReplan] = useState<BookReplanState | null>(null);
   const [learningQaOpen, setLearningQaOpen] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [exitReceipt, setExitReceipt] = useState<AccountExitReceipt | null>(null);
@@ -423,6 +428,7 @@ export default function App() {
   const routeRequestVersion = useRef(0);
   const routeInitializedForUser = useRef('');
   const initialSectionMonitorVersion = useRef(0);
+  const bookReplanRequestVersion = useRef(0);
 
   const hasActiveDailyMode = () => Boolean(
     data?.dailyMode?.active
@@ -1107,11 +1113,16 @@ export default function App() {
   };
 
   const activateBook = async (book: Book) => {
-    const proposal = await run(
-      '正在根据你最近的学习情况调整下一本书…',
-      () => api.replanBook(book.id),
-    );
-    setBookReplan({ book, proposal });
+    const requestVersion = ++bookReplanRequestVersion.current;
+    setBookReplan({ book, proposal: null, status: 'preparing' });
+    try {
+      const proposal = await api.replanBook(book.id);
+      if (requestVersion !== bookReplanRequestVersion.current) return;
+      setBookReplan({ book, proposal, status: 'ready' });
+    } catch {
+      if (requestVersion !== bookReplanRequestVersion.current) return;
+      setBookReplan({ book, proposal: null, status: 'failed' });
+    }
   };
 
   const generateSection = async (sectionId: string) => {
@@ -1984,11 +1995,18 @@ export default function App() {
         <BookReplanDialog
           book={bookReplan.book}
           proposal={bookReplan.proposal}
-          onClose={() => setBookReplan(null)}
+          status={bookReplan.status}
+          onClose={() => {
+            bookReplanRequestVersion.current += 1;
+            setBookReplan(null);
+          }}
+          onRetry={() => activateBook(bookReplan.book)}
           onConfirm={async () => {
+            const proposal = bookReplan.proposal;
+            if (!proposal) return;
             await run(
               '正在确认新章节目录…',
-              () => api.confirmBookReplan(bookReplan.book.id, bookReplan.proposal.proposalId),
+              () => api.confirmBookReplan(bookReplan.book.id, proposal.proposalId),
             );
             await refreshSeries();
           }}
@@ -2035,12 +2053,16 @@ export default function App() {
 function BookReplanDialog({
   book,
   proposal,
+  status,
   onClose,
+  onRetry,
   onConfirm,
 }: {
   book: Book;
-  proposal: BookReplanProposal;
+  proposal: BookReplanProposal | null;
+  status: BookReplanState['status'];
   onClose: () => void;
+  onRetry: () => Promise<void>;
   onConfirm: () => Promise<void>;
 }) {
   const [confirming, setConfirming] = useState(false);
@@ -2092,44 +2114,70 @@ function BookReplanDialog({
       >
         <header className="book-replan-heading">
           <div>
-            <p className="eyebrow">下一本书 · 目录预览</p>
-            <h2 id="book-replan-title">开始《{book.title}》前，先看一眼新目录</h2>
+            <p className="eyebrow">下一本书 · {status === 'ready' ? '目录预览' : '准备目录'}</p>
+            <h2 id="book-replan-title">
+              {status === 'ready'
+                ? `开始《${book.title}》前，先看一眼新目录`
+                : `正在准备《${book.title}》的新目录`}
+            </h2>
           </div>
           <button className="dialog-close" type="button" aria-label="关闭目录预览" disabled={confirming} onClick={onClose}>×</button>
         </header>
 
-        <ol className="book-replan-outline">
-          {proposal.chapters.map((chapter, index) => (
-            <li key={`${chapter.title}-${index}`}>
-              <span>{String(index + 1).padStart(2, '0')}</span>
-              <div>
-                <b>{chapter.title}</b>
-                <p>{chapter.objective}</p>
-              </div>
-            </li>
-          ))}
-        </ol>
+        {status === 'preparing' ? (
+          <div className="book-replan-preparing" role="status" aria-live="polite">
+            <span className="book-replan-progress-mark" aria-hidden="true"><i /><i /><i /></span>
+            <div>
+              <b>正在结合最近的学习表现调整章节</b>
+              <p>准备完成后，新的章节顺序和学习重点会直接出现在这里；只调整本书尚未开始的章节，不会改变书单或系列。</p>
+            </div>
+          </div>
+        ) : status === 'failed' ? (
+          <div className="book-replan-failure" role="alert">
+            <b>这次没有准备好新目录</b>
+            <p>当前章节没有变化。请检查网络后重新准备，或先关闭稍后再试。</p>
+          </div>
+        ) : proposal ? (
+          <ol className="book-replan-outline">
+            {proposal.chapters.map((chapter, index) => (
+              <li key={`${chapter.title}-${index}`}>
+                <span>{String(index + 1).padStart(2, '0')}</span>
+                <div>
+                  <b>{chapter.title}</b>
+                  <p>{chapter.objective}</p>
+                </div>
+              </li>
+            ))}
+          </ol>
+        ) : null}
 
         <footer className="dialog-actions">
-          <button className="quiet-button" type="button" disabled={confirming} onClick={onClose}>稍后再说</button>
-          <button
-            className="primary-button"
-            type="button"
-            disabled={confirming}
-            onClick={async () => {
-              setConfirming(true);
-              let confirmed = false;
-              try {
-                await onConfirm();
-                confirmed = true;
-              } finally {
-                setConfirming(false);
-              }
-              if (confirmed) onClose();
-            }}
-          >
-            {confirming ? '正在采用…' : '采用这份目录'}
+          <button className="quiet-button" type="button" disabled={confirming} onClick={onClose}>
+            {status === 'ready' ? '稍后再说' : '先关闭'}
           </button>
+          {status === 'failed' && (
+            <button className="primary-button" type="button" onClick={() => void onRetry()}>重新准备</button>
+          )}
+          {status === 'ready' && (
+            <button
+              className="primary-button"
+              type="button"
+              disabled={confirming}
+              onClick={async () => {
+                setConfirming(true);
+                let confirmed = false;
+                try {
+                  await onConfirm();
+                  confirmed = true;
+                } finally {
+                  setConfirming(false);
+                }
+                if (confirmed) onClose();
+              }}
+            >
+              {confirming ? '正在采用…' : '采用这份目录'}
+            </button>
+          )}
         </footer>
       </section>
     </div>

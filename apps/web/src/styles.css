@@ -2110,6 +2110,57 @@ button:disabled { cursor: not-allowed; }
 .book-replan-heading > div { min-width: 0; }
 .book-replan-heading h2 { max-width: 540px; margin: 5px 0 10px; font: 700 29px/1.28 var(--font-display); letter-spacing: -.025em; }
 .book-replan-heading > div > p:last-child { max-width: 530px; margin: 0; color: var(--dialog-muted); font-size: 12px; line-height: 1.7; }
+.book-replan-preparing,
+.book-replan-failure {
+  min-height: 238px;
+  margin-top: 26px;
+  padding: 34px;
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  gap: 24px;
+  align-items: center;
+  border: 1px solid #e0e6df;
+  border-radius: 12px;
+  background: #f7f8f4;
+}
+.book-replan-preparing b,
+.book-replan-failure b { display: block; color: #284035; font: 700 17px/1.45 var(--font-display); }
+.book-replan-preparing p,
+.book-replan-failure p { max-width: 430px; margin: 9px 0 0; color: #737b75; font-size: 12px; line-height: 1.75; }
+.book-replan-progress-mark {
+  width: 74px;
+  height: 82px;
+  padding: 14px 13px;
+  display: grid;
+  align-content: center;
+  gap: 9px;
+  border: 1px solid #cad8ce;
+  border-left: 4px solid var(--green);
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 12px 28px rgba(39, 78, 57, .08);
+}
+.book-replan-progress-mark i {
+  height: 5px;
+  display: block;
+  border-radius: 999px;
+  background: #dbe4dc;
+  transform-origin: left;
+  animation: book-outline-preparing 1.25s ease-in-out infinite;
+}
+.book-replan-progress-mark i:nth-child(2) { width: 78%; animation-delay: .16s; }
+.book-replan-progress-mark i:nth-child(3) { width: 58%; animation-delay: .32s; }
+@keyframes book-outline-preparing {
+  0%, 100% { opacity: .42; transform: scaleX(.64); }
+  50% { opacity: 1; transform: scaleX(1); }
+}
+.book-replan-failure {
+  grid-template-columns: 1fr;
+  min-height: 190px;
+  border-color: #eadbd5;
+  background: #fff8f5;
+}
+.book-replan-failure b { color: #7d4136; }
 .book-replan-outline {
   margin: 26px 0 0;
   padding: 0;
@@ -4814,6 +4865,10 @@ button:disabled { cursor: not-allowed; }
   .delete-confirm { padding: 24px 21px; }
   .book-replan-dialog { padding: 25px 21px 20px; }
   .book-replan-heading h2 { font-size: 25px; }
+  .book-replan-preparing,
+  .book-replan-failure { min-height: 220px; padding: 27px 22px; grid-template-columns: 58px minmax(0, 1fr); gap: 17px; }
+  .book-replan-progress-mark { width: 58px; height: 70px; padding: 11px 10px; }
+  .book-replan-failure { grid-template-columns: 1fr; }
   .book-replan-outline { margin-top: 21px; }
   .book-replan-outline li { padding: 14px 0; grid-template-columns: 31px minmax(0, 1fr); gap: 8px; }
   .confirm-backdrop :is(.dialog-actions, .delete-confirm > div) { flex-direction: column-reverse; }
@@ -4893,6 +4948,7 @@ button:disabled { cursor: not-allowed; }
   .confirm-backdrop, .confirm-backdrop :is(.ai-settings-dialog, .shelf-create-dialog, .feedback-dialog, .delete-confirm, .book-replan-dialog),
   .shelf-create-dialog, .user-account-menu, .daily-mode-backdrop, .daily-mode-dialog, .daily-mode-popover,
   .feedback-select-menu { animation: none; }
+  .book-replan-progress-mark i { animation: none; opacity: .78; transform: none; }
   .content-block.review-target { animation: none; }
   .knowledge-rank-update.rank-up .knowledge-rank-seal { animation: none; }
 }
