@@ -12,7 +12,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0061_ask_me_role_lineage"
+HEAD_REVISION = "0062_learning_start_choices"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -198,6 +198,10 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
             "route_admission_decisions",
             "assessment_distractor_diagnostics",
             "remediation_diagnoses",
+            "learning_start_previews",
+            "series_learning_start_preferences",
+            "chapter_route_decision_events",
+            "chapter_challenge_attempts",
         }.issubset(trustworthy_tables)
         qa_message_columns = {
             row[1]

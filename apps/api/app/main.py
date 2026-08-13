@@ -35,7 +35,7 @@ from .ai.gateway import (
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ReinforcementRespond, ResumeUpdate, ReviewSubmit, ShelfCreate, StudyActivityHeartbeat
+from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, ChapterChallengeSubmit, ChapterCreate, ChapterOrder, ChapterSkipCreate, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, LearningStartPreviewCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ReinforcementRespond, ResumeUpdate, ReviewSubmit, ShelfCreate, StudyActivityHeartbeat
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -1770,6 +1770,13 @@ def create_app(
     @app.post("/api/shelves", status_code=201)
     def create_shelf(body: ShelfCreate, s: SlowService = Depends(service)): return s.create_shelf(body)
 
+    @app.post("/api/learning-start/preview", status_code=201)
+    def learning_start_preview(
+        body: LearningStartPreviewCreate,
+        s: SlowService = Depends(service),
+    ):
+        return s.learning_start_preview(body)
+
     @app.post("/api/plans", status_code=201)
     async def create_plan(
         request: Request,
@@ -1851,6 +1858,43 @@ def create_app(
 
     @app.post("/api/chapters/{chapter_id}/generate")
     async def generate_chapter(chapter_id: str, s: SlowService = Depends(service)): return await s.generate_chapter(chapter_id)
+
+    @app.post("/api/chapters/{chapter_id}/skip")
+    def skip_chapter(
+        chapter_id: str,
+        body: ChapterSkipCreate,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return s.skip_chapter(chapter_id, body, idempotency_key)
+
+    @app.post("/api/chapters/{chapter_id}/resume")
+    def resume_chapter(
+        chapter_id: str,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return s.resume_chapter(chapter_id, idempotency_key)
+
+    @app.post("/api/chapters/{chapter_id}/challenge/prepare")
+    async def prepare_chapter_challenge(
+        chapter_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return await s.prepare_chapter_challenge(chapter_id)
+
+    @app.post("/api/chapters/{chapter_id}/challenge/submit")
+    def submit_chapter_challenge(
+        chapter_id: str,
+        body: ChapterChallengeSubmit,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return s.submit_chapter_challenge(
+            chapter_id,
+            body,
+            idempotency_key,
+        )
 
     @app.get("/api/sections/{section_id}")
     def section(section_id: str, s: SlowService = Depends(service)): return s.section(section_id)

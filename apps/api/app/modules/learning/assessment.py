@@ -1012,6 +1012,7 @@ def record_scoring_facts(
     assistance_mode: str,
     learning_episode_id: str | None = None,
     qualification_profile: str = "standard",
+    source_type: str = "choice_quiz",
 ) -> ScoringResult:
     existing = db.scalar(
         select(ScoringResult).where(ScoringResult.attempt_id == attempt.id)
@@ -1072,7 +1073,7 @@ def record_scoring_facts(
             assessment_target_id=target_id,
             question_index=index,
             correct=bool(result["correct"]),
-            source_type="choice_quiz",
+            source_type=source_type,
             evidence_key=None,
             assistance_mode=assistance_mode,
             learning_episode_id=episode_id,
@@ -1083,6 +1084,7 @@ def record_scoring_facts(
                 "selectedOptions": result.get("selectedOptions", []),
                 "correctOptions": result.get("correctOptions", []),
                 "questionFingerprint": fingerprint,
+                "sourceType": source_type,
             }),
         )
         db.add(observation)

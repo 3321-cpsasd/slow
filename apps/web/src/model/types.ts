@@ -17,6 +17,21 @@ export type Series = {
 };
 export type Shelf = { id:string; name:string; domain:string; specialty:string; tags:string[]; series:Series[] };
 export type ShelfCreateInput = { name:string };
+export type LearningStartPreference =
+  | 'practical_application'
+  | 'understand_principles'
+  | 'case_based'
+  | 'practice_heavy';
+export type LearningStartPreview = {
+  schemaVersion:'learning_start_preview_v1';
+  previewId:string;
+  availability:'ready'|'not_ready';
+  topic:string;
+  title:string;
+  nodes:{conceptRevisionId:string;label:string;meaning:string}[];
+  edges:{id:string;from:string;to:string;type:string;label:string}[];
+  message:string;
+};
 export type ResumePosition = {
   learningRunId:string;
   sectionId:string;
@@ -258,6 +273,46 @@ export type Question = {
   assessmentTargetId?:string;
   evidenceBlockIds?:string[];
   selectionMode:'single'|'multiple';
+};
+export type ChapterChallenge = {
+  schemaVersion:'chapter_challenge_view_v1';
+  chapterId:string;
+  chapterTitle:string;
+  objective:string;
+  status:'ready';
+  questionCount:number;
+  sections:{
+    sectionId:string;
+    position:number;
+    title:string;
+    quizSetId:string;
+    questions:Question[];
+  }[];
+};
+export type ChapterChallengeResult = {
+  schemaVersion:'chapter_challenge_result_v1';
+  attemptId:string;
+  chapterId:string;
+  passed:boolean;
+  passedSectionCount:number;
+  totalSectionCount:number;
+  sectionResults:{
+    sectionId:string;
+    position:number;
+    title:string;
+    status:'passed'|'needs_learning';
+    score:number;
+    total:number;
+  }[];
+  nextChapterId?:string|null;
+  nextBookId?:string|null;
+};
+export type ChapterRouteResult = {
+  chapterId:string;
+  status:'skipped'|'available';
+  reason?:'not_focus'|'defer_unknown'|'challenge_exit';
+  nextChapterId?:string|null;
+  nextBookId?:string|null;
 };
 export type QuizGovernance = {
   decisionId:string;

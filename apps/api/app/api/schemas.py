@@ -29,6 +29,32 @@ class ShelfCreate(ApiModel):
         return normalized
 
 
+LearningStartPreferenceKey = Literal[
+    "practical_application",
+    "understand_principles",
+    "case_based",
+    "practice_heavy",
+]
+
+
+class LearningStartSelection(ApiModel):
+    preview_id: str = Field(min_length=1, max_length=160)
+    selected_concept_revision_ids: list[str] = Field(min_length=1, max_length=120)
+    learning_preferences: list[LearningStartPreferenceKey] = Field(
+        default_factory=list, max_length=2
+    )
+
+    @model_validator(mode="after")
+    def selection_is_unique(self):
+        if len(self.selected_concept_revision_ids) != len(
+            set(self.selected_concept_revision_ids)
+        ):
+            raise ValueError("点亮的知识方向不能重复")
+        if len(self.learning_preferences) != len(set(self.learning_preferences)):
+            raise ValueError("学习偏好不能重复")
+        return self
+
+
 class PlanCreate(ApiModel):
     shelf_id: str
     topic: str = Field(min_length=1, max_length=160)
@@ -37,6 +63,26 @@ class PlanCreate(ApiModel):
         max_length=80,
         description="学习者的专业、身份或当前背景",
     )
+    experience: str = Field(min_length=1, max_length=500)
+    purpose: str = Field(default="", max_length=1000)
+    depth: Literal["overview", "deep", "mastery"]
+    details: str = Field(default="", max_length=3000)
+    start_mode: Literal["direct", "guided"] = "direct"
+    learning_start_selection: LearningStartSelection | None = None
+
+    @model_validator(mode="after")
+    def guided_start_requires_selection(self):
+        if self.start_mode == "guided" and self.learning_start_selection is None:
+            raise ValueError("先挑重点需要至少点亮一个知识方向")
+        if self.start_mode == "direct" and self.learning_start_selection is not None:
+            raise ValueError("直接开始不能附带知识版图选择")
+        return self
+
+
+class LearningStartPreviewCreate(ApiModel):
+    shelf_id: str
+    topic: str = Field(min_length=1, max_length=160)
+    role: str = Field(min_length=1, max_length=80)
     experience: str = Field(min_length=1, max_length=500)
     purpose: str = Field(default="", max_length=1000)
     depth: Literal["overview", "deep", "mastery"]
@@ -306,7 +352,7 @@ class LearningPreferences(ApiModel):
     interaction_rhythm: Literal[
         "auto", "low_interruption", "balanced", "frequent_checkins"
     ] = "auto"
-    daily_mode_prompt_enabled: bool = Field(default=True, strict=True)
+    daily_mode_prompt_enabled: bool = Field(default=False, strict=True)
 
 
 class LearningPreferenceEvidenceCreate(ApiModel):
@@ -509,3 +555,26 @@ class ChapterUpdate(ApiModel):
 
 class ChapterOrder(ApiModel):
     chapter_ids: list[str] = Field(min_length=1)
+
+
+class ChapterSkipCreate(ApiModel):
+    reason: Literal["not_focus", "defer_unknown", "challenge_exit"]
+
+
+class ChapterChallengeSectionSubmission(ApiModel):
+    section_id: str = Field(min_length=1, max_length=160)
+    quiz_set_id: str = Field(min_length=1, max_length=160)
+    answers: list[list[int]] = Field(min_length=1, max_length=30)
+
+
+class ChapterChallengeSubmit(ApiModel):
+    sections: list[ChapterChallengeSectionSubmission] = Field(
+        min_length=1, max_length=12
+    )
+
+    @model_validator(mode="after")
+    def sections_are_unique(self):
+        section_ids = [item.section_id for item in self.sections]
+        if len(section_ids) != len(set(section_ids)):
+            raise ValueError("章挑战不能重复提交同一小节")
+        return self

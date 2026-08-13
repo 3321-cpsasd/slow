@@ -50,3 +50,4 @@
 | [ADR-0016](0016-trusted-assessment-model-roles.md) | Accepted，已实现 | 全部正式选择题的出题、独立审题和答案盲判职责分离 |
 | [ADR-0017](0017-independent-chapter-scope-review.md) | Accepted，已实现 | 独立模型通读整章，以最小编辑消除小节知识增量重复 |
 | [ADR-0018](0018-m4-trustworthy-adaptive-learning.md) | Accepted，实现完成，等待真实模型验收 | M4 可信测评、口试职责、跨书适配和生产失败关闭的统一验收合同 |
+| [ADR-0019](0019-learning-start-and-chapter-route-choices.md) | Accepted，MVP 已实现 | 系列启动兴趣选择、章级挑战与显式略过的路线/掌握分离 |

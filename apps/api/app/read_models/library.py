@@ -422,7 +422,11 @@ class LibraryReadModel:
         for book, progress in book_rows:
             chapters = chapters_by_book[book.id]
             section_units = 0.0
-            for sections in section_progress_by_book[book.id]:
+            for chapter in chapters:
+                if chapter["status"] == "skipped":
+                    section_units += 1
+                    continue
+                sections = chapter["sections"]
                 denominator = len(sections) or EXPECTED_SECTIONS_PER_CHAPTER
                 completed = sum(
                     item["status"] == "completed" for item in sections
@@ -474,7 +478,7 @@ class LibraryReadModel:
                     "title": series.title,
                     "rationale": series.rationale,
                     "progress": round(completed_minutes / total_minutes * 100),
-                    "progressBasis": "bookEstimatedMinutesWithFutureChapterProjection",
+                    "progressBasis": "resolvedRouteIncludingExplicitSkips",
                     "books": books,
                 }
             )
