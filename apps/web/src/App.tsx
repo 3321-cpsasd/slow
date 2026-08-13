@@ -7519,28 +7519,43 @@ function AskMePanel({ sectionId }: { sectionId: string }) {
   }[value] || value);
   return (
     <div className="askme-view">
-      <header className="askme-intro">
-        <div>
-          <p className="eyebrow">隐藏关卡</p>
-          <h2>Grill Me</h2>
-        </div>
-        {discussion && (
-          <span>
-            {discussion.status === 'completed'
-              ? '已结束'
-              : `主题 ${Math.max(activeTopicIndex + 1, 1)} / ${discussion.topics.length}`}
-          </span>
-        )}
-      </header>
+      {(loading || discussion) && (
+        <header className="askme-intro">
+          <div>
+            <p className="eyebrow">隐藏关卡</p>
+            <h2>Grill Me</h2>
+          </div>
+          {discussion && (
+            <span>
+              {discussion.status === 'completed'
+                ? '已结束'
+                : `主题 ${Math.max(activeTopicIndex + 1, 1)} / ${discussion.topics.length}`}
+            </span>
+          )}
+        </header>
+      )}
 
       {loading ? (
         <div className="askme-loading" aria-live="polite">正在恢复讨论…</div>
       ) : !discussion ? (
-        <div className="askme-start-card">
-          <button className="primary-button large" disabled={actioning} onClick={start}>
-            {actioning ? '正在准备…' : '进入关卡'}
-          </button>
-        </div>
+        <section className="askme-entry-card" aria-labelledby="askme-entry-title">
+          <div className="askme-entry-copy">
+            <p className="eyebrow">满分已解锁 · 可选挑战</p>
+            <h2 id="askme-entry-title">Grill Me</h2>
+            <p>不是再做一套题。考官会连续追问，确认你能不能把这一节讲清楚、判断边界，并用到新的情境。</p>
+            <div className="askme-entry-actions">
+              <button className="primary-button large" disabled={actioning} onClick={start}>
+                {actioning ? '正在准备…' : '开始口试挑战'}
+              </button>
+              <small>过程中只评估，不继续教学；可以随时暂停。</small>
+            </div>
+          </div>
+          <ol className="askme-entry-probes" aria-label="口试探测顺序">
+            <li><span>01</span><div><b>机制</b><small>解释为什么成立</small></div></li>
+            <li><span>02</span><div><b>边界</b><small>判断何时不适用</small></div></li>
+            <li><span>03</span><div><b>迁移</b><small>用到新的情境</small></div></li>
+          </ol>
+        </section>
       ) : (
         <div className="askme-discussion">
           <nav className="askme-topic-tabs" aria-label="讨论主题">
