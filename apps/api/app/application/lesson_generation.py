@@ -857,6 +857,17 @@ def publish_lesson_candidate(
             "correct": question.correct,
             "explanation": question.explanation,
             "difficulty": question.difficulty,
+            "answerAuthority": question.answer_authority,
+            "optionVerdicts": [
+                {
+                    "optionId": item.option_id,
+                    "decision": item.decision,
+                    "evidenceBlockKey": item.evidence_block_key,
+                    "rationale": item.rationale,
+                    "causeCode": item.cause_code,
+                }
+                for item in question.option_verdicts
+            ],
             "distractorDiagnostics": [
                 {
                     "optionIndex": item.option_index,

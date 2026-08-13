@@ -3,7 +3,7 @@ import json
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, delete, func, select
 from sqlalchemy.orm import Session
 
 from app.ai.contracts import (
@@ -23,6 +23,7 @@ from app.application.lesson_generation import (
 from app.application.standard_content import StandardContentService
 from app.infrastructure.tables import (
     AssessmentTarget,
+    AssessmentAnswerVersion,
     AssessmentItemEvidenceBlock,
     AssessmentItemVersion,
     Base,
@@ -41,6 +42,7 @@ from app.infrastructure.tables import (
 )
 from app.main import create_app
 from app.core.errors import AppError
+from app.modules.learning.assessment_items import immutable_questions_for_quiz
 from app.services.source_verifier import AcceptingSourceVerifier
 from test_vertical_slice import FakeAi, create_series, sse_events, wait_for_task
 
@@ -84,7 +86,7 @@ def spec(*, second_required=False, feedback=None):
     )
 
 
-def candidate():
+def candidate(*, trusted_answers=False):
     roles = [
         ("core_instruction", "core", ["target_core"]),
         ("core_instruction", "core", ["target_boundary"]),
@@ -113,6 +115,38 @@ def candidate():
             options=["仅匹配标题", "使用稳定目标 ID", "忽略契约"],
             correct=[1],
             explanation="正文明确要求使用稳定目标 ID。",
+            answer_authority=(
+                "blind_model_adjudication_v1"
+                if trusted_answers
+                else "legacy_author_declared"
+            ),
+            option_verdicts=(
+                [
+                    {
+                        "option_id": "O1",
+                        "decision": "does_not_satisfy",
+                        "evidence_block_key": "b1",
+                        "rationale": "标题不是稳定身份",
+                        "cause_code": "concept_confusion",
+                    },
+                    {
+                        "option_id": "O2",
+                        "decision": "satisfies",
+                        "evidence_block_key": "b1",
+                        "rationale": "正文要求使用稳定目标 ID",
+                        "cause_code": "",
+                    },
+                    {
+                        "option_id": "O3",
+                        "decision": "does_not_satisfy",
+                        "evidence_block_key": "b1",
+                        "rationale": "忽略契约会失去验证边界",
+                        "cause_code": "boundary_comparison_error",
+                    },
+                ]
+                if trusted_answers
+                else []
+            ),
         )
         for index in range(1, 5)
     ]
@@ -480,7 +514,7 @@ def test_atomic_publisher_normalizes_explicit_bindings_and_rolls_back():
                 )
             )
         db.flush()
-        validated = validate_lesson_candidate(spec(), candidate())
+        validated = validate_lesson_candidate(spec(), candidate(trusted_answers=True))
         published = publish_lesson_candidate(
             db,
             uid=uid,
@@ -499,7 +533,13 @@ def test_atomic_publisher_normalizes_explicit_bindings_and_rolls_back():
         assert '"readerPriority":"essential"' in payload
         assert db.scalar(select(func.count()).select_from(ContentBlockAssessmentTarget)) == 2
         assert db.scalar(select(func.count()).select_from(AssessmentItemVersion)) == 4
+        assert db.scalar(select(func.count()).select_from(AssessmentAnswerVersion)) == 4
         assert db.scalar(select(func.count()).select_from(AssessmentItemEvidenceBlock)) == 4
+        db.execute(delete(AssessmentAnswerVersion))
+        db.flush()
+        with pytest.raises(AppError) as raised:
+            immutable_questions_for_quiz(db, published.quiz)
+        assert raised.value.code == "ASSESSMENT_ANSWER_VERSION_MISSING"
         db.rollback()
         assert db.scalar(select(func.count()).select_from(ContentVersion)) == 0
         assert db.scalar(select(func.count()).select_from(QuizSet)) == 0

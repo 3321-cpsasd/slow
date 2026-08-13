@@ -70,7 +70,9 @@ class RuntimeSettingsStore:
             if not isinstance(fallback.get("baseUrl", ""), str):
                 raise RuntimeError("本机 AI 备用模型地址配置无效")
         allowed_routes = {
-            "default", "curriculum", "lesson_author", "ask_ai",
+            "default", "curriculum", "curriculum_review", "lesson_author",
+            "assessment_item_author", "assessment_item_review",
+            "assessment_answer_adjudication", "ask_ai",
             "feedback_style", "feedback_accuracy", "assessment_probe",
             "assessment_evaluation", "note", "source_repair",
             "source_review", "quality_review", "assessment",

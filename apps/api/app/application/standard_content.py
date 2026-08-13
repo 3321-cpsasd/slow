@@ -116,6 +116,8 @@ class StandardContentService:
         validate_lesson_candidate(spec, candidate)
         snapshot = contract_snapshot(spec)
         payload = candidate.model_dump(by_alias=True)
+        for question in payload["questions"]:
+            question["answer_authority"] = "reviewed_package_v1"
         output_hash = _hash({"contract": snapshot, "candidate": payload})
         package = StandardLessonPackageVersion(
             id=f"standard_package_{uuid4().hex}",

@@ -98,6 +98,12 @@ class AskMeService:
             "authorModelFamilyId": str(selected.get("modelFamilyId") or ""),
         }
 
+    def _current_tutor_lineage(self) -> tuple[str, str]:
+        return (
+            str(getattr(self.tutor, "last_deployment_id", "") or ""),
+            str(getattr(self.tutor, "last_model_family_id", "") or ""),
+        )
+
     async def answer(self, section_id: str, answer: str | None):
         context = self.contexts.resolve_section(
             user_id=self.user_id,
@@ -332,6 +338,8 @@ class AskMeService:
                         "previousPrompt": turn.prompt,
                         "previousAnswer": answer,
                         "priorTurns": prior_turns,
+                        "probeDeploymentId": topic.current_probe_deployment_id,
+                        "probeModelFamilyId": topic.current_probe_model_family_id,
                         **self._author_lineage(
                             self._binding(learning_run.id, section_id)
                         ),
@@ -365,6 +373,10 @@ class AskMeService:
             turn.lease_expires_at = None
             turn.updated_at = now()
             topic.current_prompt = result.follow_up_prompt
+            (
+                topic.current_probe_deployment_id,
+                topic.current_probe_model_family_id,
+            ) = self._current_tutor_lineage()
             topic.turn_count += 1
             topic.status = (
                 "sufficient"
@@ -634,6 +646,8 @@ class AskMeService:
             learning_contract_version_id=binding.learning_contract_version_id,
             content_version_id=binding.content_version_id,
             round_index=0,
+            current_probe_deployment_id=self._current_tutor_lineage()[0],
+            current_probe_model_family_id=self._current_tutor_lineage()[1],
             entries_json=self.dump(
                 [
                     {
@@ -690,6 +704,8 @@ class AskMeService:
                         "finalize": finalize,
                         "validationAttempt": validation_attempt,
                         "requiredEvaluation": ["strong", "partial", "weak"],
+                        "probeDeploymentId": session.current_probe_deployment_id,
+                        "probeModelFamilyId": session.current_probe_model_family_id,
                         **self._author_lineage(binding),
                     },
                     context_pack,
@@ -728,6 +744,8 @@ class AskMeService:
         )
         if finalize:
             session.status = "completed"
+            session.current_probe_deployment_id = ""
+            session.current_probe_model_family_id = ""
         else:
             if turn.dimension != requested_dimension:
                 raise AiError("Ask Me 轮次顺序无效")
@@ -741,6 +759,10 @@ class AskMeService:
                 }
             )
             session.round_index += 1
+            (
+                session.current_probe_deployment_id,
+                session.current_probe_model_family_id,
+            ) = self._current_tutor_lineage()
         session.entries_json = self.dump(entries)
         session.updated_at = now()
         self.db.commit()

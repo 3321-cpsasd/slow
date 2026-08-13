@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from ...core.errors import AppError
 from ...infrastructure.tables import (
+    AssessmentAnswerVersion,
     AssessmentItemEvidenceBlock,
     AssessmentItemVersion,
     AssessmentDistractorDiagnostic,
@@ -24,6 +25,13 @@ from ...infrastructure.tables import (
 
 
 VERSIONED_LEGACY_QUIZ_SCHEMA = "versioned_legacy_quiz_v1"
+BLIND_ANSWER_SCHEMA_VERSION = "assessment_answer_v1"
+BLIND_ANSWER_RULE_VERSION = "answer_from_option_verdicts_v1"
+BLIND_LESSON_SCHEMA_VERSION = "generated_lesson_composition_candidate_v8"
+TRUSTED_ASSESSMENT_SCHEMA_VERSIONS = {
+    "generated_lesson_composition_candidate_v7",
+    BLIND_LESSON_SCHEMA_VERSION,
+}
 DIAGNOSTIC_CAUSES = {
     "prerequisite_gap",
     "concept_confusion",
@@ -124,6 +132,72 @@ def publish_assessment_item_versions(
         payload["itemKey"] = item_key
         payload["assessmentTargetId"] = target_id
         payload["evidenceBlockIds"] = normalized_evidence_ids
+        options = payload.get("options", [])
+        correct_indexes = payload.get("correct", [])
+        if (
+            not isinstance(options, list)
+            or not 3 <= len(options) <= 6
+            or not isinstance(correct_indexes, list)
+            or not correct_indexes
+            or any(
+                not isinstance(index, int)
+                or isinstance(index, bool)
+                or index < 0
+                or index >= len(options)
+                for index in correct_indexes
+            )
+        ):
+            raise AppError(
+                "题目的答案结构无效",
+                code="ASSESSMENT_ANSWER_INVALID",
+                status=502,
+            )
+        option_ids = [f"O{index}" for index in range(1, len(options) + 1)]
+        payload["optionIds"] = option_ids
+        authority_kind = str(
+            payload.get("answerAuthority")
+            or payload.get("answer_authority")
+            or ""
+        ).strip()
+        persist_answer_version = authority_kind in {
+            "blind_model_adjudication_v1",
+            "deterministic_rule_v1",
+            "reviewed_package_v1",
+            "demo_fixture_v1",
+        }
+        correct_option_ids = [option_ids[index] for index in correct_indexes]
+        raw_option_verdicts = (
+            payload.get("optionVerdicts")
+            or payload.get("option_verdicts")
+            or []
+        )
+        option_verdicts = [
+            {
+                "optionId": item.get("optionId") or item.get("option_id"),
+                "decision": item.get("decision"),
+                "evidenceBlockKey": (
+                    item.get("evidenceBlockKey")
+                    or item.get("evidence_block_key")
+                ),
+                "rationale": item.get("rationale", ""),
+                "causeCode": item.get("causeCode") or item.get("cause_code", ""),
+            }
+            for item in raw_option_verdicts
+        ]
+        payload["answerAuthority"] = authority_kind
+        payload["optionVerdicts"] = option_verdicts
+        payload.pop("answer_authority", None)
+        payload.pop("option_verdicts", None)
+        explanation = str(payload.get("explanation") or "").strip()
+        answer_material = {
+            "assessmentItemVersionId": item_id,
+            "authorityKind": authority_kind,
+            "correctOptionIds": correct_option_ids,
+            "optionVerdicts": option_verdicts,
+            "explanation": explanation,
+            "schemaVersion": BLIND_ANSWER_SCHEMA_VERSION,
+            "ruleVersion": BLIND_ANSWER_RULE_VERSION,
+        }
         diagnostics = payload.get("distractorDiagnostics")
         if diagnostics is None:
             diagnostics = payload.get("distractor_diagnostics", [])
@@ -137,7 +211,6 @@ def publish_assessment_item_versions(
             ]
             payload.pop("distractor_diagnostics", None)
             diagnostics = payload["distractorDiagnostics"]
-        options = payload.get("options", [])
         correct = set(payload.get("correct", []))
         seen_diagnostic_indexes: set[int] = set()
         for diagnostic in diagnostics:
@@ -173,6 +246,13 @@ def publish_assessment_item_versions(
                 status=502,
             )
         payloads.append(payload)
+        item_payload = dict(payload)
+        if persist_answer_version:
+            for field in (
+                "correct", "explanation", "answerAuthority", "answer_authority",
+                "optionVerdicts", "option_verdicts",
+            ):
+                item_payload.pop(field, None)
         db.add(
             AssessmentItemVersion(
                 id=item_id,
@@ -180,9 +260,23 @@ def publish_assessment_item_versions(
                 assessment_target_id=target_id,
                 position=position,
                 item_key=item_key,
-                payload_json=_dump(payload),
+                payload_json=_dump(item_payload),
             )
         )
+        if persist_answer_version:
+            db.flush()
+            db.add(AssessmentAnswerVersion(
+                id=uid("assessment_answer"),
+                assessment_item_version_id=item_id,
+                authority_kind=authority_kind,
+                correct_option_ids_json=_dump(correct_option_ids),
+                option_verdicts_json=_dump(option_verdicts),
+                explanation_payload_json=_dump({"text": explanation}),
+                schema_version=BLIND_ANSWER_SCHEMA_VERSION,
+                rule_version=BLIND_ANSWER_RULE_VERSION,
+                verdict_hash=sha256(_dump(answer_material).encode("utf-8")).hexdigest(),
+                publication_status="published",
+            ))
         pending_bindings.extend(
             (item_id, block_id) for block_id in normalized_evidence_ids
         )
@@ -249,6 +343,57 @@ def immutable_questions_for_quiz(
             code="ASSESSMENT_ITEM_VERSION_INVALID",
             status=409,
         )
+    answer_rows = db.scalars(
+        select(AssessmentAnswerVersion).where(
+            AssessmentAnswerVersion.assessment_item_version_id.in_(
+                [row.id for row in rows]
+            )
+        )
+    ).all()
+    if not answer_rows and any("correct" not in question for question in questions):
+        raise AppError(
+            "题集缺少独立答案版本，不能作为正式学习证据",
+            code="ASSESSMENT_ANSWER_VERSION_MISSING",
+            status=409,
+        )
+    if answer_rows:
+        answer_by_item = {row.assessment_item_version_id: row for row in answer_rows}
+        if set(answer_by_item) != {row.id for row in rows}:
+            raise AppError(
+                "题集的答案版本不完整",
+                code="ASSESSMENT_ANSWER_VERSION_INCOMPLETE",
+                status=409,
+            )
+        hydrated = []
+        for row, question in zip(rows, questions, strict=True):
+            answer = answer_by_item[row.id]
+            if answer.publication_status != "published":
+                raise AppError(
+                    "题目答案已经撤回",
+                    code="ASSESSMENT_ANSWER_WITHDRAWN",
+                    status=409,
+                )
+            option_ids = question.get("optionIds", [])
+            correct_option_ids = _load(answer.correct_option_ids_json, [])
+            if (
+                len(option_ids) != len(question.get("options", []))
+                or len(option_ids) != len(set(option_ids))
+                or any(item not in option_ids for item in correct_option_ids)
+            ):
+                raise AppError(
+                    "题目选项与答案版本不一致",
+                    code="ASSESSMENT_ANSWER_VERSION_INVALID",
+                    status=409,
+                )
+            explanation_payload = _load(answer.explanation_payload_json, {})
+            hydrated.append({
+                **question,
+                "correct": [option_ids.index(item) for item in correct_option_ids],
+                "explanation": str(explanation_payload.get("text") or ""),
+                "answerAuthority": answer.authority_kind,
+                "optionVerdicts": _load(answer.option_verdicts_json, []),
+            })
+        questions = hydrated
     bindings = db.scalars(
         select(AssessmentItemEvidenceBlock).where(
             AssessmentItemEvidenceBlock.assessment_item_version_id.in_(

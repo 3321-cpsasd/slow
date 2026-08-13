@@ -116,7 +116,11 @@ class AiRuntimeUpdate(ApiModel):
         allowed_purposes = {
             "default",
             "curriculum",
+            "curriculum_review",
             "lesson_author",
+            "assessment_item_author",
+            "assessment_item_review",
+            "assessment_answer_adjudication",
             "ask_ai",
             "feedback_style",
             "feedback_accuracy",

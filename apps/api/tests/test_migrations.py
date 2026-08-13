@@ -12,7 +12,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0059_ai_gateway_lineage"
+HEAD_REVISION = "0061_ask_me_role_lineage"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:

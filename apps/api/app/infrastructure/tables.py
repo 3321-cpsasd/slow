@@ -1943,6 +1943,48 @@ class AssessmentItemVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class AssessmentAnswerVersion(Base):
+    """Immutable scoring authority separated from the authored item payload."""
+
+    __tablename__ = "assessment_answer_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "assessment_item_version_id",
+            name="uq_assessment_answer_item_version",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    assessment_item_version_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_item_versions.id"), index=True
+    )
+    authority_kind: Mapped[str] = mapped_column(String(48), index=True)
+    correct_option_ids_json: Mapped[str] = mapped_column(Text)
+    option_verdicts_json: Mapped[str] = mapped_column(Text, default="[]")
+    explanation_payload_json: Mapped[str] = mapped_column(Text)
+    schema_version: Mapped[str] = mapped_column(String(48))
+    rule_version: Mapped[str] = mapped_column(String(48))
+    verdict_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    publication_status: Mapped[str] = mapped_column(
+        String(24), default="published", index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class LearningEvidenceInvalidation(Base):
+    """Append-only withdrawal of all learning evidence from one faulty quiz."""
+
+    __tablename__ = "learning_evidence_invalidations"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    quiz_set_id: Mapped[str] = mapped_column(
+        ForeignKey("quiz_sets.id"), index=True
+    )
+    reason_code: Mapped[str] = mapped_column(String(64), index=True)
+    actor_kind: Mapped[str] = mapped_column(String(32))
+    actor_id: Mapped[str] = mapped_column(String(160), default="")
+    idempotency_key: Mapped[str] = mapped_column(String(160), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class AssessmentDistractorDiagnostic(Base):
     """Immutable diagnostic meaning attached to one incorrect option."""
 
@@ -3050,6 +3092,12 @@ class AskMeSession(Base):
     status: Mapped[str] = mapped_column(String(24), default="active")
     round_index: Mapped[int] = mapped_column(Integer, default=0)
     entries_json: Mapped[str] = mapped_column(Text, default="[]")
+    current_probe_deployment_id: Mapped[str] = mapped_column(
+        String(160), default="", server_default=""
+    )
+    current_probe_model_family_id: Mapped[str] = mapped_column(
+        String(160), default="", server_default=""
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
@@ -3113,6 +3161,12 @@ class AskMeDiscussionTopic(Base):
     assessment_target_ids_json: Mapped[str] = mapped_column(Text, default="[]")
     status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
     current_prompt: Mapped[str] = mapped_column(Text)
+    current_probe_deployment_id: Mapped[str] = mapped_column(
+        String(160), default="", server_default=""
+    )
+    current_probe_model_family_id: Mapped[str] = mapped_column(
+        String(160), default="", server_default=""
+    )
     turn_count: Mapped[int] = mapped_column(Integer, default=0)
     evidence_recorded: Mapped[bool] = mapped_column(Boolean, default=False)
     final_assessment_json: Mapped[str] = mapped_column(Text, default="{}")

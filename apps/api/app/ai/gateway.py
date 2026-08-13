@@ -4,6 +4,21 @@ from enum import StrEnum
 from typing import Callable, Iterable
 
 from ..core.errors import AiError, safe_error_code
+from .contracts import (
+    AskMeDiscussionTurn,
+    AskMeTurn,
+    GeneratedLessonSlotQuestion,
+    GeneratedQuiz,
+)
+from .openai_adapter import (
+    _adjudicate_choice_questions,
+    _apply_answerless_question_review,
+    _apply_chapter_outline_review,
+    _apply_lesson_question_review,
+    _combine_lesson_candidate,
+    _expand_lesson_slots,
+    _lesson_question_payload,
+)
 from .port import ProviderCapabilities
 from .route_context import InvocationRouteContext, invocation_route_context
 
@@ -11,7 +26,11 @@ from .route_context import InvocationRouteContext, invocation_route_context
 class AiPurpose(StrEnum):
     DEFAULT = "default"
     CURRICULUM = "curriculum"
+    CURRICULUM_REVIEW = "curriculum_review"
     LESSON_AUTHOR = "lesson_author"
+    ASSESSMENT_ITEM_AUTHOR = "assessment_item_author"
+    ASSESSMENT_ITEM_REVIEW = "assessment_item_review"
+    ASSESSMENT_ANSWER_ADJUDICATION = "assessment_answer_adjudication"
     ASK_AI = "ask_ai"
     FEEDBACK_STYLE = "feedback_style"
     FEEDBACK_ACCURACY = "feedback_accuracy"
@@ -42,6 +61,8 @@ class LineageConstraints:
     author_model_family_id: str = ""
     author_model: str = ""
     exclude_author_family: bool = False
+    excluded_deployment_ids: tuple[str, ...] = ()
+    excluded_model_family_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -100,6 +121,124 @@ def model_family(model: str) -> str:
         if normalized.startswith(prefixes):
             return family
     return normalized.split("/", 1)[0].split("-", 1)[0]
+
+
+def _trusted_quiz_material(request, content, prior_questions=None):
+    """Project any frozen lesson material into the shared assessment-role contract."""
+
+    prior = list(prior_questions or [])
+    if prior:
+        raw_targets = [
+            {
+                "assessmentTargetId": item.get("assessmentTargetId", ""),
+                "objective": item.get("objective", ""),
+                "required": bool(item.get("core", False)),
+            }
+            for item in prior
+        ]
+    else:
+        raw_targets = list(request.get("assessmentTargets") or [])
+        if not raw_targets:
+            raw_targets = [
+                {
+                    "assessmentTargetId": request.get("assessmentTargetId", ""),
+                    "objective": objective,
+                    "required": position == 0,
+                }
+                for position, objective in enumerate(request.get("objectives") or [])
+            ]
+    targets = []
+    for raw in raw_targets:
+        objective = str(
+            raw.get("objective")
+            or raw.get("objectiveStatement")
+            or ""
+        ).strip()
+        if not objective:
+            raise ValueError("trusted assessment target is missing its objective")
+        targets.append({
+            "assessmentTargetId": str(raw.get("assessmentTargetId") or ""),
+            "objective": objective,
+            "required": bool(raw.get("required", raw.get("core", False))),
+        })
+    if not 1 <= len(targets) <= 5:
+        raise ValueError("trusted quiz generation requires 1-5 target slots")
+
+    blocks = list(content.blocks)
+    payload_blocks = []
+    targets_by_slot = {}
+    evidence_indexes_by_slot = {}
+    for position, target in enumerate(targets, 1):
+        slot = f"T{position}"
+        indexes = [
+            index
+            for index, block in enumerate(blocks)
+            if target["objective"] in set(block.assessment_objectives)
+        ]
+        if not indexes and prior:
+            indexes = [
+                index
+                for index in prior[position - 1].get("claim_block_indexes", [])
+                if isinstance(index, int) and 0 <= index < len(blocks)
+            ]
+        if not indexes:
+            raise ValueError(
+                "trusted assessment target has no explicitly bound frozen evidence"
+            )
+        evidence_indexes_by_slot[slot] = [] if prior else indexes
+        targets_by_slot[slot] = target
+        payload_blocks.append({
+            "slot": f"{slot}_CORE",
+            "heading": " / ".join(
+                blocks[index].heading for index in indexes if blocks[index].heading
+            ),
+            "content": "\n\n".join(blocks[index].content for index in indexes),
+        })
+
+    question_count = len(prior) if prior else max(4, len(targets))
+    if question_count > 5:
+        raise ValueError("trusted assessment question count exceeds five")
+    author_payload = {
+        "questionCount": question_count,
+        "learningContractVersionId": request.get("learningContractVersionId", ""),
+        "targets": [
+            {
+                "slot": slot,
+                "objective": target["objective"],
+                "required": target["required"],
+            }
+            for slot, target in targets_by_slot.items()
+        ],
+        "blocks": payload_blocks,
+        "priorQuestions": prior,
+    }
+    return author_payload, targets_by_slot, evidence_indexes_by_slot
+
+
+def _trusted_quiz_review_payload(author_payload, questions):
+    block_by_slot = {
+        block["slot"]: block for block in author_payload["blocks"]
+    }
+    target_by_slot = {
+        target["slot"]: target for target in author_payload["targets"]
+    }
+    return {
+        **author_payload,
+        "questions": [
+            {
+                "itemSlot": f"Q{position}",
+                "targetSlot": question.target_slot,
+                "objective": target_by_slot[question.target_slot]["objective"],
+                "prompt": question.prompt,
+                "options": [
+                    {"optionId": f"O{index}", "content": option}
+                    for index, option in enumerate(question.options, 1)
+                ],
+                "evidence": block_by_slot[f"{question.target_slot}_CORE"],
+            }
+            for position, question in enumerate(questions, 1)
+        ],
+    }
 
 
 class ModelDeploymentRegistry:
@@ -165,6 +304,10 @@ class ModelDeploymentRegistry:
             ):
                 continue
             if envelope.requirements.streaming and not deployment.streaming:
+                continue
+            if deployment.deployment_id in envelope.lineage.excluded_deployment_ids:
+                continue
+            if deployment.model_family_id in envelope.lineage.excluded_model_family_ids:
                 continue
             if envelope.lineage.exclude_author_family:
                 author_family = envelope.lineage.author_model_family_id
@@ -600,6 +743,64 @@ class PurposeAiGateway:
             exclude_author_family=exclude,
         )
 
+    @staticmethod
+    def _ask_me_evaluation_lineage(payload: dict) -> LineageConstraints:
+        probe_deployment = str(payload.get("probeDeploymentId") or "")
+        probe_family = str(payload.get("probeModelFamilyId") or "")
+        return LineageConstraints(
+            author_deployment_id=str(payload.get("authorDeploymentId") or ""),
+            author_model_family_id=str(payload.get("authorModelFamilyId") or ""),
+            author_model=str(payload.get("authorModel") or ""),
+            exclude_author_family=True,
+            excluded_deployment_ids=(probe_deployment,) if probe_deployment else (),
+            excluded_model_family_ids=(probe_family,) if probe_family else (),
+        )
+
+    @staticmethod
+    def _ask_me_probe_lineage(
+        payload: dict,
+        evaluator: ModelDeployment,
+        unsupported: tuple[ModelDeployment, ...] = (),
+    ) -> LineageConstraints:
+        deployment_ids = [
+            evaluator.deployment_id,
+            str(payload.get("authorDeploymentId") or ""),
+            *(item.deployment_id for item in unsupported),
+        ]
+        family_ids = [
+            evaluator.model_family_id,
+            str(payload.get("authorModelFamilyId") or ""),
+            *(item.model_family_id for item in unsupported),
+        ]
+        return LineageConstraints(
+            excluded_deployment_ids=tuple(
+                dict.fromkeys(item for item in deployment_ids if item)
+            ),
+            excluded_model_family_ids=tuple(
+                dict.fromkeys(item for item in family_ids if item)
+            ),
+        )
+
+    @staticmethod
+    def _extend_lineage(
+        lineage: LineageConstraints,
+        deployments: tuple[ModelDeployment, ...],
+    ) -> LineageConstraints:
+        return LineageConstraints(
+            author_deployment_id=lineage.author_deployment_id,
+            author_model_family_id=lineage.author_model_family_id,
+            author_model=lineage.author_model,
+            exclude_author_family=lineage.exclude_author_family,
+            excluded_deployment_ids=tuple(dict.fromkeys((
+                *lineage.excluded_deployment_ids,
+                *(item.deployment_id for item in deployments),
+            ))),
+            excluded_model_family_ids=tuple(dict.fromkeys((
+                *lineage.excluded_model_family_ids,
+                *(item.model_family_id for item in deployments),
+            ))),
+        )
+
     async def plan(self, request, memory):
         return await self._call(
             AiTaskEnvelope(
@@ -613,16 +814,81 @@ class PurposeAiGateway:
         )
 
     async def chapter(self, request, memory):
-        return await self._call(
-            AiTaskEnvelope(
-                AiPurpose.CURRICULUM,
-                AuthorityLevel.CANDIDATE_ONLY,
-                CapabilityRequirements(structured=True),
-            ),
+        envelope = AiTaskEnvelope(
+            AiPurpose.CURRICULUM,
+            AuthorityLevel.CANDIDATE_ONLY,
+            CapabilityRequirements(structured=True),
+        )
+        authored = await self._call(
+            envelope,
             "chapter",
             request,
             memory,
         )
+        author = self._last_deployment.get()
+        trace = list(self._trace.get())
+        structured = list(self._structured.get())
+        review_payload = {
+            "chapter": request,
+            "candidateSections": [
+                {
+                    "sectionSlot": f"S{position}",
+                    **section.model_dump(by_alias=True),
+                }
+                for position, section in enumerate(authored.sections, 1)
+            ],
+        }
+        try:
+            unsupported = tuple(
+                deployment
+                for deployment in self.registry.all()
+                if not hasattr(deployment.adapter, "review_chapter_outline")
+            )
+            review = await self._call(
+                AiTaskEnvelope(
+                    AiPurpose.CURRICULUM_REVIEW,
+                    AuthorityLevel.SYSTEM_AUDIT,
+                    CapabilityRequirements(structured=True),
+                    self._exclude_deployments(author, *unsupported),
+                ),
+                "review_chapter_outline",
+                review_payload,
+            )
+            trace.extend(self._trace.get())
+            structured.extend(self._structured.get())
+            result = _apply_chapter_outline_review(authored, review)
+            trace.append({
+                "purpose": "chapter_outline_scope_review",
+                "outcome": "succeeded",
+                "authorDeploymentId": author.deployment_id,
+                "reviewerDeploymentId": self._last_deployment.get().deployment_id,
+                "editCount": sum(
+                    item.decision == "edit" for item in review.sections
+                ),
+            })
+        except Exception as error:
+            trace.extend(self._trace.get())
+            structured.extend(self._structured.get())
+            trace.append({
+                "purpose": "chapter_outline_scope_review",
+                "outcome": "skipped",
+                "authorDeploymentId": author.deployment_id,
+                "errorCode": (
+                    error.code if isinstance(error, AiError) else safe_error_code(error)
+                ),
+            })
+            if self.registry.environment == "production":
+                self._trace.set(tuple(trace))
+                self._structured.set(tuple(structured))
+                raise AiError(
+                    "章节范围审校暂未完成；目录不会以未审状态发布",
+                    code="AI_CURRICULUM_REVIEW_REQUIRED",
+                    retryable=True,
+                ) from error
+            result = authored
+        self._trace.set(tuple(trace))
+        self._structured.set(tuple(structured))
+        return result
 
     async def replan_book(self, request, memory):
         return await self._call(
@@ -667,22 +933,330 @@ class PurposeAiGateway:
         )
 
     def lesson_call_budget(self, spec: dict) -> int:
-        return len(self._candidates(self._lesson_envelope(spec)))
+        purposes = (
+            self._lesson_envelope(spec).purpose,
+            AiPurpose.ASSESSMENT_ITEM_AUTHOR,
+            AiPurpose.ASSESSMENT_ITEM_REVIEW,
+            AiPurpose.ASSESSMENT_ANSWER_ADJUDICATION,
+        )
+        return sum(len(self._policy(purpose).deployment_ids) for purpose in purposes)
+
+    @staticmethod
+    def _exclude_deployments(*deployments: ModelDeployment) -> LineageConstraints:
+        return LineageConstraints(
+            excluded_deployment_ids=tuple(
+                dict.fromkeys(item.deployment_id for item in deployments)
+            ),
+            excluded_model_family_ids=tuple(
+                dict.fromkeys(item.model_family_id for item in deployments)
+            ),
+        )
+
+    def _unsupported_deployments(self, method: str) -> tuple[ModelDeployment, ...]:
+        return tuple(
+            deployment
+            for deployment in self.registry.all()
+            if not hasattr(deployment.adapter, method)
+        )
+
+    def _purpose_supports(self, purpose: AiPurpose, method: str) -> bool:
+        envelope = AiTaskEnvelope(
+            purpose,
+            AuthorityLevel.CANDIDATE_ONLY,
+            CapabilityRequirements(structured=True),
+        )
+        return any(
+            hasattr(deployment.adapter, method)
+            for deployment in self.registry.eligible(
+                self._policy(purpose),
+                envelope,
+            )
+        )
+
+    async def _trusted_lesson_pipeline(self, spec, validator=None):
+        trace: list[dict] = []
+        structured: list[dict] = []
+
+        def collect() -> None:
+            trace.extend(self._trace.get())
+            structured.extend(self._structured.get())
+
+        content = await self._call(
+            self._lesson_envelope(spec),
+            "author_lesson_content",
+            spec,
+        )
+        content_deployment = self._last_deployment.get()
+        collect()
+        if content.decision == "replan_required":
+            result = _expand_lesson_slots(
+                _combine_lesson_candidate(content, None),
+                spec,
+            )
+            if validator is not None:
+                validator(result)
+            self._trace.set(tuple(trace))
+            self._structured.set(tuple(structured))
+            return result
+
+        authored = await self._call(
+            AiTaskEnvelope(
+                AiPurpose.ASSESSMENT_ITEM_AUTHOR,
+                AuthorityLevel.CANDIDATE_ONLY,
+                CapabilityRequirements(structured=True),
+            ),
+            "author_lesson_questions",
+            _lesson_question_payload(content, spec),
+        )
+        item_author = self._last_deployment.get()
+        collect()
+        slot_candidate = _combine_lesson_candidate(content, authored)
+
+        review = await self._call(
+            AiTaskEnvelope(
+                AiPurpose.ASSESSMENT_ITEM_REVIEW,
+                AuthorityLevel.SYSTEM_AUDIT,
+                CapabilityRequirements(structured=True),
+                self._exclude_deployments(item_author),
+            ),
+            "review_lesson_questions",
+            _lesson_question_payload(content, spec, slot_candidate.questions),
+        )
+        reviewer = self._last_deployment.get()
+        collect()
+        try:
+            reviewed = _apply_lesson_question_review(slot_candidate, review)
+        except ValueError as error:
+            raise AiError(
+                "独立审题未形成可发布题集；本次候选已失败",
+                code="AI_ASSESSMENT_REVIEW_REJECTED",
+                retryable=False,
+            ) from error
+
+        adjudication = await self._call(
+            AiTaskEnvelope(
+                AiPurpose.ASSESSMENT_ANSWER_ADJUDICATION,
+                AuthorityLevel.EVIDENCE_CANDIDATE,
+                CapabilityRequirements(structured=True),
+                self._exclude_deployments(item_author, reviewer),
+            ),
+            "adjudicate_lesson_questions",
+            _lesson_question_payload(content, spec, reviewed.questions),
+        )
+        collect()
+        try:
+            result = _expand_lesson_slots(reviewed, spec, adjudication)
+            if validator is not None:
+                validator(result)
+        except Exception as error:
+            raise AiError(
+                "答案盲判未形成唯一可发布答案；本次候选已失败",
+                code="AI_ASSESSMENT_ADJUDICATION_REJECTED",
+                retryable=False,
+            ) from error
+        trace.append({
+            "purpose": "trusted_assessment_pipeline",
+            "outcome": "succeeded",
+            "contentDeploymentId": content_deployment.deployment_id,
+            "itemAuthorDeploymentId": item_author.deployment_id,
+            "reviewerDeploymentId": reviewer.deployment_id,
+            "adjudicatorDeploymentId": self._last_deployment.get().deployment_id,
+            "reviewDecisionCounts": {
+                decision: sum(
+                    item.decision == decision for item in review.questions
+                )
+                for decision in ("accept", "edit", "reject")
+            },
+        })
+        self._trace.set(tuple(trace))
+        self._structured.set(tuple(structured))
+        return result
+
+    def _supports_trusted_assessment_pipeline(self) -> bool:
+        return all((
+            self._purpose_supports(
+                AiPurpose.LESSON_AUTHOR,
+                "author_lesson_content",
+            ),
+            self._purpose_supports(
+                AiPurpose.ASSESSMENT_ITEM_AUTHOR,
+                "author_lesson_questions",
+            ),
+            self._purpose_supports(
+                AiPurpose.ASSESSMENT_ITEM_REVIEW,
+                "review_lesson_questions",
+            ),
+            self._purpose_supports(
+                AiPurpose.ASSESSMENT_ANSWER_ADJUDICATION,
+                "adjudicate_lesson_questions",
+            ),
+        ))
+
+    def _supports_trusted_quiz_pipeline(self) -> bool:
+        return all((
+            self._purpose_supports(
+                AiPurpose.ASSESSMENT_ITEM_AUTHOR,
+                "author_lesson_questions",
+            ),
+            self._purpose_supports(
+                AiPurpose.ASSESSMENT_ITEM_REVIEW,
+                "review_lesson_questions",
+            ),
+            self._purpose_supports(
+                AiPurpose.ASSESSMENT_ANSWER_ADJUDICATION,
+                "adjudicate_lesson_questions",
+            ),
+        ))
+
+    async def _trusted_quiz_pipeline(
+        self,
+        request,
+        content,
+        prior_questions=None,
+    ) -> GeneratedQuiz:
+        trace: list[dict] = []
+        structured: list[dict] = []
+
+        def collect() -> None:
+            trace.extend(self._trace.get())
+            structured.extend(self._structured.get())
+
+        try:
+            material, targets, evidence_indexes = _trusted_quiz_material(
+                request,
+                content,
+                prior_questions,
+            )
+            authored = await self._call(
+                AiTaskEnvelope(
+                    AiPurpose.ASSESSMENT_ITEM_AUTHOR,
+                    AuthorityLevel.CANDIDATE_ONLY,
+                    CapabilityRequirements(structured=True),
+                    self._exclude_deployments(
+                        *self._unsupported_deployments(
+                            "author_lesson_questions"
+                        )
+                    ),
+                ),
+                "author_lesson_questions",
+                material,
+            )
+            item_author = self._last_deployment.get()
+            collect()
+            if len(authored.questions) != material["questionCount"]:
+                raise ValueError("item author returned the wrong question count")
+            if prior_questions and any(
+                question.target_slot != f"T{position}"
+                for position, question in enumerate(authored.questions, 1)
+            ):
+                raise ValueError("replacement questions changed their target positions")
+            required_slots = {
+                slot for slot, target in targets.items() if target["required"]
+            }
+            if not required_slots.issubset({
+                question.target_slot for question in authored.questions
+            }):
+                raise ValueError("authored questions missed a required target")
+
+            review = await self._call(
+                AiTaskEnvelope(
+                    AiPurpose.ASSESSMENT_ITEM_REVIEW,
+                    AuthorityLevel.SYSTEM_AUDIT,
+                    CapabilityRequirements(structured=True),
+                    self._exclude_deployments(
+                        item_author,
+                        *self._unsupported_deployments(
+                            "review_lesson_questions"
+                        ),
+                    ),
+                ),
+                "review_lesson_questions",
+                _trusted_quiz_review_payload(material, authored.questions),
+            )
+            reviewer = self._last_deployment.get()
+            collect()
+            reviewed = _apply_answerless_question_review(
+                [
+                    GeneratedLessonSlotQuestion.model_validate(
+                        question.model_dump()
+                    )
+                    for question in authored.questions
+                ],
+                review,
+            )
+
+            adjudication = await self._call(
+                AiTaskEnvelope(
+                    AiPurpose.ASSESSMENT_ANSWER_ADJUDICATION,
+                    AuthorityLevel.EVIDENCE_CANDIDATE,
+                    CapabilityRequirements(structured=True),
+                    self._exclude_deployments(
+                        item_author,
+                        reviewer,
+                        *self._unsupported_deployments(
+                            "adjudicate_lesson_questions"
+                        ),
+                    ),
+                ),
+                "adjudicate_lesson_questions",
+                _trusted_quiz_review_payload(material, reviewed),
+            )
+            collect()
+            result = _adjudicate_choice_questions(
+                reviewed,
+                adjudication,
+                targets_by_slot=targets,
+                evidence_indexes_by_slot=evidence_indexes,
+                seed=str(
+                    request.get("learningContractVersionId")
+                    or request.get("reviewAssignmentId")
+                    or request.get("reinforcementRunId")
+                    or request.get("id")
+                    or "assessment"
+                ),
+            )
+        except AiError:
+            self._trace.set(tuple(trace + list(self._trace.get())))
+            self._structured.set(tuple(structured + list(self._structured.get())))
+            raise
+        except Exception as error:
+            self._trace.set(tuple(trace + list(self._trace.get())))
+            self._structured.set(tuple(structured + list(self._structured.get())))
+            raise AiError(
+                "可信测评未形成可发布题目；本次候选已失败",
+                code="AI_TRUSTED_ASSESSMENT_REJECTED",
+                retryable=False,
+            ) from error
+        trace.append({
+            "purpose": "trusted_assessment_quiz_pipeline",
+            "outcome": "succeeded",
+            "itemAuthorDeploymentId": item_author.deployment_id,
+            "reviewerDeploymentId": reviewer.deployment_id,
+            "adjudicatorDeploymentId": self._last_deployment.get().deployment_id,
+            "questionCount": len(result.questions),
+        })
+        self._trace.set(tuple(trace))
+        self._structured.set(tuple(structured))
+        return result
 
     async def generate_lesson(self, spec):
-        return await self._call(
-            self._lesson_envelope(spec),
-            "generate_lesson",
-            spec,
-        )
+        if not self._supports_trusted_assessment_pipeline():
+            return await self._call(
+                self._lesson_envelope(spec),
+                "generate_lesson",
+                spec,
+            )
+        return await self._trusted_lesson_pipeline(spec)
 
     async def generate_lesson_validated(self, spec, validator):
-        return await self._call(
-            self._lesson_envelope(spec),
-            "generate_lesson",
-            spec,
-            candidate_validator=validator,
-        )
+        if not self._supports_trusted_assessment_pipeline():
+            return await self._call(
+                self._lesson_envelope(spec),
+                "generate_lesson",
+                spec,
+                candidate_validator=validator,
+            )
+        return await self._trusted_lesson_pipeline(spec, validator)
 
     async def lesson(self, request, memory, prior_questions=None):
         return await self._call(
@@ -711,6 +1285,12 @@ class PurposeAiGateway:
         )
 
     async def lesson_quiz(self, request, content, prior_questions=None):
+        if self._supports_trusted_quiz_pipeline():
+            return await self._trusted_quiz_pipeline(
+                request,
+                content,
+                prior_questions,
+            )
         return await self._call(
             AiTaskEnvelope(
                 AiPurpose.LESSON_AUTHOR,
@@ -811,6 +1391,92 @@ class PurposeAiGateway:
 
     async def ask_me(self, request):
         evaluates_answer = bool(request.get("previousAnswer"))
+        split_supported = (
+            self._purpose_supports(AiPurpose.ASSESSMENT_PROBE, "ask_me_probe")
+            and self._purpose_supports(
+                AiPurpose.ASSESSMENT_EVALUATION,
+                "evaluate_ask_me",
+            )
+        )
+        if split_supported and not evaluates_answer:
+            probe = await self._call(
+                AiTaskEnvelope(
+                    AiPurpose.ASSESSMENT_PROBE,
+                    AuthorityLevel.EPHEMERAL,
+                    CapabilityRequirements(structured=True),
+                    self._exclude_deployments(
+                        *self._unsupported_deployments("ask_me_probe")
+                    ),
+                ),
+                "ask_me_probe",
+                request,
+            )
+            return AskMeTurn(
+                dimension=probe.dimension,
+                prompt=probe.prompt,
+                evaluation="not_evaluated",
+            )
+        if split_supported:
+            trace: list[dict] = []
+            structured: list[dict] = []
+            evaluation_lineage = self._extend_lineage(
+                self._ask_me_evaluation_lineage(request),
+                self._unsupported_deployments("evaluate_ask_me"),
+            )
+            evaluation = await self._call(
+                AiTaskEnvelope(
+                    AiPurpose.ASSESSMENT_EVALUATION,
+                    AuthorityLevel.EVIDENCE_CANDIDATE,
+                    CapabilityRequirements(structured=True),
+                    evaluation_lineage,
+                ),
+                "evaluate_ask_me",
+                request,
+            )
+            evaluator = self._last_deployment.get()
+            trace.extend(self._trace.get())
+            structured.extend(self._structured.get())
+            prompt = ""
+            if not request.get("finalize"):
+                probe = await self._call(
+                    AiTaskEnvelope(
+                        AiPurpose.ASSESSMENT_PROBE,
+                        AuthorityLevel.EPHEMERAL,
+                        CapabilityRequirements(structured=True),
+                        self._ask_me_probe_lineage(
+                            request,
+                            evaluator,
+                            self._unsupported_deployments("ask_me_probe"),
+                        ),
+                    ),
+                    "ask_me_probe",
+                    request,
+                )
+                trace.extend(self._trace.get())
+                structured.extend(self._structured.get())
+                prompt = probe.prompt
+                if probe.dimension != request["dimension"]:
+                    raise AiError(
+                        "Ask Me 探测模型改变了服务端指定维度",
+                        code="ASK_ME_PROBE_DIMENSION_INVALID",
+                        retryable=False,
+                    )
+            trace.append({
+                "purpose": "ask_me_role_separation",
+                "outcome": "succeeded",
+                "evaluatorDeploymentId": evaluator.deployment_id,
+                "probeDeploymentId": (
+                    self._last_deployment.get().deployment_id if prompt else ""
+                ),
+            })
+            self._trace.set(tuple(trace))
+            self._structured.set(tuple(structured))
+            return AskMeTurn(
+                dimension=request["dimension"],
+                prompt=prompt,
+                evaluation=evaluation.evaluation,
+                rationale=evaluation.rationale,
+            )
         purpose = (
             AiPurpose.ASSESSMENT_EVALUATION
             if evaluates_answer
@@ -832,6 +1498,70 @@ class PurposeAiGateway:
         )
 
     async def ask_me_discussion(self, request):
+        split_supported = (
+            self._purpose_supports(
+                AiPurpose.ASSESSMENT_EVALUATION,
+                "evaluate_ask_me_discussion",
+            )
+            and self._purpose_supports(
+                AiPurpose.ASSESSMENT_PROBE,
+                "ask_me_discussion_probe",
+            )
+        )
+        if split_supported:
+            evaluation = await self._call(
+                AiTaskEnvelope(
+                    AiPurpose.ASSESSMENT_EVALUATION,
+                    AuthorityLevel.EVIDENCE_CANDIDATE,
+                    CapabilityRequirements(structured=True),
+                    self._extend_lineage(
+                        self._ask_me_evaluation_lineage(request),
+                        self._unsupported_deployments(
+                            "evaluate_ask_me_discussion"
+                        ),
+                    ),
+                ),
+                "evaluate_ask_me_discussion",
+                request,
+            )
+            evaluator = self._last_deployment.get()
+            trace = list(self._trace.get())
+            structured = list(self._structured.get())
+            probe = await self._call(
+                AiTaskEnvelope(
+                    AiPurpose.ASSESSMENT_PROBE,
+                    AuthorityLevel.EPHEMERAL,
+                    CapabilityRequirements(structured=True),
+                    self._ask_me_probe_lineage(
+                        request,
+                        evaluator,
+                        self._unsupported_deployments(
+                            "ask_me_discussion_probe"
+                        ),
+                    ),
+                ),
+                "ask_me_discussion_probe",
+                request,
+            )
+            trace.extend(self._trace.get())
+            structured.extend(self._structured.get())
+            trace.append({
+                "purpose": "ask_me_discussion_role_separation",
+                "outcome": "succeeded",
+                "evaluatorDeploymentId": evaluator.deployment_id,
+                "probeDeploymentId": self._last_deployment.get().deployment_id,
+            })
+            self._trace.set(tuple(trace))
+            self._structured.set(tuple(structured))
+            return AskMeDiscussionTurn(
+                evaluation=evaluation.evaluation,
+                correct_points=evaluation.correct_points,
+                issues=evaluation.issues,
+                suggestions=evaluation.suggestions,
+                follow_up_prompt=probe.follow_up_prompt,
+                follow_up_purpose=probe.follow_up_purpose,
+                topic_sufficiency=evaluation.topic_sufficiency,
+            )
         return await self._call(
             AiTaskEnvelope(
                 AiPurpose.ASSESSMENT_EVALUATION,
