@@ -1266,6 +1266,7 @@ export default function App() {
         <header className="auth-header">
           <div className="auth-header-left">
             <span className="brand"><span className="brand-mark"><i /></span><b>slow</b></span>
+            <a className="docs-entry-link" href="/docs">使用指南</a>
             <a
               className="github-repo-link"
               href="https://github.com/3321-cpsasd/slow"
@@ -1662,6 +1663,7 @@ export default function App() {
           <small>一步一步，学成自己的书</small>
         )}
         <div className="header-actions">
+          <a className="quiet-button docs-header-link" href="/docs">使用指南</a>
           {data?.dailyMode && (
             <DailyModeHeader
               state={data.dailyMode}

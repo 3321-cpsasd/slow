@@ -11,6 +11,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -p tsconfig.app.json --noEmit && vite build",
+    "build:pages": "tsc -p tsconfig.app.json --noEmit && VITE_DOCS_ONLY=true vite build --base=/slow/",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {

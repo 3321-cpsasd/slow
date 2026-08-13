@@ -5,46 +5,111 @@
 <h1 align="center">Slow · 知行书架</h1>
 
 <p align="center">
-  An AI-native personal learning bookshelf.<br>
-  把学习目标变成可以真正学完的书。
+  <strong>把学习目标变成可以真正学完的书。</strong><br>
+  An AI-native personal learning system built around understanding, verification, and durable memory.
 </p>
 
 <p align="center">
-  <a href="https://slow.net.cn">访问产品 / Live site</a> ·
-  <a href="mailto:alpha@slow.net.cn">申请 Alpha 测试 / Request access</a> ·
-  <a href="#中文">中文</a> · <a href="#english">English</a>
+  <a href="https://slow.net.cn">体验产品</a> ·
+  <a href="https://3321-cpsasd.github.io/slow/">阅读文档</a> ·
+  <a href="mailto:alpha@slow.net.cn">申请 Alpha 测试</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/3321-cpsasd/slow/actions/workflows/ci.yml"><img src="https://github.com/3321-cpsasd/slow/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0--only-4f7666" alt="AGPL-3.0-only"></a>
 </p>
 
 ---
 
-## 中文
+## Slow 是什么
 
-Slow 是一个 AI 原生个人学习应用。它把学习目标组织为可阅读、可验证、可持续推进的个性化教材，而不是只生成一份静态计划。
+Slow 是一个 AI 原生个人学习系统。它不会在收到主题后只交付一份“看起来完整”的学习计划，而是把学习目标组织成个性化教材，让学习者逐节阅读、提问、验证，并把真实学习结果带入后续内容。
 
-课程、生成、目录和学习证据共同遵守 [`用户 → 书架 → 系列（学习目标） → 书 → 章 → 节`](PRODUCT_DNA.md) 的领域契约；内容块只是节内结构，不是目录或解锁层级。正文与测验生成遵循 [ADR-0001](docs/decisions/0001-lesson-generation-v2.md)。
+产品围绕一个简单的判断展开：**AI 可以快速生成内容，但理解必须经过学习，掌握必须留下证据。**
 
-### 申请 Alpha 测试
+因此，Slow 的核心交付不是一次性的回答，而是一条可以持续推进的学习闭环：
 
-Slow 目前采用邀请制测试。如果你希望体验产品，请发送邮件至
-[alpha@slow.net.cn](mailto:alpha@slow.net.cn)，简单说明你想学习的主题；我们会在审核后回复注册邀请码。
+```text
+提出学习目标
+  → 形成有序教材
+  → 逐节阅读与 Ask AI
+  → 选择题验证
+  ├─ 未通过：定位缺口 → 补救教学 → 同目标新题
+  └─ 通过：记录学习证据 → 解锁下一节
+       └─ 满分：可选 Ask Me（机制 → 边界 → 迁移）
+```
 
-### 当前能力
+## 与常见 AI 学习工具有什么不同
 
-- React + TypeScript 学习界面
-- FastAPI + SQLAlchemy 服务端
-- 个性化课程、正文与测验生成
-- 服务端评分、渐进解锁与失败补救
-- 与具体学习内容绑定的 Ask AI
-- 可选的多轮 Ask Me 检查
-- 持久化后台任务、恢复与幂等处理
-- 邀请制账号密码登录、本地开发身份和可选 OIDC 身份边界
-- 版本化隐私同意、可审计的退出与数据删除申请
-- 本机运营快照导出，不开放无权限边界的公网管理接口
-- OpenAI 与 Anthropic 兼容供应商接口
+| 常见做法 | Slow 的选择 |
+|---|---|
+| 生成一份课程计划后结束 | 交付可逐节学习、验证和完成的教材 |
+| 每次对话都从零开始 | 将测验、答疑和口试沉淀为学习证据 |
+| 用“读过”代替“掌握” | 通过后才解锁下一节，满分后再开放迁移口试 |
+| 所有人获得相同讲解 | 后续内容参考已有证据，减少重复并补足薄弱关联 |
+| 把模型输出直接当正式内容 | 候选内容先经过结构与契约校验，再原子发布 |
+| 前端自己决定进度 | 评分、解锁和学习状态全部由服务端裁决 |
 
-### 快速开始
+## 产品模型
 
-环境要求：Python 3.12+、Node.js 22+、pnpm 11+。
+Slow 的目录不是普通文件夹，而是学习语义的一部分：
+
+```text
+用户 → 书架 → 系列（学习目标） → 书 → 章 → 节
+                                      └→ 内容块（节内教学结构）
+```
+
+- **书架**承载一个长期学科或领域。
+- **系列**对应一个已确认的学习目标，并组织完成目标所需的有序书籍。
+- **书**围绕一个完整、可命名的学习主题展开。
+- **章**聚合一组相关知识点，通常对应约一天的学习。
+- **节**锚定一个核心知识点，是最小学习与验证单元，典型投入为 15–20 分钟。
+- **内容块**用于定义、机制、例子、边界或练习，不构成新的目录和解锁层级。
+
+完整定义和不可破坏的粒度规则见 [PRODUCT_DNA.md](PRODUCT_DNA.md)。面向学习者的解释见[官方文档：核心概念](https://3321-cpsasd.github.io/slow/textbook-not-plan)。
+
+## 当前学习体验
+
+- 根据目标、角色、经验和期望深度生成系列、书与章节目录。
+- 阅读带有明确内容模式与来源边界的个性化正文。
+- 在具体小节和段落上下文中使用 Ask AI，不打断阅读主流程。
+- 每节结束进行服务端评分的选择题验证；失败后提供补救教学与新题。
+- 满分后可进入 Ask Me，依次检验机制、边界和迁移能力。
+- 将测验和 Ask Me 结果写入掌握画像，用于后续生成与重规划。
+- 通过后生成可编辑的个人笔记，保留易错点、答疑结论和未解决问题。
+- 使用版本化内容、持久后台任务和失败关闭边界保护学习链路。
+
+Slow 目前处于邀请制 Alpha 阶段。你可以访问 [slow.net.cn](https://slow.net.cn)，或发送邮件至 [alpha@slow.net.cn](mailto:alpha@slow.net.cn)，简单说明希望学习的主题以申请测试资格。
+
+## 文档导航
+
+### 学习者与首次访问者
+
+- [官方使用指南](https://3321-cpsasd.github.io/slow/)：了解产品、开始第一次学习并查看核心概念。
+- [为什么是教材，而不是计划](https://3321-cpsasd.github.io/slow/textbook-not-plan)：理解 Slow 的基本产品判断。
+- [学习证据与个性化](https://3321-cpsasd.github.io/slow/evidence-and-personalization)：了解后续内容如何适应真实学习结果。
+- [AI、Demo 与可信边界](https://3321-cpsasd.github.io/slow/ai-content)：了解系统能够和不能保证什么。
+
+### 开发者与贡献者
+
+- [产品底层基因](PRODUCT_DNA.md)：产品层级、学习粒度与证据边界。
+- [架构决策记录](docs/decisions/README.md)：正文生成、课程规划、UI 表达和连续学习等决策。
+- [正文生成与原子发布](docs/decisions/0001-lesson-generation-v2.md)：Learning Contract、内容版本和发布门禁。
+- [课程规划边界](docs/decisions/0002-curriculum-planning-boundaries.md)：系列、书、章、节如何形成与重规划。
+- [模块化单体边界](docs/decisions/0003-modular-monolith-boundaries.md)：应用、领域模块和基础设施的依赖规则。
+- [界面表达边界](docs/decisions/0007-user-interface-expression-boundary.md)：内部机制如何转换为用户可理解的状态与行动。
+- [试点运营](deploy/PILOT_OPERATIONS.md)：邀请制测试和运营流程。
+
+## 本地运行
+
+### 环境要求
+
+- Python 3.12+
+- Node.js 22+
+- pnpm 11+
+
+### 启动应用
 
 ```bash
 python3 -m venv .venv
@@ -54,179 +119,92 @@ cp .env.example .env
 ./start.sh
 ```
 
-默认地址：
+默认服务地址：
 
-- Web：`http://127.0.0.1:5173`
-- API：`http://127.0.0.1:8000`
-- OpenAPI：`http://127.0.0.1:8000/docs`
+| 服务 | 地址 |
+|---|---|
+| Web 应用 | `http://127.0.0.1:5173` |
+| 应用内文档 | `http://127.0.0.1:5173/docs` |
+| API | `http://127.0.0.1:8000` |
+| OpenAPI | `http://127.0.0.1:8000/docs` |
 
-只读运营数据服务见 [`apps/ops/README.md`](apps/ops/README.md)。它运行在运营者本机，通过 SSH 隧道读取生产 PostgreSQL 的受限视图，不占用 ECS 常驻应用资源。
+开发环境未配置外部模型时，只允许使用明确标记的 Demo 数据。Demo 内容不得伪装成真实 AI 结果或正式学习证据。模型密钥只能保存在服务端环境变量中。
 
-未配置外部模型时，开发环境使用明确标记的本地 Demo 数据。Demo 数据不能被当作真实 AI 内容或正式学习证据。
-
-### 验证
+### 验证改动
 
 ```bash
 PYTHONPATH=apps/api .venv/bin/pytest -q apps/api/tests
 cd apps/web && pnpm build
 ```
 
-生产数据库兼容性使用显式的一次性 PostgreSQL 测试实例验证：
+验证 GitHub Pages 独立文档构建：
 
 ```bash
-docker compose -f deploy/compose.postgres.test.yml down --remove-orphans
-docker compose -f deploy/compose.postgres.test.yml up -d --wait
-POSTGRES_TEST_DATABASE_URL=postgresql+psycopg://slow_test:slow_test_only@127.0.0.1:55432/slow_test \
-  PYTHONPATH=apps/api .venv/bin/pytest -q apps/api/tests/test_postgresql_support.py
-docker compose -f deploy/compose.postgres.test.yml down --remove-orphans
+cd apps/web && pnpm build:pages
 ```
 
-真实课程基准候选包必须先通过 Schema、引用闭合和显式缺口校验；校验不会写入数据库：
+更多数据库、部署和专项验证命令请查看对应文档，不在项目首页复制生产操作流程。
 
-```bash
-PYTHONPATH=apps/api .venv/bin/python apps/api/import_curriculum_baseline.py \
-  apps/api/curriculum_baselines/pku_cs_programming_practice_2025_v1.json \
-  --validate-only
+## 技术架构
+
+Slow 当前保持为适合产品验证期的模块化单体：
+
+```text
+React + TypeScript + Vite
+            │ REST / JSON / NDJSON
+            ▼
+FastAPI + Pydantic
+  ├─ 身份、权限与用户作用域
+  ├─ 学习、书架、答疑与产物模块
+  ├─ 评分、解锁与确定性领域规则
+  ├─ AI 能力端口与结构化校验
+  └─ 持久后台任务、版本与审计
+            │
+            ▼
+SQLAlchemy + Alembic + SQLite / PostgreSQL
 ```
 
-候选内容与人工审核决定分别版本化。审核清单必须冻结候选摘要、逐一覆盖来源、候选关系和显式缺口，并明确区分课程范围、知识发布及能力证据门禁：
+AI 负责规划、生成、辅导与评价建议；服务端规则负责身份、归属、评分、完成、解锁和事务裁决。模型输出始终是候选结果，不能绕过服务端校验直接进入正式学习链路。
 
-```bash
-PYTHONPATH=apps/api .venv/bin/python apps/api/import_curriculum_baseline.py \
-  apps/api/curriculum_baselines/pku_cs_programming_practice_2025_v1.json \
-  --review apps/api/curriculum_baselines/pku_cs_programming_practice_2025_v1_review_20260809.json \
-  --validate-only
+## 仓库结构
+
+```text
+apps/
+  api/          FastAPI 服务、领域规则、AI 端口和数据库
+  web/          React 学习应用与官方 Docs
+  ops/          本机只读运营工具
+deploy/         部署配置与试点运营文档
+docs/           系统说明、质量门禁与架构决策
+.github/        CI、发布与 Docs Pages 工作流
 ```
 
-去掉 `--validate-only` 只导入候选和审核记录；再显式增加 `--publish` 才会尝试发布。课程范围仍有阻断项、来源未复核或审核清单不闭合时，发布失败且不会进入正式规划。知识事实和开放能力证据继续走独立门禁，不能因为课程基准已发布而自动升级。权威边界见 [ADR-0004](docs/decisions/0004-curriculum-baseline-authority.md)。
+## 参与项目
 
-测试数据库使用公开的测试凭据和 `tmpfs`，不得与生产 Compose 合并。
+当前阶段优先验证真实学习闭环、生成质量、学习证据和用户留存。提交改动前，请先确认它没有破坏以下原则：
 
-### 安全说明
+- 教材层级保持为“用户 → 书架 → 系列 → 书 → 章 → 节”。
+- 支撑知识不能静默变成新的考核目标。
+- 失败的生成候选不能成为用户可读的正式内容。
+- 解锁、评分和掌握度不能信任浏览器状态。
+- Demo、降级和未核验内容必须明确标识。
+- 用户界面表达任务和影响，不直接暴露内部实现术语。
 
-- API Key 只存在服务端，不应进入浏览器、日志或 Git。
-- 正式内测可使用管理员预创建的账号密码；生产环境必须关闭本地开发身份与 Demo 模式。
-- 解锁、评分和学习状态由服务端负责，不能信任前端状态。
-- `.env`、运行时配置、数据库、附件与内部评测证据均被 Git 忽略。
-
-### 邀请制内测账号
-
-生产内测使用 `APP_MODE=production` 与 `AUTH_MODE=password`。默认不开放注册；
-首次部署并完成迁移后，可继续由管理员在 API 容器中创建账号：
-
-```bash
-./create-demo-user.sh
-./create-demo-user.sh --name '张三'
-docker compose --env-file .release.env -f compose.prod.yml -f compose.https.yml exec api python manage_users.py create zhangsan --name '张三'
-docker compose --env-file .release.env -f compose.prod.yml -f compose.https.yml exec api python manage_users.py disable zhangsan
-docker compose --env-file .release.env -f compose.prod.yml -f compose.https.yml exec api python manage_users.py enable zhangsan
-docker compose --env-file .release.env -f compose.prod.yml -f compose.https.yml exec api python manage_users.py reset-password zhangsan
-```
-
-`create-demo-user.sh` 必须在 ECS 的 `/opt/slow` 下调用。它会使用生产 HTTPS
-Compose 配置自动创建 `slow-demo` 加五位随机数的账号，并生成一个 24 位强密码。
-账号和 Argon2id 密码哈希随 PostgreSQL 数据库持久化；明文密码只在
-调用终端显示一次，不会进入密码托管文件。请立即复制并通过私密渠道发送给用户。
-
-创建和重置命令默认生成随机密码；也可使用 `--prompt-password` 安全输入自定密码。
-禁用账号或重置密码会撤销该用户的全部现有 Session。默认 Session 最长 7 天，
-连续 24 小时未使用则过期。
-
-需要开放无邮箱 Alpha 注册时，在生产环境设置：
-
-```bash
-REGISTRATION_MODE=alpha
-ALPHA_REGISTRATION_CODE=请使用独立高熵访问码
-ALPHA_REGISTRATION_DAILY_LIMIT=100
-```
-
-新用户使用访问码创建用户名和密码，随后会收到仅展示一次的恢复码。恢复码
-是无邮箱账号的自助重置凭证；服务端只保存其哈希。恢复成功后旧密码、旧恢复码
-和全部现有 Session 都会失效，并生成新的恢复码。已登录用户验证当前密码后，也可以
-在“账号与数据”中生成新的恢复码；生成后旧恢复码立即失效。`REGISTRATION_MODE=closed`
-可随时停止新注册，不影响已有账号登录和恢复。`open` 模式不要求访问码，当前
-Alpha 阶段不建议启用。
-
-上线前如确实需要管理员重复查看分发密码，可在**非生产环境**显式设置
-`PASSWORD_ESCROW_ENABLED=true`。创建或重置后的密码会写入独立的 `0600` 文件，
-然后可执行：
-
-```bash
-PYTHONPATH=apps/api .venv/bin/python apps/api/manage_users.py show-password zhangsan
-```
-
-正式上线前先关闭该环境变量，再清除托管文件：
-
-```bash
-PYTHONPATH=apps/api .venv/bin/python apps/api/manage_users.py purge-passwords --confirm
-```
-
-`APP_MODE=production` 检测到密码托管开启时会拒绝启动。清理服务器文件后，还应按
-备份保留策略删除可能含有该文件的历史备份。密码重置只撤销身份 Session，不删除或
-重建用户，因此书架、学习进度、测验记录和掌握画像均保持不变。
-
-内测运营者应遵循 [`deploy/PILOT_OPERATIONS.md`](deploy/PILOT_OPERATIONS.md)。生产环境会在学习画像和业务接口前要求当前版本的隐私与试点同意；运营台账快照只允许在 API 容器内导出：
-
-```bash
-python operations_report.py --include-identifiers
-```
-
-输出包含账号状态和学习漏斗指标，不包含密码、Session、API Key、学习正文、问答或笔记内容。
-
-### 许可证
-
-本项目源代码依据 [GNU Affero General Public License v3.0](LICENSE)
-发布，仅适用该版本（`AGPL-3.0-only`）。
-
----
+建议从 [PRODUCT_DNA.md](PRODUCT_DNA.md) 和 [架构决策索引](docs/decisions/README.md) 开始阅读，再通过 Issue 或 Pull Request 参与讨论。
 
 ## English
 
-Slow is an AI-native personal learning application. It turns a learning goal into structured material that learners can study, verify, and continue over time instead of stopping at a static plan.
+Slow is an AI-native personal learning system that turns a learning goal into structured material a learner can actually study, verify, and finish. It treats understanding as a process and mastery as evidence—not as a side effect of content generation.
 
-### Request Alpha access
+The core loop is: **goal → personalized textbook → section-level study → assessment → remediation or unlock → durable learning evidence**. Later content uses that evidence to avoid unnecessary repetition and provide scaffolding where it is needed.
 
-Slow is currently invite-only. To try the product, email
-[alpha@slow.net.cn](mailto:alpha@slow.net.cn) with a short note about what you want to learn. We will review the request and reply with a registration invite code.
+- Product: [slow.net.cn](https://slow.net.cn)
+- User documentation: [3321-cpsasd.github.io/slow](https://3321-cpsasd.github.io/slow/)
+- Alpha access: [alpha@slow.net.cn](mailto:alpha@slow.net.cn)
+- Product contract: [PRODUCT_DNA.md](PRODUCT_DNA.md)
+- Architecture decisions: [docs/decisions](docs/decisions/README.md)
 
-### Highlights
+Local development requires Python 3.12+, Node.js 22+, and pnpm 11+. Follow the commands in [Local development](#本地运行) to start the application.
 
-- React and TypeScript learning interface
-- FastAPI and SQLAlchemy backend
-- Personalized curriculum, lesson, and quiz generation
-- Server-side grading, progressive unlocking, and remediation
-- Context-bound Ask AI and optional multi-round Ask Me checks
-- Durable background tasks with recovery and idempotency
-- Invitation-only password accounts, local development identity, and optional OIDC
-- OpenAI- and Anthropic-compatible provider interfaces
+## License
 
-### Quick start
-
-Requires Python 3.12+, Node.js 22+, and pnpm 11+.
-
-```bash
-python3 -m venv .venv
-.venv/bin/pip install -r apps/api/requirements.txt
-cd apps/web && pnpm install && cd ../..
-cp .env.example .env
-./start.sh
-```
-
-### Verification
-
-```bash
-PYTHONPATH=apps/api .venv/bin/pytest -q apps/api/tests
-cd apps/web && pnpm build
-```
-
-Production beta deployments can use `APP_MODE=production` with
-`AUTH_MODE=password`. Accounts are created only by the server-side
-`manage_users.py` command; there is no public registration endpoint.
-
-External model credentials are optional in development and must remain server-side. Production deployments can use invitation-only password accounts or OIDC, and must disable local/demo identity modes.
-
-### License
-
-This project's source code is licensed under the
-[GNU Affero General Public License v3.0](LICENSE), version 3 only
-(`AGPL-3.0-only`).
+Copyright © Slow contributors. Licensed under the [GNU Affero General Public License v3.0](LICENSE), version 3 only (`AGPL-3.0-only`).
