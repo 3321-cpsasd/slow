@@ -13,6 +13,7 @@ from ...infrastructure.tables import (
     BookCapstone,
     Chapter,
     ChapterPractice,
+    Section,
     now,
 )
 
@@ -284,6 +285,107 @@ class ArtifactService:
         progress.updated_at = now()
         self.db.commit()
         return self.capstone_view(capstone)
+
+    def settle_book(self, book_id: str) -> dict:
+        """Create an idempotent, evidence-derived completion receipt for a book."""
+
+        context = self.contexts.resolve_book(
+            user_id=self.user_id,
+            book_id=book_id,
+        )
+        book = context.book
+        if self.progress.for_book(book).status != "completed":
+            raise AppError(
+                "完成全书后才可结算",
+                code="BOOK_SETTLEMENT_LOCKED",
+                status=403,
+            )
+        capstone = self.db.scalar(
+            select(BookCapstone).where(BookCapstone.book_id == book_id)
+        )
+        if not capstone:
+            raise AppError(
+                "全书结算记录不存在",
+                code="BOOK_SETTLEMENT_NOT_FOUND",
+                status=404,
+            )
+
+        chapters = self.db.scalars(
+            select(Chapter)
+            .where(Chapter.book_id == book_id)
+            .order_by(Chapter.position)
+        ).all()
+        section_progresses = []
+        for chapter in chapters:
+            sections = self.db.scalars(
+                select(Section)
+                .where(Section.chapter_id == chapter.id)
+                .order_by(Section.position)
+            ).all()
+            section_progresses.extend(
+                self.progress.for_section(section, chapter, book)
+                for section in sections
+            )
+
+        completed_sections = [
+            item for item in section_progresses if item.status == "completed"
+        ]
+        scored_sections = [item for item in completed_sections if item.total_score > 0]
+        best_score = sum(item.best_score for item in scored_sections)
+        total_score = sum(item.total_score for item in scored_sections)
+        summary = {
+            "bookId": book.id,
+            "bookTitle": book.title,
+            "status": "completed",
+            "chapterCount": len(chapters),
+            "completedChapterCount": sum(
+                self.progress.for_chapter(chapter, book).status == "completed"
+                for chapter in chapters
+            ),
+            "sectionCount": len(section_progresses),
+            "completedSectionCount": len(completed_sections),
+            "verificationScore": best_score,
+            "verificationTotal": total_score,
+            "verificationRate": (
+                round(best_score * 100 / total_score) if total_score else None
+            ),
+            "perfectSectionCount": sum(
+                item.ask_me_unlocked for item in completed_sections
+            ),
+            "reviewSectionCount": sum(
+                item.total_score > 0 and item.best_score < item.total_score
+                for item in completed_sections
+            ),
+            "ruleVersion": "book_settlement_v1",
+        }
+
+        progress = self.capstone_progress(capstone)
+        if progress.status != "completed":
+            run = self.progress.active_run(book.series_id)
+            content = {"kind": "book_settlement", "summary": summary}
+            self.db.add(
+                ArtifactSubmission(
+                    id=_uid("artifact_submission"),
+                    learning_run_id=run.id,
+                    user_id=self.user_id,
+                    target_type="book_capstone",
+                    target_id=capstone.id,
+                    content_json=_dump(content),
+                    attachment_ids_json="[]",
+                )
+            )
+            progress.submission_json = _dump(
+                {"content": content, "attachmentIds": []}
+            )
+            progress.status = "completed"
+            progress.updated_at = now()
+            self.db.commit()
+        summary["settledAt"] = (
+            progress.updated_at.replace(tzinfo=None).isoformat()
+            if progress.updated_at
+            else None
+        )
+        return summary
 
     def capstone_progress(self, capstone):
         book = self.db.get(Book, capstone.book_id)

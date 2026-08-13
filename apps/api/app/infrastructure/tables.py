@@ -141,6 +141,37 @@ class ProductEvent(Base):
     )
 
 
+class StudyActivityPulse(Base):
+    """Append-only authority used to rebuild estimated study-time intervals."""
+
+    __tablename__ = "study_activity_pulses"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "event_id",
+            name="uq_study_activity_pulses_user_event",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    event_id: Mapped[str] = mapped_column(String(80))
+    client_session_id: Mapped[str] = mapped_column(String(80), index=True)
+    client_sequence: Mapped[int] = mapped_column(Integer)
+    activity_kind: Mapped[str] = mapped_column(String(32), index=True)
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    learning_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_runs.id"), nullable=True, index=True
+    )
+    timezone_snapshot: Mapped[str] = mapped_column(String(64))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    measurement_rule_version: Mapped[str] = mapped_column(
+        String(40), default="study_time_v1"
+    )
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
 class UserProfile(Base):
     __tablename__ = "user_profiles"
     user_id: Mapped[str] = mapped_column(
@@ -1016,6 +1047,50 @@ class PlanCreationRequest(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class LearningStartPreview(Base):
+    """Immutable knowledge-map preview shown before a Series exists."""
+
+    __tablename__ = "learning_start_previews"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    shelf_id: Mapped[str] = mapped_column(ForeignKey("shelves.id"), index=True)
+    knowledge_graph_release_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_graph_releases.id"), nullable=True, index=True
+    )
+    topic: Mapped[str] = mapped_column(String(160))
+    request_hash: Mapped[str] = mapped_column(String(64), index=True)
+    visible_concept_revision_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    schema_version: Mapped[str] = mapped_column(
+        String(48), default="learning_start_preview_v1"
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class SeriesLearningStartPreference(Base):
+    """Append-only startup choice bound to the created Series."""
+
+    __tablename__ = "series_learning_start_preferences"
+    __table_args__ = (
+        UniqueConstraint("series_id", name="uq_series_learning_start_preference"),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    series_id: Mapped[str] = mapped_column(ForeignKey("series.id"), index=True)
+    preview_id: Mapped[str | None] = mapped_column(
+        ForeignKey("learning_start_previews.id"), nullable=True, index=True
+    )
+    start_mode: Mapped[str] = mapped_column(String(24), index=True)
+    selected_concept_revision_ids_json: Mapped[str] = mapped_column(
+        Text, default="[]"
+    )
+    learning_preferences_json: Mapped[str] = mapped_column(Text, default="[]")
+    rule_version: Mapped[str] = mapped_column(
+        String(48), default="learning_start_selection_v1"
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class MilestonePath(Base):
     __tablename__ = "milestone_paths"
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -1426,6 +1501,40 @@ class ChapterProgress(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class ChapterRouteDecisionEvent(Base):
+    """Append-only learner decision to learn, skip, or return to one chapter."""
+
+    __tablename__ = "chapter_route_decision_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "learning_run_id",
+            "user_id",
+            "idempotency_key",
+            name="uq_chapter_route_decision_run_user_idempotency",
+        ),
+        ForeignKeyConstraint(
+            ["learning_run_id", "user_id"],
+            ["learning_runs.id", "learning_runs.user_id"],
+            name="fk_chapter_route_decision_run_user",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    learning_run_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_runs.id"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    chapter_id: Mapped[str] = mapped_column(ForeignKey("chapters.id"), index=True)
+    action: Mapped[str] = mapped_column(String(24), index=True)
+    reason: Mapped[str] = mapped_column(String(32), default="", index=True)
+    source: Mapped[str] = mapped_column(String(32), default="chapter_entry")
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    outcome_json: Mapped[str] = mapped_column(Text, default="{}")
+    rule_version: Mapped[str] = mapped_column(
+        String(48), default="chapter_route_choice_v1"
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class SectionProgress(Base):
     __tablename__ = "section_progress"
     __table_args__ = (
@@ -1803,6 +1912,13 @@ class AiInvocation(Base):
     api_mode: Mapped[str] = mapped_column(String(32))
     model: Mapped[str] = mapped_column(String(160), index=True)
     operation: Mapped[str] = mapped_column(String(64), index=True)
+    purpose: Mapped[str] = mapped_column(String(64), default="", index=True)
+    authority: Mapped[str] = mapped_column(String(32), default="")
+    deployment_id: Mapped[str] = mapped_column(String(160), default="", index=True)
+    model_family_id: Mapped[str] = mapped_column(String(80), default="", index=True)
+    config_version_id: Mapped[str] = mapped_column(String(80), default="", index=True)
+    route_policy_version: Mapped[str] = mapped_column(String(80), default="")
+    fallback_index: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(24), index=True)
     usage_status: Mapped[str] = mapped_column(String(24), index=True)
     attribution_status: Mapped[str] = mapped_column(String(32), index=True)
@@ -1905,6 +2021,48 @@ class AssessmentItemVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class AssessmentAnswerVersion(Base):
+    """Immutable scoring authority separated from the authored item payload."""
+
+    __tablename__ = "assessment_answer_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "assessment_item_version_id",
+            name="uq_assessment_answer_item_version",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    assessment_item_version_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_item_versions.id"), index=True
+    )
+    authority_kind: Mapped[str] = mapped_column(String(48), index=True)
+    correct_option_ids_json: Mapped[str] = mapped_column(Text)
+    option_verdicts_json: Mapped[str] = mapped_column(Text, default="[]")
+    explanation_payload_json: Mapped[str] = mapped_column(Text)
+    schema_version: Mapped[str] = mapped_column(String(48))
+    rule_version: Mapped[str] = mapped_column(String(48))
+    verdict_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    publication_status: Mapped[str] = mapped_column(
+        String(24), default="published", index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class LearningEvidenceInvalidation(Base):
+    """Append-only withdrawal of all learning evidence from one faulty quiz."""
+
+    __tablename__ = "learning_evidence_invalidations"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    quiz_set_id: Mapped[str] = mapped_column(
+        ForeignKey("quiz_sets.id"), index=True
+    )
+    reason_code: Mapped[str] = mapped_column(String(64), index=True)
+    actor_kind: Mapped[str] = mapped_column(String(32))
+    actor_id: Mapped[str] = mapped_column(String(160), default="")
+    idempotency_key: Mapped[str] = mapped_column(String(160), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class AssessmentDistractorDiagnostic(Base):
     """Immutable diagnostic meaning attached to one incorrect option."""
 
@@ -1981,6 +2139,41 @@ class QuizAttempt(Base):
     workflow_status: Mapped[str] = mapped_column(String(24), default="processing")
     response_json: Mapped[str] = mapped_column(Text, default="")
     workflow_error_code: Mapped[str] = mapped_column(String(80), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ChapterChallengeAttempt(Base):
+    """One atomic chapter-level diagnostic assembled from published section quizzes."""
+
+    __tablename__ = "chapter_challenge_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "learning_run_id",
+            "user_id",
+            "idempotency_key",
+            name="uq_chapter_challenge_run_user_idempotency",
+        ),
+        ForeignKeyConstraint(
+            ["learning_run_id", "user_id"],
+            ["learning_runs.id", "learning_runs.user_id"],
+            name="fk_chapter_challenge_run_user",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    learning_run_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_runs.id"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    chapter_id: Mapped[str] = mapped_column(ForeignKey("chapters.id"), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    status: Mapped[str] = mapped_column(String(24), default="processing", index=True)
+    passed: Mapped[bool] = mapped_column(Boolean, default=False)
+    request_json: Mapped[str] = mapped_column(Text, default="{}")
+    response_json: Mapped[str] = mapped_column(Text, default="{}")
+    rule_version: Mapped[str] = mapped_column(
+        String(48), default="chapter_challenge_v1"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -2324,6 +2517,130 @@ class KnowledgeStateProjection(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class KnowledgeNodeStateProjection(Base):
+    """Rebuildable user state for one published knowledge identity.
+
+    Target-level BKT projections remain the measurement layer.  This row is the
+    user-facing aggregation that turns qualified, attributable evidence into a
+    rank, stars and a wake-up state without making the UI an authority.
+    """
+
+    __tablename__ = "knowledge_node_state_projections"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "concept_revision_id",
+            name="uq_knowledge_node_state_user_concept",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    concept_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("concept_revisions.id"), index=True
+    )
+    current_rank: Mapped[str] = mapped_column(
+        String(24), default="unranked", index=True
+    )
+    current_rank_order: Mapped[int] = mapped_column(Integer, default=0)
+    current_stars: Mapped[int] = mapped_column(Integer, default=0)
+    highest_rank: Mapped[str] = mapped_column(
+        String(24), default="unranked", index=True
+    )
+    highest_rank_order: Mapped[int] = mapped_column(Integer, default=0)
+    highest_stars: Mapped[int] = mapped_column(Integer, default=0)
+    activation_state: Mapped[str] = mapped_column(
+        String(24), default="learning", index=True
+    )
+    stability_days: Mapped[int] = mapped_column(Integer, default=1)
+    next_due_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    last_qualified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    evidence_count: Mapped[int] = mapped_column(Integer, default=0)
+    independent_evidence_count: Mapped[int] = mapped_column(Integer, default=0)
+    uncertainty_ppm: Mapped[int] = mapped_column(Integer, default=1000000)
+    rank_rule_version: Mapped[str] = mapped_column(
+        String(40), default="knowledge_rank_v2"
+    )
+    projection_version: Mapped[int] = mapped_column(Integer, default=1)
+    source_observation_watermark: Mapped[int] = mapped_column(Integer, default=0)
+    rebuilt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class LearnerKnowledgeProfileProjection(Base):
+    """Rebuildable, evidence-only third-layer learner profile.
+
+    This projection deliberately stores structural summaries rather than AI
+    diagnoses.  Every field can be reproduced from node and target projections.
+    """
+
+    __tablename__ = "learner_knowledge_profile_projections"
+    __table_args__ = (
+        UniqueConstraint("user_id", name="uq_learner_knowledge_profile_user"),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    summary_json: Mapped[str] = mapped_column(Text, default="{}")
+    evidence_count: Mapped[int] = mapped_column(Integer, default=0)
+    independent_evidence_count: Mapped[int] = mapped_column(Integer, default=0)
+    profile_rule_version: Mapped[str] = mapped_column(
+        String(40), default="learner_knowledge_profile_v1"
+    )
+    projection_version: Mapped[int] = mapped_column(Integer, default=1)
+    source_observation_watermark: Mapped[int] = mapped_column(Integer, default=0)
+    rebuilt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class BktParameterSetVersion(Base):
+    """Immutable candidate or baseline BKT parameter artifact."""
+
+    __tablename__ = "bkt_parameter_set_versions"
+    version: Mapped[str] = mapped_column(String(80), primary_key=True)
+    scope_kind: Mapped[str] = mapped_column(String(32), index=True)
+    scope_key: Mapped[str] = mapped_column(String(160), index=True)
+    parameters_json: Mapped[str] = mapped_column(Text)
+    training_snapshot_json: Mapped[str] = mapped_column(Text, default="{}")
+    evaluation_json: Mapped[str] = mapped_column(Text, default="{}")
+    provenance_mode: Mapped[str] = mapped_column(String(40), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
+class BktParameterActivationEvent(Base):
+    """Append-only shadow/online activation audit for a parameter artifact."""
+
+    __tablename__ = "bkt_parameter_activation_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "scope_kind",
+            "scope_key",
+            "deployment_mode",
+            "sequence",
+            name="uq_bkt_activation_scope_mode_sequence",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    scope_kind: Mapped[str] = mapped_column(String(32), index=True)
+    scope_key: Mapped[str] = mapped_column(String(160), index=True)
+    deployment_mode: Mapped[str] = mapped_column(String(16), index=True)
+    sequence: Mapped[int] = mapped_column(Integer)
+    parameter_set_version: Mapped[str] = mapped_column(
+        ForeignKey("bkt_parameter_set_versions.version"), index=True
+    )
+    previous_parameter_set_version: Mapped[str] = mapped_column(
+        String(80), default=""
+    )
+    decision_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
 class ReviewState(Base):
     __tablename__ = "review_states"
     __table_args__ = (
@@ -2454,6 +2771,139 @@ class ReviewAssignmentEventRecord(Base):
     rule_version: Mapped[str] = mapped_column(String(40))
     idempotency_key: Mapped[str] = mapped_column(String(160), default="")
     payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ReinforcementRun(Base):
+    """Server-owned bounded recovery run for one assessment target."""
+
+    __tablename__ = "reinforcement_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_review_assignment_id",
+            name="uq_reinforcement_runs_review_assignment",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    assessment_target_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_targets.id"), index=True
+    )
+    source_review_assignment_id: Mapped[str | None] = mapped_column(
+        ForeignKey("review_assignments.id"), nullable=True, index=True
+    )
+    source_learning_run_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_runs.id"), index=True
+    )
+    source_section_id: Mapped[str] = mapped_column(
+        ForeignKey("sections.id"), index=True
+    )
+    learning_contract_version_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), index=True
+    )
+    content_version_id: Mapped[str] = mapped_column(
+        ForeignKey("content_versions.id"), index=True
+    )
+    entry_mode: Mapped[str] = mapped_column(String(32), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    current_state: Mapped[str] = mapped_column(String(32), index=True)
+    current_activity_key: Mapped[str] = mapped_column(String(64))
+    activity_count: Mapped[int] = mapped_column(Integer, default=0)
+    repair_rounds: Mapped[int] = mapped_column(Integer, default=0)
+    max_activities: Mapped[int] = mapped_column(Integer, default=5)
+    max_repair_rounds: Mapped[int] = mapped_column(Integer, default=2)
+    confirmed_cause_code: Mapped[str] = mapped_column(String(48), default="")
+    state_rule_version: Mapped[str] = mapped_column(String(48))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class ReinforcementPackageVersion(Base):
+    """Immutable published package; AI output is authoritative only after validation."""
+
+    __tablename__ = "reinforcement_package_versions"
+    __table_args__ = (
+        UniqueConstraint("run_id", "version", name="uq_reinforcement_package_run_version"),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("reinforcement_runs.id"), index=True)
+    generation_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("generation_runs.id"), nullable=True, index=True
+    )
+    verification_quiz_set_id: Mapped[str] = mapped_column(
+        ForeignKey("quiz_sets.id"), unique=True
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    schema_version: Mapped[str] = mapped_column(String(48))
+    prompt_version: Mapped[str] = mapped_column(String(48))
+    input_hash: Mapped[str] = mapped_column(String(64))
+    output_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ReinforcementActivityVersion(Base):
+    """Immutable activity definition inside a published reinforcement package."""
+
+    __tablename__ = "reinforcement_activity_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "package_version_id", "activity_key",
+            name="uq_reinforcement_activity_package_key",
+        ),
+        UniqueConstraint(
+            "package_version_id", "position",
+            name="uq_reinforcement_activity_package_position",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    package_version_id: Mapped[str] = mapped_column(
+        ForeignKey("reinforcement_package_versions.id"), index=True
+    )
+    assessment_target_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_targets.id"), index=True
+    )
+    activity_key: Mapped[str] = mapped_column(String(64))
+    position: Mapped[int] = mapped_column(Integer)
+    activity_type: Mapped[str] = mapped_column(String(32), index=True)
+    assistance_mode: Mapped[str] = mapped_column(String(32))
+    evidence_role: Mapped[str] = mapped_column(String(32))
+    payload_json: Mapped[str] = mapped_column(Text)
+    signature: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ReinforcementEventRecord(Base):
+    """Append-only interaction and state-transition fact for a recovery run."""
+
+    __tablename__ = "reinforcement_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "run_id", "idempotency_key",
+            name="uq_reinforcement_events_run_idempotency",
+        ),
+    )
+    sequence: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[str] = mapped_column(String, unique=True, index=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("reinforcement_runs.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    event_type: Mapped[str] = mapped_column(String(32), index=True)
+    activity_key: Mapped[str] = mapped_column(String(64))
+    state_before: Mapped[str] = mapped_column(String(32))
+    state_after: Mapped[str] = mapped_column(String(32))
+    response_json: Mapped[str] = mapped_column(Text, default="{}")
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
+    assistance_mode: Mapped[str] = mapped_column(String(32))
+    source_observation_id: Mapped[str | None] = mapped_column(
+        ForeignKey("assessment_observations.id"), nullable=True, index=True
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    rule_version: Mapped[str] = mapped_column(String(48))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -2755,6 +3205,12 @@ class AskMeSession(Base):
     status: Mapped[str] = mapped_column(String(24), default="active")
     round_index: Mapped[int] = mapped_column(Integer, default=0)
     entries_json: Mapped[str] = mapped_column(Text, default="[]")
+    current_probe_deployment_id: Mapped[str] = mapped_column(
+        String(160), default="", server_default=""
+    )
+    current_probe_model_family_id: Mapped[str] = mapped_column(
+        String(160), default="", server_default=""
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
@@ -2818,6 +3274,12 @@ class AskMeDiscussionTopic(Base):
     assessment_target_ids_json: Mapped[str] = mapped_column(Text, default="[]")
     status: Mapped[str] = mapped_column(String(24), default="pending", index=True)
     current_prompt: Mapped[str] = mapped_column(Text)
+    current_probe_deployment_id: Mapped[str] = mapped_column(
+        String(160), default="", server_default=""
+    )
+    current_probe_model_family_id: Mapped[str] = mapped_column(
+        String(160), default="", server_default=""
+    )
     turn_count: Mapped[int] = mapped_column(Integer, default=0)
     evidence_recorded: Mapped[bool] = mapped_column(Boolean, default=False)
     final_assessment_json: Mapped[str] = mapped_column(Text, default="{}")

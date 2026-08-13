@@ -26,8 +26,8 @@ class Settings(BaseSettings):
         validation_alias="AI_REQUEST_TIMEOUT_SECONDS",
     )
     ai_fallback_models: str = Field(
-        default="qwen3.8-max-preview",
-        validation_alias="AI_FALLBACK_MODELS",
+        default="qwen3.8-max",
+        validation_alias=AliasChoices("AI_MODEL_POOL", "AI_FALLBACK_MODELS"),
     )
     qwen38_api_key: str = Field(default="", validation_alias="QWEN38_API_KEY")
     qwen38_base_url: str = Field(default="", validation_alias="QWEN38_BASE_URL")

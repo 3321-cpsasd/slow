@@ -289,9 +289,14 @@ class MilestoneService:
                 None,
             )
             section_objectives = section.get("objectives") or []
+            section_objective = section_objectives[0] if section_objectives else None
+            if isinstance(section_objective, dict):
+                section_objective = section_objective.get("statement")
+            if not isinstance(section_objective, str):
+                section_objective = ""
             reason = (
-                section_objectives[0]
-                if section_objectives
+                section_objective.strip()
+                if section_objective.strip()
                 else matched.get("statement")
                 if matched
                 else chapter.get("objective")

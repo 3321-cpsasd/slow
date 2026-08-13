@@ -29,6 +29,12 @@ from ...infrastructure.tables import (
 
 
 M1_NAMESPACE = "m1_provisional"
+ROUTE_KNOWLEDGE_NAMESPACE = "route_knowledge"
+ROUTE_KNOWLEDGE_IDENTITY_STATUS = "route_scoped_knowledge"
+RANK_SETTLEABLE_IDENTITY_STATUSES = {
+    "published_knowledge_graph",
+    ROUTE_KNOWLEDGE_IDENTITY_STATUS,
+}
 M1_CONTRACT_SCHEMA_VERSION = "learning_contract_v1"
 
 
@@ -143,6 +149,121 @@ def materialize_provisional_target(
     return target
 
 
+def _series_id_for_section(db: Session, section: Section) -> str:
+    series_id = db.scalar(
+        select(Book.series_id)
+        .join(Chapter, Chapter.book_id == Book.id)
+        .where(Chapter.id == section.chapter_id)
+    )
+    if not series_id:
+        raise AppError(
+            "小节缺少所属系列，不能建立稳定的能力身份",
+            code="SECTION_SERIES_MISSING",
+            status=500,
+        )
+    return series_id
+
+
+def _route_rank_policy(statement: str) -> dict:
+    """Return the complete local capability ladder frozen with a route node."""
+
+    return {
+        "version": "knowledge_rank_policy_v1",
+        "capabilityScope": statement,
+        "rankCeiling": "master",
+        "dimensionRanks": {
+            "recognition": "bronze",
+            "mechanism": "silver",
+            "application": "gold",
+            "boundary": "platinum",
+            "transfer": "diamond",
+        },
+    }
+
+
+def _materialize_route_target(
+    db: Session,
+    *,
+    series_id: str,
+    statement: str,
+) -> AssessmentTarget:
+    """Create a stable, rank-settleable identity without cross-route guessing."""
+
+    objective_hash = _objective_key(statement)
+    namespace = f"{ROUTE_KNOWLEDGE_NAMESPACE}:{series_id}"
+    semantic_key = f"route:{series_id}:{objective_hash}"
+    concept_id = _stable_id("concept_route", series_id, objective_hash)
+    revision_id = _stable_id("concept_revision_route", concept_id, 1)
+    objective_id = _stable_id("learning_objective_route", series_id, objective_hash)
+    target_id = _stable_id(
+        "target_route", series_id, objective_hash, "recognition", "standard"
+    )
+
+    concept = db.get(Concept, concept_id)
+    if concept is None:
+        db.add(
+            Concept(
+                id=concept_id,
+                namespace=namespace,
+                concept_key=objective_hash,
+                canonical_name=statement,
+                status="active",
+                origin="route_scoped",
+            )
+        )
+    revision = db.get(ConceptRevision, revision_id)
+    if revision is None:
+        db.add(
+            ConceptRevision(
+                id=revision_id,
+                concept_id=concept_id,
+                revision=1,
+                label=statement,
+                definition=statement,
+                scope_json=_dump(
+                    {
+                        "routeScope": {"seriesId": series_id},
+                        "rankPolicy": _route_rank_policy(statement),
+                    }
+                ),
+                boundaries_json="[]",
+                provenance_mode="route_scoped",
+                verification_status="route_scoped",
+            )
+        )
+    objective = db.get(LearningObjective, objective_id)
+    if objective is None:
+        db.add(
+            LearningObjective(
+                id=objective_id,
+                namespace=namespace,
+                objective_key=objective_hash,
+                statement=statement,
+                cognitive_verb="demonstrate",
+                outcome_type="knowledge",
+                provenance_mode="route_scoped",
+                verification_status="route_scoped",
+                status="active",
+            )
+        )
+    target = db.get(AssessmentTarget, target_id)
+    if target is None:
+        target = AssessmentTarget(
+            id=target_id,
+            concept_revision_id=revision_id,
+            learning_objective_id=objective_id,
+            objective_key=semantic_key,
+            objective_statement=statement,
+            dimension="recognition",
+            target_depth="standard",
+            identity_status=ROUTE_KNOWLEDGE_IDENTITY_STATUS,
+            status="active",
+        )
+        db.add(target)
+    db.flush()
+    return target
+
+
 def _ensure_section_targets(
     db: Session, section: Section
 ) -> list[tuple[SectionAssessmentTarget, AssessmentTarget]]:
@@ -239,31 +360,18 @@ def _ensure_section_targets(
     # Existing bindings are historical server-owned semantics. Never rewrite or
     # expand a partially materialized M1 set during migration.
     objectives = [] if rows else _section_objectives(section)
+    series_id = _series_id_for_section(db, section) if objectives else None
     for position, (statement, required) in enumerate(objectives, 1):
         key = _objective_key(statement)
         pair = by_key.get(key)
         if pair is None:
-            target = db.scalar(
-                select(AssessmentTarget).where(
-                    AssessmentTarget.objective_key == key,
-                    AssessmentTarget.dimension == "recognition",
-                    AssessmentTarget.target_depth == "standard",
-                )
+            target = _materialize_route_target(
+                db,
+                series_id=series_id,
+                statement=statement,
             )
-            if target is None:
-                target = AssessmentTarget(
-                    id=_stable_id("target_m1", key, "recognition", "standard"),
-                    objective_key=key,
-                    objective_statement=statement,
-                    dimension="recognition",
-                    target_depth="standard",
-                    identity_status="legacy_provisional",
-                    status="active",
-                )
-                db.add(target)
-                db.flush()
             binding = SectionAssessmentTarget(
-                id=_stable_id("section_target_m1", section.id, target.id),
+                id=_stable_id("section_target_route", section.id, target.id),
                 section_id=section.id,
                 assessment_target_id=target.id,
                 position=position,
@@ -276,7 +384,8 @@ def _ensure_section_targets(
 
     result = sorted(by_key.values(), key=lambda pair: pair[0].position)
     for _binding, target in result:
-        materialize_provisional_target(db, target)
+        if not target.concept_revision_id or not target.learning_objective_id:
+            materialize_provisional_target(db, target)
     return result
 
 
@@ -313,12 +422,17 @@ def ensure_learning_contract(
     if delivery_depth not in {"overview", "deep", "mastery"}:
         delivery_depth = "deep"
     target_rows = _ensure_section_targets(db, section)
-    uses_published_knowledge = bool(target_rows) and all(
-        target.identity_status == "published_knowledge_graph"
+    uses_rank_settleable_knowledge = bool(target_rows) and all(
+        target.identity_status in RANK_SETTLEABLE_IDENTITY_STATUSES
         for _, target in target_rows
     )
+    identity_statuses = {target.identity_status for _, target in target_rows}
     contract_provenance = (
-        "published_knowledge_graph" if uses_published_knowledge else provenance_mode
+        "published_knowledge_graph"
+        if identity_statuses == {"published_knowledge_graph"}
+        else "route_scoped_knowledge"
+        if identity_statuses == {ROUTE_KNOWLEDGE_IDENTITY_STATUS}
+        else provenance_mode
     )
     payload = {
         "schemaVersion": M1_CONTRACT_SCHEMA_VERSION,
@@ -380,7 +494,7 @@ def ensure_learning_contract(
             }
         ),
         provenance_mode=contract_provenance,
-        lineage_status=("verified" if uses_published_knowledge else "provisional"),
+        lineage_status=("verified" if uses_rank_settleable_knowledge else "provisional"),
         contract_hash=contract_hash,
     )
     db.add(contract)
@@ -446,6 +560,63 @@ def ensure_m1_learning_contract(
         mission_version_id=mission_version_id,
         provenance_mode="derived_from_m1",
     )
+
+
+def require_rank_settleable_contract(
+    db: Session,
+    contract: LearningContractVersion,
+) -> None:
+    """Fail publication unless every formal target can produce a rank receipt."""
+
+    from .knowledge_ranks import (
+        RANK_SETTLEABLE_REVISION_STATUSES,
+        rank_policy_for_revision,
+    )
+
+    rows = db.execute(
+        select(LearningContractAssessmentTarget, AssessmentTarget)
+        .join(
+            AssessmentTarget,
+            AssessmentTarget.id
+            == LearningContractAssessmentTarget.assessment_target_id,
+        )
+        .where(
+            LearningContractAssessmentTarget.contract_version_id == contract.id,
+            LearningContractAssessmentTarget.diagnostic_only.is_(False),
+        )
+        .order_by(LearningContractAssessmentTarget.position)
+    ).all()
+    if not rows:
+        raise AppError(
+            "本节还没有可结算的能力目标，请重新规划后再生成",
+            code="CONTRACT_RANK_TARGET_MISSING",
+            status=409,
+        )
+
+    for _binding, target in rows:
+        if (
+            target.identity_status not in RANK_SETTLEABLE_IDENTITY_STATUSES
+            or not target.concept_revision_id
+            or not target.learning_objective_id
+        ):
+            raise AppError(
+                "本节能力目标尚未取得正式段位身份，请重新规划后再生成",
+                code="CONTRACT_RANK_IDENTITY_UNSETTLEABLE",
+                status=409,
+            )
+        revision = db.get(ConceptRevision, target.concept_revision_id)
+        policy = rank_policy_for_revision(revision) if revision else None
+        if (
+            revision is None
+            or revision.verification_status not in RANK_SETTLEABLE_REVISION_STATUSES
+            or policy is None
+            or target.dimension not in policy["dimensionRanks"]
+        ):
+            raise AppError(
+                "本节能力目标缺少完整段位规则，已停止发布",
+                code="CONTRACT_RANK_POLICY_INVALID",
+                status=409,
+            )
 
 
 def require_run_section_binding(

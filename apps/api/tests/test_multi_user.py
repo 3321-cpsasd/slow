@@ -239,7 +239,7 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
     assert public_config.status_code == 200
     assert public_config.json()["mode"] == "oidc"
     assert public_config.json()["providerName"] == "统一身份账户"
-    assert public_config.json()["privacyNotice"]["noticeVersion"] == "2026-08-08-r2"
+    assert public_config.json()["privacyNotice"]["noticeVersion"] == "2026-08-12-r3"
 
     me = login(client, fake_oidc)
     assert me["user"]["name"] == "用户 A"
@@ -283,7 +283,7 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
         "explanationDensity": "auto",
         "formatPreferences": [],
         "interactionRhythm": "auto",
-        "dailyModePromptEnabled": True,
+        "dailyModePromptEnabled": False,
     }
     assert resumed.json()["required"] is True
 
@@ -464,7 +464,7 @@ def test_demo_auth_config_is_public_and_explicit():
     assert response.status_code == 200
     assert response.json()["mode"] == "demo"
     assert response.json()["providerName"] == ""
-    assert response.json()["privacyNotice"]["noticeVersion"] == "2026-08-08-r2"
+    assert response.json()["privacyNotice"]["noticeVersion"] == "2026-08-12-r3"
 
 
 @pytest.fixture

@@ -63,17 +63,46 @@ export function LessonContentBlock({
 }
 
 export function LessonBlockBody({ block, content = block.content }: { block: Block; content?: string }) {
-  if (block.kind === 'code') return <pre className="code-block"><code>{content}</code></pre>;
+  // `kind` is a presentation hint; generated block content is still GFM.
+  // Keep legacy plain-code blocks readable, but let mixed prose + fenced code
+  // retain the authored boundary instead of wrapping the prose in <code>.
+  if (block.kind === 'code' && !hasBalancedCodeFences(content)) {
+    return <pre className="code-block"><code>{content}</code></pre>;
+  }
   const markdown = block.kind === 'table'
     ? normalizeTableMarkdown(content)
     : block.kind === 'text'
       ? normalizeLessonTextMarkdown(content)
-      : content;
+      : content.replace(/\r\n?/g, '\n').trim();
   return (
     <div className={`content-markdown kind-${block.kind}`}>
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
     </div>
   );
+}
+
+function hasBalancedCodeFences(content: string): boolean {
+  const lines = content.replace(/\r\n?/g, '\n').split('\n');
+  let opening: { marker: '`' | '~'; length: number } | null = null;
+  let completedFence = false;
+  for (const line of lines) {
+    const match = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (!match) continue;
+    const marker = match[1][0] as '`' | '~';
+    if (!opening) {
+      opening = { marker, length: match[1].length };
+      continue;
+    }
+    if (
+      marker === opening.marker
+      && match[1].length >= opening.length
+      && match[2].trim() === ''
+    ) {
+      opening = null;
+      completedFence = true;
+    }
+  }
+  return completedFence && opening === null;
 }
 
 function normalizeLessonTextMarkdown(content: string): string {

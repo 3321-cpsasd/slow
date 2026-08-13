@@ -13,6 +13,7 @@ from app.infrastructure.database import build_database
 from app.infrastructure.tables import Base, LearningRun, Shelf, User
 from migrate_sqlite_to_postgres import (
     MigrationRefused,
+    SCHEMA_BOOTSTRAP_ROWS,
     _synchronize_postgresql_sequences,
     migrate,
 )
@@ -68,7 +69,9 @@ def test_sqlite_to_postgresql_import_and_nonempty_refusal(tmp_path):
                     sa.select(sa.literal(1)).select_from(table).limit(1)
                 ).first()
             ]
-        assert populated == [], f"PostgreSQL test database is not empty: {populated}"
+        assert set(populated) == set(SCHEMA_BOOTSTRAP_ROWS), (
+            f"PostgreSQL test database has non-bootstrap rows: {populated}"
+        )
     finally:
         target_engine.dispose()
 

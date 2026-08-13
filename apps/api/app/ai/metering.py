@@ -11,6 +11,7 @@ from sqlalchemy.orm import sessionmaker
 from ..auth.context import Principal
 from ..core.errors import safe_error_code
 from ..infrastructure.tables import AiInvocation, AiUsageMeasurement, now
+from .route_context import current_route_context
 
 
 _current_principal: ContextVar[Principal | None] = ContextVar(
@@ -142,6 +143,7 @@ class AiUsageRecorder:
     ) -> str:
         invocation_id = _uid("aiinv")
         principal = _current_principal.get()
+        route = current_route_context()
         if principal:
             attribution_status = "verified"
         with self.sessions() as db:
@@ -152,6 +154,15 @@ class AiUsageRecorder:
                     api_mode=api_mode,
                     model=model,
                     operation=operation,
+                    purpose=route.purpose if route else operation,
+                    authority=route.authority if route else "legacy_unverified",
+                    deployment_id=route.deployment_id if route else "",
+                    model_family_id=route.model_family_id if route else "",
+                    config_version_id=route.config_version_id if route else "",
+                    route_policy_version=(
+                        route.route_policy_version if route else ""
+                    ),
+                    fallback_index=route.fallback_index if route else 0,
                     status="started",
                     usage_status="pending",
                     attribution_status=attribution_status,

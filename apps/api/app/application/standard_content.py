@@ -1,7 +1,9 @@
-"""Reviewed standard lesson packages for guaranteed-route model outages.
+"""Optional reviewed standard packages for routes needing offline continuity.
 
 Packages are bound by an exact deterministic contract signature. A match never
-bypasses the normal lesson candidate validator or atomic publisher.
+bypasses the normal lesson candidate validator or atomic publisher. M3's
+default recoverable route does not require this repository: model failure may
+be surfaced explicitly and retried after provider recovery.
 """
 
 from __future__ import annotations
@@ -114,6 +116,8 @@ class StandardContentService:
         validate_lesson_candidate(spec, candidate)
         snapshot = contract_snapshot(spec)
         payload = candidate.model_dump(by_alias=True)
+        for question in payload["questions"]:
+            question["answer_authority"] = "reviewed_package_v1"
         output_hash = _hash({"contract": snapshot, "candidate": payload})
         package = StandardLessonPackageVersion(
             id=f"standard_package_{uuid4().hex}",

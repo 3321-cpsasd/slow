@@ -25,12 +25,19 @@ from ...infrastructure.tables import (
     now,
 )
 from .contracts import ensure_learning_contract
+from .bkt_parameters import (
+    BKT_PARAMETER_VERSION,
+    BktParameterSet,
+    DEFAULT_BKT_PARAMETERS,
+    resolve_bkt_parameters,
+)
+from .knowledge_ranks import rebuild_knowledge_node_projections
+from .knowledge_profile import rebuild_learner_knowledge_profile
 
 
 SCORING_RULE_VERSION = "choice_exact_v2"
-QUALIFICATION_RULE_VERSION = "evidence_v2"
+QUALIFICATION_RULE_VERSION = "evidence_v3"
 GATE_RULE_VERSION = "gate_v2"
-BKT_PARAMETER_VERSION = "bkt_multimodal_v2"
 MASTERY_RULE_VERSION = "mastery_v3"
 REVIEW_RULE_VERSION = "review_v3"
 RETENTION_WINDOW = timedelta(days=1)
@@ -38,6 +45,7 @@ QUALIFIED_STATUSES_BY_FAMILY = {
     "gate": frozenset({"eligible"}),
     "mastery": frozenset({"eligible", "eligible_grouped"}),
     "retention": frozenset({"eligible", "candidate"}),
+    "rank": frozenset({"eligible", "eligible_grouped"}),
 }
 
 
@@ -49,6 +57,11 @@ class SectionGateDecision:
     fixed_total: int
     unresolved_required_target_ids: tuple[str, ...]
     unresolved_target_ids: tuple[str, ...]
+
+
+# Compatibility name for deterministic unit tests and external evaluators. The
+# online replay path resolves an activated version from the registry below.
+ACTIVE_BKT_PARAMETERS = DEFAULT_BKT_PARAMETERS
 
 
 def _uid(prefix: str) -> str:
@@ -359,6 +372,7 @@ def _sync_knowledge_and_review(
     required: bool,
     state: KnowledgeStateProjection | None,
     review: ReviewState | None,
+    parameters: BktParameterSet,
 ) -> tuple[KnowledgeStateProjection, ReviewState]:
     episode_groups: dict[str, list[AssessmentObservation]] = defaultdict(list)
     for observation in observations:
@@ -368,7 +382,7 @@ def _sync_knowledge_and_review(
         key=lambda items: (min(_utc(item.created_at) for item in items), min(item.sequence for item in items)),
     )
 
-    prior = 0.2
+    prior = parameters.prior_known
     claim_status = "unobserved"
     retention_rounds = 0
     seen_signatures: set[str] = set()
@@ -381,17 +395,31 @@ def _sync_knowledge_and_review(
         correct = outcome == "strong"
         assisted = any(item.assistance_mode == "assisted_immediate" for item in items)
         if outcome == "partial":
-            prior = _posterior(prior, True, guess=0.48, slip=0.25)
+            prior = _posterior(
+                prior,
+                True,
+                guess=parameters.oral_partial_guess,
+                slip=parameters.oral_partial_slip,
+            )
         elif outcome == "weak" and any(
             item.source_type in {"ask_me", "ask_me_topic"} for item in items
         ):
-            prior = _posterior(prior, False, guess=0.4, slip=0.4)
+            prior = _posterior(
+                prior,
+                False,
+                guess=parameters.oral_weak_guess,
+                slip=parameters.oral_weak_slip,
+            )
         else:
             prior = _posterior(
                 prior,
                 correct,
-                guess=0.5 if assisted else 0.25,
-                slip=0.12,
+                guess=(
+                    parameters.assisted_guess
+                    if assisted
+                    else parameters.standard_guess
+                ),
+                slip=parameters.standard_slip,
             )
         unassisted_review = all(
             item.assistance_mode == "unassisted_review" for item in items
@@ -437,7 +465,7 @@ def _sync_knowledge_and_review(
     state.uncertainty_ppm = round(4 * prior * (1 - prior) * 1_000_000)
     state.claim_status = claim_status
     state.retention_rounds = retention_rounds
-    state.parameter_set_version = BKT_PARAMETER_VERSION
+    state.parameter_set_version = parameters.version
     state.projection_rule_version = MASTERY_RULE_VERSION
     state.source_observation_watermark = max(item.sequence for item in observations)
     state.rebuilt_at = now()
@@ -553,6 +581,7 @@ def rebuild_assessment_projections(
     by_gate: dict[tuple[str, str, str], list[AssessmentObservation]] = defaultdict(list)
     by_target_mastery: dict[str, list[AssessmentObservation]] = defaultdict(list)
     retention_observation_ids: set[str] = set()
+    rank_observation_ids: set[str] = set()
     for observation in observations:
         if qualified(observation, "gate"):
             by_gate[
@@ -566,6 +595,8 @@ def rebuild_assessment_projections(
             by_target_mastery[observation.assessment_target_id].append(observation)
         if qualified(observation, "retention"):
             retention_observation_ids.add(observation.id)
+        if qualified(observation, "rank"):
+            rank_observation_ids.add(observation.id)
 
     for key, items in by_gate.items():
         _sync_gate(db, key=key, observations=items, existing=existing_gates.pop(key, None))
@@ -586,11 +617,23 @@ def rebuild_assessment_projections(
             required=required,
             state=existing_states.pop(target_id, None),
             review=existing_reviews.pop(target_id, None),
+            parameters=resolve_bkt_parameters(
+                db,
+                user_id=user_id,
+                target_id=target_id,
+            ),
         )
     for stale in existing_states.values():
         db.delete(stale)
     for stale in existing_reviews.values():
         db.delete(stale)
+    knowledge_node_states = rebuild_knowledge_node_projections(
+        db,
+        user_id=user_id,
+        observations=observations,
+        rank_observation_ids=rank_observation_ids,
+    )
+    learner_profile = rebuild_learner_knowledge_profile(db, user_id=user_id)
     db.flush()
     return {
         "observations": len(observations),
@@ -599,10 +642,13 @@ def rebuild_assessment_projections(
             len(items) for items in by_target_mastery.values()
         ),
         "qualifiedRetentionObservations": len(retention_observation_ids),
+        "qualifiedRankObservations": len(rank_observation_ids),
         "qualificationRuleVersion": qualification_rule_version,
         "gates": len(by_gate),
         "knowledgeStates": len(by_target_mastery),
         "reviewStates": len(by_target_mastery),
+        "knowledgeNodeStates": knowledge_node_states,
+        "learnerKnowledgeProfileVersion": learner_profile.projection_version,
     }
 
 
@@ -766,44 +812,75 @@ def _record_qualification_events(
         governance
         and (not governance.allowed or not governance.assessment_eligible)
     )
-    statuses = (
-        {
+    if qualification_profile == "ask_me":
+        statuses = {
             "gate": ("ineligible", "optional oral assessment cannot rewrite the section gate"),
             "mastery": ("eligible_grouped", "contract-bound oral assessment updates mastery once"),
             "retention": ("ineligible", "same-session oral assessment is not delayed retention evidence"),
+            "rank": ("eligible_grouped", "contract-bound oral dimension may support a knowledge rank"),
         }
-        if qualification_profile == "ask_me"
-        else
-        {
+    elif qualification_profile == "review_assignment" and governance_ineligible:
+        statuses = {
             "gate": ("ineligible", "delayed review cannot rewrite the section gate"),
             "mastery": ("ineligible", "review quiz is not governance-qualified for mastery"),
             "retention": ("ineligible", "review quiz is not governance-qualified for retention"),
+            "rank": ("ineligible", "review quiz is not governance-qualified for rank progression"),
         }
-        if qualification_profile == "review_assignment" and governance_ineligible
-        else {
+    elif qualification_profile == "review_assignment":
+        statuses = {
             "gate": ("ineligible", "delayed review cannot rewrite the section gate"),
             "mastery": ("eligible_grouped", "assignment-bound governed review updates mastery once"),
             "retention": ("candidate", "server-qualified governed delayed unassisted novel review"),
+            "rank": ("eligible_grouped", "assignment-bound novel review may strengthen the knowledge rank"),
         }
-        if qualification_profile == "review_assignment"
-        else {
+    elif qualification_profile == "reinforcement_verification" and governance_ineligible:
+        statuses = {
+            "gate": ("ineligible", "reinforcement cannot rewrite the section gate"),
+            "mastery": ("ineligible", "verification item is not governance-qualified"),
+            "retention": ("ineligible", "same-session reinforcement is not delayed retention evidence"),
+            "rank": ("ineligible", "verification item is not governance-qualified"),
+        }
+    elif qualification_profile == "reinforcement_verification":
+        statuses = {
+            "gate": ("ineligible", "reinforcement cannot rewrite the section gate"),
+            "mastery": ("eligible_grouped", "unassisted final verification updates mastery once"),
+            "retention": ("ineligible", "same-session verification is not delayed retention evidence"),
+            "rank": ("eligible_grouped", "novel unassisted final verification may strengthen rank"),
+        }
+    elif governance_ineligible:
+        statuses = {
             # Defense in depth: even if a caller bypasses the submission
             # boundary, governance-ineligible evidence has no projection rights.
             "gate": ("ineligible", "quiz is not governance-qualified for progression"),
             "mastery": ("ineligible", "quiz is not governance-qualified for mastery"),
             "retention": ("ineligible", "quiz is not governance-qualified for retention"),
+            "rank": ("ineligible", "quiz is not governance-qualified for rank progression"),
         }
-        if governance_ineligible
-        else {
+    else:
+        repeated = observation.assistance_mode == "unassisted_repeat"
+        assisted = observation.assistance_mode == "assisted_immediate"
+        statuses = {
             "gate": ("eligible", "attempt target outcome is aggregated"),
-            "mastery": ("eligible_grouped", "one BKT update per learning episode and target"),
+            "mastery": (
+                ("ineligible", "repeated section quiz is practice, not new mastery evidence")
+                if repeated
+                else ("eligible_grouped", "one BKT update per learning episode and target")
+            ),
             "retention": (
                 ("candidate", "requires a delayed unassisted novel review")
                 if observation.assistance_mode == "unassisted_review"
                 else ("ineligible", "not an unassisted review")
             ),
+            "rank": (
+                ("ineligible", "repeated question signature cannot increase a knowledge rank")
+                if repeated
+                else ("ineligible", "assisted immediate remediation is not independent rank evidence")
+                if assisted
+                else ("eligible_grouped", "governed unassisted assessment may update the knowledge rank")
+                if observation.assistance_mode == "unassisted_initial"
+                else ("ineligible", "rank evidence requires an authorized independent assessment")
+            ),
         }
-    )
     for family, (status, reason) in statuses.items():
         db.add(EvidenceQualificationEvent(
             id=_uid("qualification"),
@@ -935,6 +1012,7 @@ def record_scoring_facts(
     assistance_mode: str,
     learning_episode_id: str | None = None,
     qualification_profile: str = "standard",
+    source_type: str = "choice_quiz",
 ) -> ScoringResult:
     existing = db.scalar(
         select(ScoringResult).where(ScoringResult.attempt_id == attempt.id)
@@ -995,7 +1073,7 @@ def record_scoring_facts(
             assessment_target_id=target_id,
             question_index=index,
             correct=bool(result["correct"]),
-            source_type="choice_quiz",
+            source_type=source_type,
             evidence_key=None,
             assistance_mode=assistance_mode,
             learning_episode_id=episode_id,
@@ -1006,6 +1084,7 @@ def record_scoring_facts(
                 "selectedOptions": result.get("selectedOptions", []),
                 "correctOptions": result.get("correctOptions", []),
                 "questionFingerprint": fingerprint,
+                "sourceType": source_type,
             }),
         )
         db.add(observation)

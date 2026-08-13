@@ -10,6 +10,7 @@ import {
 } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { MermaidDiagram } from './components/MermaidDiagram';
 import { api, ApiError } from './api/client';
 import { telemetry } from './telemetry';
 import { ProfileOnboardingFlow } from './ProfileOnboardingFlow';
@@ -25,6 +26,7 @@ import {
 } from './features/lesson/LessonBlockTools';
 import { LessonBlockBody, LessonContentBlock } from './features/lesson/LessonContentBlock';
 import { PathDecisionBanner } from './features/learning/PathDecisionBanner';
+import { useStudyActivity } from './features/study/useStudyActivity';
 import { AppBusyStatus, AppStatusRegion } from './features/shell/AppStatusRegion';
 import { useModalFocus } from './features/system/useModalFocus';
 import type {
@@ -35,11 +37,14 @@ import type {
   Block,
   Book,
   BookReplanProposal,
+  BookSettlement,
   Bootstrap,
   AccountExitReceipt,
   PrivacyState,
   RegistrationResult,
   Chapter,
+  ChapterChallenge,
+  ChapterChallengeResult,
   DueReviews,
   DailyMode,
   DailyModeDuration,
@@ -47,27 +52,44 @@ import type {
   LearningTask,
   LearningProfile,
   LearningPreferences,
+  LearningStartPreference,
+  LearningStartPreview,
+  KnowledgeSettlement,
+  KnowledgeMap,
+  KnowledgeMapNode,
   Note as NoteType,
   NoteContent,
+  NoteVerificationAnnotation,
   QaHistory,
   QuizResult,
   ReviewResult,
   ReviewSession,
+  ReinforcementRun,
   Section,
   SectionSummary,
   Series,
   Shelf,
   ShelfCreateInput,
+  StudyActivitySummary,
 } from './model/types';
 
-type View = 'home' | 'shelf' | 'learn' | 'profile';
+type View = 'home' | 'shelf' | 'learn' | 'profile' | 'knowledge' | 'review';
 type AppRoute =
   | { view: 'home' }
   | { view: 'profile'; section: 'profile' | 'account' }
+  | { view: 'knowledge' }
+  | { view: 'review' }
   | { view: 'shelf'; shelfId: string }
   | { view: 'learn'; seriesId: string; sectionId: string | null };
 type TextQuote = { text: string; blockId: string };
 type SelectionPopup = TextQuote & { top: number; left: number };
+type BookReplanState = {
+  book: Book;
+  proposal: BookReplanProposal | null;
+  status: 'preparing' | 'ready' | 'failed';
+  feedback: string;
+  previousProposalId?: string;
+};
 type ExplanationRequest = {
   requestId: string;
   blockId: string;
@@ -190,6 +212,8 @@ const routeFromLocation = (): AppRoute => {
         : 'profile',
     };
   }
+  if (parts[0] === 'knowledge' && parts.length === 1) return { view: 'knowledge' };
+  if (parts[0] === 'review' && parts.length === 1) return { view: 'review' };
   if (parts[0] === 'shelves' && parts[1] && parts.length === 2) {
     return { view: 'shelf', shelfId: parts[1] };
   }
@@ -231,6 +255,21 @@ const GENERATION_STAGE_LABELS: Record<string, string> = {
   persisted: '已经完成',
   failed: '准备失败',
 };
+
+type FailureWithCode = { errorCode?: string | null } | null | undefined;
+
+const isAiGenerationFailure = (failure: FailureWithCode) => (
+  failure?.errorCode?.startsWith('AI_') === true
+);
+
+const generationFailureMessage = (
+  failure: FailureWithCode,
+  subject = '本节内容',
+) => (
+  isAiGenerationFailure(failure)
+    ? `AI 本次没有完成${subject}生成，未完成的内容不会发布。请稍后重新准备。`
+    : `${subject}本次没有准备完成，未完成的内容不会发布。请稍后重新准备。`
+);
 
 const formatElapsed = (milliseconds: number) => {
   const seconds = Math.max(0, Math.floor(milliseconds / 1000));
@@ -373,7 +412,7 @@ export default function App() {
   const [notice, setNotice] = useState('');
   const [showAiSettings, setShowAiSettings] = useState(false);
   const [feedbackTarget, setFeedbackTarget] = useState<FeedbackTarget | null>(null);
-  const [bookReplan, setBookReplan] = useState<{ book: Book; proposal: BookReplanProposal } | null>(null);
+  const [bookReplan, setBookReplan] = useState<BookReplanState | null>(null);
   const [learningQaOpen, setLearningQaOpen] = useState(false);
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [exitReceipt, setExitReceipt] = useState<AccountExitReceipt | null>(null);
@@ -395,6 +434,7 @@ export default function App() {
   const routeRequestVersion = useRef(0);
   const routeInitializedForUser = useRef('');
   const initialSectionMonitorVersion = useRef(0);
+  const bookReplanRequestVersion = useRef(0);
 
   const hasActiveDailyMode = () => Boolean(
     data?.dailyMode?.active
@@ -402,7 +442,7 @@ export default function App() {
     && new Date(data.dailyMode.expiresAt).getTime() > Date.now(),
   );
 
-  const dailyModePromptEnabled = data?.profile.preferences.dailyModePromptEnabled ?? true;
+  const dailyModePromptEnabled = data?.profile.preferences.dailyModePromptEnabled ?? false;
 
   const loadAuthenticatedState = async () => {
     const value = await api.authMe();
@@ -482,6 +522,8 @@ export default function App() {
       telemetry.track('learning_viewed', { view: 'learn', entityType: 'series', entityId: series.id });
     } else if (view === 'profile') {
       telemetry.track('profile_viewed', { view: 'profile' });
+    } else if (view === 'review') {
+      telemetry.track('review_center_viewed', { view: 'review' });
     }
   }, [auth?.privacy.status, data, view, shelf?.id, series?.id]);
 
@@ -560,11 +602,9 @@ export default function App() {
     const state = data?.dailyMode;
     if (!state) return;
     if (!state.active || !state.expiresAt) {
-      if (dailyModePromptEnabled && !(view === 'learn' && section && activityDailyMode)) {
-        setDailyModeDialogOpen(true);
-      }
       return;
     }
+    setDailyModeDialogOpen(false);
     const expire = () => {
       setData((current) => current ? {
         ...current,
@@ -580,8 +620,6 @@ export default function App() {
       } : current);
       if (view === 'learn' && section && activityDailyMode) {
         setDailyModeExpiredDuringActivity(true);
-      } else if (dailyModePromptEnabled) {
-        setDailyModeDialogOpen(true);
       }
     };
     const remaining = new Date(state.expiresAt).getTime() - Date.now();
@@ -591,7 +629,7 @@ export default function App() {
     }
     const timer = window.setTimeout(expire, Math.min(remaining, 2_147_000_000));
     return () => window.clearTimeout(timer);
-  }, [data?.dailyMode?.version, data?.dailyMode?.active, data?.dailyMode?.expiresAt, dailyModePromptEnabled, view, section?.id, activityDailyMode]);
+  }, [data?.dailyMode?.version, data?.dailyMode?.active, data?.dailyMode?.expiresAt, view, section?.id, activityDailyMode]);
 
   const run = async <T,>(label: string, action: () => Promise<T>) => {
     setBusy(label);
@@ -733,7 +771,7 @@ export default function App() {
     setSection(null);
     setActivityDailyMode(null);
     setDailyModeExpiredDuringActivity(false);
-    if (dailyModePromptEnabled && !hasActiveDailyMode()) setDailyModeDialogOpen(true);
+    setDailyModeDialogOpen(false);
     void api.bootstrap()
       .then(setData)
       .catch((reason) => setError(reason instanceof Error ? reason.message : '主页刷新失败'));
@@ -741,19 +779,28 @@ export default function App() {
 
   const goHome = () => showHome('push');
 
-  const returnToShelf = () => {
-    if (!shelf) {
+  const returnToShelf = async () => {
+    const shelfId = shelf?.id;
+    if (!shelfId) {
       goHome();
       return;
     }
-    routeRequestVersion.current += 1;
-    updateBrowserLocation(shelfPath(shelf.id), 'push');
-    setShowUserMenu(false);
-    setSeries(null);
-    setSection(null);
-    setActivityDailyMode(null);
-    setDailyModeExpiredDuringActivity(false);
-    setView('shelf');
+    try {
+      const refreshed = await run('正在返回书架…', () => api.bootstrap());
+      const refreshedShelf = refreshed.shelves.find((item) => item.id === shelfId) || null;
+      setData(refreshed);
+      setShelf(refreshedShelf);
+      routeRequestVersion.current += 1;
+      updateBrowserLocation(refreshedShelf ? shelfPath(shelfId) : '/', 'push');
+      setShowUserMenu(false);
+      setSeries(null);
+      setSection(null);
+      setActivityDailyMode(null);
+      setDailyModeExpiredDuringActivity(false);
+      setView(refreshedShelf ? 'shelf' : 'home');
+    } catch {
+      // Stay in the current learning view so stale shelf data is never presented.
+    }
   };
 
   const openProfileCenter = (nextSection: 'profile' | 'account' = 'profile') => {
@@ -766,6 +813,26 @@ export default function App() {
     setSeries(null);
     setSection(null);
     setView('profile');
+  };
+
+  const openKnowledgeMap = () => {
+    routeRequestVersion.current += 1;
+    updateBrowserLocation('/knowledge', 'push');
+    setShowUserMenu(false);
+    setShelf(null);
+    setSeries(null);
+    setSection(null);
+    setView('knowledge');
+  };
+
+  const openReviewCenter = () => {
+    routeRequestVersion.current += 1;
+    updateBrowserLocation('/review', 'push');
+    setShowUserMenu(false);
+    setShelf(null);
+    setSeries(null);
+    setSection(null);
+    setView('review');
   };
 
   const changeProfileSection = (nextSection: 'profile' | 'account') => {
@@ -807,12 +874,14 @@ export default function App() {
   const loadSection = async (
     sectionId: string,
     historyMode: 'push' | 'replace' | 'none' = 'push',
+    promptForDailyMode = true,
   ) => {
     if (series) updateBrowserLocation(seriesPath(series.id, sectionId), historyMode);
-    if (dailyModePromptEnabled && !hasActiveDailyMode()) {
+    if (promptForDailyMode && dailyModePromptEnabled && !hasActiveDailyMode()) {
       setPendingSectionId(sectionId);
       setDailyModeDialogOpen(true);
       if (section) return section;
+      return api.section(sectionId);
     }
     const value = await run(
       '正在读取小节…',
@@ -826,6 +895,7 @@ export default function App() {
     mode: DailyMode,
     duration: DailyModeDuration,
     source: DailyModeSource,
+    promptEnabled?: boolean,
   ) => {
     setDailyModeBusy(true);
     setError('');
@@ -835,7 +905,38 @@ export default function App() {
         { dailyMode: mode, duration, timezone, source },
         `daily-mode-${crypto.randomUUID()}`,
       );
-      setData((current) => current ? { ...current, dailyMode: updated } : current);
+      let updatedProfile: LearningProfile | null = null;
+      let promptPreferenceFailed = false;
+      if (
+        source === 'dialog'
+        && typeof promptEnabled === 'boolean'
+        && data
+        && data.profile.preferences.dailyModePromptEnabled !== promptEnabled
+      ) {
+        const profile = data.profile;
+        try {
+          updatedProfile = await api.updateProfile({
+            profession: profile.profession,
+            stage: profile.stage,
+            purpose: profile.purpose,
+            domains: profile.domains,
+            experience: profile.experience,
+            weeklyMinutes: profile.weeklyMinutes,
+            targetDate: profile.targetDate,
+            preferences: {
+              ...profile.preferences,
+              dailyModePromptEnabled: promptEnabled,
+            },
+          });
+        } catch {
+          promptPreferenceFailed = true;
+        }
+      }
+      setData((current) => current ? {
+        ...current,
+        dailyMode: updated,
+        profile: updatedProfile || current.profile,
+      } : current);
       if (source === 'header_toggle') {
         if (section) setActivityDailyMode(mode);
         setNotice(mode === 'fast'
@@ -844,6 +945,9 @@ export default function App() {
       }
       setDailyModeExpiredDuringActivity(false);
       setDailyModeDialogOpen(false);
+      if (promptPreferenceFailed) {
+        setNotice('学习模式已开始；“不再自动弹出”未能保存，可稍后在学习画像中关闭。');
+      }
       if (pendingSectionId) {
         const target = pendingSectionId;
         setPendingSectionId('');
@@ -862,7 +966,7 @@ export default function App() {
     for (const book of value.books) {
       for (const chapter of book.chapters) {
         const match = chapter.sections.find(
-          (item) => item.status !== 'locked' && item.status !== 'completed',
+          (item) => !['locked', 'completed', 'skipped'].includes(item.status),
         );
         if (match) return match.id;
         completedFallback ||= chapter.sections.find(
@@ -900,38 +1004,18 @@ export default function App() {
         if (task.status === 'succeeded') {
           const refreshed = await api.series(value.id);
           if (!isCurrent()) return false;
-          const targetSectionId = typeof task.result?.targetSectionId === 'string'
-            ? task.result.targetSectionId
-            : firstUsableSection(refreshed);
-          let openedSection: Section | null = null;
-          if (targetSectionId) {
-            openedSection = await api.openSection(targetSectionId);
-            if (!isCurrent()) return false;
-          }
           setSeries(refreshed);
-          if (targetSectionId && openedSection) {
-            updateBrowserLocation(seriesPath(refreshed.id, targetSectionId), 'replace');
-            applyOpenedSection(openedSection, targetSectionId);
-            setSection(openedSection);
-          }
+          setSection(null);
+          updateBrowserLocation(seriesPath(refreshed.id), 'replace');
           return true;
         }
         if (task.status === 'failed') {
           const refreshed = await api.series(value.id);
           if (!isCurrent()) return false;
-          const fallbackSectionId = firstUsableSection(refreshed);
-          let openedSection: Section | null = null;
-          if (fallbackSectionId) {
-            openedSection = await api.openSection(fallbackSectionId);
-            if (!isCurrent()) return false;
-          }
           setSeries(refreshed);
-          if (fallbackSectionId && openedSection) {
-            updateBrowserLocation(seriesPath(refreshed.id, fallbackSectionId), 'replace');
-            applyOpenedSection(openedSection, fallbackSectionId);
-            setSection(openedSection);
-          }
-          setError('第一节暂未准备完成，请重试。');
+          setSection(null);
+          updateBrowserLocation(seriesPath(refreshed.id), 'replace');
+          setError(generationFailureMessage(task, '第一节内容'));
           return true;
         }
         await new Promise((resolve) => window.setTimeout(resolve, 1000));
@@ -978,28 +1062,28 @@ export default function App() {
     const resumeBelongsToSeries = resumeSection
       ? value.books.some((book) => book.chapters.some(
         (chapter) => chapter.sections.some(
-          (item) => item.id === resumeSection && item.status !== 'locked',
+          (item) => item.id === resumeSection && !['locked', 'skipped'].includes(item.status),
         ),
       ))
       : false;
     const requestedBelongsToSeries = requestedSectionId
       ? value.books.some((book) => book.chapters.some(
         (chapter) => chapter.sections.some(
-          (item) => item.id === requestedSectionId && item.status !== 'locked',
+          (item) => item.id === requestedSectionId && !['locked', 'skipped'].includes(item.status),
         ),
       ))
       : false;
     const initial = requestedBelongsToSeries
       ? requestedSectionId!
-      : resumeBelongsToSeries
+      : resumeBelongsToSeries && value.progress > 0
         ? resumeSection!
-        : firstUsableSection(value);
+        : null;
     if (initial) {
       updateBrowserLocation(
         seriesPath(value.id, initial),
         historyMode === 'none' ? 'none' : 'replace',
       );
-      await loadSection(initial, 'none');
+      await loadSection(initial, 'none', false);
     } else setSection(null);
   };
 
@@ -1034,7 +1118,9 @@ export default function App() {
     try {
       const updated = await run('正在规划本章小节…', () => api.chapter(chapter.id));
       await refreshSeries();
-      const first = updated.sections.find((item) => item.status !== 'locked');
+      const first = updated.sections.find(
+        (item) => !['locked', 'completed', 'skipped'].includes(item.status),
+      ) || updated.sections.find((item) => item.status === 'completed');
       if (first) await loadSection(first.id);
     } finally {
       chapterGenerationRequests.current.delete(chapter.id);
@@ -1042,18 +1128,56 @@ export default function App() {
     }
   };
 
-  const activateBook = async (book: Book) => {
-    const proposal = await run(
-      '正在根据你最近的学习情况调整下一本书…',
-      () => api.replanBook(book.id),
+  const startNextBook = async () => {
+    if (!series) return;
+    const nextBook = series.books.find(
+      (book, index) => index > 0 && book.status !== 'locked' && book.status !== 'completed',
     );
-    setBookReplan({ book, proposal });
+    const firstChapter = nextBook?.chapters[0];
+    if (!firstChapter) return;
+    const availableSection = firstChapter.sections.find(
+      (item) => item.status !== 'locked' && item.status !== 'completed',
+    );
+    if (availableSection) await loadSection(availableSection.id);
+    else await openChapter(firstChapter);
+  };
+
+  const activateBook = async (
+    book: Book,
+    feedback = '',
+    previousProposalId?: string,
+  ) => {
+    const requestVersion = ++bookReplanRequestVersion.current;
+    setBookReplan({ book, proposal: null, status: 'preparing', feedback, previousProposalId });
+    try {
+      const proposal = await api.replanBook(
+        book.id,
+        feedback ? { feedback, previousProposalId } : undefined,
+      );
+      if (requestVersion !== bookReplanRequestVersion.current) return;
+      setBookReplan({ book, proposal, status: 'ready', feedback: '', previousProposalId: proposal.proposalId });
+    } catch {
+      if (requestVersion !== bookReplanRequestVersion.current) return;
+      setBookReplan({ book, proposal: null, status: 'failed', feedback, previousProposalId });
+    }
   };
 
   const generateSection = async (sectionId: string) => {
-    const value = await run('正在准备并检查本节内容…', () => api.prepareSection(sectionId));
-    setSection(value);
-    await refreshSeries();
+    try {
+      const value = await run('正在准备并检查本节内容…', () => api.prepareSection(sectionId));
+      setSection(value);
+      await refreshSeries();
+    } catch (reason) {
+      if (!(reason instanceof ApiError) || !reason.retryable) throw reason;
+      try {
+        const failed = await api.section(sectionId);
+        setSection(failed);
+        setError('');
+        await refreshSeries();
+      } catch {
+        setError(generationFailureMessage(null));
+      }
+    }
   };
 
   const regenerateSection = async (sectionId: string) => {
@@ -1102,6 +1226,20 @@ export default function App() {
       if (route.view === 'profile') {
         setProfileSection(route.section);
         setView('profile');
+        setShelf(null);
+        setSeries(null);
+        setSection(null);
+        return;
+      }
+      if (route.view === 'knowledge') {
+        setView('knowledge');
+        setShelf(null);
+        setSeries(null);
+        setSection(null);
+        return;
+      }
+      if (route.view === 'review') {
+        setView('review');
         setShelf(null);
         setSeries(null);
         setSection(null);
@@ -1566,13 +1704,8 @@ export default function App() {
   const showDailyModeDialog = Boolean(
     data?.dailyMode
     && dailyModePromptEnabled
-    && (
-      dailyModeDialogOpen
-      || (
-        !data.dailyMode.active
-        && !(view === 'learn' && section && activityDailyMode)
-      )
-    ),
+    && dailyModeDialogOpen
+    && !hasActiveDailyMode(),
   );
   const currentMilestonePath = data?.milestoneDashboard.path || null;
   const activeMilestonePath = currentMilestonePath?.seriesId === series?.id
@@ -1606,6 +1739,10 @@ export default function App() {
           </div>
         ) : view === 'profile' ? (
           <small>个人中心</small>
+        ) : view === 'knowledge' ? (
+          <small>我的知识版图</small>
+        ) : view === 'review' ? (
+          <small>复习与补强</small>
         ) : (
           <small>一步一步，学成自己的书</small>
         )}
@@ -1668,6 +1805,12 @@ export default function App() {
                 <button role="menuitem" onClick={() => openProfileCenter('profile')}>
                   <span><b>个人中心</b><small>学习画像与学习节奏</small></span><i aria-hidden="true">→</i>
                 </button>
+                <button role="menuitem" onClick={openKnowledgeMap}>
+                  <span><b>知识版图</b><small>能力段位、保持状态与目标覆盖</small></span><i aria-hidden="true">→</i>
+                </button>
+                <button role="menuitem" onClick={openReviewCenter}>
+                  <span><b>复习与补强</b><small>快速唤醒知识，修复薄弱连接</small></span><i aria-hidden="true">→</i>
+                </button>
                 <button role="menuitem" onClick={() => openProfileCenter('account')}>
                   <span><b>账号与数据</b><small>身份、数据归属与安全</small></span><i aria-hidden="true">→</i>
                 </button>
@@ -1686,13 +1829,14 @@ export default function App() {
         onDismissError={() => setError('')}
         onDismissNotice={() => setNotice('')}
       />
-      <main className={view === 'learn' ? 'learn-main' : view === 'profile' ? 'profile-main' : 'marketing-main'}>
+      <main className={view === 'learn' ? 'learn-main' : view === 'profile' ? 'profile-main' : view === 'knowledge' ? 'knowledge-main' : view === 'review' ? 'review-main' : 'marketing-main'}>
         {view === 'home' && (
           <Home
             data={data}
             dailyMode={data?.dailyMode?.dailyMode || data?.dailyMode?.lastDailyMode || 'slow'}
             onOpen={openShelf}
             onContinue={openSeries}
+            onOpenReview={openReviewCenter}
             onCreate={async (body) => {
               const value = await run('正在创建书架…', () => api.createShelf(body));
               setData((current) => current
@@ -1753,6 +1897,20 @@ export default function App() {
             onRequestExit={requestAccountExit}
           />
         )}
+        {view === 'knowledge' && data && (
+          <KnowledgeMapPage
+            series={data.shelves.flatMap((item) => item.series.map((entry) => ({
+              id: entry.id,
+              title: entry.title,
+              shelfName: item.name,
+            })))}
+            onBack={goHome}
+            onOpenReview={openReviewCenter}
+          />
+        )}
+        {view === 'review' && (
+          <ReviewCenterPage onBack={goHome} />
+        )}
         {view === 'learn' && series && (
           <>
             {(pathNeedsDecision
@@ -1785,7 +1943,7 @@ export default function App() {
                     succeeded: '已完成',
                   }[series.initializationTask.status]}：
                   {series.initializationTask.status === 'failed'
-                    ? '暂时没有准备完成，可以重新尝试。'
+                    ? generationFailureMessage(series.initializationTask, '第一节内容')
                     : '准备中'}
                 </span>
                 {series.initializationTask.retryable && (
@@ -1811,6 +1969,7 @@ export default function App() {
               onRegenerateSection={regenerateSection}
               onGenerateChapter={openChapter}
               onActivateBook={activateBook}
+              onStartNextBook={startNextBook}
               chapterGenerationDisabled={preparingInitialSection}
               generatingChapterId={generatingChapterId}
               onSectionChange={setSection}
@@ -1844,7 +2003,7 @@ export default function App() {
                 setSeries(updated);
                 if (deletingCurrentBook) {
                   const initial = firstUsableSection(updated);
-                  if (initial) await loadSection(initial);
+                  if (initial) await loadSection(initial, 'push', false);
                   else setSection(null);
                 }
               });
@@ -1868,11 +2027,27 @@ export default function App() {
         <BookReplanDialog
           book={bookReplan.book}
           proposal={bookReplan.proposal}
-          onClose={() => setBookReplan(null)}
+          status={bookReplan.status}
+          onClose={() => {
+            bookReplanRequestVersion.current += 1;
+            setBookReplan(null);
+          }}
+          onRetry={() => activateBook(
+            bookReplan.book,
+            bookReplan.feedback,
+            bookReplan.previousProposalId,
+          )}
+          onRevise={(feedback) => activateBook(
+            bookReplan.book,
+            feedback,
+            bookReplan.proposal?.proposalId,
+          )}
           onConfirm={async () => {
+            const proposal = bookReplan.proposal;
+            if (!proposal) return;
             await run(
               '正在确认新章节目录…',
-              () => api.confirmBookReplan(bookReplan.book.id, bookReplan.proposal.proposalId),
+              () => api.confirmBookReplan(bookReplan.book.id, proposal.proposalId),
             );
             await refreshSeries();
           }}
@@ -1888,7 +2063,7 @@ export default function App() {
       {AI_RUNTIME_SETTINGS_ENABLED && showAiSettings && (
         <AiSettingsDialog onClose={() => setShowAiSettings(false)} />
       )}
-      {view !== 'learn' && !learningQaOpen && (
+      {!(view === 'learn' && section) && !learningQaOpen && (
         <button
           className="global-feedback-tab"
           aria-label="反馈产品问题或建议"
@@ -1901,8 +2076,14 @@ export default function App() {
         <FeedbackDialog
           target={feedbackTarget}
           view={view}
-          onSectionChange={setSection}
+          onSectionChange={(updated) => {
+            setSection((current) => current?.id === updated.id ? updated : current);
+          }}
           onRefreshSeries={refreshSeries}
+          onRepairBackgrounded={() => setNotice('反馈已收到，正文正在后台更新，你可以继续学习。')}
+          onRepairSettled={(updated) => setNotice(updated
+            ? '正文已按你的反馈完成更新。'
+            : '反馈已收到，但正文这次没有更新；原内容保持不变，可稍后重试。')}
           onClose={() => setFeedbackTarget(null)}
         />
       )}
@@ -1913,15 +2094,22 @@ export default function App() {
 function BookReplanDialog({
   book,
   proposal,
+  status,
   onClose,
+  onRetry,
+  onRevise,
   onConfirm,
 }: {
   book: Book;
-  proposal: BookReplanProposal;
+  proposal: BookReplanProposal | null;
+  status: BookReplanState['status'];
   onClose: () => void;
+  onRetry: () => Promise<void>;
+  onRevise: (feedback: string) => Promise<void>;
   onConfirm: () => Promise<void>;
 }) {
   const [confirming, setConfirming] = useState(false);
+  const [feedback, setFeedback] = useState('');
   const dialogRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
@@ -1970,44 +2158,111 @@ function BookReplanDialog({
       >
         <header className="book-replan-heading">
           <div>
-            <p className="eyebrow">下一本书 · 目录预览</p>
-            <h2 id="book-replan-title">开始《{book.title}》前，先看一眼新目录</h2>
+            <p className="eyebrow">下一本书 · {status === 'ready' ? '目录预览' : '准备目录'}</p>
+            <h2 id="book-replan-title">
+              {status === 'ready'
+                ? `开始《${book.title}》前，先看一眼新目录`
+                : `正在准备《${book.title}》的新目录`}
+            </h2>
           </div>
           <button className="dialog-close" type="button" aria-label="关闭目录预览" disabled={confirming} onClick={onClose}>×</button>
         </header>
 
-        <ol className="book-replan-outline">
-          {proposal.chapters.map((chapter, index) => (
-            <li key={`${chapter.title}-${index}`}>
-              <span>{String(index + 1).padStart(2, '0')}</span>
+        {status === 'preparing' ? (
+          <div className="book-replan-preparing" role="status" aria-live="polite">
+            <span className="book-replan-progress-mark" aria-hidden="true"><i /><i /><i /></span>
+            <div>
+              <b>正在结合最近的学习表现调整章节</b>
+              <p>准备完成后，新的章节顺序和学习重点会直接出现在这里；只调整本书尚未开始的章节，不会改变书单或系列。</p>
+            </div>
+          </div>
+        ) : status === 'failed' ? (
+          <div className="book-replan-failure" role="alert">
+            <b>这次没有准备好新目录</b>
+            <p>当前章节没有变化。请检查网络后重新准备，或先关闭稍后再试。</p>
+          </div>
+        ) : proposal ? (
+          <>
+            <ol className="book-replan-outline">
+              {proposal.chapters.map((chapter, index) => (
+                <li key={`${chapter.title}-${index}`}>
+                  <span>{String(index + 1).padStart(2, '0')}</span>
+                  <div>
+                    <b>{chapter.title}</b>
+                    <p>{chapter.objective}</p>
+                  </div>
+                </li>
+              ))}
+            </ol>
+            <section className="book-replan-feedback" aria-labelledby="book-replan-feedback-title">
               <div>
-                <b>{chapter.title}</b>
-                <p>{chapter.objective}</p>
+                <span>和这版目录继续讨论</span>
+                <b id="book-replan-feedback-title">哪里不对，直接指出来</b>
+                <p>可以点名某一章，要求加深、删减、换顺序或补上遗漏；系统会返回下一版，不会直接采用。</p>
               </div>
-            </li>
-          ))}
-        </ol>
+              <textarea
+                value={feedback}
+                maxLength={3000}
+                rows={4}
+                placeholder="例如：第 2 章太泛。不要罗列共享方案，改成从训练任务的隔离目标出发，对比 time-slicing、MIG 和 vGPU 的机制与边界。"
+                aria-label="对这版目录的修改意见"
+                onChange={(event) => setFeedback(event.target.value)}
+                onKeyDown={(event) => {
+                  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && feedback.trim()) {
+                    event.preventDefault();
+                    const instruction = feedback.trim();
+                    setFeedback('');
+                    void onRevise(instruction);
+                  }
+                }}
+              />
+              <footer>
+                <small>{feedback.length}/3000 · {navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'} + Enter</small>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={!feedback.trim()}
+                  onClick={() => {
+                    const instruction = feedback.trim();
+                    if (!instruction) return;
+                    setFeedback('');
+                    void onRevise(instruction);
+                  }}
+                >
+                  按我的意见重做
+                </button>
+              </footer>
+            </section>
+          </>
+        ) : null}
 
         <footer className="dialog-actions">
-          <button className="quiet-button" type="button" disabled={confirming} onClick={onClose}>稍后再说</button>
-          <button
-            className="primary-button"
-            type="button"
-            disabled={confirming}
-            onClick={async () => {
-              setConfirming(true);
-              let confirmed = false;
-              try {
-                await onConfirm();
-                confirmed = true;
-              } finally {
-                setConfirming(false);
-              }
-              if (confirmed) onClose();
-            }}
-          >
-            {confirming ? '正在采用…' : '采用这份目录'}
+          <button className="quiet-button" type="button" disabled={confirming} onClick={onClose}>
+            {status === 'ready' ? '稍后再说' : '先关闭'}
           </button>
+          {status === 'failed' && (
+            <button className="primary-button" type="button" onClick={() => void onRetry()}>重新准备</button>
+          )}
+          {status === 'ready' && (
+            <button
+              className="primary-button"
+              type="button"
+              disabled={confirming}
+              onClick={async () => {
+                setConfirming(true);
+                let confirmed = false;
+                try {
+                  await onConfirm();
+                  confirmed = true;
+                } finally {
+                  setConfirming(false);
+                }
+                if (confirmed) onClose();
+              }}
+            >
+              {confirming ? '正在采用…' : '采用这份目录'}
+            </button>
+          )}
         </footer>
       </section>
     </div>
@@ -2138,12 +2393,16 @@ function FeedbackDialog({
   view,
   onSectionChange,
   onRefreshSeries,
+  onRepairBackgrounded,
+  onRepairSettled,
   onClose,
 }: {
   target: FeedbackTarget;
   view: View;
   onSectionChange: (section: Section) => void;
   onRefreshSeries: () => Promise<void>;
+  onRepairBackgrounded: () => void;
+  onRepairSettled: (updated: boolean) => void;
   onClose: () => void;
 }) {
   const options = target.scope === 'content_block'
@@ -2164,6 +2423,7 @@ function FeedbackDialog({
   const [feedbackType, setFeedbackType] = useState(options[0][0]);
   const [message, setMessage] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [repairing, setRepairing] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [repairText, setRepairText] = useState('');
   const [repairFeedbackId, setRepairFeedbackId] = useState('');
@@ -2172,11 +2432,26 @@ function FeedbackDialog({
   const dialogRef = useRef<HTMLElement | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const submittingRef = useRef(submitting);
+  const repairingRef = useRef(repairing);
   const onCloseRef = useRef(onClose);
+  const onRepairBackgroundedRef = useRef(onRepairBackgrounded);
+  const onRepairSettledRef = useRef(onRepairSettled);
+  const backgroundedRef = useRef(false);
   const closeTimerRef = useRef<number | undefined>(undefined);
   const submissionRef = useRef({ payload: '', key: '' });
   submittingRef.current = submitting;
+  repairingRef.current = repairing;
   onCloseRef.current = onClose;
+  onRepairBackgroundedRef.current = onRepairBackgrounded;
+  onRepairSettledRef.current = onRepairSettled;
+
+  const closeDialog = () => {
+    if (repairingRef.current) {
+      backgroundedRef.current = true;
+      onRepairBackgroundedRef.current();
+    }
+    onCloseRef.current();
+  };
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -2189,7 +2464,7 @@ function FeedbackDialog({
 
     const handleDialogKeys = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        if (!submittingRef.current) onCloseRef.current();
+        if (!submittingRef.current) closeDialog();
         return;
       }
       if (event.key !== 'Tab' || !dialog) return;
@@ -2223,11 +2498,11 @@ function FeedbackDialog({
   }, [target.scope]);
 
   const streamRepair = async (feedbackId: string) => {
-    setSubmitting(true);
+    setRepairing(true);
     setSubmitted(true);
     setRepairFailed(false);
     setRepairText('');
-    setStatus('');
+    setStatus('反馈已收到，正在更新这段内容。你可以关闭窗口继续学习。');
     try {
       await api.streamFeedbackRepair(
         feedbackId,
@@ -2237,13 +2512,17 @@ function FeedbackDialog({
         const updated = await api.section(target.sectionId);
         onSectionChange(updated);
         await onRefreshSeries();
-        setStatus('已替换');
+        setStatus('正文已完成更新。');
+        if (backgroundedRef.current) onRepairSettledRef.current(true);
       }
     } catch (reason) {
       setRepairFailed(true);
-      setStatus(reason instanceof Error ? reason.message : '补救没有完成，请重试。');
+      setStatus(reason instanceof Error
+        ? `反馈已收到，但这次更新没有完成：${reason.message}。原正文保持不变。`
+        : '反馈已收到，但这次更新没有完成。原正文保持不变，请稍后重试。');
+      if (backgroundedRef.current) onRepairSettledRef.current(false);
     } finally {
-      setSubmitting(false);
+      setRepairing(false);
     }
   };
 
@@ -2273,26 +2552,27 @@ function FeedbackDialog({
       }
       const receipt = await api.submitFeedback(payload, submissionRef.current.key);
       setSubmitted(true);
+      setSubmitting(false);
       if (target.scope === 'global') {
         setStatus('已收到。');
         closeTimerRef.current = window.setTimeout(() => onCloseRef.current(), 900);
         return;
       }
-      const regeneration = receipt.regeneration;
-      if (regeneration.status === 'stream_ready') {
+      if (receipt.regeneration.status === 'stream_ready') {
         setRepairFeedbackId(receipt.id);
         await streamRepair(receipt.id);
         return;
       }
       const blockedMessages: Record<string, string> = {
-        FEEDBACK_CONTENT_VERSION_STALE: '当前正文已更新；请刷新后再反馈一次。',
-        SECTION_CONTENT_MISSING: '这段正文已不可用；请刷新后再试。',
+        FEEDBACK_CONTENT_VERSION_STALE: '当前正文已经更新。请刷新页面后，在最新正文上重新反馈。',
+        SECTION_CONTENT_MISSING: '这段正文已不可用，请刷新页面后重试。',
+        FEEDBACK_ACCURACY_REVIEW_REQUIRED: '已记录。为避免未经核实地改写，原正文保持不变。',
+        FEEDBACK_CLASSIFICATION_REQUIRED: '已记录。需先确认问题类型，因此原正文保持不变。',
       };
       setStatus(
-        blockedMessages[regeneration.reasonCode || '']
-        || '这段正文暂时无法补救。',
+        blockedMessages[receipt.regeneration.reasonCode || '']
+        || '反馈已记录，但当前版本暂时不能自动更新。',
       );
-      setSubmitting(false);
     } catch (reason) {
       setStatus(reason instanceof Error ? reason.message : '反馈没有提交成功，请稍后重试。');
       setSubmitting(false);
@@ -2303,7 +2583,7 @@ function FeedbackDialog({
     <div
       className="confirm-backdrop feedback-backdrop"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !submitting) onClose();
+        if (event.target === event.currentTarget && !submitting) closeDialog();
       }}
     >
       <section
@@ -2319,7 +2599,7 @@ function FeedbackDialog({
             <p className="eyebrow">{target.scope === 'content_block' ? '正文页边批注' : '告诉我们你的感受'}</p>
             <h2 id="feedback-title">{target.scope === 'content_block' ? '反馈这一段' : '全局反馈'}</h2>
           </div>
-          <button className="dialog-close" type="button" aria-label="关闭反馈" disabled={submitting} onClick={onClose}>×</button>
+          <button className="dialog-close" type="button" aria-label="关闭反馈" disabled={submitting} onClick={closeDialog}>×</button>
         </header>
         {target.scope === 'content_block' && (
           <div className="feedback-block-preview">
@@ -2353,24 +2633,26 @@ function FeedbackDialog({
             <div className={`feedback-repair-answer ${repairFailed ? 'failed' : ''}`} aria-live="polite">
               {repairText ? (
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{repairText}</ReactMarkdown>
-              ) : submitting ? (
-                <span className="feedback-repair-listening">正在回应<span aria-hidden="true">…</span></span>
+              ) : repairing ? (
+                <span className="feedback-repair-listening">正在更新正文<span aria-hidden="true">…</span></span>
               ) : null}
-              {submitting && repairText && <i className="stream-caret" aria-hidden="true" />}
+              {repairing && repairText && <i className="stream-caret" aria-hidden="true" />}
             </div>
           )}
           {status && <p className="feedback-status" role="status">{status}</p>}
           <div className="dialog-actions">
-            <button type="button" className="quiet-button" disabled={submitting} onClick={onClose}>{submitted ? '关闭' : '取消'}</button>
+            <button type="button" className="quiet-button" disabled={submitting} onClick={closeDialog}>
+              {repairing ? '继续学习' : submitted ? '关闭' : '取消'}
+            </button>
             {repairFailed && repairFeedbackId ? (
-              <button type="button" className="primary-button" disabled={submitting} onClick={() => streamRepair(repairFeedbackId)}>
-                {submitting ? '正在回应…' : '重试补救'}
+              <button type="button" className="primary-button" disabled={repairing} onClick={() => void streamRepair(repairFeedbackId)}>
+                {repairing ? '正在更新…' : '重试更新'}
               </button>
-            ) : (
-              <button className="primary-button" disabled={submitting || submitted || ((target.scope === 'global' || feedbackType === 'other') && message.trim().length < 2)}>
-                {submitting ? '正在送出…' : submitted ? '已提交' : '发送反馈'}
+            ) : !submitted ? (
+              <button className="primary-button" disabled={submitting || ((target.scope === 'global' || feedbackType === 'other') && message.trim().length < 2)}>
+                {submitting ? '正在送出…' : '发送反馈'}
               </button>
-            )}
+            ) : null}
           </div>
         </form>
       </section>
@@ -2606,30 +2888,142 @@ function bookContainsSection(book: Book, sectionId: string | null | undefined) {
   );
 }
 
-function Home({
-  data,
-  dailyMode,
-  onOpen,
-  onContinue,
-  onCreate,
+const studyActivityLabels = {
+  reading_thinking: '阅读与思考',
+  verification_review: '验证与复习',
+  ask_ai: 'Ask AI',
+} as const;
+
+function studyMinutes(seconds: number) {
+  if (seconds <= 0) return '0';
+  return String(Math.max(1, Math.round(seconds / 60)));
+}
+
+function StudyTimeSummary({
+  summary,
+  loading,
 }: {
-  data: Bootstrap | null;
-  dailyMode: DailyMode;
-  onOpen: (shelf: Shelf) => void;
-  onContinue: (seriesId: string, sectionId?: string | null) => Promise<void>;
-  onCreate: (body: ShelfCreateInput) => Promise<void>;
+  summary: StudyActivitySummary | null;
+  loading: boolean;
 }) {
-  const [showCreate, setShowCreate] = useState(false);
-  const dashboard = data?.milestoneDashboard;
-  const shelfCount = data?.shelves.length || 0;
-  const seriesCount = data?.shelves.reduce((total, item) => total + item.series.length, 0) || 0;
-  const bookCount = data?.shelves.reduce(
-    (total, item) => total + item.series.reduce((count, itemSeries) => count + itemSeries.books.length, 0),
-    0,
-  ) || 0;
+  const [view, setView] = useState<'activity' | 'timeline'>('activity');
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const shellRef = useRef<HTMLDivElement>(null);
+  const open = hovered || focused || pinned;
+
+  useEffect(() => {
+    if (!pinned) return undefined;
+    const close = (event: MouseEvent) => {
+      if (!shellRef.current?.contains(event.target as Node)) setPinned(false);
+    };
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') setPinned(false);
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [pinned]);
+
+  const totalSeconds = summary?.totalSeconds || 0;
+  const categories = summary?.categories.filter((item) => item.seconds > 0) || [];
+  const episodes = summary?.episodes || [];
+  const localTime = (value: string) => new Intl.DateTimeFormat('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(new Date(value));
+
+  return (
+    <div
+      className="study-time-shell"
+      ref={shellRef}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onFocus={() => setFocused(true)}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setFocused(false);
+      }}
+    >
+      <button
+        type="button"
+        className="study-time-trigger"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls="study-time-popover"
+        onClick={() => setPinned((value) => !value)}
+      >
+        <span>今天已投入</span>
+        <strong>{loading && !summary ? '—' : studyMinutes(totalSeconds)}</strong>
+        <em>分钟</em>
+      </button>
+      {open && (
+        <section
+          className="study-time-popover"
+          id="study-time-popover"
+          role="dialog"
+          aria-label="今天的学习投入"
+        >
+          <h2>今天的学习投入</h2>
+          <div className="study-time-view-switch" role="tablist" aria-label="学习投入查看方式">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === 'activity'}
+              className={view === 'activity' ? 'active' : ''}
+              onClick={() => setView('activity')}
+            >按活动</button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === 'timeline'}
+              className={view === 'timeline' ? 'active' : ''}
+              onClick={() => setView('timeline')}
+            >时间线</button>
+          </div>
+          {view === 'activity' ? (
+            categories.length ? (
+              <ul className="study-time-rows">
+                {categories.map((item) => (
+                  <li key={item.activityKind}>
+                    <span>{studyActivityLabels[item.activityKind]}</span>
+                    <strong>{studyMinutes(item.seconds)} 分钟</strong>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="study-time-empty">今天还没有学习记录</p>
+            )
+          ) : episodes.length ? (
+            <ol className="study-time-timeline">
+              {episodes.map((episode) => (
+                <li key={`${episode.startedAt}-${episode.endedAt}`}>
+                  <time dateTime={episode.startedAt}>{localTime(episode.startedAt)}</time>
+                  <span>开始</span>
+                  <strong>学了 {studyMinutes(episode.durationSeconds)} 分钟</strong>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="study-time-empty">今天还没有学习记录</p>
+          )}
+        </section>
+      )}
+    </div>
+  );
+}
+
+function useReviewWorkspace() {
   const [dueReviews, setDueReviews] = useState<DueReviews | null>(null);
   const [reviewSession, setReviewSession] = useState<ReviewSession | null>(null);
   const [reviewResult, setReviewResult] = useState<ReviewResult | null>(null);
+  const [reinforcement, setReinforcement] = useState<ReinforcementRun | null>(null);
+  const [reinforcementAnswer, setReinforcementAnswer] = useState<number[]>([]);
+  const [reinforcementText, setReinforcementText] = useState('');
   const [reviewAnswers, setReviewAnswers] = useState<number[][]>([]);
   const [reviewBusy, setReviewBusy] = useState('正在读取到期复习…');
   const [reviewError, setReviewError] = useState('');
@@ -2652,6 +3046,9 @@ function Home({
 
   useEffect(() => {
     void loadDueReviews();
+    void api.activeReinforcement().then((value) => {
+      if (value) setReinforcement(value);
+    }).catch(() => undefined);
   }, []);
 
   const startDueReview = async () => {
@@ -2663,6 +3060,7 @@ function Home({
       setReviewSession(value);
       setReviewAnswers(value.quiz.questions.map(() => []));
       setReviewResult(null);
+      setReinforcement(null);
       setDueReviews((current) => current ? {
         ...current,
         items: current.items.map((item) => item.assignmentId === value.assignmentId
@@ -2676,11 +3074,7 @@ function Home({
     }
   };
 
-  const chooseReviewAnswer = (
-    questionIndex: number,
-    optionIndex: number,
-    mode: 'single' | 'multiple',
-  ) => {
+  const chooseReviewAnswer = (questionIndex: number, optionIndex: number, mode: 'single' | 'multiple') => {
     setReviewAnswers((current) => current.map((answer, index) => {
       if (index !== questionIndex) return answer;
       if (mode === 'single') return [optionIndex];
@@ -2737,7 +3131,253 @@ function Home({
     setReviewSession(null);
     setReviewResult(null);
     setReviewAnswers([]);
+    setReinforcement(null);
+    setReinforcementAnswer([]);
+    setReinforcementText('');
   };
+
+  const startReinforcement = async () => {
+    if (!reviewResult) return;
+    setReviewBusy('正在为这个断点准备一条短路径…');
+    setReviewError('');
+    try {
+      const value = await api.startReviewReinforcement(reviewResult.assignmentId);
+      setReinforcement(value);
+      setReinforcementAnswer([]);
+      setReinforcementText('');
+    } catch (reason) {
+      setReviewError(reason instanceof Error ? reason.message : '补强路径准备失败。');
+    } finally {
+      setReviewBusy('');
+    }
+  };
+
+  const submitReinforcementStep = async () => {
+    const activity = reinforcement?.currentActivity;
+    if (!reinforcement || !activity) return;
+    setReviewBusy('正在衔接下一步…');
+    setReviewError('');
+    try {
+      const value = await api.respondReinforcement(
+        reinforcement.runId,
+        {
+          activityKey: activity.activityKey,
+          selectedOptions: reinforcementAnswer,
+          responseText: reinforcementText,
+          acknowledged: activity.type === 'diagnose',
+        },
+        `reinforcement-${reinforcement.runId}-${reinforcement.progress.activityCount + 1}`,
+      );
+      setReinforcement(value);
+      setReinforcementAnswer([]);
+      setReinforcementText('');
+    } catch (reason) {
+      setReviewError(reason instanceof Error ? reason.message : '这一步暂时无法保存。');
+    } finally {
+      setReviewBusy('');
+    }
+  };
+
+  return {
+    dueReviews, pendingReviews, currentReview, reviewSession, reviewResult, reinforcement,
+    reinforcementAnswer, reinforcementText, reviewAnswers, reviewBusy, reviewError,
+    setReinforcementAnswer, setReinforcementText, loadDueReviews, startDueReview,
+    chooseReviewAnswer, submitDueReview, skipDueReview, continueReviewQueue,
+    startReinforcement, submitReinforcementStep,
+  };
+}
+
+function ReviewCenterPage({ onBack }: { onBack: () => void }) {
+  const {
+    pendingReviews, currentReview, reviewSession, reviewResult, reinforcement,
+    reinforcementAnswer, reinforcementText, reviewAnswers, reviewBusy, reviewError,
+    setReinforcementAnswer, setReinforcementText, loadDueReviews, startDueReview,
+    chooseReviewAnswer, submitDueReview, skipDueReview, continueReviewQueue,
+    startReinforcement, submitReinforcementStep,
+  } = useReviewWorkspace();
+  const activity = reinforcement?.currentActivity;
+  const stage = reinforcement?.outcome
+    ? 5
+    : activity?.type === 'verify'
+      ? 5
+      : activity?.type === 'recompose'
+        ? 4
+        : activity?.type === 'repair'
+          ? 3
+          : activity?.type === 'diagnose'
+            ? 2
+            : reviewSession
+              ? 1
+              : 0;
+
+  return (
+    <section className="review-center-page" aria-labelledby="review-center-title">
+      <header className="review-center-hero">
+        <button type="button" className="review-center-back" onClick={onBack}>← 返回书架</button>
+        <div className="review-center-title-row">
+          <div>
+            <p className="eyebrow">RECALL STUDIO · 只处理已经学过的知识</p>
+            <h1 id="review-center-title">快速找回，<br /><em>只在断点处停留。</em></h1>
+            <p>先用一道新题检查能否调用；答不稳时，再根据这次薄弱点补一个案例，最后独立验证。</p>
+          </div>
+          <div className="review-center-contract">
+            <span>一次 5–10 分钟</span>
+            <b>唤醒不是重学，补强不是刷题。</b>
+            <small>只有最后的独立验证会形成新的掌握证据。</small>
+          </div>
+        </div>
+        <ol className="review-trace" aria-label={`当前位于第 ${stage || 1} 阶段`}>
+          {['快速唤醒', '定位断点', '案例补强', '重组推理', '独立验证'].map((label, index) => (
+            <li key={label} className={stage >= index + 1 ? 'is-reached' : ''}><i /><span>{label}</span></li>
+          ))}
+        </ol>
+      </header>
+
+      <div className="review-center-layout">
+        <aside className="review-center-queue">
+          <header><div><span>今日队列</span><b>{pendingReviews.length} 项</b></div><small>跨书架按到期程度排序</small></header>
+          {reinforcement && (
+            <button type="button" className="review-queue-item is-active">
+              <i>补</i><span><b>{reinforcement.objective}</b><small>补强进行中 · 继续当前一步</small></span>
+            </button>
+          )}
+          {!reinforcement && pendingReviews.map((item, index) => (
+            <button type="button" className={`review-queue-item ${index === 0 ? 'is-active' : ''}`} key={item.assignmentId}>
+              <i>{String(index + 1).padStart(2, '0')}</i><span><b>{item.objective}</b><small>{item.status === 'started' ? '已开始' : '等待唤醒'}</small></span>
+            </button>
+          ))}
+          {!reviewBusy && !reinforcement && pendingReviews.length === 0 && (
+            <div className="review-queue-clear"><i>✓</i><b>今日队列已清空</b><small>下一次到期时，这里会自动出现。</small></div>
+          )}
+          <div className="review-method-note"><span>本次方法</span><ol><li><b>01</b> 快速过关键连接</li><li><b>02</b> 只补薄弱案例</li><li><b>03</b> 换题独立校验</li></ol></div>
+        </aside>
+
+        <main className="review-workbench" aria-live="polite">
+          {reviewBusy ? (
+            <div className="review-workbench-status"><i /><span>正在衔接</span><h2>{reviewBusy}</h2></div>
+          ) : reviewError ? (
+            <div className="review-workbench-status is-error" role="alert"><span>暂时中断</span><h2>这一步没有保存</h2><p>{reviewError}</p><button onClick={() => void loadDueReviews()}>重新读取</button></div>
+          ) : reinforcement?.outcome ? (
+            <div className={`review-workbench-outcome is-${reinforcement.outcome.kind}`}>
+              <span>{reinforcement.outcome.kind === 'recovered' ? '连接已恢复' : '本轮已停止'}</span>
+              <h2>{reinforcement.outcome.kind === 'recovered' ? '这次不是记住答案，是真正重新会用了。' : '不继续堆题，下一步拆回前置能力。'}</h2>
+              <p>{reinforcement.outcome.message}</p>
+              <button onClick={continueReviewQueue}>处理下一项 <i aria-hidden="true">→</i></button>
+            </div>
+          ) : reinforcement && activity ? (
+            <div className={`review-workbench-activity is-${activity.type}`}>
+              <header><span>{activity.type === 'diagnose' ? '定位断点' : activity.type === 'repair' ? '案例补强' : activity.type === 'recompose' ? '重组推理' : '独立验证'}</span><small>{reinforcement.progress.activityCount} / {reinforcement.progress.maxActivities} 步已用</small></header>
+              <p className="review-workbench-objective">当前知识点 · <b>{reinforcement.objective}</b></p>
+              <h2>{activity.payload.heading}</h2>
+              {reinforcement.feedback && <div className={`reinforcement-feedback is-${reinforcement.feedback.kind}`}>{reinforcement.feedback.message}</div>}
+              {activity.type === 'diagnose' && (
+                <div className="review-agent-diagnosis">
+                  <div className={`review-diagnosis-signal is-${activity.payload.hypothesis?.status || 'abstained'}`}>
+                    <span>{activity.payload.hypothesis?.status === 'supported' ? '多条证据一致' : activity.payload.hypothesis?.status === 'tentative' ? '一条待验证线索' : 'Agent 暂不判断'}</span>
+                    <small>不会直接写入画像</small>
+                  </div>
+                  <h3>{activity.payload.hypothesis?.label}</h3>
+                  <p>{activity.payload.hypothesis?.message}</p>
+                  <div className="review-diagnosis-next"><i aria-hidden="true">→</i><span>{activity.payload.prompt}</span></div>
+                </div>
+              )}
+              {activity.type === 'repair' && (
+                <div className="review-repair-layout">
+                  <div className="review-quick-pass"><span>30 秒快速过</span><p>{activity.payload.content}</p></div>
+                  {activity.payload.case && (
+                    <div className="review-targeted-case">
+                      <header><span>针对刚才断点的案例</span><small>{activity.payload.case.source}</small></header>
+                      <h3>{activity.payload.case.heading}</h3>
+                      <p>{activity.payload.case.content}</p>
+                    </div>
+                  )}
+                  <label className="reinforcement-recall"><span>{activity.payload.prompt}</span><textarea value={reinforcementText} onChange={(event) => setReinforcementText(event.target.value)} placeholder="用你自己的话写一句…" rows={3} /></label>
+                </div>
+              )}
+              {(activity.type === 'recompose' || activity.type === 'verify') && activity.payload.question && (
+                <fieldset><legend>{activity.payload.question.prompt}</legend>{activity.payload.question.options.map((option, index) => (
+                  <label key={index}><input type={activity.payload.question?.selectionMode === 'multiple' ? 'checkbox' : 'radio'} name={`reinforcement-${reinforcement.runId}-${activity.activityKey}`} checked={reinforcementAnswer.includes(index)} onChange={() => setReinforcementAnswer((current) => activity.payload.question?.selectionMode === 'multiple' ? current.includes(index) ? current.filter((item) => item !== index) : [...current, index].sort() : [index])} /><span>{option}</span></label>
+                ))}</fieldset>
+              )}
+              <button className="review-workbench-next" disabled={activity.type === 'repair' ? reinforcementText.trim().length < 6 : activity.type === 'diagnose' ? false : reinforcementAnswer.length === 0} onClick={() => void submitReinforcementStep()}>{activity.type === 'diagnose' ? '查看针对性案例' : activity.type === 'verify' ? '提交独立验证' : '进入下一步'} <i aria-hidden="true">→</i></button>
+              <p className="review-evidence-boundary"><i aria-hidden="true">◇</i>{reinforcement.evidenceBoundary}</p>
+            </div>
+          ) : reviewResult ? (
+            <div className="review-workbench-result">
+              <span>{reviewResult.passed ? '快速唤醒完成' : '发现一个具体断点'}</span><h2>{reviewResult.score} / {reviewResult.total}</h2>
+              {reviewResult.reinforcement.available ? <><p>不重复刚才那道题。接下来只补这项能力缺失的连接与案例，再换题独立验证。</p><button onClick={() => void startReinforcement()}>开始针对性补强 <i aria-hidden="true">→</i></button></> : <button onClick={continueReviewQueue}>{pendingReviews.length ? '处理下一项' : '完成今日复习'} <i aria-hidden="true">→</i></button>}
+            </div>
+          ) : reviewSession ? (
+            <div className="review-workbench-quiz">
+              <header><span>快速唤醒</span><small>先凭记忆作答，不翻正文</small></header>
+              <p className="review-workbench-objective">正在检查 · <b>{currentReview?.objective || reviewSession.quiz.questions[0]?.objective}</b></p>
+              {reviewSession.quiz.questions.map((question, questionIndex) => (
+                <fieldset key={`${reviewSession.quiz.id}-${questionIndex}`}><legend>{question.prompt}</legend>{question.options.map((option, optionIndex) => (
+                  <label key={optionIndex}><input type={question.selectionMode === 'multiple' ? 'checkbox' : 'radio'} name={`review-${reviewSession.quiz.id}-${questionIndex}`} checked={reviewAnswers[questionIndex]?.includes(optionIndex) || false} onChange={() => chooseReviewAnswer(questionIndex, optionIndex, question.selectionMode)} /><span>{option}</span></label>
+                ))}</fieldset>
+              ))}
+              <button className="review-workbench-next" disabled={reviewAnswers.some((answer) => answer.length === 0)} onClick={() => void submitDueReview()}>检查能否调用 <i aria-hidden="true">→</i></button>
+            </div>
+          ) : currentReview ? (
+            <div className="review-workbench-ready"><span>下一项 · 预计 3 分钟</span><h2>{currentReview.objective}</h2><p>先快速过一遍关键连接，然后用一道新题检查是否还能独立调用。只有答不稳，才会进入补强。</p><div><button onClick={() => void startDueReview()}>{currentReview.status === 'started' ? '继续快速唤醒' : '开始快速唤醒'} <i aria-hidden="true">→</i></button>{currentReview.status !== 'started' && <button onClick={() => void skipDueReview()}>今天跳过</button>}</div></div>
+          ) : (
+            <div className="review-workbench-status is-clear"><span>今日完成</span><h2>需要找回的知识都处理好了。</h2><p>这里不会为了维持连续感制造练习；等新的复习证据到期再回来。</p><button onClick={onBack}>返回书架</button></div>
+          )}
+        </main>
+      </div>
+    </section>
+  );
+}
+
+function Home({
+  data,
+  dailyMode,
+  onOpen,
+  onContinue,
+  onOpenReview,
+  onCreate,
+}: {
+  data: Bootstrap | null;
+  dailyMode: DailyMode;
+  onOpen: (shelf: Shelf) => void;
+  onContinue: (seriesId: string, sectionId?: string | null) => Promise<void>;
+  onOpenReview: () => void;
+  onCreate: (body: ShelfCreateInput) => Promise<void>;
+}) {
+  const [showCreate, setShowCreate] = useState(false);
+  const dashboard = data?.milestoneDashboard;
+  const shelfCount = data?.shelves.length || 0;
+  const seriesCount = data?.shelves.reduce((total, item) => total + item.series.length, 0) || 0;
+  const bookCount = data?.shelves.reduce(
+    (total, item) => total + item.series.reduce((count, itemSeries) => count + itemSeries.books.length, 0),
+    0,
+  ) || 0;
+  const [studyToday, setStudyToday] = useState<StudyActivitySummary | null>(null);
+  const [studyTodayLoading, setStudyTodayLoading] = useState(true);
+  const {
+    pendingReviews, currentReview, reinforcement, reviewBusy, reviewError, loadDueReviews,
+  } = useReviewWorkspace();
+
+  useEffect(() => {
+    let current = true;
+    const loadStudyToday = async () => {
+      try {
+        const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+        const value = await api.studyActivityToday(timezone);
+        if (current) setStudyToday(value);
+      } catch {
+        // The dashboard stays usable if the estimate is temporarily unavailable.
+      } finally {
+        if (current) setStudyTodayLoading(false);
+      }
+    };
+    void loadStudyToday();
+    const timer = window.setInterval(loadStudyToday, 60_000);
+    return () => {
+      current = false;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   return (
     <section className={`library-dashboard mode-${dailyMode}`}>
@@ -2746,6 +3386,7 @@ function Home({
           <h1>把正在学的，<br /><em>放回眼前。</em></h1>
         </div>
         <div className="library-hero-aside">
+          <StudyTimeSummary summary={studyToday} loading={studyTodayLoading} />
           <p className="library-summary">
             <strong>{shelfCount}</strong> 个领域 · <strong>{seriesCount}</strong> 个学习系列 · <strong>{bookCount}</strong> 本教材
           </p>
@@ -2786,92 +3427,35 @@ function Home({
           )}
         </article>
 
-        <article className="library-focus-card review-focus-card">
+        <article className="library-focus-card review-entry-card">
           <header>
-            <span className="focus-card-label">{dailyMode === 'fast' && currentReview ? 'Fast 模式优先 · 待复习' : '待复习'}</span>
+            <span className="focus-card-label">复习与补强</span>
             <small>跨书架</small>
           </header>
           {reviewBusy ? (
-            <div className="review-empty-state" aria-live="polite">
-              <span>正在同步</span>
-              <h2>{reviewBusy}</h2>
-            </div>
+            <div className="review-entry-copy"><span>正在同步</span><h2>整理今天需要找回的知识</h2></div>
           ) : reviewError ? (
-            <div className="review-empty-state review-error-state" role="alert">
-              <span>读取失败</span>
-              <h2>暂时无法打开复习</h2>
-              <p>{reviewError}</p>
-              <button onClick={() => void loadDueReviews()}>重新读取</button>
-            </div>
-          ) : reviewResult ? (
-            <div className="review-result-state" aria-live="polite">
-              <span>{reviewResult.passed ? '已完成' : '完成本次复习'}</span>
-              <h2>{reviewResult.score} / {reviewResult.total}</h2>
-              <button onClick={continueReviewQueue}>
-                {pendingReviews.length ? '继续下一项' : '完成今日复习'} <span aria-hidden="true">→</span>
-              </button>
-            </div>
-          ) : reviewSession ? (
-            <div className="review-session-state">
-              <div className="review-objective-label">到期概念</div>
-              <p>{currentReview?.objective || reviewSession.quiz.questions[0]?.objective}</p>
-              {reviewSession.quiz.questions.map((question, questionIndex) => (
-                <fieldset key={`${reviewSession.quiz.id}-${questionIndex}`}>
-                  <legend>{question.prompt}</legend>
-                  {question.options.map((option, optionIndex) => (
-                    <label key={optionIndex}>
-                      <input
-                        type={question.selectionMode === 'multiple' ? 'checkbox' : 'radio'}
-                        name={`review-${reviewSession.quiz.id}-${questionIndex}`}
-                        checked={reviewAnswers[questionIndex]?.includes(optionIndex) || false}
-                        onChange={() => chooseReviewAnswer(
-                          questionIndex,
-                          optionIndex,
-                          question.selectionMode,
-                        )}
-                      />
-                      <span>{option}</span>
-                    </label>
-                  ))}
-                </fieldset>
-              ))}
-              <button
-                className="review-submit-button"
-                disabled={reviewAnswers.some((answer) => answer.length === 0)}
-                onClick={() => void submitDueReview()}
-              >
-                保存复习结果 <span aria-hidden="true">→</span>
-              </button>
+            <div className="review-entry-copy is-error"><span>读取失败</span><h2>今天的复习队列暂时没有取到</h2><button onClick={() => void loadDueReviews()}>重新读取</button></div>
+          ) : reinforcement ? (
+            <div className="review-entry-copy">
+              <span>补强进行中 · {reinforcement.progress.activityCount}/{reinforcement.progress.maxActivities}</span>
+              <h2>{reinforcement.objective}</h2>
+              <p>断点已经定位，回到专用工作台继续当前一步。</p>
+              <button onClick={onOpenReview}>继续补强 <i aria-hidden="true">→</i></button>
             </div>
           ) : currentReview ? (
-            <div className="review-ready-state">
-              <span>{pendingReviews.length} 项到期</span>
+            <div className="review-entry-copy">
+              <span>{pendingReviews.length} 项需要唤醒</span>
               <h2>{currentReview.objective}</h2>
-              <div className="review-ready-actions">
-                <button onClick={() => void startDueReview()}>
-                  {currentReview.status === 'started' ? '继续复习' : '开始复习'} <span aria-hidden="true">→</span>
-                </button>
-                {currentReview.status !== 'started' && (
-                  <button onClick={() => void skipDueReview()}>今天跳过</button>
-                )}
-              </div>
+              <p>先快速找回关键概念；答不稳时，再进入针对性案例与独立校验。</p>
+              <button onClick={onOpenReview}>进入复习中心 <i aria-hidden="true">→</i></button>
             </div>
           ) : (
-            <div className="review-empty-state review-clear-state">
-              <span>今日已清空</span>
-              <h2>没有到期的复习</h2>
-            </div>
+            <div className="review-entry-copy is-clear"><span>今日已清空</span><h2>暂时没有需要唤醒的知识</h2><button onClick={onOpenReview}>查看复习中心 <i aria-hidden="true">→</i></button></div>
           )}
-          <div className="review-cadence" aria-label="复习间隔">
-            <span>复习节奏</span>
-            <ol>
-              <li>1 天</li>
-              <li>3 天</li>
-              <li>7 天</li>
-              <li>14 天</li>
-            </ol>
-          </div>
+          <div className="review-entry-rail" aria-hidden="true"><i /><i /><i /></div>
         </article>
+
       </div>
 
       <section className="library-catalog" aria-labelledby="library-catalog-title">
@@ -3119,7 +3703,7 @@ const DEFAULT_LEARNING_PREFERENCES: LearningPreferences = {
   explanationDensity: 'auto',
   formatPreferences: [],
   interactionRhythm: 'auto',
-  dailyModePromptEnabled: true,
+  dailyModePromptEnabled: false,
 };
 
 const PROFILE_PREFERENCE_OPTIONS = {
@@ -3158,6 +3742,220 @@ function parseProfileDomains(value: string) {
       .map((item) => item.trim())
       .filter(Boolean),
   )).slice(0, 6);
+}
+
+const KNOWLEDGE_RANK_SHORT:Record<KnowledgeMapNode['rank'],string> = {
+  unranked: '待验证', bronze: '青铜', silver: '白银', gold: '黄金',
+  platinum: '铂金', diamond: '钻石', master: '大师',
+};
+
+function KnowledgeMapPage({
+  series,
+  onBack,
+  onOpenReview,
+}: {
+  series:{id:string;title:string;shelfName:string}[];
+  onBack:()=>void;
+  onOpenReview:()=>void;
+}) {
+  const [scope, setScope] = useState('');
+  const [map, setMap] = useState<KnowledgeMap | null>(null);
+  const [selectedId, setSelectedId] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [actionBusy, setActionBusy] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setError('');
+    void api.knowledgeMap(scope || undefined).then((value) => {
+      if (!alive) return;
+      setMap(value);
+      setSelectedId((current) => (
+        value.nodes.some((item) => item.conceptRevisionId === current)
+          ? current
+          : value.nodes[0]?.conceptRevisionId || ''
+      ));
+    }).catch((reason) => {
+      if (alive) setError(reason instanceof Error ? reason.message : '知识版图暂时无法加载');
+    }).finally(() => {
+      if (alive) setLoading(false);
+    });
+    return () => { alive = false; };
+  }, [scope]);
+
+  const selected = map?.nodes.find((item) => item.conceptRevisionId === selectedId) || null;
+  const positioned = useMemo(() => {
+    const nodes = map?.nodes || [];
+    return nodes.map((node, index) => {
+      const column = index % 3;
+      const row = Math.floor(index / 3);
+      return {
+        node,
+        x: 130 + column * 220 + (row % 2 ? 28 : 0),
+        y: 92 + row * 150 + (column === 1 ? 34 : 0),
+      };
+    });
+  }, [map]);
+  const coordinates = new Map(positioned.map((item) => [item.node.conceptRevisionId, item]));
+  const coverage = map ? Math.round(map.progress.coveragePpm / 10_000) : 0;
+
+  const startSelectedReinforcement = async () => {
+    if (actionBusy) return;
+    if (selected?.nextAction.kind === 'wake') {
+      onOpenReview();
+      return;
+    }
+    if (!selected?.recommendedTargetId) return;
+    setActionBusy(true);
+    setError('');
+    try {
+      await api.startTargetReinforcement(selected.recommendedTargetId);
+      onOpenReview();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '暂时无法开始补强');
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  return (
+    <section className="knowledge-map-page" aria-labelledby="knowledge-map-title">
+      <header className="knowledge-map-hero">
+        <button type="button" className="knowledge-map-back" onClick={onBack}>← 返回书架</button>
+        <div className="knowledge-map-title-row">
+          <div>
+            <p className="eyebrow">MY KNOWLEDGE FIELD · 由正式证据生长</p>
+            <h1 id="knowledge-map-title">不是读到了哪里，<br />是能力真正长到了哪里。</h1>
+            <p>{map?.message || '正在重建你的个人知识子网…'}</p>
+          </div>
+          <label className="knowledge-scope-picker">
+            <span>观察范围</span>
+            <select value={scope} onChange={(event) => setScope(event.target.value)}>
+              <option value="">全部学习目标</option>
+              {series.map((item) => (
+                <option key={item.id} value={item.id}>{item.shelfName} · {item.title}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="knowledge-progress-strip" aria-label={`能力路线覆盖 ${coverage}%`}>
+          <div className="knowledge-progress-number"><strong>{coverage}</strong><span>%</span></div>
+          <div className="knowledge-progress-copy">
+            <span>能力路线覆盖</span>
+            <div><i style={{ width: `${coverage}%` }} /></div>
+            <small>{map?.progress.verifiedTargets || 0} / {map?.progress.requiredTargets || 0} 项正式目标已有合格证据</small>
+          </div>
+          <dl>
+            <div><dt>{map?.progress.activeNodes || 0}</dt><dd>可随时调用</dd></div>
+            <div><dt>{map?.progress.needsWakeNodes || 0}</dt><dd>待唤醒</dd></div>
+            <div><dt>{map?.progress.reassessmentNodes || 0}</dt><dd>待补强</dd></div>
+          </dl>
+        </div>
+      </header>
+
+      {loading ? (
+        <div className="knowledge-map-status"><i />正在从学习证据重建版图…</div>
+      ) : error ? (
+        <div className="knowledge-map-status is-error" role="alert">{error}</div>
+      ) : !map?.nodes.length ? (
+        <div className="knowledge-map-empty">
+          <span aria-hidden="true">◎</span>
+          <h2>第一颗知识坐标还在形成</h2>
+          <p>{map?.message}</p>
+          {Boolean(map?.excluded.provisionalTargetCount) && <small>已有 {map?.excluded.provisionalTargetCount} 项旧目标尚未完成正式知识坐标绑定，因此没有被拿来虚构段位。</small>}
+        </div>
+      ) : (
+        <div className="knowledge-map-workspace">
+          <div className="knowledge-constellation" aria-label="知识节点关系图">
+            <div className="knowledge-constellation-heading">
+              <div><span>个人子网</span><b>{map.nodes.length} 个能力节点</b></div>
+              <small>连线来自已发布知识关系；点击节点查看证据范围</small>
+            </div>
+            <svg viewBox={`0 0 700 ${Math.max(430, Math.ceil(positioned.length / 3) * 150 + 80)}`} role="img" aria-label="能力节点关系">
+              <defs>
+                <pattern id="knowledge-grid" width="28" height="28" patternUnits="userSpaceOnUse">
+                  <circle cx="1" cy="1" r="1" fill="currentColor" />
+                </pattern>
+              </defs>
+              <rect width="100%" height="100%" fill="url(#knowledge-grid)" className="knowledge-grid" />
+              {map.edges.map((edge) => {
+                const from = coordinates.get(edge.from);
+                const to = coordinates.get(edge.to);
+                if (!from || !to) return null;
+                return <g key={edge.id} className="knowledge-edge"><line x1={from.x} y1={from.y} x2={to.x} y2={to.y} /><text x={(from.x + to.x) / 2} y={(from.y + to.y) / 2 - 8}>{edge.label}</text></g>;
+              })}
+              {positioned.map(({ node, x, y }) => (
+                <g
+                  key={node.conceptRevisionId}
+                  className={`knowledge-node rank-${node.rank} activation-${node.activation}${selectedId === node.conceptRevisionId ? ' is-selected' : ''}`}
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${node.label}，${node.rankLabel}，${node.nextAction.label}`}
+                  onClick={() => setSelectedId(node.conceptRevisionId)}
+                  onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') setSelectedId(node.conceptRevisionId); }}
+                >
+                  <circle cx={x} cy={y} r="42" className="knowledge-node-halo" />
+                  <circle cx={x} cy={y} r="30" className="knowledge-node-core" />
+                  <text x={x} y={y + 4} className="knowledge-node-rank">{KNOWLEDGE_RANK_SHORT[node.rank]}</text>
+                  <text x={x} y={y + 61} className="knowledge-node-label">{node.label.length > 11 ? `${node.label.slice(0, 10)}…` : node.label}</text>
+                  {node.activation === 'due' && <text x={x + 31} y={y - 28} className="knowledge-node-signal">唤</text>}
+                  {node.activation === 'reassessment' && <text x={x + 31} y={y - 28} className="knowledge-node-signal">补</text>}
+                </g>
+              ))}
+            </svg>
+          </div>
+
+          <aside className="knowledge-node-ledger" aria-live="polite">
+            {selected && (
+              <>
+                <div className={`knowledge-ledger-seal rank-${selected.rank}`}>
+                  <span>{KNOWLEDGE_RANK_SHORT[selected.rank]}</span>
+                  <small>{'★'.repeat(selected.stars)}{'☆'.repeat(Math.max(0, 3 - selected.stars))}</small>
+                </div>
+                <p className="eyebrow">EVIDENCE LEDGER</p>
+                <h2>{selected.label}</h2>
+                <p className="knowledge-capability-scope">本节点只衡量：{selected.capabilityScope}</p>
+                <div className="knowledge-ledger-state">
+                  <span>{selected.rankLabel}</span>
+                  <i>→</i>
+                  <span className={`activation-${selected.activation}`}>{selected.nextAction.label}</span>
+                </div>
+                <dl>
+                  <div><dt>{selected.independentEvidenceCount}</dt><dd>独立证据</dd></div>
+                  <div><dt>{selected.verifiedTargetCount}/{selected.targetCount}</dt><dd>目标验证</dd></div>
+                  <div><dt>{selected.stabilityDays} 天</dt><dd>当前稳定期</dd></div>
+                </dl>
+                <div className="knowledge-ceiling-note">
+                  <span>这项能力的自然上限</span>
+                  <b>{selected.rankCeilingLabel}</b>
+                  <small>{selected.atCeiling ? '本节点已满阶；更复杂的能力会作为新的知识节点出现。' : '继续学习不会靠重复刷题升级，而要出现更深、独立的新证据。'}</small>
+                </div>
+                {selected.routeContexts[0] && (
+                  <div className="knowledge-route-origin">
+                    <span>进入你版图的路线</span>
+                    <b>{selected.routeContexts[0].seriesTitle}</b>
+                    <small>{selected.routeContexts[0].bookTitle} · {selected.routeContexts[0].sectionTitle}</small>
+                  </div>
+                )}
+                {(selected.nextAction.kind === 'reinforce' || selected.nextAction.kind === 'wake') && (
+                  <button className="knowledge-reinforce-entry" disabled={actionBusy} onClick={() => void startSelectedReinforcement()}>
+                    {actionBusy ? '正在准备短路径…' : selected.nextAction.label}
+                    <span aria-hidden="true">→</span>
+                  </button>
+                )}
+              </>
+            )}
+          </aside>
+        </div>
+      )}
+      <footer className="knowledge-map-footnote">
+        <b>这里不显示 AI 猜测。</b>
+        <span>正文互动帮助理解，但只有节末测验、Ask Me 与合格的延迟复习会改变正式段位；后台发现生疏时，会明确显示为“待唤醒”。</span>
+      </footer>
+    </section>
+  );
 }
 
 function ProfileCenterPage({
@@ -3200,7 +3998,7 @@ function ProfileCenterPage({
   const [formatPreferences, setFormatPreferences] = useState(initialPreferences.formatPreferences);
   const [interactionRhythm, setInteractionRhythm] = useState(initialPreferences.interactionRhythm);
   const [dailyModePromptEnabled, setDailyModePromptEnabled] = useState(
-    initialPreferences.dailyModePromptEnabled ?? true,
+    initialPreferences.dailyModePromptEnabled ?? false,
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -3380,7 +4178,8 @@ function ProfileCenterPage({
             <legend>学习节奏</legend>
             <label className="profile-toggle-row">
               <span>
-                <b>进入学习前询问 Fast / Slow 模式</b>
+                <b>进入学习前自动询问 Fast / Slow 模式</b>
+                <small>关闭时沿用上次选择，也可以随时从顶部切换。</small>
               </span>
               <input
                 type="checkbox"
@@ -3657,7 +4456,7 @@ function ShelfPage({
           {showPlan ? '取消创建' : '＋ 创建学习系列'}
         </button>
       </div>
-      {showPlan && <PlanForm profile={profile} submit={onCreate} onCancel={() => setShowPlan(false)} />}
+      {showPlan && <PlanForm shelfId={shelf.id} profile={profile} submit={onCreate} onCancel={() => setShowPlan(false)} />}
       <div className="series-shelf-heading">
         <span>书架上的学习系列</span>
         <small>每一排对应一个学习目标</small>
@@ -3802,10 +4601,12 @@ function TrashIcon({ size = 16 }: { size?: number }) {
 }
 
 function PlanForm({
+  shelfId,
   profile,
   submit,
   onCancel,
 }: {
+  shelfId: string;
   profile: LearningProfile;
   submit: (body: object, idempotencyKey: string) => Promise<void>;
   onCancel: () => void;
@@ -3820,29 +4621,200 @@ function PlanForm({
   const [experience, setExperience] = useState(profile.experience || '暂无直接经验，希望从当前基础开始建立理解。');
   const [purpose, setPurpose] = useState(profile.purpose);
   const [depth, setDepth] = useState('');
+  const [step, setStep] = useState<'details' | 'start' | 'map'>('details');
+  const [preview, setPreview] = useState<LearningStartPreview | null>(null);
+  const [selectedConcepts, setSelectedConcepts] = useState<string[]>([]);
+  const [learningPreferences, setLearningPreferences] = useState<LearningStartPreference[]>([]);
   const [formError, setFormError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
   const idempotencyKey = useRef(crypto.randomUUID());
-  const send = async (event: FormEvent) => {
+  const planDetails = { shelfId, topic, role: background, experience, purpose, depth, details: '' };
+  const continueToStart = (event: FormEvent) => {
     event.preventDefault();
-    if (submitting) return;
+    if (submitting || previewing) return;
     if (!depth) {
       setFormError('请选择目标深度');
+      return;
+    }
+    setFormError('');
+    setStep('start');
+  };
+  const submitPlan = async (mode: 'direct' | 'guided') => {
+    if (submitting) return;
+    if (mode === 'guided' && !selectedConcepts.length) {
+      setFormError('至少点亮一个你愿意投入时间的方向');
       return;
     }
     setFormError('');
     setSubmitting(true);
     try {
       await submit(
-        { topic, role: background, experience, purpose, depth, details: '' },
+        mode === 'guided' && preview
+          ? {
+              ...planDetails,
+              startMode: 'guided',
+              learningStartSelection: {
+                previewId: preview.previewId,
+                selectedConceptRevisionIds: selectedConcepts,
+                learningPreferences,
+              },
+            }
+          : { ...planDetails, startMode: 'direct' },
         idempotencyKey.current,
       );
-    } catch {
+    } catch (reason) {
       setSubmitting(false);
+      setFormError(reason instanceof Error ? reason.message : '学习路线生成失败，请稍后重试');
     }
   };
+  const openKnowledgeMap = async () => {
+    if (previewing) return;
+    setPreviewing(true);
+    setFormError('');
+    try {
+      const value = await api.learningStartPreview(planDetails);
+      setPreview(value);
+      setSelectedConcepts([]);
+      setLearningPreferences([]);
+      setStep('map');
+    } catch (reason) {
+      setFormError(reason instanceof Error ? reason.message : '暂时无法打开知识版图');
+    } finally {
+      setPreviewing(false);
+    }
+  };
+  const returnToDetails = () => {
+    idempotencyKey.current = crypto.randomUUID();
+    setPreview(null);
+    setSelectedConcepts([]);
+    setLearningPreferences([]);
+    setFormError('');
+    setStep('details');
+  };
+
+  if (step === 'start') {
+    return (
+      <section className="learning-start-flow" id="create-series-form" aria-labelledby="learning-start-title">
+        <header className="learning-start-heading">
+          <div>
+            <p className="eyebrow">最后一步</p>
+            <h2 id="learning-start-title">这次想怎么开始？</h2>
+            <p>课程结构不变，只决定哪些内容多投入，哪些内容先轻一点。</p>
+          </div>
+          <span className="learning-start-topic">{topic}</span>
+        </header>
+        <div className="learning-start-options">
+          <button
+            type="button"
+            disabled={submitting || previewing}
+            onClick={() => void submitPlan('direct')}
+          >
+            <span className="learning-start-option-number">01</span>
+            <small>直接开始</small>
+            <b>让系统从零安排</b>
+            <p>按你的背景和目标生成完整路线，适合还不确定重点的时候。</p>
+            <i aria-hidden="true">→</i>
+          </button>
+          <button
+            type="button"
+            className="featured"
+            disabled={submitting || previewing}
+            onClick={() => void openKnowledgeMap()}
+          >
+            <span className="learning-start-option-number">02</span>
+            <small>先挑重点</small>
+            <b>点亮想学的方向</b>
+            <p>从知识关系中凭直觉点选。没点亮的不会消失，只会降低优先级。</p>
+            <i aria-hidden="true">↗</i>
+          </button>
+        </div>
+        {formError && <p className="plan-form-error" role="alert">{formError}</p>}
+        <footer className="learning-start-footer">
+          <button type="button" className="quiet-button" disabled={submitting || previewing} onClick={returnToDetails}>← 修改学习目标</button>
+          <span>{submitting ? '正在生成学习路线…' : previewing ? '正在展开知识关系…' : '之后每章仍可以选择学习、挑战或暂时略过'}</span>
+        </footer>
+      </section>
+    );
+  }
+
+  if (step === 'map' && preview) {
+    const ready = preview.availability === 'ready' && preview.nodes.length > 0;
+    return (
+      <section className="learning-start-flow knowledge-interest-step" id="create-series-form" aria-labelledby="knowledge-interest-title">
+        <header className="learning-start-heading">
+          <div>
+            <p className="eyebrow">凭直觉选择</p>
+            <h2 id="knowledge-interest-title">点亮你真正关心的内容</h2>
+            <p>{preview.message}</p>
+          </div>
+          <span className="knowledge-selection-count">已点亮 <b>{selectedConcepts.length}</b></span>
+        </header>
+        {ready ? (
+          <KnowledgeInterestGraph
+            preview={preview}
+            selected={selectedConcepts}
+            onToggle={(conceptId) => {
+              setSelectedConcepts((current) => (
+                current.includes(conceptId)
+                  ? current.filter((item) => item !== conceptId)
+                  : [...current, conceptId]
+              ));
+              setFormError('');
+            }}
+          />
+        ) : (
+          <div className="knowledge-interest-empty">
+            <span aria-hidden="true">◌</span>
+            <h3>这个方向暂时没有可选择的知识关系</h3>
+            <p>可以先直接开始，进入每一章时仍然能学习、挑战或略过。</p>
+          </div>
+        )}
+        {ready && (
+          <fieldset className="learning-preference-picks">
+            <legend>再选一两个学习偏好 <small>可选</small></legend>
+            {([
+              ['practical_application', '实际应用'],
+              ['understand_principles', '理解原理'],
+              ['case_based', '案例带入'],
+              ['practice_heavy', '多做练习'],
+            ] as [LearningStartPreference, string][]).map(([value, label]) => {
+              const selected = learningPreferences.includes(value);
+              return (
+                <button
+                  type="button"
+                  key={value}
+                  className={selected ? 'selected' : ''}
+                  aria-pressed={selected}
+                  onClick={() => setLearningPreferences((current) => {
+                    if (selected) return current.filter((item) => item !== value);
+                    return current.length < 2 ? [...current, value] : current;
+                  })}
+                >
+                  <span aria-hidden="true">{selected ? '●' : '○'}</span>{label}
+                </button>
+              );
+            })}
+          </fieldset>
+        )}
+        {formError && <p className="plan-form-error" role="alert">{formError}</p>}
+        <footer className="learning-start-footer">
+          <button type="button" className="quiet-button" disabled={submitting} onClick={() => { setStep('start'); setFormError(''); }}>← 换一种开始方式</button>
+          <button
+            type="button"
+            className="primary-button"
+            disabled={submitting}
+            onClick={() => void submitPlan(ready ? 'guided' : 'direct')}
+          >
+            {submitting ? '正在生成学习路线…' : ready ? '按这些重点开始 →' : '直接开始 →'}
+          </button>
+        </footer>
+      </section>
+    );
+  }
+
   return (
-    <form className="plan-form" id="create-series-form" onSubmit={send}>
+    <form className="plan-form" id="create-series-form" onSubmit={continueToStart}>
       <label>
         学习内容
         <input required disabled={submitting} value={topic} onChange={(event) => setTopic(event.target.value)} placeholder="输入你想学习的内容" />
@@ -3880,13 +4852,72 @@ function PlanForm({
       </fieldset>
       <div className="plan-form-actions">
         <button type="button" className="quiet-button" disabled={submitting} onClick={onCancel}>取消</button>
-        <button className="primary-button" disabled={submitting}>{submitting ? '正在生成，请稍候…' : '生成目录方案'}</button>
+        <button className="primary-button" disabled={submitting}>继续选择开始方式 →</button>
       </div>
     </form>
   );
 }
 
+function KnowledgeInterestGraph({
+  preview,
+  selected,
+  onToggle,
+}: {
+  preview: LearningStartPreview;
+  selected: string[];
+  onToggle: (conceptId: string) => void;
+}) {
+  const points = useMemo(() => {
+    const count = preview.nodes.length;
+    return preview.nodes.map((node, index) => {
+      const ring = count > 8 && index % 3 !== 0 ? 35 : 24;
+      const angle = -Math.PI / 2 + ((Math.PI * 2 * index) / Math.max(count, 1));
+      return {
+        ...node,
+        x: 50 + Math.cos(angle) * ring,
+        y: 50 + Math.sin(angle) * ring,
+      };
+    });
+  }, [preview]);
+  const pointById = new Map(points.map((point) => [point.conceptRevisionId, point]));
+  return (
+    <div className="knowledge-interest-graph" aria-label="可点选的知识关系图">
+      <svg aria-hidden="true" viewBox="0 0 100 100" preserveAspectRatio="none">
+        {preview.edges.map((edge) => {
+          const from = pointById.get(edge.from);
+          const to = pointById.get(edge.to);
+          if (!from || !to) return null;
+          const active = selected.includes(edge.from) && selected.includes(edge.to);
+          return <line key={edge.id} x1={from.x} y1={from.y} x2={to.x} y2={to.y} className={active ? 'active' : ''} />;
+        })}
+      </svg>
+      {points.map((point, index) => {
+        const active = selected.includes(point.conceptRevisionId);
+        return (
+          <button
+            type="button"
+            key={point.conceptRevisionId}
+            className={active ? 'active' : ''}
+            aria-pressed={active}
+            title={point.meaning}
+            style={{ '--node-x': `${point.x}%`, '--node-y': `${point.y}%`, '--node-delay': `${index * 20}ms` } as CSSProperties}
+            onClick={() => onToggle(point.conceptRevisionId)}
+          >
+            <span aria-hidden="true" />
+            <b>{point.label}</b>
+          </button>
+        );
+      })}
+      <div className="knowledge-interest-center" aria-hidden="true">
+        <span>你的目标</span>
+        <b>{preview.topic}</b>
+      </div>
+    </div>
+  );
+}
+
 type WorkspacePanel = 'directory' | 'qa';
+type ChapterLaunchAction = 'challenge' | 'skip';
 type WorkspaceLayoutRatios = {
   threeDirectory: number;
   threeQa: number;
@@ -3897,9 +4928,12 @@ type WorkspaceLayoutRatioKey = keyof WorkspaceLayoutRatios;
 
 const workspacePanelSizing = {
   directory: { defaultWidth: 240, minWidth: 220, maxWidth: 360 },
-  qa: { defaultWidth: 380, minWidth: 300, maxWidth: 480 },
+  qa: { defaultWidth: 380, minWidth: 300, maxWidth: Number.POSITIVE_INFINITY },
 } as const;
-const workspaceReaderMinWidth = 512;
+// Side panels share at most this proportion. The remaining reader width is
+// therefore stable across laptop and wide desktop viewports without relying
+// on one fixed-pixel breakpoint.
+const workspaceReaderMinRatio = 0.48;
 const workspaceRatioMigrationReferenceWidth = 1440;
 const defaultWorkspaceLayoutRatios: WorkspaceLayoutRatios = {
   threeDirectory: workspacePanelSizing.directory.defaultWidth / workspaceRatioMigrationReferenceWidth,
@@ -4016,7 +5050,7 @@ function fitVisibleWorkspacePanelWidths(
   if (!directoryHidden && !qaHidden) {
     const availableForPanels = Math.max(
       workspacePanelSizing.directory.minWidth + workspacePanelSizing.qa.minWidth,
-      workspaceWidth - workspaceReaderMinWidth,
+      workspaceWidth * (1 - workspaceReaderMinRatio),
     );
     let overflow = Math.max(0, nextDirectoryWidth + nextQaWidth - availableForPanels);
     const qaReduction = Math.min(overflow, nextQaWidth - workspacePanelSizing.qa.minWidth);
@@ -4027,10 +5061,14 @@ function fitVisibleWorkspacePanelWidths(
     nextDirectoryWidth = clampWorkspacePanelWidth(
       'directory',
       nextDirectoryWidth,
-      workspaceWidth - workspaceReaderMinWidth,
+      workspaceWidth * (1 - workspaceReaderMinRatio),
     );
   } else if (!qaHidden) {
-    nextQaWidth = clampWorkspacePanelWidth('qa', nextQaWidth, workspaceWidth - workspaceReaderMinWidth);
+    nextQaWidth = clampWorkspacePanelWidth(
+      'qa',
+      nextQaWidth,
+      workspaceWidth * (1 - workspaceReaderMinRatio),
+    );
   }
   return { directoryWidth: nextDirectoryWidth, qaWidth: nextQaWidth };
 }
@@ -4072,6 +5110,7 @@ function LearningWorkspace({
   onRegenerateSection,
   onGenerateChapter,
   onActivateBook,
+  onStartNextBook,
   chapterGenerationDisabled,
   generatingChapterId,
   onSectionChange,
@@ -4090,9 +5129,10 @@ function LearningWorkspace({
   onRegenerateSection: (id: string) => Promise<void>;
   onGenerateChapter: (chapter: Chapter) => Promise<void>;
   onActivateBook: (book: Book) => Promise<void>;
+  onStartNextBook: () => Promise<void>;
   chapterGenerationDisabled: boolean;
   generatingChapterId: string;
-  onSectionChange: (section: Section) => void;
+  onSectionChange: (section: Section | null) => void;
   onRefreshSeries: () => Promise<void>;
   onDeleteBook: (bookId: string) => Promise<void>;
   onFeedbackBlock: (block: Block) => void;
@@ -4100,6 +5140,8 @@ function LearningWorkspace({
   onQaVisibilityChange: (open: boolean) => void;
 }) {
   const [selectedBlockId, setSelectedBlockId] = useState('');
+  const [selectedChapterId, setSelectedChapterId] = useState('');
+  const [chapterLaunchAction, setChapterLaunchAction] = useState<ChapterLaunchAction | null>(null);
   const [selectedQuote, setSelectedQuote] = useState<TextQuote | null>(null);
   const [explanationRequest, setExplanationRequest] = useState<ExplanationRequest | null>(null);
   const [compactLayout, setCompactLayout] = useState(() => window.matchMedia('(max-width: 900px)').matches);
@@ -4107,6 +5149,7 @@ function LearningWorkspace({
   const [directoryHidden, setDirectoryHidden] = useState(() => window.matchMedia('(max-width: 900px)').matches);
   const [qaHidden, setQaHidden] = useState(true);
   const [readerTab, setReaderTab] = useState<ReaderTab>('content');
+  const [askAiStreaming, setAskAiStreaming] = useState(false);
   const [layoutRatios, setLayoutRatios] = useState(() => readWorkspaceLayoutRatios(userId));
   const [directoryWidth, setDirectoryWidth] = useState(() => clampWorkspacePanelWidth(
     'directory',
@@ -4132,6 +5175,16 @@ function LearningWorkspace({
 
   const qaAvailable = readerTab !== 'quiz';
   const effectiveQaHidden = qaHidden || !qaAvailable;
+  const studyActivityKind = !effectiveQaHidden
+    ? 'ask_ai'
+    : readerTab === 'quiz'
+      ? 'verification_review'
+      : 'reading_thinking';
+  const studyActivity = useStudyActivity({
+    sectionId: section?.content ? section.id : null,
+    activityKind: studyActivityKind,
+    keepActive: askAiStreaming,
+  });
 
   useEffect(() => {
     onQaVisibilityChange(!effectiveQaHidden);
@@ -4203,9 +5256,52 @@ function LearningWorkspace({
     setSelectedBlockId(section?.content?.blocks[0]?.id || '');
     setSelectedQuote(null);
     setExplanationRequest(null);
+    if (section?.id) setChapterLaunchAction(null);
   }, [section?.id, section?.content?.id]);
 
   const location = useMemo(() => findSectionLocation(series, section?.id), [series, section?.id]);
+  const routeChapters = useMemo(
+    () => series.books.flatMap((book) => book.chapters),
+    [series],
+  );
+  const selectedChapter = routeChapters.find((chapter) => chapter.id === selectedChapterId) || null;
+  useEffect(() => {
+    if (location?.chapter.id) {
+      setSelectedChapterId(location.chapter.id);
+      return;
+    }
+    if (selectedChapter && selectedChapter.status !== 'locked') return;
+    const next = routeChapters.find((chapter) => chapter.status === 'available')
+      || routeChapters.find((chapter) => chapter.status === 'skipped')
+      || null;
+    setSelectedChapterId(next?.id || '');
+  }, [location?.chapter.id, selectedChapter?.id, selectedChapter?.status, routeChapters]);
+  const selectChapter = async (chapter: Chapter) => {
+    if (chapter.status === 'locked') return;
+    setSelectedChapterId(chapter.id);
+    setChapterLaunchAction(null);
+    if (compactLayout) setDirectoryHidden(true);
+    if (chapter.status === 'skipped') {
+      await api.resumeChapter(chapter.id, `resume-${crypto.randomUUID()}`);
+      await onRefreshSeries();
+    }
+    const first = chapter.sections.find(
+      (item) => !['locked', 'completed'].includes(item.status),
+    ) || chapter.sections.find((item) => item.status === 'completed');
+    if (chapter.generated && first) {
+      await onSelectSection(first.id);
+      return;
+    }
+    await onGenerateChapter(chapter);
+  };
+  const openChapterAction = (chapter: Chapter, action: ChapterLaunchAction) => {
+    if (chapter.status === 'locked' || chapter.status === 'completed') return;
+    setSelectedChapterId(chapter.id);
+    setChapterLaunchAction(action);
+    onSectionChange(null);
+    updateBrowserLocation(seriesPath(series.id), 'push');
+    if (compactLayout) setDirectoryHidden(true);
+  };
   const activeBlockId = selectedBlockId || section?.content?.blocks[0]?.id || '';
   const selectBlock = (blockId: string) => {
     setSelectedBlockId(blockId);
@@ -4240,7 +5336,7 @@ function LearningWorkspace({
     const otherWidth = panel === 'directory'
       ? (!qaHidden && !otherPanelWillClose ? qaWidth : 0)
       : (!directoryHidden && !otherPanelWillClose ? directoryWidth : 0);
-    return workspaceWidth - workspaceReaderMinWidth - otherWidth;
+    return workspaceWidth * (1 - workspaceReaderMinRatio) - otherWidth;
   };
   const persistPanelRatio = (
     panel: WorkspacePanel,
@@ -4347,7 +5443,7 @@ function LearningWorkspace({
     let nextWidth = currentWidth;
     const step = event.shiftKey ? 32 : 12;
     if (event.key === 'Home') nextWidth = workspacePanelSizing[panel].minWidth;
-    else if (event.key === 'End') nextWidth = workspacePanelSizing[panel].maxWidth;
+    else if (event.key === 'End') nextWidth = panelAvailableWidth(panel);
     else if (event.key === 'ArrowLeft') nextWidth += panel === 'directory' ? -step : step;
     else if (event.key === 'ArrowRight') nextWidth += panel === 'directory' ? step : -step;
     else return;
@@ -4382,8 +5478,12 @@ function LearningWorkspace({
         hidden={directoryHidden}
         onClose={() => setDirectoryHidden(true)}
         currentSectionId={section?.id}
+        currentChapterId={selectedChapter?.id}
         onSelectSection={onSelectSection}
-        onGenerateChapter={onGenerateChapter}
+        onSelectChapter={selectChapter}
+        onChallengeChapter={(chapter) => openChapterAction(chapter, 'challenge')}
+        onSkipChapter={(chapter) => openChapterAction(chapter, 'skip')}
+        onStartNextBook={onStartNextBook}
         onActivateBook={onActivateBook}
         chapterGenerationDisabled={chapterGenerationDisabled}
         generatingChapterId={generatingChapterId}
@@ -4393,7 +5493,12 @@ function LearningWorkspace({
       <ReaderPanel
         series={series}
         section={section}
+        chapter={selectedChapter}
+        chapterAction={chapterLaunchAction}
         dailyMode={dailyMode}
+        studySessionSeconds={studyActivity.sessionSeconds}
+        studyPaused={studyActivity.paused}
+        onResumeStudy={studyActivity.resume}
         directoryHidden={directoryHidden}
         qaHidden={effectiveQaHidden}
         qaAvailable={qaAvailable}
@@ -4415,6 +5520,14 @@ function LearningWorkspace({
         onGenerate={() => section && onGenerateSection(section.id)}
         onRegenerate={() => (section ? onRegenerateSection(section.id) : Promise.resolve())}
         onSelectSection={onSelectSection}
+        onSelectChapter={(chapterId) => {
+          const target = routeChapters.find((chapter) => chapter.id === chapterId);
+          if (target) void selectChapter(target);
+        }}
+        onCloseChapterAction={() => {
+          setChapterLaunchAction(null);
+          setDirectoryHidden(false);
+        }}
         onSectionChange={onSectionChange}
         onRefreshSeries={onRefreshSeries}
         onFeedbackBlock={onFeedbackBlock}
@@ -4491,12 +5604,14 @@ function LearningWorkspace({
         onClearQuote={() => setSelectedQuote(null)}
         explanationRequest={explanationRequest}
         onSectionChange={onSectionChange}
+        onStreamingChange={setAskAiStreaming}
       />
       {(['directory', ...(qaAvailable ? ['qa' as const] : [])] as const).map((panel) => {
         const hidden = panel === 'directory' ? directoryHidden : qaHidden;
         const width = panel === 'directory' ? directoryWidth : qaWidth;
         const sizing = workspacePanelSizing[panel];
         const panelName = panel === 'directory' ? '目录' : '答疑';
+        const maximumWidth = Math.max(sizing.minWidth, Math.min(sizing.maxWidth, panelAvailableWidth(panel)));
         return (
           <div
             key={panel}
@@ -4505,7 +5620,7 @@ function LearningWorkspace({
             aria-label={hidden ? `展开${panelName}` : `调整${panelName}宽度`}
             aria-orientation="vertical"
             aria-valuemin={sizing.minWidth}
-            aria-valuemax={sizing.maxWidth}
+            aria-valuemax={Math.round(maximumWidth)}
             aria-valuenow={Math.round(width)}
             aria-expanded={!hidden}
             tabIndex={0}
@@ -4574,8 +5689,12 @@ function DirectoryPanel({
   hidden,
   onClose,
   currentSectionId,
+  currentChapterId,
   onSelectSection,
-  onGenerateChapter,
+  onSelectChapter,
+  onChallengeChapter,
+  onSkipChapter,
+  onStartNextBook,
   onActivateBook,
   chapterGenerationDisabled,
   generatingChapterId,
@@ -4586,8 +5705,12 @@ function DirectoryPanel({
   hidden: boolean;
   onClose: () => void;
   currentSectionId?: string;
+  currentChapterId?: string;
   onSelectSection: (id: string) => Promise<Section>;
-  onGenerateChapter: (chapter: Chapter) => Promise<void>;
+  onSelectChapter: (chapter: Chapter) => void;
+  onChallengeChapter: (chapter: Chapter) => void;
+  onSkipChapter: (chapter: Chapter) => void;
+  onStartNextBook: () => Promise<void>;
   onActivateBook: (book: Book) => Promise<void>;
   chapterGenerationDisabled: boolean;
   generatingChapterId: string;
@@ -4603,11 +5726,33 @@ function DirectoryPanel({
     ? activeBookIndex
     : Math.max(0, series.books.findIndex((book) => book.status !== 'locked'));
   const activeBook = series.books[resolvedBookIndex];
+  const [settlementTarget, setSettlementTarget] = useState<Book | null>(null);
+  const [settlement, setSettlement] = useState<BookSettlement | null>(null);
+  const [settlementLoading, setSettlementLoading] = useState(false);
+  const [settlementError, setSettlementError] = useState('');
   const deleteDialogRef = useModalFocus<HTMLElement>({
     open: Boolean(deleteTarget),
     canClose: !deleting,
     onRequestClose: () => setDeleteTarget(null),
   });
+  const settlementDialogRef = useModalFocus<HTMLElement>({
+    open: Boolean(settlementTarget),
+    onRequestClose: () => setSettlementTarget(null),
+  });
+  const openSettlement = async (book: Book) => {
+    setSettlementTarget(book);
+    setSettlement(null);
+    setSettlementError('');
+    setSettlementLoading(true);
+    try {
+      setSettlement(await api.settleBook(book.id));
+      await onRefreshSeries();
+    } catch (reason) {
+      setSettlementError(reason instanceof Error ? reason.message : '全书结算暂时不可用');
+    } finally {
+      setSettlementLoading(false);
+    }
+  };
 
   return (
     <aside className="directory-panel" id="course-directory-panel" aria-label="课程目录" hidden={hidden}>
@@ -4618,17 +5763,29 @@ function DirectoryPanel({
         <h2>{activeBook?.title || '这本书'}</h2>
         <div className="series-progress">
           <span><i style={{ width: `${activeBook?.progress || 0}%` }} /></span>
-          <b>{activeBook?.progress || 0}%</b>
+          <b>路线 {activeBook?.progress || 0}%</b>
         </div>
       </div>
+      {series.books[0]?.status === 'completed'
+        && series.books[1]
+        && series.books[1].status !== 'locked' && (
+          <div className="next-book-callout" role="status">
+            <b>{series.books[0].chapters.some((chapter) => chapter.status === 'skipped') ? '第一册路线已走完' : '第一册已完成'}</b>
+            <span>第二册《{series.books[1].title}》已经解锁。</span>
+            <button className="secondary-button" onClick={onStartNextBook}>开始第二册</button>
+          </div>
+      )}
       <nav className="book-tree">
         {activeBook && (
           <BookTree
             key={activeBook.id}
             book={activeBook}
             currentSectionId={currentSectionId}
+            currentChapterId={currentChapterId}
             onSelectSection={onSelectSection}
-            onGenerateChapter={onGenerateChapter}
+            onSelectChapter={onSelectChapter}
+            onChallengeChapter={onChallengeChapter}
+            onSkipChapter={onSkipChapter}
             canActivate={
               activeBook.outlineStatus === 'draft'
               && (resolvedBookIndex === 0 || series.books[resolvedBookIndex - 1].status === 'completed')
@@ -4636,7 +5793,7 @@ function DirectoryPanel({
             onActivate={onActivateBook}
             chapterGenerationDisabled={chapterGenerationDisabled}
             generatingChapterId={generatingChapterId}
-            onRefreshSeries={onRefreshSeries}
+            onOpenSettlement={openSettlement}
             onRequestDelete={setDeleteTarget}
           />
         )}
@@ -4688,6 +5845,56 @@ function DirectoryPanel({
           </section>
         </div>
       )}
+      {settlementTarget && (
+        <div
+          className="confirm-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setSettlementTarget(null);
+          }}
+        >
+          <section
+            ref={settlementDialogRef}
+            className="book-settlement-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="book-settlement-title"
+            tabIndex={-1}
+          >
+            <header>
+              <p className="eyebrow">全书结算</p>
+              <h2 id="book-settlement-title">{settlementTarget.title}</h2>
+              <p>结算只汇总已经写入的学习与验证记录，不需要额外上传成果。</p>
+            </header>
+            {settlementLoading ? (
+              <div className="book-settlement-loading" role="status">正在汇总全书学习记录…</div>
+            ) : settlement ? (
+              <>
+                <div className="book-settlement-result">
+                  <div><strong>{settlement.completedChapterCount}/{settlement.chapterCount}</strong><span>完成章节</span></div>
+                  <div><strong>{settlement.completedSectionCount}/{settlement.sectionCount}</strong><span>完成小节</span></div>
+                  <div><strong>{settlement.verificationRate === null ? '—' : `${settlement.verificationRate}%`}</strong><span>验证最佳成绩</span></div>
+                  <div><strong>{settlement.perfectSectionCount}</strong><span>满分小节</span></div>
+                </div>
+                <div className="book-settlement-followup">
+                  <b>{settlement.reviewSectionCount > 0
+                    ? `${settlement.reviewSectionCount} 节验证未满分，可继续重点巩固`
+                    : '本书验证记录已完整结算'}</b>
+                  <p>后续复习仍以真实测验、口试和实际复习安排为准；结算不会把浏览或上传文件算作掌握。</p>
+                </div>
+              </>
+            ) : (
+              <div className="book-settlement-error" role="alert">
+                <b>暂时无法完成结算</b>
+                <p>{settlementError}</p>
+                <button className="secondary-button" onClick={() => void openSettlement(settlementTarget)}>重新结算</button>
+              </div>
+            )}
+            <footer>
+              <button data-dialog-initial-focus className="primary-button" onClick={() => setSettlementTarget(null)}>完成</button>
+            </footer>
+          </section>
+        </div>
+      )}
     </aside>
   );
 }
@@ -4695,29 +5902,39 @@ function DirectoryPanel({
 function BookTree({
   book,
   currentSectionId,
+  currentChapterId,
   onSelectSection,
-  onGenerateChapter,
+  onSelectChapter,
+  onChallengeChapter,
+  onSkipChapter,
   canActivate,
   onActivate,
   chapterGenerationDisabled,
   generatingChapterId,
-  onRefreshSeries,
+  onOpenSettlement,
   onRequestDelete,
 }: {
   book: Book;
   currentSectionId?: string;
+  currentChapterId?: string;
   onSelectSection: (id: string) => Promise<Section>;
-  onGenerateChapter: (chapter: Chapter) => Promise<void>;
+  onSelectChapter: (chapter: Chapter) => void;
+  onChallengeChapter: (chapter: Chapter) => void;
+  onSkipChapter: (chapter: Chapter) => void;
   canActivate: boolean;
   onActivate: (book: Book) => Promise<void>;
   chapterGenerationDisabled: boolean;
   generatingChapterId: string;
-  onRefreshSeries: () => Promise<void>;
+  onOpenSettlement: (book: Book) => Promise<void>;
   onRequestDelete: (book: Book) => void;
 }) {
   const containsCurrent = book.chapters.some((chapter) => chapter.sections.some((item) => item.id === currentSectionId));
+  const canExpand = book.status !== 'locked' || canActivate;
   return (
-    <details className="book-node" open={containsCurrent || book.status !== 'locked'}>
+    <details
+      className={`book-node ${canExpand ? '' : 'is-unavailable'}`}
+      open={canExpand && (containsCurrent || book.status !== 'locked')}
+    >
       <button
         className="book-delete-button"
         aria-label={`删除书籍 ${book.title}`}
@@ -4726,15 +5943,24 @@ function BookTree({
       >
         <TrashIcon size={14} />
       </button>
-      <summary>
+      <summary
+        aria-disabled={!canExpand}
+        onClick={(event) => {
+          if (!canExpand) event.preventDefault();
+        }}
+      >
         <span className="book-number">书 {book.position}</span>
         <span>
           <b>{book.title}</b>
           <small>
-            {book.outlineStatus === 'draft'
+            {!canExpand
+              ? '未解锁'
+              : book.outlineStatus === 'draft'
               ? '待确认'
               : book.status === 'completed'
-                ? '已完成'
+                ? book.chapters.some((chapter) => chapter.status === 'skipped')
+                  ? '路线已走完'
+                  : '已完成'
                 : book.status === 'locked'
                   ? '未解锁'
                   : '已解锁'}
@@ -4743,7 +5969,7 @@ function BookTree({
         </span>
         <i>{book.status === 'locked' ? <LockIcon /> : <ChevronIcon />}</i>
       </summary>
-      {book.outlineStatus === 'draft' && (
+      {canExpand && book.outlineStatus === 'draft' && (
         <div className="book-outline-callout" role="status">
           <span>
             <b>{canActivate ? '下一本书可以开始准备' : '下一本书将在完成前一册后调整'}</b>
@@ -4760,38 +5986,47 @@ function BookTree({
           )}
         </div>
       )}
-      <div className="chapter-tree">
+      {canExpand && <div className="chapter-tree">
         {book.chapters.map((chapter) => {
           const chapterLocked = chapter.status === 'locked';
+          const chapterBusy = generatingChapterId === chapter.id;
           return (
             <div className="chapter-node" key={chapter.id}>
               {chapter.generated || chapterLocked ? (
-                <div
-                  className={`chapter-title ${chapterLocked ? 'locked' : ''}`}
+                <button
+                  type="button"
+                  className={`chapter-title chapter-select ${chapterLocked ? 'locked' : ''} ${currentChapterId === chapter.id && !currentSectionId ? 'active' : ''} ${chapter.status}`}
+                  disabled={chapterLocked}
                   aria-label={chapterLocked
                     ? `第 ${chapter.position} 章 ${chapter.title}，未解锁`
-                    : `第 ${chapter.position} 章 ${chapter.title}`}
+                    : `学习第 ${chapter.position} 章 ${chapter.title}`}
+                  onClick={() => onSelectChapter(chapter)}
                 >
                   <span>第 {chapter.position} 章</span>
                   <b>{chapter.title}</b>
                   {chapterLocked && <LockIcon size={13} />}
-                </div>
+                  {chapter.status === 'skipped' && <small>暂时继续</small>}
+                </button>
               ) : (
                 <button
-                  className="chapter-title chapter-entry"
-                  aria-label={`生成第 ${chapter.position} 章 ${chapter.title} 的小节并进入`}
-                  disabled={chapterGenerationDisabled || generatingChapterId === chapter.id}
-                  onClick={() => onGenerateChapter(chapter)}
+                  className={`chapter-title chapter-entry chapter-select ${currentChapterId === chapter.id && !currentSectionId ? 'active' : ''}`}
+                  aria-label={`学习第 ${chapter.position} 章 ${chapter.title}`}
+                  disabled={chapterGenerationDisabled || chapterBusy}
+                  onClick={() => onSelectChapter(chapter)}
                 >
                   <span>第 {chapter.position} 章</span>
-                  <b>
-                    {generatingChapterId === chapter.id
-                      ? '正在规划本章小节…'
-                      : chapter.title}
-                  </b>
-                  <GenerateIcon />
+                  <b>{chapter.title}</b>
+                  <i aria-hidden="true">→</i>
                 </button>
               )}
+            {!chapterLocked && chapter.status !== 'completed' && (
+              <div className="chapter-route-actions" aria-label={`第 ${chapter.position} 章的其他学习方式`}>
+                <button type="button" disabled={chapterBusy} onClick={() => onChallengeChapter(chapter)}>直接挑战</button>
+                {chapter.status !== 'skipped' && (
+                  <button type="button" disabled={chapterBusy} onClick={() => onSkipChapter(chapter)}>暂时略过</button>
+                )}
+              </div>
+            )}
             {chapter.generated ? (
               <div className="section-tree">
                 {chapter.workloadHint && chapter.workloadHint.level !== 'typical' && (
@@ -4816,25 +6051,27 @@ function BookTree({
                   {chapterLocked ? <LockIcon size={10} /> : <GenerateIcon />}
                 </span>
                 <small>
-                  {chapterLocked ? '完成上一章后解锁' : '点击章名开始'}
+                  {chapterLocked ? '完成上一章后解锁' : chapterBusy ? '正在准备本章…' : '点击章节标题开始学习'}
                 </small>
               </div>
             )}
             </div>
           );
         })}
-        {book.capstone && (
-          <ArtifactSubmission
-            id={book.id}
-            status={book.capstone.status}
-            attachmentCount={book.capstone.attachments.length}
-            onSubmit={async (action) => {
-              await action();
-              await onRefreshSeries();
-            }}
-          />
-        )}
-      </div>
+        <button
+          className={`book-settlement-entry ${book.status === 'completed' ? 'enabled' : ''}`}
+          disabled={book.status !== 'completed'}
+          onClick={() => void onOpenSettlement(book)}
+        >
+          <span>{book.status === 'completed' ? '◆' : <LockIcon size={12} />}</span>
+          <b>全书结算</b>
+          <small>· {book.status !== 'completed'
+            ? '完成全书后开启'
+            : book.capstone?.status === 'completed'
+              ? '查看总结'
+              : '生成总结'}</small>
+        </button>
+      </div>}
     </details>
   );
 }
@@ -4853,6 +6090,8 @@ function SectionTreeButton({
   const preparing = item.status === 'preparing';
   const state = item.status === 'completed'
     ? '✓'
+    : item.status === 'skipped'
+      ? '↷'
     : item.status === 'locked'
       ? <LockIcon size={11} />
       : preparing
@@ -4862,7 +6101,7 @@ function SectionTreeButton({
   return (
     <button
       className={`section-tree-button ${active ? 'active' : ''} ${item.status}`}
-      disabled={item.status === 'locked' || preparing}
+      disabled={item.status === 'locked' || item.status === 'skipped' || preparing}
       aria-label={`${sectionNumber} ${item.title}`}
       onClick={onClick}
     >
@@ -4873,10 +6112,283 @@ function SectionTreeButton({
   );
 }
 
+function ChapterLaunchPanel({
+  chapter,
+  initialAction,
+  onCancel,
+  onSelectSection,
+  onSelectChapter,
+  onRefreshSeries,
+}: {
+  chapter: Chapter;
+  initialAction: ChapterLaunchAction;
+  onCancel: () => void;
+  onSelectSection: (id: string) => Promise<Section>;
+  onSelectChapter: (chapterId: string) => void;
+  onRefreshSeries: () => Promise<void>;
+}) {
+  const [screen, setScreen] = useState<'preparing' | 'skip' | 'challenge' | 'result'>(
+    initialAction === 'challenge' ? 'preparing' : 'skip',
+  );
+  const [challenge, setChallenge] = useState<ChapterChallenge | null>(null);
+  const [result, setResult] = useState<ChapterChallengeResult | null>(null);
+  const [answers, setAnswers] = useState<Record<string, number[][]>>({});
+  const [busy, setBusy] = useState('');
+  const [localError, setLocalError] = useState('');
+  const preparedActionRef = useRef('');
+
+  const ensureActive = async () => {
+    if (chapter.status !== 'skipped') return;
+    await api.resumeChapter(chapter.id, `resume-${crypto.randomUUID()}`);
+    await onRefreshSeries();
+  };
+  const prepareChallenge = async () => {
+    setScreen('preparing');
+    setBusy('challenge');
+    setLocalError('');
+    try {
+      await ensureActive();
+      const value = await api.prepareChapterChallenge(chapter.id);
+      setChallenge(value);
+      setAnswers(Object.fromEntries(value.sections.map((section) => [
+        section.sectionId,
+        section.questions.map(() => []),
+      ])));
+      setScreen('challenge');
+    } catch (reason) {
+      setLocalError(reason instanceof Error ? reason.message : '章挑战暂时没有准备好');
+    } finally {
+      setBusy('');
+    }
+  };
+  useEffect(() => {
+    const actionKey = `${chapter.id}:${initialAction}`;
+    if (preparedActionRef.current === actionKey) return;
+    preparedActionRef.current = actionKey;
+    setChallenge(null);
+    setResult(null);
+    setAnswers({});
+    setBusy('');
+    setLocalError('');
+    if (initialAction === 'challenge') void prepareChallenge();
+    else setScreen('skip');
+  }, [chapter.id, initialAction]);
+  const skipChapter = async (reason: 'not_focus' | 'defer_unknown' | 'challenge_exit') => {
+    setBusy(`skip-${reason}`);
+    setLocalError('');
+    try {
+      const route = await api.skipChapter(chapter.id, reason, `skip-${crypto.randomUUID()}`);
+      await onRefreshSeries();
+      if (route.nextChapterId) onSelectChapter(route.nextChapterId);
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : '暂时无法略过本章');
+    } finally {
+      setBusy('');
+    }
+  };
+  const toggleAnswer = (
+    sectionId: string,
+    questionIndex: number,
+    optionIndex: number,
+    mode: 'single' | 'multiple',
+  ) => {
+    setAnswers((current) => {
+      const sectionAnswers = (current[sectionId] || []).map((item) => [...item]);
+      const selected = sectionAnswers[questionIndex] || [];
+      sectionAnswers[questionIndex] = mode === 'single'
+        ? [optionIndex]
+        : selected.includes(optionIndex)
+          ? selected.filter((item) => item !== optionIndex)
+          : [...selected, optionIndex].sort((left, right) => left - right);
+      return { ...current, [sectionId]: sectionAnswers };
+    });
+  };
+  const allAnswered = challenge?.sections.every((section) => (
+    answers[section.sectionId]?.length === section.questions.length
+    && answers[section.sectionId].every((answer) => answer.length > 0)
+  )) ?? false;
+  const submitChallenge = async () => {
+    if (!challenge || !allAnswered) return;
+    setBusy('grading');
+    setLocalError('');
+    try {
+      const graded = await api.submitChapterChallenge(
+        chapter.id,
+        challenge.sections.map((section) => ({
+          sectionId: section.sectionId,
+          quizSetId: section.quizSetId,
+          answers: answers[section.sectionId],
+        })),
+        `challenge-${crypto.randomUUID()}`,
+      );
+      setResult(graded);
+      setScreen('result');
+      await onRefreshSeries();
+    } catch (reason) {
+      setLocalError(reason instanceof Error ? reason.message : '章挑战提交失败');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  if (screen === 'preparing') {
+    return (
+      <div className="chapter-launch-scroll chapter-route-pending">
+        <button type="button" className="quiet-button" disabled={Boolean(busy)} onClick={onCancel}>← 返回目录</button>
+        <span aria-hidden="true" />
+        <p className="eyebrow">直接挑战</p>
+        <h1>正在准备本章验证</h1>
+        <p>会按小节出题，答对的部分直接形成掌握证据。</p>
+        {localError && <p className="chapter-launch-error" role="alert">{localError}</p>}
+        {localError && (
+          <button type="button" className="secondary-button" disabled={Boolean(busy)} onClick={() => void prepareChallenge()}>重新准备</button>
+        )}
+      </div>
+    );
+  }
+
+  if (screen === 'challenge' && challenge) {
+    let questionNumber = 0;
+    return (
+      <div className="chapter-launch-scroll challenge-screen">
+        <header className="chapter-challenge-heading">
+          <button type="button" className="quiet-button" disabled={Boolean(busy)} onClick={onCancel}>← 返回目录</button>
+          <p className="eyebrow">直接挑战 · {challenge.questionCount} 题</p>
+          <h1>{challenge.chapterTitle}</h1>
+          <p>每一组对应一个小节。答完后只留下真正薄弱的部分。</p>
+        </header>
+        <div className="chapter-challenge-sections">
+          {challenge.sections.map((section) => (
+            <section key={section.sectionId} className="chapter-challenge-section">
+              <header>
+                <span>{String(section.position).padStart(2, '0')}</span>
+                <div><small>小节验证</small><h2>{section.title}</h2></div>
+              </header>
+              {section.questions.map((question, questionIndex) => {
+                questionNumber += 1;
+                const selected = answers[section.sectionId]?.[questionIndex] || [];
+                return (
+                  <fieldset key={`${section.sectionId}-${questionIndex}`} className="chapter-challenge-question">
+                    <legend><span>{String(questionNumber).padStart(2, '0')}</span>{question.prompt}</legend>
+                    {question.options.map((option, optionIndex) => (
+                      <button
+                        type="button"
+                        key={option}
+                        className={selected.includes(optionIndex) ? 'selected' : ''}
+                        aria-pressed={selected.includes(optionIndex)}
+                        onClick={() => toggleAnswer(
+                          section.sectionId,
+                          questionIndex,
+                          optionIndex,
+                          question.selectionMode,
+                        )}
+                      >
+                        <span aria-hidden="true">{String.fromCharCode(65 + optionIndex)}</span>{option}
+                      </button>
+                    ))}
+                  </fieldset>
+                );
+              })}
+            </section>
+          ))}
+        </div>
+        {localError && <p className="chapter-launch-error" role="alert">{localError}</p>}
+        <footer className="chapter-challenge-submit">
+          <span>{allAnswered ? '已经答完，可以查看薄弱小节' : '完成全部题目后提交'}</span>
+          <button type="button" className="primary-button" disabled={!allAnswered || Boolean(busy)} onClick={() => void submitChallenge()}>
+            {busy === 'grading' ? '正在判断…' : '提交挑战 →'}
+          </button>
+        </footer>
+      </div>
+    );
+  }
+
+  if (screen === 'result' && result) {
+    const weakSections = result.sectionResults.filter((item) => item.status === 'needs_learning');
+    return (
+      <div className={`chapter-launch-scroll challenge-result ${result.passed ? 'passed' : 'partial'}`}>
+        <header>
+          <span className="challenge-result-mark" aria-hidden="true">{result.passed ? '✓' : weakSections.length}</span>
+          <p className="eyebrow">挑战结果</p>
+          <h1>{result.passed ? '这一章可以放心略过' : `重点只剩 ${weakSections.length} 个薄弱小节`}</h1>
+          <p>{result.passed
+            ? '本次答题已经形成掌握证据，本章按通过处理。'
+            : '答对的小节已经记为完成；薄弱小节不会被算作掌握。'}</p>
+        </header>
+        <div className="challenge-result-sections">
+          {result.sectionResults.map((item) => (
+            <article key={item.sectionId} className={item.status}>
+              <span>{item.status === 'passed' ? '✓' : '!'}</span>
+              <div><small>第 {item.position} 节 · {item.score}/{item.total}</small><b>{item.title}</b></div>
+              <em>{item.status === 'passed' ? '已通过' : '建议学习'}</em>
+            </article>
+          ))}
+        </div>
+        {localError && <p className="chapter-launch-error" role="alert">{localError}</p>}
+        <div className="challenge-result-actions">
+          {weakSections.length > 0 ? (
+            <>
+              <button type="button" className="primary-button" disabled={Boolean(busy)} onClick={() => void onSelectSection(weakSections[0].sectionId)}>
+                学习薄弱小节 →
+              </button>
+              <button type="button" className="quiet-button" disabled={Boolean(busy)} onClick={() => void skipChapter('challenge_exit')}>
+                {busy ? '正在继续…' : '暂时继续下一章'}
+              </button>
+              <small>继续不代表通过；后续依赖这里时会提醒回来补。</small>
+            </>
+          ) : (
+            <button type="button" className="primary-button" onClick={() => result.nextChapterId ? onSelectChapter(result.nextChapterId) : onCancel()}>
+              {result.nextChapterId ? '进入下一章 →' : '返回目录'}
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (screen === 'skip') {
+    return (
+      <div className="chapter-launch-scroll chapter-skip-screen">
+        <header>
+          <button type="button" className="quiet-button" disabled={Boolean(busy)} onClick={onCancel}>← 返回目录</button>
+          <p className="eyebrow">暂时略过</p>
+          <h1>为什么不学这一章？</h1>
+          <p>原因不同，系统对你的学习画像也会不同处理。</p>
+        </header>
+        <div className="chapter-skip-reasons">
+          <button type="button" disabled={Boolean(busy)} onClick={() => void skipChapter('not_focus')}>
+            <span aria-hidden="true">◎</span>
+            <small>不属于重点</small>
+            <b>这不是我的目标</b>
+            <p>只降低路线优先级，不判断你会或不会，也不改变知识段位。</p>
+            <i aria-hidden="true">→</i>
+          </button>
+          <button type="button" disabled={Boolean(busy)} onClick={() => void skipChapter('defer_unknown')}>
+            <span aria-hidden="true">↷</span>
+            <small>以后再说</small>
+            <b>我还不会，但现在先继续</b>
+            <p>本章暂不计为掌握；后面真正依赖这里时，会提醒回来补。</p>
+            <i aria-hidden="true">→</i>
+          </button>
+        </div>
+        {localError && <p className="chapter-launch-error" role="alert">{localError}</p>}
+        <aside className="chapter-skip-note">系列最终完成时，关键目标仍然需要有效证据；略过不是通过。</aside>
+      </div>
+    );
+  }
+
+  return null;
+}
+
 function ReaderPanel({
   series,
   section,
+  chapter,
+  chapterAction,
   dailyMode,
+  studySessionSeconds,
+  studyPaused,
+  onResumeStudy,
   directoryHidden,
   qaHidden,
   qaAvailable,
@@ -4890,6 +6402,8 @@ function ReaderPanel({
   onGenerate,
   onRegenerate,
   onSelectSection,
+  onSelectChapter,
+  onCloseChapterAction,
   onSectionChange,
   onRefreshSeries,
   onFeedbackBlock,
@@ -4899,7 +6413,12 @@ function ReaderPanel({
 }: {
   series: Series;
   section: Section | null;
+  chapter: Chapter | null;
+  chapterAction: ChapterLaunchAction | null;
   dailyMode: DailyMode;
+  studySessionSeconds: number;
+  studyPaused: boolean;
+  onResumeStudy: () => void;
   directoryHidden: boolean;
   qaHidden: boolean;
   qaAvailable: boolean;
@@ -4913,6 +6432,8 @@ function ReaderPanel({
   onGenerate: () => void;
   onRegenerate: () => Promise<void>;
   onSelectSection: (id: string) => Promise<Section>;
+  onSelectChapter: (chapterId: string) => void;
+  onCloseChapterAction: () => void;
   onSectionChange: (section: Section) => void;
   onRefreshSeries: () => Promise<void>;
   onFeedbackBlock: (block: Block) => void;
@@ -5078,7 +6599,16 @@ function ReaderPanel({
           onToggleDirectory={onToggleDirectory}
           onToggleQa={onToggleQa}
         />
-        <SeriesRoutePreview series={series} />
+        {chapter && chapterAction ? (
+          <ChapterLaunchPanel
+            chapter={chapter}
+            initialAction={chapterAction}
+            onCancel={onCloseChapterAction}
+            onSelectSection={onSelectSection}
+            onSelectChapter={onSelectChapter}
+            onRefreshSeries={onRefreshSeries}
+          />
+        ) : <SeriesRoutePreview series={series} />}
       </main>
     );
   }
@@ -5098,7 +6628,12 @@ function ReaderPanel({
         chapterTitle={location?.chapter.title}
         sectionPosition={section.position}
         title={section.title}
-        status={section.status}
+        sessionSeconds={studySessionSeconds}
+        status={
+          !section.content && section.generation?.status === 'failed'
+            ? 'failed'
+            : section.status
+        }
         canRegenerate={Boolean(section.content && section.bestScore === 0 && section.totalScore === 0)}
         regenerating={regenerating}
         onRequestRegenerate={() => setRegenerationConfirmOpen(true)}
@@ -5113,46 +6648,58 @@ function ReaderPanel({
         onChange={switchTab}
       />
 
-      <div
-        className="reader-scroll"
-        id="reader-tabpanel"
-        role="tabpanel"
-        aria-labelledby={`reader-tab-${tab}`}
-        ref={readerScrollRef}
-        onMouseUp={captureTextSelection}
-        onKeyUp={captureTextSelection}
-        onScroll={() => setSelectionPopup(null)}
-      >
-        {tab === 'content' && (
-          <LessonContent
-            section={section}
-            dailyMode={dailyMode}
-            selectedBlockId={selectedBlockId}
-            reviewTargetBlockId={reviewTargetBlockId}
-            onGenerate={onGenerate}
-            onStartQuiz={() => switchTab('quiz')}
-            onFeedbackBlock={onFeedbackBlock}
-            onRestorePersonalPresentation={onRestorePersonalPresentation}
-            onExplainBlock={onExplainBlock}
-          />
-        )}
-        {tab === 'quiz' && section.quiz && (
-          <Quiz
-            key={section.quiz.id}
-            section={section}
-            onUpgrade={() => setRegenerationConfirmOpen(true)}
-            onSectionChange={onSectionChange}
-            onRefreshSeries={onRefreshSeries}
-            onSelectSection={onSelectSection}
-            onReviewContent={reviewContent}
-            onSubmissionComplete={() => {
-              tabScrollPositionsRef.current.quiz = 0;
-              if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
-            }}
-          />
-        )}
-        {tab === 'note' && section.note && (
-          <Note sectionId={section.id} note={section.note} onSaved={onSectionChange} />
+      <div className="reader-scroll-shell">
+        <div
+          className="reader-scroll"
+          id="reader-tabpanel"
+          role="tabpanel"
+          aria-labelledby={`reader-tab-${tab}`}
+          ref={readerScrollRef}
+          onMouseUp={captureTextSelection}
+          onKeyUp={captureTextSelection}
+          onScroll={() => setSelectionPopup(null)}
+        >
+          {tab === 'content' && (
+            <LessonContent
+              section={section}
+              dailyMode={dailyMode}
+              selectedBlockId={selectedBlockId}
+              reviewTargetBlockId={reviewTargetBlockId}
+              onGenerate={onGenerate}
+              onStartQuiz={() => switchTab('quiz')}
+              onFeedbackBlock={onFeedbackBlock}
+              onRestorePersonalPresentation={onRestorePersonalPresentation}
+              onExplainBlock={onExplainBlock}
+            />
+          )}
+          {tab === 'quiz' && section.quiz && (
+            <Quiz
+              key={section.quiz.id}
+              section={section}
+              onUpgrade={() => setRegenerationConfirmOpen(true)}
+              onSectionChange={onSectionChange}
+              onRefreshSeries={onRefreshSeries}
+              onSelectSection={onSelectSection}
+              onReviewContent={reviewContent}
+              onSubmissionComplete={() => {
+                tabScrollPositionsRef.current.quiz = 0;
+                if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
+              }}
+            />
+          )}
+          {tab === 'note' && section.note && (
+            <Note sectionId={section.id} note={section.note} onSaved={onSectionChange} />
+          )}
+        </div>
+        {studyPaused && (
+          <button
+            type="button"
+            className="reader-study-pause"
+            onClick={onResumeStudy}
+          >
+            <span>刚才是在思考吗？</span>
+            <small>轻触、滚动或按任意键继续</small>
+          </button>
         )}
       </div>
       {regenerationConfirmOpen && (
@@ -5235,7 +6782,7 @@ function SeriesRoutePreview({ series }: { series: Series }) {
   const firstBook = series.books[0];
   const firstChapter = firstBook?.chapters[0];
   const statusCopy = taskStatus === 'failed'
-    ? '第一节暂未准备完成。'
+    ? generationFailureMessage(series.initializationTask, '第一节内容')
     : taskStatus === 'pending'
       ? '排队中'
       : taskStatus === 'running'
@@ -5334,7 +6881,11 @@ function ReaderPanelToggles({
           aria-expanded={true}
           aria-label="收起目录"
           title="收起目录"
-          onClick={onToggleDirectory}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleDirectory();
+          }}
         >
           ‹
         </button>
@@ -5356,7 +6907,11 @@ function ReaderPanelToggles({
           aria-expanded={true}
           aria-label="收起答疑"
           title="收起答疑"
-          onClick={onToggleQa}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleQa();
+          }}
         >
           ›
         </button>
@@ -5431,7 +6986,7 @@ function LessonContent({
         </div>
         {section.generation?.status === 'failed' && (
           <div className="inline-error">
-            上次准备失败，请重试。
+            {generationFailureMessage(section.generation)}
           </div>
         )}
         <button className="primary-button large" onClick={onGenerate}>
@@ -5461,10 +7016,10 @@ function LessonContent({
 
   return (
     <article className="lesson-document">
-      <div className="lesson-question">
+      <section className="lesson-question" aria-label="本节问题">
         <span>本节问题</span>
-        <h2>{section.question}</h2>
-      </div>
+        <p>{section.question}</p>
+      </section>
       <p className="content-trust-note">
         {section.content.generationMode === 'demo'
           ? '演示内容 · 仅用于体验学习流程'
@@ -5559,9 +7114,6 @@ function Quiz({
       !section.quiz.governance?.allowed ||
       !section.quiz.governance?.assessmentEligible
     ),
-  );
-  const hasMultipleChoice = Boolean(
-    section.quiz?.questions.some((question) => question.selectionMode === 'multiple'),
   );
   const [answers, setAnswers] = useState<number[][]>(() => {
     const empty = section.quiz?.questions.map(() => []) || [];
@@ -5926,11 +7478,6 @@ function Quiz({
       <p className="eyebrow">完成验证后解锁下一节</p>
       <h2>小节验证</h2>
       <p className="quiz-rule">答对至少 80%，且关键题达到要求即可继续；错题会用于安排重点巩固。</p>
-      <p className="quiz-draft-note">
-        {hasMultipleChoice
-          ? '标为“多选”的题目可以选择多个答案，其余题目只能选择一个答案。'
-          : '每道题只有一个答案，选择最符合本节内容的一项。'}
-      </p>
       {quizGovernanceBlocked && (
         <aside className="quiz-governance-notice" role="alert">
           <b>这节内容需要升级后才能验证</b>
@@ -6098,8 +7645,9 @@ function QuizReview({
     if (task.type === 'remediation_generation') return '补充教学';
     return '后续内容';
   })));
+  const aiFailedTask = failedWorkflowTasks.find(isAiGenerationFailure);
   const failedTaskSummary = failedTaskLabels.length
-    ? `${failedTaskLabels.join('和')}暂未准备完成。`
+    ? generationFailureMessage(aiFailedTask, failedTaskLabels.join('和'))
     : '后续内容暂未准备完成。';
   const nextSectionReady = Boolean(
     result.passed && nextSectionTask?.status === 'succeeded' && nextSectionId,
@@ -6126,6 +7674,8 @@ function QuizReview({
           {result.passed ? '查看解析或回到正文。' : '先查看下面的错题解析。'}
         </p>
       </header>
+
+      <KnowledgeSettlementCard settlement={result.knowledgeSettlement} />
 
       {wrongIndexes.length > 0 && (
         <nav className="wrong-question-nav" aria-label="错题导航">
@@ -6223,7 +7773,9 @@ function QuizReview({
           nextSectionReady ? (
             <>
               <span>下一节已准备好</span>
-              {noteTask?.status === 'failed' && <small>个人笔记暂未更新。</small>}
+              {noteTask?.status === 'failed' && (
+                <small>{generationFailureMessage(noteTask, '个人笔记')}</small>
+              )}
               <div className="remediation-readiness-actions">
                 {noteTask?.status === 'failed' && noteTask.retryable && (
                   <button
@@ -6320,6 +7872,100 @@ function QuizReview({
   );
 }
 
+function KnowledgeSettlementCard({
+  settlement,
+}: {
+  settlement?: KnowledgeSettlement | null;
+}) {
+  if (!settlement?.updates.length) return null;
+  const priority = {
+    rank_up: 0,
+    star_up: 1,
+    reactivated: 2,
+    needs_reinforcement: 3,
+    confirmed: 4,
+  } as const;
+  const updates = [...settlement.updates].sort(
+    (left, right) => priority[left.change] - priority[right.change],
+  );
+  const stateLabel = {
+    rank_up: '段位提升',
+    star_up: '证据增加',
+    reactivated: '重新唤醒',
+    needs_reinforcement: '需要巩固',
+    confirmed: '能力确认',
+  } as const;
+
+  return (
+    <section className="knowledge-settlement" aria-labelledby="knowledge-settlement-title">
+      <div className="knowledge-settlement-heading">
+        <div>
+          <span>知识印记</span>
+          <h3 id="knowledge-settlement-title">本节留下的成长</h3>
+        </div>
+        <small>只记录正式验证，不把阅读时长算成掌握</small>
+      </div>
+      <div className="knowledge-settlement-list">
+        {updates.map((update) => {
+          const tier = update.after.rankLabel.split(' · ')[0];
+          const rankChanged = update.change === 'rank_up';
+          return (
+            <article
+              className={`knowledge-rank-update ${rankChanged ? 'rank-up' : update.change}`}
+              data-rank={update.after.rank}
+              key={update.conceptRevisionId}
+            >
+              <div
+                className="knowledge-rank-seal"
+                aria-label={`当前段位：${update.after.rankLabel}，${update.after.stars} 颗证据星`}
+              >
+                <small>{rankChanged ? 'NEW RANK' : 'KNOWLEDGE'}</small>
+                <strong>{tier}</strong>
+                <i aria-hidden="true">知</i>
+              </div>
+              <div className="knowledge-rank-copy">
+                <div className="knowledge-rank-meta">
+                  <span>{stateLabel[update.change]}</span>
+                  <em>{update.label}</em>
+                </div>
+                <h4>
+                  {rankChanged && update.before.rank !== 'unranked' && (
+                    <small>{update.before.rankLabel}</small>
+                  )}
+                  {rankChanged && update.before.rank !== 'unranked' && <i>→</i>}
+                  {update.after.rankLabel}
+                </h4>
+                <p>{update.message}</p>
+                {update.after.capabilityScope && (
+                  <div className="knowledge-capability-scope">
+                    <span>这枚段位只对应</span>
+                    <b>{update.after.capabilityScope}</b>
+                    {update.after.atCeiling && <small>本节点已满阶</small>}
+                  </div>
+                )}
+                <div
+                  className="knowledge-evidence-stars"
+                  aria-label={`当前 ${update.after.stars} 颗证据星，最多 3 颗`}
+                >
+                  <span>证据星</span>
+                  {[1, 2, 3].map((star) => (
+                    <i className={star <= update.after.stars ? 'filled' : ''} key={star} aria-hidden="true">◆</i>
+                  ))}
+                  <small>
+                    {update.change === 'confirmed'
+                      ? '本次未重复累计'
+                      : `${update.after.independentEvidenceCount} 次独立验证`}
+                  </small>
+                </div>
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 const NOTE_LIST_FIELDS: { key: keyof NoteContent; label: string; hint: string }[] = [
   { key: 'core_mechanism', label: '核心机制', hint: '每行写一个机制' },
   { key: 'personal_gaps', label: '仍需留意', hint: '每行写一个需要继续巩固的点' },
@@ -6328,6 +7974,27 @@ const NOTE_LIST_FIELDS: { key: keyof NoteContent; label: string; hint: string }[
   { key: 'sources', label: '参考来源', hint: '每行写一个来源' },
   { key: 'unresolved', label: '尚未解决', hint: '每行写一个待解决问题' },
 ];
+
+function noteVerificationLabel(annotation: NoteVerificationAnnotation): string {
+  switch (annotation.claimStatus) {
+    case 'retained':
+      return '掌握稳固';
+    case 'verified_delayed':
+      return annotation.retentionRounds >= 2 ? '掌握稳固' : '复习验证通过';
+    case 'verified_immediate':
+      return '待复习验证';
+    case 'contradicted':
+      return '建议重新巩固';
+    case 'learning':
+      return '还需继续学习';
+    case 'unobserved':
+      return '尚未完成测验';
+    default:
+      if (annotation.retentionRounds >= 2) return '掌握稳固';
+      if (annotation.retentionRounds >= 1) return '复习验证通过';
+      return '学习情况待更新';
+  }
+}
 
 function noteList(content: NoteContent, key: keyof NoteContent) {
   const value = content[key];
@@ -6468,15 +8135,16 @@ function Note({
       </article>
 
       <aside className="note-verification" aria-label="本节掌握情况">
-        <header><b>本节掌握情况</b></header>
+        <header><b>本节掌握情况</b><span>会根据测验与复习表现更新</span></header>
+        <p>这里只显示 Slow 内的学习验证记录，不会改写上面的笔记。</p>
         {note.verificationAnnotations.length === 0 ? (
-          <small>目前还没有可显示的掌握情况。</small>
+          <small>完成本节测验后，这里会显示学习情况。</small>
         ) : (
           <ul>
             {note.verificationAnnotations.map((annotation) => (
               <li key={annotation.assessmentTargetId}>
                 <span><b>{annotation.objective}</b></span>
-                <em>{annotation.pKnown >= 0.8 ? '掌握稳固' : annotation.pKnown >= 0.55 ? '继续巩固' : '尚未验证'}</em>
+                <em>{noteVerificationLabel(annotation)}</em>
               </li>
             ))}
           </ul>
@@ -6629,28 +8297,43 @@ function AskMePanel({ sectionId }: { sectionId: string }) {
   }[value] || value);
   return (
     <div className="askme-view">
-      <header className="askme-intro">
-        <div>
-          <p className="eyebrow">隐藏关卡</p>
-          <h2>Grill Me</h2>
-        </div>
-        {discussion && (
-          <span>
-            {discussion.status === 'completed'
-              ? '已结束'
-              : `主题 ${Math.max(activeTopicIndex + 1, 1)} / ${discussion.topics.length}`}
-          </span>
-        )}
-      </header>
+      {(loading || discussion) && (
+        <header className="askme-intro">
+          <div>
+            <p className="eyebrow">隐藏关卡</p>
+            <h2>Grill Me</h2>
+          </div>
+          {discussion && (
+            <span>
+              {discussion.status === 'completed'
+                ? '已结束'
+                : `主题 ${Math.max(activeTopicIndex + 1, 1)} / ${discussion.topics.length}`}
+            </span>
+          )}
+        </header>
+      )}
 
       {loading ? (
         <div className="askme-loading" aria-live="polite">正在恢复讨论…</div>
       ) : !discussion ? (
-        <div className="askme-start-card">
-          <button className="primary-button large" disabled={actioning} onClick={start}>
-            {actioning ? '正在准备…' : '进入关卡'}
-          </button>
-        </div>
+        <section className="askme-entry-card" aria-labelledby="askme-entry-title">
+          <div className="askme-entry-copy">
+            <p className="eyebrow">满分已解锁 · 可选挑战</p>
+            <h2 id="askme-entry-title">Grill Me</h2>
+            <p>不是再做一套题。考官会连续追问，确认你能不能把这一节讲清楚、判断边界，并用到新的情境。</p>
+            <div className="askme-entry-actions">
+              <button className="primary-button large" disabled={actioning} onClick={start}>
+                {actioning ? '正在准备…' : '开始口试挑战'}
+              </button>
+              <small>过程中只评估，不继续教学；可以随时暂停。</small>
+            </div>
+          </div>
+          <ol className="askme-entry-probes" aria-label="口试探测顺序">
+            <li><span>01</span><div><b>机制</b><small>解释为什么成立</small></div></li>
+            <li><span>02</span><div><b>边界</b><small>判断何时不适用</small></div></li>
+            <li><span>03</span><div><b>迁移</b><small>用到新的情境</small></div></li>
+          </ol>
+        </section>
       ) : (
         <div className="askme-discussion">
           <nav className="askme-topic-tabs" aria-label="讨论主题">
@@ -6803,6 +8486,7 @@ function QaPanel({
   onClearQuote,
   explanationRequest,
   onSectionChange,
+  onStreamingChange,
 }: {
   section: Section | null;
   dailyMode: DailyMode;
@@ -6814,6 +8498,7 @@ function QaPanel({
   onClearQuote: () => void;
   explanationRequest: ExplanationRequest | null;
   onSectionChange: (section: Section) => void;
+  onStreamingChange: (streaming: boolean) => void;
 }) {
   const [threadId, setThreadId] = useState<string>();
   const [newQuestion, setNewQuestion] = useState(false);
@@ -6828,14 +8513,22 @@ function QaPanel({
   const [adoptingExchange, setAdoptingExchange] = useState('');
   const [adoptedExchange, setAdoptedExchange] = useState('');
   const [confirmedPreference, setConfirmedPreference] = useState<Record<string, boolean>>({});
+  const [latestAnswerWaiting, setLatestAnswerWaiting] = useState(false);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
+  const followLatestAnswerRef = useRef(true);
+  const askingRef = useRef(false);
   const explanationRequestRef = useRef('');
   const draftExplanationRef = useRef<ExplanationRequest | null>(null);
   const selectedBlock =
     section?.content?.blocks.find((block) => block.id === selectedBlockId) ??
     section?.content?.blocks[0];
   const effectiveBlockId = selectedBlock?.id ?? selectedBlockId;
+
+  useEffect(() => {
+    onStreamingChange(asking && !hidden);
+    return () => onStreamingChange(false);
+  }, [asking, hidden, onStreamingChange]);
 
   useEffect(() => {
     if (selectedQuote) composerRef.current?.focus();
@@ -6855,9 +8548,20 @@ function QaPanel({
     draftExplanationRef.current = draftExplanation;
   }, [draftExplanation]);
 
-  useEffect(() => {
+  const scrollToLatestAnswer = (behavior: ScrollBehavior = 'smooth') => {
     const node = messagesRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
+    if (!node) return;
+    followLatestAnswerRef.current = true;
+    setLatestAnswerWaiting(false);
+    node.scrollTo({ top: node.scrollHeight, behavior });
+  };
+
+  useEffect(() => {
+    if (!followLatestAnswerRef.current) return;
+    const frame = requestAnimationFrame(() => {
+      if (followLatestAnswerRef.current) scrollToLatestAnswer('auto');
+    });
+    return () => cancelAnimationFrame(frame);
   }, [messages]);
 
   const loadHistory = async () => {
@@ -6895,7 +8599,8 @@ function QaPanel({
   }, [hidden, section?.id, section?.content?.id, historyStatus]);
 
   const ask = async () => {
-    if (asking || historyStatus === 'loading' || !section || !effectiveBlockId || !question.trim()) return;
+    if (askingRef.current || historyStatus === 'loading' || !section || !effectiveBlockId || !question.trim()) return;
+    askingRef.current = true;
     const visibleQuestion = question.trim();
     const submittedQuestion = draftExplanation && visibleQuestion === draftExplanation.displayQuestion
       ? draftExplanation.question
@@ -6911,6 +8616,8 @@ function QaPanel({
       : draftExplanation
         ? 'unsaved'
         : undefined;
+    followLatestAnswerRef.current = true;
+    setLatestAnswerWaiting(false);
     setMessages((current) => [
       ...current,
       {
@@ -6965,6 +8672,7 @@ function QaPanel({
           : message
       )));
     } finally {
+      askingRef.current = false;
       setAsking(false);
     }
   };
@@ -7055,7 +8763,25 @@ function QaPanel({
               )}
             </div>
           )}
-          <div className="qa-messages" ref={messagesRef}>
+          <div className="qa-message-stage">
+            <div
+              className="qa-messages"
+              ref={messagesRef}
+              role="region"
+              aria-label="答疑记录"
+              tabIndex={0}
+              onScroll={(event) => {
+                const node = event.currentTarget;
+                const nearLatest = node.scrollHeight - node.scrollTop - node.clientHeight <= 56;
+                if (nearLatest) {
+                  followLatestAnswerRef.current = true;
+                  setLatestAnswerWaiting(false);
+                } else if (askingRef.current) {
+                  followLatestAnswerRef.current = false;
+                  setLatestAnswerWaiting(true);
+                }
+              }}
+            >
             {historyStatus === 'loading' && (
               <div className="qa-history-state" role="status" aria-live="polite">
                 <span className="streaming-dots" aria-hidden="true"><i /><i /><i /></span>
@@ -7069,7 +8795,7 @@ function QaPanel({
                 <button type="button" onClick={() => void loadHistory()}>重新读取</button>
               </div>
             )}
-            {historyStatus === 'loaded' && messages.length === 0 && !draftExplanation && (
+            {historyStatus === 'loaded' && messages.length === 0 && !draftExplanation && !selectedQuote && (
               <div className="qa-suggestion">
                 <span>可以这样问</span>
                 <button onClick={() => { setDraftExplanation(null); setQuestion(dailyMode === 'fast' ? '用一句结论和三个要点解释这段。' : '这个机制最容易被误解的地方是什么？'); }}>{dailyMode === 'fast' ? '用一句结论和三个要点解释这段。' : '这个机制最容易被误解的地方是什么？'}</button>
@@ -7087,16 +8813,36 @@ function QaPanel({
                         remarkPlugins={[remarkGfm]}
                         components={{
                           a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
+                          code: ({ node: _node, className, children, ...props }) => {
+                            const language = /(?:^|\s)language-([^\s]+)/.exec(className || '')?.[1]?.toLowerCase();
+                            const source = String(children).replace(/\n$/, '');
+                            if (language === 'mermaid' && message.status === 'done') {
+                              return <MermaidDiagram source={source} />;
+                            }
+                            return <code className={className} {...props}>{children}</code>;
+                          },
                         }}
                       >
                         {message.answer}
                       </ReactMarkdown>
                     ) : (
-                      <span className="streaming-dots"><i /><i /><i /></span>
+                      <span className="qa-answer-pending" role="status">
+                        <span className="streaming-dots" aria-hidden="true"><i /><i /><i /></span>
+                        <small>已发送，正在回答，无需重复点击</small>
+                      </span>
                     )}
                     {message.status === 'streaming' && message.answer && <span className="stream-caret" />}
                   </div>
                 </div>
+                {message.status === 'error' && (
+                  <div className="qa-error-actions">
+                    <span>这次回答没有完成，问题不会重复提交。</span>
+                    <button type="button" disabled={asking} onClick={() => {
+                      setQuestion(message.question);
+                      requestAnimationFrame(() => composerRef.current?.focus());
+                    }}>重新填写</button>
+                  </div>
+                )}
                 {message.status === 'done' && message.explanationStyle && (
                   <div className="explanation-style-feedback">
                     <span>{message.preferenceRequestEventId ? '这次讲法怎么样？' : '偏好未保存'}</span>
@@ -7215,6 +8961,16 @@ function QaPanel({
                 )}
               </div>
             ))}
+            </div>
+            {latestAnswerWaiting && (
+              <button
+                type="button"
+                className="qa-latest-answer"
+                onClick={() => scrollToLatestAnswer()}
+              >
+                回到最新回答 <span aria-hidden="true">↓</span>
+              </button>
+            )}
           </div>
           <div className="qa-composer">
             <textarea
@@ -7226,7 +8982,7 @@ function QaPanel({
                 if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;
                 if (event.metaKey || event.ctrlKey || event.shiftKey) return;
                 event.preventDefault();
-                ask();
+                void ask();
               }}
               placeholder={selectedQuote ? '针对选中的内容输入问题…' : '基于当前段落继续追问…'}
             />
@@ -7235,7 +8991,7 @@ function QaPanel({
                 <label><input type="checkbox" checked={newQuestion} onChange={(event) => setNewQuestion(event.target.checked)} /> 新问题</label>
                 <span>Enter 发送 · ⌘/Ctrl + Enter 换行</span>
               </div>
-              <button disabled={asking || historyStatus === 'loading' || !question.trim()} onClick={ask}>
+              <button disabled={asking || historyStatus === 'loading' || !question.trim()} aria-busy={asking} onClick={() => void ask()}>
                 {asking ? '回答中…' : '发送 ↑'}
               </button>
             </div>
@@ -7243,44 +8999,5 @@ function QaPanel({
         </>
       )}
     </aside>
-  );
-}
-
-function ArtifactSubmission({
-  id,
-  status,
-  attachmentCount,
-  onSubmit,
-}: {
-  id: string;
-  status: string;
-  attachmentCount: number;
-  onSubmit: (action: () => Promise<unknown>) => Promise<void>;
-}) {
-  const needsLegacyFile = status === 'completed' && attachmentCount === 0;
-  const enabled = status === 'available' || needsLegacyFile;
-  const upload = async (file: File) => {
-    const attachment = await api.uploadCapstone(id, file);
-    return api.capstone(id, { artifact: '全书综合成果', verification: '学习者复核记录' }, [attachment.id]);
-  };
-  return (
-    <label className={`artifact-submit capstone ${enabled ? 'enabled' : ''}`}>
-      <span className="artifact-icon">
-        {status === 'locked' ? <LockIcon size={12} /> : '◆'}
-      </span>
-      <span>全书大作业</span>
-      {status !== 'locked' && (
-        <small>· {needsLegacyFile ? '补充附件' : status === 'completed' ? '已完成' : '提交成果'}</small>
-      )}
-      <input
-        type="file"
-        hidden
-        disabled={!enabled}
-        onChange={(event) => {
-          const file = event.target.files?.[0];
-          if (file) onSubmit(() => upload(file));
-        }}
-      />
-    </label>
   );
 }

@@ -140,13 +140,14 @@ async function streamFeedbackRepair(
     const text = await response.text();
     const payload = parsePayload(text);
     throw new ApiError(
-      String(payload?.message || '补救内容生成失败'),
+      String(payload?.message || '正文更新没有完成'),
       response.status,
       String(payload?.code || 'FEEDBACK_REPAIR_FAILED'),
       Boolean(payload?.retryable),
+      payload?.operationId ? String(payload.operationId) : undefined,
     );
   }
-  if(!response.body) throw new Error('浏览器不支持流式补救');
+  if(!response.body) throw new Error('当前浏览器不支持接收更新结果');
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -164,7 +165,7 @@ async function streamFeedbackRepair(
     if(eventType === 'done') completed = payload as import('../model/types').FeedbackRepairResult;
     if(eventType === 'error') {
       throw new ApiError(
-        '补救内容暂时没有完成，请稍后重试',
+        String(payload.message || '正文更新暂时没有完成，请稍后重试'),
         200,
         String(payload.code || 'FEEDBACK_REPAIR_FAILED'),
         Boolean(payload.retryable),
@@ -182,7 +183,7 @@ async function streamFeedbackRepair(
     if(done) break;
   }
   if(buffer.trim()) consume(buffer);
-  if(!completed) throw new Error('补救内容流意外结束');
+  if(!completed) throw new Error('正文更新连接提前结束，请稍后重试');
   return completed;
 }
 
@@ -249,6 +250,19 @@ export const api = {
     keepalive:true,
     body:JSON.stringify(body),
   }),
+  studyActivityHeartbeat:(body:{
+    eventId:string;
+    clientSessionId:string;
+    clientSequence:number;
+    activityKind:import('../model/types').StudyActivityKind;
+    sectionId:string;
+    timezone:string;
+  })=>call<{accepted:boolean;duplicated:boolean;serverNow:string;measurementRuleVersion:string}>('/api/study-activity/heartbeat',{
+    method:'POST',
+    keepalive:true,
+    body:JSON.stringify(body),
+  }),
+  studyActivityToday:(timezone:string)=>call<import('../model/types').StudyActivitySummary>(`/api/study-activity/today?timezone=${encodeURIComponent(timezone)}`),
   onboarding:()=>call<import('../model/types').OnboardingState>('/api/onboarding'),
   saveProfileDraft:(body:object)=>call<import('../model/types').OnboardingState>('/api/onboarding/profile',{
     method:'PATCH',
@@ -297,13 +311,35 @@ export const api = {
   aiRuntime:()=>call<import('../model/types').AiRuntime>('/api/runtime/ai'),
   updateAiRuntime:(body:object)=>call<import('../model/types').AiRuntime>('/api/runtime/ai',{method:'PUT',body:JSON.stringify(body)}),
   createPlan:(body:object,idempotencyKey:string)=>call<import('../model/types').Series>('/api/plans',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},body:JSON.stringify(body)}),
+  learningStartPreview:(body:object)=>call<import('../model/types').LearningStartPreview>('/api/learning-start/preview',{
+    method:'POST',
+    body:JSON.stringify(body),
+  }),
   series:(id:string)=>call<import('../model/types').Series>(`/api/series/${id}`),
   confirmMilestonePath:(id:string)=>call<{seriesId:string;status:string;version:number;goalProfileVersion:number}>(`/api/series/${id}/milestone-path/confirm`,{method:'POST'}),
   deleteSeries:(id:string)=>call<void>(`/api/series/${id}`,{method:'DELETE'}),
   deleteBook:(id:string)=>call<void>(`/api/books/${id}`,{method:'DELETE'}),
-  replanBook:(id:string)=>call<import('../model/types').BookReplanProposal>(`/api/books/${id}/chapters/replan`,{method:'POST'}),
+  replanBook:(id:string,body?:{feedback?:string;previousProposalId?:string})=>call<import('../model/types').BookReplanProposal>(`/api/books/${id}/chapters/replan`,{
+    method:'POST',
+    body:body ? JSON.stringify(body) : undefined,
+  }),
   confirmBookReplan:(id:string,proposalId:string)=>call<import('../model/types').Book>(`/api/books/${id}/chapters/replan/${proposalId}/confirm`,{method:'POST'}),
   chapter:(id:string)=>call<import('../model/types').Chapter>(`/api/chapters/${id}/generate`,{method:'POST'}),
+  skipChapter:(id:string,reason:'not_focus'|'defer_unknown'|'challenge_exit',idempotencyKey:string)=>call<import('../model/types').ChapterRouteResult>(`/api/chapters/${id}/skip`,{
+    method:'POST',
+    headers:{'Idempotency-Key':idempotencyKey},
+    body:JSON.stringify({reason}),
+  }),
+  resumeChapter:(id:string,idempotencyKey:string)=>call<import('../model/types').Chapter>(`/api/chapters/${id}/resume`,{
+    method:'POST',
+    headers:{'Idempotency-Key':idempotencyKey},
+  }),
+  prepareChapterChallenge:(id:string)=>call<import('../model/types').ChapterChallenge>(`/api/chapters/${id}/challenge/prepare`,{method:'POST'}),
+  submitChapterChallenge:(id:string,sections:{sectionId:string;quizSetId:string;answers:number[][]}[],idempotencyKey:string)=>call<import('../model/types').ChapterChallengeResult>(`/api/chapters/${id}/challenge/submit`,{
+    method:'POST',
+    headers:{'Idempotency-Key':idempotencyKey},
+    body:JSON.stringify({sections}),
+  }),
   section:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}`),
   openSection:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}/open`,{method:'POST'}),
   generateSection:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}/generate`,{method:'POST'}),
@@ -319,11 +355,22 @@ export const api = {
     {method:'POST'},
   ),
   dueReviews:(dailyBudget=10)=>call<import('../model/types').DueReviews>(`/api/reviews/due?daily_budget=${dailyBudget}`),
+  knowledgeMap:(seriesId?:string)=>call<import('../model/types').KnowledgeMap>(
+    `/api/knowledge-map${seriesId ? `?series_id=${encodeURIComponent(seriesId)}` : ''}`,
+  ),
   startReview:(assignmentId:string)=>call<import('../model/types').ReviewSession>(`/api/reviews/${assignmentId}/start`,{method:'POST'}),
   submitReview:(assignmentId:string,answers:number[][],idempotencyKey:string)=>call<import('../model/types').ReviewResult>(`/api/reviews/${assignmentId}/submit`,{
     method:'POST',
     headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},
     body:JSON.stringify({answers}),
+  }),
+  startReviewReinforcement:(assignmentId:string)=>call<import('../model/types').ReinforcementRun>(`/api/reviews/${assignmentId}/reinforcement`,{method:'POST'}),
+  startTargetReinforcement:(targetId:string)=>call<import('../model/types').ReinforcementRun>(`/api/knowledge-targets/${targetId}/reinforcement`,{method:'POST'}),
+  activeReinforcement:()=>call<import('../model/types').ReinforcementRun|null>('/api/reinforcements/active'),
+  respondReinforcement:(runId:string,body:{activityKey:string;selectedOptions?:number[];responseText?:string;acknowledged?:boolean},idempotencyKey:string)=>call<import('../model/types').ReinforcementRun>(`/api/reinforcements/${runId}/respond`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},
+    body:JSON.stringify(body),
   }),
   skipReview:(assignmentId:string)=>call<{assignmentId:string;status:'skipped'}>(`/api/reviews/${assignmentId}/skip`,{method:'POST'}),
   learningTask:(id:string)=>call<import('../model/types').LearningTask>(`/api/learning-tasks/${id}`),
@@ -355,6 +402,7 @@ export const api = {
   practice:(id:string,content:object,attachmentIds:string[])=>call<import('../model/types').Practice>(`/api/chapters/${id}/practice`,{method:'POST',body:JSON.stringify({content,attachmentIds})}),
   uploadCapstone:(id:string,file:File)=>call<import('../model/types').Attachment>(`/api/books/${id}/capstone/attachments`,{method:'POST',headers:{'Content-Type':file.type||'application/octet-stream','X-Filename':encodeURIComponent(file.name)},body:file}),
   capstone:(id:string,content:object,attachmentIds:string[])=>call<import('../model/types').Capstone>(`/api/books/${id}/capstone`,{method:'POST',body:JSON.stringify({content,attachmentIds})}),
+  settleBook:(id:string)=>call<import('../model/types').BookSettlement>(`/api/books/${id}/settlement`,{method:'POST'}),
   updateChapter:(id:string,body:object)=>call<import('../model/types').Chapter>(`/api/chapters/${id}`,{method:'PATCH',body:JSON.stringify(body)}),
   addChapter:(id:string,body:object)=>call<import('../model/types').Chapter>(`/api/books/${id}/chapters`,{method:'POST',body:JSON.stringify(body)}),
   deleteChapter:(id:string)=>call<void>(`/api/chapters/${id}`,{method:'DELETE'}),

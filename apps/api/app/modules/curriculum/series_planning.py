@@ -42,6 +42,7 @@ class SeriesPlanningService:
         missions,
         milestones,
         baselines,
+        learning_start,
         generation_contexts,
         shelf_provider: Callable[[str], object],
         memory_provider: Callable[[str], list[dict]],
@@ -55,6 +56,7 @@ class SeriesPlanningService:
         self.missions = missions
         self.milestones = milestones
         self.baselines = baselines
+        self.learning_start = learning_start
         self.generation_contexts = generation_contexts
         self.shelf_provider = shelf_provider
         self.memory_provider = memory_provider
@@ -62,7 +64,8 @@ class SeriesPlanningService:
 
     async def create(self, body, idempotency_key: str | None = None) -> dict:
         shelf = self.shelf_provider(body.shelf_id)
-        request = body.model_dump(by_alias=False)
+        request = self.learning_start.plan_payload(body)
+        learning_start_context = self.learning_start.planning_context(body)
         memory = self.memory_provider(body.shelf_id)
         baseline = self.baselines.select_for_plan(
             shelf=shelf,
@@ -78,7 +81,13 @@ class SeriesPlanningService:
             plan_input=request,
             curriculum_baseline=baseline_context,
         )
-        ai_request = self.generation_contexts.attach(request, context_pack)
+        ai_request = self.generation_contexts.attach(
+            {
+                **request,
+                "learningStart": learning_start_context,
+            },
+            context_pack,
+        )
         request_key = (idempotency_key or _uid("plan_request")).strip()
         if len(request_key) < 8 or len(request_key) > 128:
             raise AppError(
@@ -175,6 +184,7 @@ class SeriesPlanningService:
         )
         self.db.add(series)
         self.db.flush()
+        self.learning_start.bind_series(series_id=series.id, body=body)
         if baseline:
             self.baselines.bind_series(
                 series_id=series.id,

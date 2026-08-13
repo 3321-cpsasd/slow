@@ -55,6 +55,10 @@ from .standard_content import StandardContentService
 CONTENT_COMPLIANCE_RULE_VERSION = "content_compliance_v1"
 MODEL_ONLY_PROMPT_VERSION = "lesson_content_model_only_v1"
 AI_CONTENT_LABEL_SCHEMA_VERSION = "ai_content_label_v1"
+TEACHING_ACTION_RULE_VERSION = "teaching_action_v1"
+TEACHING_ACTIONS = {
+    "teach", "scaffold", "wake", "connect", "compress", "replan",
+}
 GENERATION_ARTIFACT_MARKERS = (
     "候选 JSON",
     "原始候选",
@@ -83,6 +87,87 @@ def load(value, default=None):
 
 def timestamp(value):
     return value.isoformat() if value else None
+
+
+def teaching_action_snapshot(memory, target_payloads, knowledge_context):
+    """Freeze cross-book evidence into explicit, auditable author instructions."""
+
+    target_ids = {
+        str(item.get("assessmentTargetId") or "") for item in target_payloads
+    }
+    target_concepts = {
+        str(item.get("conceptRevisionId") or "") for item in target_payloads
+        if item.get("conceptRevisionId")
+    }
+    decisions = []
+    evidenced_concepts = set()
+    reason_by_action = {
+        "teach": "no_qualified_prior_evidence",
+        "scaffold": "prior_evidence_requires_support",
+        "wake": "qualified_knowledge_due_for_recall",
+        "connect": "qualified_prior_understanding",
+        "compress": "stable_prior_capability",
+        "replan": "multiple_unmet_direct_prerequisites",
+    }
+    for raw in memory:
+        concept_id = str(
+            (raw.get("knowledgeNode") or {}).get("conceptRevisionId")
+            or raw.get("conceptRevisionId")
+            or ""
+        )
+        if (
+            str(raw.get("assessmentTargetId") or "") not in target_ids
+            and concept_id not in target_concepts
+        ):
+            continue
+        action = str(raw.get("teachingAction") or "teach")
+        if action not in TEACHING_ACTIONS:
+            action = "teach"
+        if concept_id:
+            evidenced_concepts.add(concept_id)
+        decisions.append({
+            **raw,
+            "conceptRevisionId": concept_id,
+            "teachingAction": action,
+            "reasonCode": reason_by_action[action],
+            "evidenceWatermark": int(raw.get("sourceObservationWatermark") or 0),
+            "decisionRuleVersion": TEACHING_ACTION_RULE_VERSION,
+        })
+
+    missing_by_target: dict[str, list[str]] = {}
+    for edge in (knowledge_context or {}).get("edges", []):
+        if edge.get("relationType") != "prerequisite_of":
+            continue
+        prerequisite = str(edge.get("fromConceptRevisionId") or "")
+        target = str(edge.get("toConceptRevisionId") or "")
+        if (
+            target in target_concepts
+            and prerequisite
+            and prerequisite not in evidenced_concepts
+            and prerequisite not in target_concepts
+        ):
+            missing_by_target.setdefault(target, []).append(prerequisite)
+    for target, missing in missing_by_target.items():
+        unique_missing = list(dict.fromkeys(missing))
+        if len(unique_missing) >= 2:
+            decisions.insert(0, {
+                "conceptRevisionId": target,
+                "teachingAction": "replan",
+                "reasonCode": reason_by_action["replan"],
+                "blockingPrerequisiteConceptRevisionIds": unique_missing,
+                "evidenceWatermark": 0,
+                "decisionRuleVersion": TEACHING_ACTION_RULE_VERSION,
+            })
+        else:
+            decisions.append({
+                "conceptRevisionId": unique_missing[0],
+                "teachingAction": "scaffold",
+                "reasonCode": "unmet_direct_prerequisite",
+                "requiredByConceptRevisionId": target,
+                "evidenceWatermark": 0,
+                "decisionRuleVersion": TEACHING_ACTION_RULE_VERSION,
+            })
+    return decisions[:8]
 
 
 def model_only_content(value):
@@ -286,6 +371,7 @@ class SectionGenerationCoordinator:
         regenerate=False,
         supersede_remediation_id=None,
         regeneration_feedback=None,
+        allow_locked_diagnostic=False,
         resource_key=None,
         owner_id=None,
     ):
@@ -295,6 +381,7 @@ class SectionGenerationCoordinator:
                     section_id,
                     regenerate=regenerate,
                     regeneration_feedback=regeneration_feedback,
+                    allow_locked_diagnostic=allow_locked_diagnostic,
                     resource_key=resource_key,
                     owner_id=owner_id,
                 )
@@ -315,6 +402,7 @@ class SectionGenerationCoordinator:
             regenerate=regenerate,
             supersede_remediation_id=supersede_remediation_id,
             regeneration_feedback=regeneration_feedback,
+            allow_locked_diagnostic=allow_locked_diagnostic,
             resource_key=resource_key,
             owner_id=owner_id,
         )
@@ -325,6 +413,7 @@ class SectionGenerationCoordinator:
         *,
         regenerate: bool,
         regeneration_feedback: dict | None,
+        allow_locked_diagnostic: bool,
         resource_key: str | None,
         owner_id: str | None,
     ):
@@ -402,6 +491,7 @@ class SectionGenerationCoordinator:
         if (
             section_progress.status == "locked"
             and not isinstance(self.scope, WorkerExecutionContext)
+            and not allow_locked_diagnostic
         ):
             raise AppError("小节未解锁", code="SECTION_LOCKED", status=403)
         if (
@@ -468,6 +558,18 @@ class SectionGenerationCoordinator:
                     status=409,
                 )
             if regeneration_feedback:
+                if regeneration_feedback.get("feedbackType") == "inaccurate":
+                    raise AppError(
+                        "准确性反馈必须经过独立证据或人工复核，不能直接触发改写",
+                        code="FEEDBACK_ACCURACY_REVIEW_REQUIRED",
+                        status=409,
+                    )
+                if regeneration_feedback.get("feedbackType") == "other":
+                    raise AppError(
+                        "未分类反馈不能直接触发改写",
+                        code="FEEDBACK_CLASSIFICATION_REQUIRED",
+                        status=409,
+                    )
                 if regeneration_feedback.get("contentVersionId") != existing.id:
                     raise AppError(
                         "反馈对应的正文已经更新，请刷新后重新反馈",
@@ -502,6 +604,51 @@ class SectionGenerationCoordinator:
                         code="FEEDBACK_BLOCK_STALE",
                         status=409,
                     )
+                author_run = (
+                    self.db.get(GenerationRun, existing.generation_run_id)
+                    if existing.generation_run_id
+                    else None
+                )
+                if not author_run or not author_run.model:
+                    raise AppError(
+                        "原正文缺少可核验的模型来源，反馈已保留但不会自动改写正文",
+                        code="FEEDBACK_AUTHOR_MODEL_UNKNOWN",
+                        status=409,
+                    )
+                regeneration_feedback = {
+                    **regeneration_feedback,
+                    "authorModel": author_run.model,
+                    "authorDeploymentId": str(
+                        next(
+                            (
+                                item.get("deploymentId")
+                                for item in reversed(
+                                    load(author_run.trace_json, {}).get(
+                                        "modelAttempts", []
+                                    )
+                                )
+                                if item.get("outcome") == "succeeded"
+                            ),
+                            "",
+                        )
+                        or ""
+                    ),
+                    "authorModelFamilyId": str(
+                        next(
+                            (
+                                item.get("modelFamilyId")
+                                for item in reversed(
+                                    load(author_run.trace_json, {}).get(
+                                        "modelAttempts", []
+                                    )
+                                )
+                                if item.get("outcome") == "succeeded"
+                            ),
+                            "",
+                        )
+                        or ""
+                    ),
+                }
 
         running = self.db.scalar(
             select(GenerationRun)
@@ -552,7 +699,6 @@ class SectionGenerationCoordinator:
         )
         context_payload = context_pack.payload()
         target_payloads = assessment_contract_view(self.db, section, contract)
-        target_ids = {item["assessmentTargetId"] for item in target_payloads}
         chapter_sections = self.db.scalars(
             select(Section)
             .where(Section.chapter_id == section.chapter_id)
@@ -643,11 +789,11 @@ class SectionGenerationCoordinator:
             ],
             compositionPolicy=composition_policy,
             neighborBoundaries=neighbors,
-            relevantMastery=[
-                item
-                for item in memory
-                if item.get("assessmentTargetId") in target_ids
-            ],
+            relevantMastery=teaching_action_snapshot(
+                memory,
+                target_payloads,
+                context_payload["knowledgeContext"],
+            ),
             knowledgeContext=context_payload["knowledgeContext"],
             depthPolicy=context_payload["policy"]["depthPolicy"],
             feedback=regeneration_feedback or {},
@@ -679,8 +825,18 @@ class SectionGenerationCoordinator:
                         context_pack.knowledge_context.audit_manifest()
                     ),
                     "generationMode": spec.generation_mode,
-                    "physicalCallBudget": len(
-                        getattr(self.ai, "models", [getattr(self.ai, "model", "")])
+                    "physicalCallBudget": (
+                        self.ai.lesson_call_budget(spec.payload())
+                        if callable(
+                            getattr(self.ai, "lesson_call_budget", None)
+                        )
+                        else len(
+                            getattr(
+                                self.ai,
+                                "models",
+                                [getattr(self.ai, "model", "")],
+                            )
+                        )
                     ),
                     "regenerate": regenerate,
                     **(
@@ -758,7 +914,9 @@ class SectionGenerationCoordinator:
                     status=409
                     if failure.code == "PREREQUISITE_GAP_REQUIRES_REPLAN"
                     else 502,
-                    retryable=False,
+                    retryable=(
+                        failure.code != "PREREQUISITE_GAP_REQUIRES_REPLAN"
+                    ),
                     details=failure.location,
                 ) from failure
 
@@ -892,6 +1050,7 @@ class SectionGenerationCoordinator:
                     {
                         **load(failed_run.trace_json, {}),
                         "stage": "failed",
+                        "aiHarness": self._ai_harness_trace(),
                         "modelAttempts": (
                             self.ai.fallback_trace()
                             if callable(getattr(self.ai, "fallback_trace", None))
@@ -927,6 +1086,7 @@ class SectionGenerationCoordinator:
         regenerate=False,
         supersede_remediation_id=None,
         regeneration_feedback=None,
+        allow_locked_diagnostic=False,
         resource_key=None,
         owner_id=None,
     ):
@@ -940,6 +1100,7 @@ class SectionGenerationCoordinator:
             regenerate=regenerate,
             supersede_remediation_id=supersede_remediation_id,
             regeneration_feedback=regeneration_feedback,
+            allow_locked_diagnostic=allow_locked_diagnostic,
             resource_key=resource_key,
             owner_id=owner_id,
         )

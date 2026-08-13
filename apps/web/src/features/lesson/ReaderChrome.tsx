@@ -9,6 +9,7 @@ type LessonReaderHeaderProps = {
   sectionPosition: number;
   title: string;
   status: string;
+  sessionSeconds: number;
   canRegenerate: boolean;
   regenerating: boolean;
   onRequestRegenerate: () => void;
@@ -17,6 +18,7 @@ type LessonReaderHeaderProps = {
 
 const statusLabel = (status: string) => {
   if (status === 'completed') return '已验证';
+  if (status === 'failed') return '待重新准备';
   if (status === 'available') return '学习中';
   if (status === 'preparing') return '准备中';
   return '未解锁';
@@ -29,6 +31,7 @@ export function LessonReaderHeader({
   sectionPosition,
   title,
   status,
+  sessionSeconds,
   canRegenerate,
   regenerating,
   onRequestRegenerate,
@@ -67,6 +70,11 @@ export function LessonReaderHeader({
           <h1>{title}</h1>
         </div>
         <div className="reader-toolbar-actions">
+          <span className="lesson-session-time">
+            {sessionSeconds < 60
+              ? '本次 <1 分钟'
+              : `本次 ${String(Math.floor(sessionSeconds / 60)).padStart(2, '0')} 分钟`}
+          </span>
           <span className={`lesson-status ${status}`}>{statusLabel(status)}</span>
           <div className="reader-options" ref={menuRef}>
             <button

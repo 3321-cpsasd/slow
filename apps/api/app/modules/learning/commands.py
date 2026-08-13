@@ -41,8 +41,10 @@ from .progress import ProgressStore
 from .contracts import open_run_section
 from .decision_snapshots import (
     append_assessment_gate_snapshot,
+    append_knowledge_settlement_snapshot,
     append_progression_snapshot,
 )
+from .knowledge_ranks import knowledge_node_views_for_targets
 from .tasks import task_view
 
 
@@ -350,6 +352,16 @@ class SubmitQuiz:
             require_versions=bool(remediation),
             require_evidence=True,
         )
+        target_ids = {
+            str(question.get("assessmentTargetId") or "")
+            for question in questions
+            if question.get("assessmentTargetId")
+        }
+        knowledge_before = knowledge_node_views_for_targets(
+            self.db,
+            user_id=self.user_id,
+            target_ids=target_ids,
+        )
         grade = grade_choice_quiz(questions, body.answers)
         attempt = QuizAttempt(
             id=_uid("attempt"),
@@ -396,6 +408,14 @@ class SubmitQuiz:
                 if remediation
                 else f"quiz:{attempt.id}"
             ),
+        )
+        knowledge_settlement = append_knowledge_settlement_snapshot(
+            self.db,
+            attempt=attempt,
+            section_id=section.id,
+            target_ids=target_ids,
+            before=knowledge_before,
+            trigger_kind="quiz_submit",
         )
         gate_decision = section_gate_decision(
             self.db,
@@ -517,7 +537,11 @@ class SubmitQuiz:
             ))
         self.db.add_all(workflow_tasks)
         self.db.flush()
-        response = self._response(attempt, workflow_tasks)
+        response = self._response(
+            attempt,
+            workflow_tasks,
+            knowledge_settlement=knowledge_settlement,
+        )
         attempt.workflow_status = "completed"
         attempt.response_json = _dump(response)
         attempt.workflow_error_code = ""
@@ -784,8 +808,14 @@ class SubmitQuiz:
         self,
         attempt: QuizAttempt,
         workflow_tasks: list[LearningTask],
+        *,
+        knowledge_settlement: dict | None = None,
     ) -> dict:
         results = _load(attempt.results_json, [])
+        if knowledge_settlement is None and attempt.response_json:
+            knowledge_settlement = _load(attempt.response_json, {}).get(
+                "knowledgeSettlement"
+            )
         score = sum(bool(item.get("correct")) for item in results)
         note_task = next(
             (
@@ -803,6 +833,7 @@ class SubmitQuiz:
             "passed": attempt.passed,
             "perfect": bool(results) and score == len(results),
             "results": results,
+            "knowledgeSettlement": knowledge_settlement,
             "remediation": None,
             "nextQuiz": None,
             "workflowTasks": task_views,

@@ -44,6 +44,8 @@ from app.infrastructure.tables import (
     AskMeDiscussionTurnRecord,
     Book,
     ChapterRevision,
+    ChapterChallengeAttempt,
+    ChapterRouteDecisionEvent,
     ContentBlockClaimAnchor,
     ContentBlockVersion,
     ContentVersion,
@@ -64,6 +66,7 @@ from app.infrastructure.tables import (
     LearningPlan,
     LearningRun,
     LearningRunSectionBinding,
+    LearningStartPreview,
     MilestonePath,
     MilestonePathRevision,
     QuizAttempt,
@@ -76,6 +79,7 @@ from app.infrastructure.tables import (
     SectionAssessmentTarget,
     SectionProgress,
     Series,
+    SeriesLearningStartPreference,
     SourceClaimBinding,
     SourceClaimVersion,
     SourceVersion,
@@ -255,6 +259,7 @@ class FakeAi:
             topic_sufficiency="insufficient",
         )
     async def replan_book(self, request, memory):
+        self.last_replan_request = request
         return ReplannedBook(rationale="根据学习记忆减少重复", chapters=[ReplannedChapter(title="重规划章节", objective="验证迁移")])
 
 
@@ -1370,6 +1375,13 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
 
     assert first.status_code == replay.status_code == 200
     assert replay.json()["attemptId"] == first.json()["attemptId"]
+    assert replay.json()["knowledgeSettlement"] == first.json()["knowledgeSettlement"]
+    settlement_updates = first.json()["knowledgeSettlement"]["updates"]
+    assert len(settlement_updates) == 1
+    assert settlement_updates[0]["change"] == "rank_up"
+    assert settlement_updates[0]["before"]["rank"] == "unranked"
+    assert settlement_updates[0]["after"]["rank"] == "bronze"
+    assert first.json()["knowledgeSettlement"]["settlementId"]
     with client.app.state.sessions() as db:
         attempts = db.scalars(
             select(QuizAttempt).where(
@@ -1406,9 +1418,10 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
         assert len(evidence) == len(section["quiz"]["questions"])
         assert len(scoring) == 1
         assert len(observations) == len(section["quiz"]["questions"])
-        assert len(qualification) == len(observations) * 3
+        assert len(qualification) == len(observations) * 4
         assert [item.decision_kind for item in decisions] == [
             "assessment_gate",
+            "knowledge_settlement",
             "progression",
         ]
         gate = decisions[0]
@@ -1421,7 +1434,13 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
         assert gate_input["requiredTargetIds"]
         assert gate_output["passed"] is True
         assert gate_output["unresolvedRequiredTargetIds"] == []
-        progression = decisions[1]
+        settlement = decisions[1]
+        assert settlement.rule_version == "knowledge_rank_v3"
+        frozen_updates = json.loads(settlement.output_decision_json)["updates"]
+        assert len(frozen_updates) == 1
+        assert frozen_updates[0]["change"] == "rank_up"
+        assert frozen_updates[0]["after"]["rank"] == "bronze"
+        progression = decisions[2]
         assert progression.rule_version == "progression_v2_book_outline_gate"
         assert json.loads(progression.input_snapshot_json)["section_id"] == section["id"]
         assert json.loads(progression.output_decision_json)["completed_section_id"] == section["id"]
@@ -1438,7 +1457,7 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
             select(LearningDecisionSnapshot).where(
                 LearningDecisionSnapshot.attempt_id == first.json()["attemptId"]
             )
-        ).all()) == 2
+        ).all()) == 3
 
 
 def test_assessment_gate_remediates_only_failed_target_and_rebuilds(client):
@@ -1754,7 +1773,7 @@ def test_retention_discounts_same_source_and_counts_delayed_novel_review(client)
                 select(EvidenceQualificationEvent).where(
                     EvidenceQualificationEvent.observation_id == item.id,
                     EvidenceQualificationEvent.projection_family == "retention",
-                    EvidenceQualificationEvent.rule_version == "evidence_v2",
+                    EvidenceQualificationEvent.rule_version == "evidence_v3",
                 )
             )
             qualification.status = "candidate"
@@ -1890,7 +1909,7 @@ def test_due_review_api_enforces_daily_budget_without_creating_task_debt(client)
                 learning_episode_id=f"quiz:{attempt.id}",
                 equivalence_group_id=question["equivalenceGroupId"],
                 qualification_at_creation="eligible_grouped",
-                qualification_rule_version="evidence_v2",
+                qualification_rule_version="evidence_v3",
                 payload_json=json.dumps({
                     "questionFingerprint": hashlib.sha256(
                         json.dumps({
@@ -2199,9 +2218,13 @@ def test_local_maintenance_regenerates_remediation_as_a_new_revision(client):
 
 
 def test_quiz_response_does_not_wait_for_post_quiz_ai(tmp_path):
+    note_started = Event()
+    release_note = Event()
+
     class SlowPostQuizAi(FakeAi):
         async def note(self, request):
-            await asyncio.sleep(0.4)
+            note_started.set()
+            await asyncio.to_thread(release_note.wait)
             return await super().note(request)
 
     storage = LocalAttachmentStorage(tmp_path / "slow-task-attachments")
@@ -2220,19 +2243,24 @@ def test_quiz_response_does_not_wait_for_post_quiz_ai(tmp_path):
         section = non_blocking.post(
             f"/api/sections/{chapter['sections'][0]['id']}/generate"
         ).json()
-        started = time.monotonic()
-        response = non_blocking.post(
-            f"/api/sections/{section['id']}/quiz",
-            json={
-                "quizSetId": section["quiz"]["id"],
-                "answers": [[1] for _ in section["quiz"]["questions"]],
-            },
-        )
-        elapsed = time.monotonic() - started
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            response_future = pool.submit(
+                non_blocking.post,
+                f"/api/sections/{section['id']}/quiz",
+                json={
+                    "quizSetId": section["quiz"]["id"],
+                    "answers": [[1] for _ in section["quiz"]["questions"]],
+                },
+            )
+            try:
+                response = response_future.result(timeout=5)
+                assert note_started.wait(timeout=5)
+                assert not release_note.is_set()
+            finally:
+                release_note.set()
 
         assert response.status_code == 200
         assert response.json()["passed"] is True
-        assert elapsed < 0.25
         assert {
             task["type"] for task in response.json()["workflowTasks"]
         } == {"note_generation", "next_section_preload"}
@@ -2430,6 +2458,151 @@ def test_deleting_available_book_requires_next_outline_confirmation(client):
 
 def create_series(client):
     return client.post("/api/plans", json={"shelfId":"shelf_technology","topic":"Kubernetes","role":"技术人员","experience":"会 Docker","depth":"deep"}).json()
+
+
+def test_learning_start_preview_falls_back_and_direct_choice_is_auditable(client):
+    body = {
+        "shelfId": "shelf_technology",
+        "topic": "Kubernetes",
+        "role": "技术人员",
+        "experience": "会 Docker",
+        "purpose": "参与部署排障",
+        "depth": "deep",
+        "details": "理解机制",
+    }
+
+    preview = client.post("/api/learning-start/preview", json=body)
+    assert preview.status_code == 201
+    assert preview.json()["availability"] == "not_ready"
+    assert preview.json()["nodes"] == []
+
+    created = client.post(
+        "/api/plans",
+        json={**body, "startMode": "direct"},
+        headers={"Idempotency-Key": "direct-learning-start-1"},
+    )
+    assert created.status_code == 201
+    with client.app.state.sessions() as db:
+        stored_preview = db.get(LearningStartPreview, preview.json()["previewId"])
+        preference = db.scalar(
+            select(SeriesLearningStartPreference).where(
+                SeriesLearningStartPreference.series_id == created.json()["id"]
+            )
+        )
+        assert stored_preview.user_id == "user_demo"
+        assert preference.start_mode == "direct"
+        assert json.loads(preference.selected_concept_revision_ids_json) == []
+
+
+def test_chapter_skip_records_route_choice_without_fake_mastery(client):
+    series = create_series(client)
+    wait_for_task(client, series["initializationTask"]["taskId"])
+    refreshed = client.get(f"/api/series/{series['id']}").json()
+    chapter, next_chapter = refreshed["books"][0]["chapters"][:2]
+
+    blocked = client.post(
+        f"/api/chapters/{next_chapter['id']}/skip",
+        json={"reason": "not_focus"},
+        headers={"Idempotency-Key": "skip-locked-chapter-1"},
+    )
+    assert blocked.status_code == 403
+    assert blocked.json()["code"] == "CHAPTER_LOCKED"
+
+    with client.app.state.sessions() as db:
+        evidence_before = db.scalar(
+            select(func.count()).select_from(LearningEvidence)
+        )
+
+    skipped = client.post(
+        f"/api/chapters/{chapter['id']}/skip",
+        json={"reason": "not_focus"},
+        headers={"Idempotency-Key": "skip-not-focus-chapter-1"},
+    )
+    assert skipped.status_code == 200
+    assert skipped.json()["status"] == "skipped"
+    assert skipped.json()["nextChapterId"] == next_chapter["id"]
+
+    route = client.get(f"/api/series/{series['id']}").json()
+    assert route["books"][0]["chapters"][0]["status"] == "skipped"
+    assert route["books"][0]["chapters"][1]["status"] == "available"
+    with client.app.state.sessions() as db:
+        assert db.scalar(select(func.count()).select_from(LearningEvidence)) == evidence_before
+        event = db.scalar(
+            select(ChapterRouteDecisionEvent).where(
+                ChapterRouteDecisionEvent.chapter_id == chapter["id"]
+            )
+        )
+        assert event.reason == "not_focus"
+
+
+def test_chapter_challenge_keeps_weak_sections_and_can_continue(client):
+    series = create_series(client)
+    wait_for_task(client, series["initializationTask"]["taskId"])
+    refreshed = client.get(f"/api/series/{series['id']}").json()
+    chapter, next_chapter = refreshed["books"][0]["chapters"][:2]
+
+    prepared = client.post(
+        f"/api/chapters/{chapter['id']}/challenge/prepare"
+    )
+    assert prepared.status_code == 200, prepared.json()
+    challenge = prepared.json()
+    assert len(challenge["sections"]) == 3
+    assert all(
+        "correct" not in question and "explanation" not in question
+        for section in challenge["sections"]
+        for question in section["questions"]
+    )
+    submissions = []
+    for index, section in enumerate(challenge["sections"]):
+        choice = 0 if index == 0 else 1
+        submissions.append(
+            {
+                "sectionId": section["sectionId"],
+                "quizSetId": section["quizSetId"],
+                "answers": [[choice] for _ in section["questions"]],
+            }
+        )
+
+    graded = client.post(
+        f"/api/chapters/{chapter['id']}/challenge/submit",
+        json={"sections": submissions},
+        headers={"Idempotency-Key": "partial-chapter-challenge-1"},
+    )
+    assert graded.status_code == 200, graded.json()
+    result = graded.json()
+    assert result["passed"] is False
+    assert [item["status"] for item in result["sectionResults"]] == [
+        "needs_learning",
+        "passed",
+        "passed",
+    ]
+    route = client.get(f"/api/series/{series['id']}").json()
+    assert route["books"][0]["chapters"][0]["status"] == "available"
+    assert [
+        item["status"]
+        for item in route["books"][0]["chapters"][0]["sections"]
+    ] == ["available", "completed", "completed"]
+
+    continued = client.post(
+        f"/api/chapters/{chapter['id']}/skip",
+        json={"reason": "challenge_exit"},
+        headers={"Idempotency-Key": "continue-after-challenge-1"},
+    )
+    assert continued.status_code == 200
+    assert continued.json()["nextChapterId"] == next_chapter["id"]
+    with client.app.state.sessions() as db:
+        attempt = db.scalar(
+            select(ChapterChallengeAttempt).where(
+                ChapterChallengeAttempt.chapter_id == chapter["id"]
+            )
+        )
+        assert attempt.passed is False
+        facts = db.scalars(
+            select(AssessmentObservation).where(
+                AssessmentObservation.source_type == "chapter_challenge"
+            )
+        ).all()
+        assert facts
 
 
 def test_shelf_topics_are_rebuilt_from_confirmed_series(client):
@@ -2725,6 +2898,34 @@ def test_runtime_ai_settings_never_return_the_key_and_can_switch_to_demo(client)
     assert '"apiKey":' not in switched.text
     assert "must-not-be-returned" not in switched.text
     assert client.get("/api/health").json()["model"] == "local-demo-v1"
+
+
+def test_runtime_ai_rejects_a_pool_without_an_active_route(client):
+    response = client.put(
+        "/api/runtime/ai",
+        json={
+            "mode": "provider",
+            "apiKey": "test-provider-key",
+            "baseUrl": "http://127.0.0.1:9999/v1",
+            "model": "qwen3.8-max",
+            "deployments": [
+                {
+                    "deploymentId": "disabled-author",
+                    "providerId": "test-provider",
+                    "model": "qwen3.8-max",
+                    "modelFamilyId": "qwen",
+                    "baseUrl": "http://127.0.0.1:9999/v1",
+                    "structuredMode": "json_object",
+                    "backendAllowed": True,
+                    "allowedEnvironments": ["test"],
+                    "status": "disabled",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "AI_RUNTIME_ROUTE_INVALID"
 
 
 def test_library_read_model_has_fixed_query_budget_and_no_writes(client):
@@ -3288,11 +3489,54 @@ def test_future_chapter_edits_and_started_boundary(client):
     assert confirmed.status_code == 200 and confirmed.json()["chapters"][1]["title"] == "重规划章节"
 
 
+def test_book_replan_feedback_produces_a_new_reviewable_proposal(client):
+    series = create_series(client)
+    book = series["books"][0]
+    first = client.post(f"/api/books/{book['id']}/chapters/replan")
+    assert first.status_code == 200
+
+    feedback = "第 1 章太浅，请从机制与边界重新组织，并删除重复内容。"
+    revised = client.post(
+        f"/api/books/{book['id']}/chapters/replan",
+        json={
+            "feedback": feedback,
+            "previousProposalId": first.json()["proposalId"],
+        },
+    )
+    assert revised.status_code == 200
+    assert revised.json()["proposalId"] != first.json()["proposalId"]
+    request = client.app.state.ai.last_replan_request
+    assert request["feedback"] == feedback
+    assert request["reviewed_proposal"]["chapters"]
+
+    with client.app.state.sessions() as db:
+        revision = db.get(ChapterRevision, revised.json()["proposalId"])
+        audit = json.loads(revision.after_json)
+        assert audit["feedback"] == feedback
+        assert audit["previousProposalId"] == first.json()["proposalId"]
+
+
+def test_book_replan_feedback_rejects_an_unknown_proposal(client):
+    series = create_series(client)
+    book = series["books"][0]
+    response = client.post(
+        f"/api/books/{book['id']}/chapters/replan",
+        json={"feedback": "这版范围不对", "previousProposalId": "revision_missing"},
+    )
+    assert response.status_code == 404
+    assert response.json()["code"] == "REPLAN_PROPOSAL_NOT_FOUND"
+
+
 def test_complete_first_book_attachments_and_enter_second(client):
     series = create_series(client)
     first_book = series["books"][0]
     assert client.get(f"/api/books/{first_book['id']}/capstone").json()["status"] == "locked"
     assert client.post(f"/api/books/{first_book['id']}/capstone", json={"content":{"too":"early"}, "attachmentIds":["missing"]}).status_code == 403
+    locked_settlement = client.post(
+        f"/api/books/{first_book['id']}/settlement"
+    )
+    assert locked_settlement.status_code == 403
+    assert locked_settlement.json()["code"] == "BOOK_SETTLEMENT_LOCKED"
     for chapter_summary in first_book["chapters"]:
         chapter = client.post(f"/api/chapters/{chapter_summary['id']}/generate").json()
         for section in chapter["sections"]:
@@ -3302,6 +3546,21 @@ def test_complete_first_book_attachments_and_enter_second(client):
         assert stored.json()["sha256"] == hashlib.sha256(b"practice evidence").hexdigest()
         practice = client.post(f"/api/chapters/{chapter['id']}/practice", json={"content":{"artifact":"evidence"}, "attachmentIds":[stored.json()["id"]]})
         assert practice.status_code == 200 and practice.json()["status"] == "completed" and practice.json()["evidenceMode"] == "file_attachment"
+    settlement = client.post(
+        f"/api/books/{first_book['id']}/settlement"
+    )
+    assert settlement.status_code == 200
+    assert settlement.json()["status"] == "completed"
+    assert settlement.json()["completedChapterCount"] == settlement.json()["chapterCount"]
+    assert settlement.json()["completedSectionCount"] == settlement.json()["sectionCount"]
+    assert settlement.json()["verificationRate"] >= 80
+    assert settlement.json()["ruleVersion"] == "book_settlement_v1"
+    replayed_settlement = client.post(
+        f"/api/books/{first_book['id']}/settlement"
+    )
+    assert replayed_settlement.status_code == 200
+    assert replayed_settlement.json()["settledAt"] == settlement.json()["settledAt"]
+    assert client.get(f"/api/books/{first_book['id']}/capstone").json()["status"] == "completed"
     capstone_file = client.post(f"/api/books/{first_book['id']}/capstone/attachments", content=b"capstone evidence", headers={"x-filename":"capstone.txt","content-type":"text/plain"})
     assert capstone_file.status_code == 201
     oversized = client.post(f"/api/books/{first_book['id']}/capstone/attachments", content=b"x", headers={"content-length": str(10 * 1024 * 1024 + 1)})
@@ -3735,7 +3994,7 @@ def test_content_feedback_repairs_legacy_contract_bound_content(client):
     )
 
 
-def test_content_feedback_after_assessment_repairs_without_rewriting_evidence(client):
+def test_accuracy_feedback_after_assessment_preserves_content_and_evidence(client):
     series = create_series(client)
     assert wait_for_task(
         client,
@@ -3770,15 +4029,23 @@ def test_content_feedback_after_assessment_repairs_without_rewriting_evidence(cl
 
     assert submitted.status_code == 201
     receipt = submitted.json()
-    assert receipt["regeneration"]["status"] == "stream_ready"
-    events = sse_events(
-        client.post(f"/api/feedback/{receipt['id']}/repair/stream")
+    assert receipt["regeneration"] == {
+        "status": "needs_review",
+        "reasonCode": "FEEDBACK_ACCURACY_REVIEW_REQUIRED",
+        "task": None,
+    }
+    repair = client.post(f"/api/feedback/{receipt['id']}/repair/stream")
+    assert repair.status_code == 200
+    error_event = next(
+        data for event, data in sse_events(repair) if event == "error"
     )
-    assert any(event[0] == "done" for event in events)
+    assert error_event["code"] == (
+        "FEEDBACK_ACCURACY_REVIEW_REQUIRED"
+    )
     replacement = client.get(f"/api/sections/{section_id}").json()
     assert replacement["status"] == "completed"
-    assert replacement["content"]["version"] == 2
-    assert replacement["content"]["id"] != section["content"]["id"]
+    assert replacement["content"]["version"] == 1
+    assert replacement["content"]["id"] == section["content"]["id"]
     assert replacement["quiz"]["id"] == section["quiz"]["id"]
     assert replacement["latestAttemptReview"] is not None
     with client.app.state.sessions() as db:
@@ -3800,7 +4067,7 @@ def test_content_feedback_after_assessment_repairs_without_rewriting_evidence(cl
     assert feedback_task_count == 0
     assert original_attempt.quiz_set_id == section["quiz"]["id"]
     assert original_quiz.content_version_id == section["content"]["id"]
-    assert binding.content_version_id == replacement["content"]["id"]
+    assert binding.content_version_id == section["content"]["id"]
     assert binding.initial_quiz_set_id == section["quiz"]["id"]
 
 
@@ -4502,6 +4769,118 @@ def test_lookahead_prepares_one_locked_section_without_unlocking_it(tmp_path):
             assert content is not None
             assert quiz is not None
             assert quiz.content_version_id == content.id
+
+
+def test_lookahead_crosses_chapter_but_stops_at_book_boundary(tmp_path):
+    ai = FakeAi()
+    with TestClient(create_app(
+        f"sqlite+pysqlite:///{tmp_path / 'lookahead-chapter-boundary.db'}",
+        ai,
+        AcceptingSourceVerifier(),
+        LocalAttachmentStorage(tmp_path / "lookahead-chapter-boundary-attachments"),
+    )) as buffered:
+        series = create_series(buffered)
+        initialization = wait_for_task(
+            buffered,
+            series["initializationTask"]["taskId"],
+        )
+        assert initialization["status"] == "succeeded"
+
+        with buffered.app.state.sessions() as db:
+            initial_task = db.get(
+                LearningTask,
+                series["initializationTask"]["taskId"],
+            )
+            initial_lookahead = db.scalar(
+                select(LearningTask).where(
+                    LearningTask.learning_run_id == initial_task.learning_run_id,
+                    LearningTask.task_type == "section_lookahead_preload",
+                )
+            )
+            assert initial_lookahead is not None
+            initial_lookahead_id = initial_lookahead.id
+        assert wait_for_task(buffered, initial_lookahead_id)["status"] == "succeeded"
+
+        route = buffered.get(f"/api/series/{series['id']}").json()
+        first_book = route["books"][0]
+        first_chapter = first_book["chapters"][0]
+        next_chapter = first_book["chapters"][1]
+        assert len(first_chapter["sections"]) == 3
+        assert next_chapter["sections"] == []
+        source_section_id = first_chapter["sections"][-1]["id"]
+
+        cross_chapter_task_id = f"task_{uuid4().hex}"
+        with buffered.app.state.sessions() as db:
+            initial_task = db.get(
+                LearningTask,
+                series["initializationTask"]["taskId"],
+            )
+            db.add(LearningTask(
+                id=cross_chapter_task_id,
+                learning_run_id=initial_task.learning_run_id,
+                user_id=initial_task.user_id,
+                section_id=source_section_id,
+                task_type="section_lookahead_preload",
+                idempotency_key=f"lookahead-after:{source_section_id}",
+                trigger_id="test-cross-chapter-lookahead",
+                payload_json=json.dumps({"sourceSectionId": source_section_id}),
+                status="pending",
+            ))
+            db.commit()
+        buffered.app.state.learning_task_wakeup.set()
+
+        prepared = wait_for_task(buffered, cross_chapter_task_id, timeout=5)
+        assert prepared["status"] == "succeeded"
+        assert prepared["result"]["endOfBook"] is False
+        target_id = prepared["result"]["targetSectionId"]
+
+        route = buffered.get(f"/api/series/{series['id']}").json()
+        first_book = route["books"][0]
+        generated_next_chapter = first_book["chapters"][1]
+        assert len(generated_next_chapter["sections"]) == 3
+        assert generated_next_chapter["sections"][0]["id"] == target_id
+        assert all(
+            section["status"] == "locked"
+            for section in generated_next_chapter["sections"]
+        )
+        assert buffered.get(f"/api/sections/{target_id}").status_code == 403
+        with buffered.app.state.sessions() as db:
+            assert db.scalar(select(ContentVersion).where(
+                ContentVersion.section_id == target_id,
+                ContentVersion.publication_status == "published",
+            )) is not None
+            assert db.scalar(select(QuizSet).where(
+                QuizSet.section_id == target_id,
+                QuizSet.publication_status == "published",
+            )) is not None
+
+        last_section_id = generated_next_chapter["sections"][-1]["id"]
+        book_boundary_task_id = f"task_{uuid4().hex}"
+        with buffered.app.state.sessions() as db:
+            initial_task = db.get(
+                LearningTask,
+                series["initializationTask"]["taskId"],
+            )
+            db.add(LearningTask(
+                id=book_boundary_task_id,
+                learning_run_id=initial_task.learning_run_id,
+                user_id=initial_task.user_id,
+                section_id=last_section_id,
+                task_type="section_lookahead_preload",
+                idempotency_key=f"lookahead-after:{last_section_id}",
+                trigger_id="test-book-boundary-lookahead",
+                payload_json=json.dumps({"sourceSectionId": last_section_id}),
+                status="pending",
+            ))
+            db.commit()
+        buffered.app.state.learning_task_wakeup.set()
+
+        stopped = wait_for_task(buffered, book_boundary_task_id, timeout=5)
+        assert stopped["status"] == "succeeded"
+        assert stopped["result"]["targetSectionId"] is None
+        assert stopped["result"]["endOfBook"] is True
+        route = buffered.get(f"/api/series/{series['id']}").json()
+        assert route["books"][1]["chapters"][0]["sections"] == []
 
 
 def test_runner_persists_failure_report_and_evidence_snapshot(tmp_path, monkeypatch):

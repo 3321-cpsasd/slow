@@ -24,18 +24,31 @@ from .auth.registration import claim_alpha_registration
 from .auth.service import IdentityService, OidcStateService, SessionService, token_hash
 from .ai.openai_adapter import OpenAiAdapter
 from .ai.anthropic_adapter import AnthropicAdapter
-from .ai.fallback_adapter import FallbackAiAdapter
+from .ai.gateway import (
+    AiPurpose,
+    ModelDeployment,
+    ModelDeploymentRegistry,
+    PurposeAiGateway,
+    RoutePolicy,
+    model_family,
+)
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ResumeUpdate, ReviewSubmit, ShelfCreate
+from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, BookReplanCreate, ChapterChallengeSubmit, ChapterCreate, ChapterOrder, ChapterSkipCreate, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, LearningStartPreviewCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ReinforcementRespond, ResumeUpdate, ReviewSubmit, ShelfCreate, StudyActivityHeartbeat
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
 from .demo_personas import LOCAL_DEMO_PERSONAS
 from .infrastructure.database import build_database
 from .infrastructure.tables import Base, LearningTask, QuizAttempt, Remediation, Shelf, User, now
-from .modules.learning.tasks import claim_task, heartbeat_task, recoverable_task_ids
+from .modules.learning.tasks import (
+    backfill_missing_lookahead_tasks,
+    claim_task,
+    heartbeat_task,
+    recoverable_task_ids,
+)
+from .modules.learning.study_activity import StudyActivityService
 from .modules.feedback.service import FeedbackService
 from .modules.telemetry.service import ProductEventService
 from .modules.library.context import ActiveLearningContextResolver
@@ -120,24 +133,20 @@ def fallback_model_profiles(config: dict) -> list[dict]:
             profiles.append({
                 "model": model,
                 "providerProtocol": "openai",
-                "apiMode": (
-                    "responses"
-                    if model == "qwen3.8-max-preview"
-                    else "chat_completions"
-                ),
+                "apiMode": "chat_completions",
                 "reasoningMode": (
                     "required" if model == "kimi/kimi-k3" else "optional"
                 ),
                 "apiKey": (
                     settings.qwen38_api_key
-                    if model == "qwen3.8-max-preview"
+                    if model in {"qwen3.8-max", "qwen3.8-max-preview"}
                     else settings.kimi_k3_api_key
                     if model == "kimi/kimi-k3"
                     else ""
                 ),
                 "baseUrl": (
                     settings.qwen38_base_url
-                    if model == "qwen3.8-max-preview"
+                    if model in {"qwen3.8-max", "qwen3.8-max-preview"}
                     else settings.kimi_k3_base_url
                     if model == "kimi/kimi-k3"
                     else ""
@@ -149,7 +158,7 @@ def fallback_model_profiles(config: dict) -> list[dict]:
     for profile in profiles:
         model = str(profile.get("model") or "").strip()
         if (
-            model in {"qwen3.8-max-preview", "kimi/kimi-k3"}
+            model in {"qwen3.8-max", "kimi/kimi-k3"}
             and model not in enabled_bundled_models
         ):
             continue
@@ -170,30 +179,145 @@ def fallback_model_profiles(config: dict) -> list[dict]:
 
 
 def build_runtime_adapter(config: dict):
-    primary_capabilities = provider_capabilities(config)
-    primary = build_provider_adapter(
-        config["api_key"],
-        config["provider_model"],
-        config["base_url"],
-        primary_capabilities,
-    )
-    adapters = [primary]
-    for fallback in fallback_model_profiles(config):
-        model = str(fallback["model"])
-        if model == config["provider_model"]:
-            continue
-        fallback_config = {
-            "provider_protocol": fallback.get("providerProtocol", "openai"),
-            "api_mode": fallback["apiMode"],
-            "reasoning_mode": fallback["reasoningMode"],
+    raw_deployments = list(config.get("deployments") or [])
+    explicit_deployments = bool(raw_deployments)
+    if not raw_deployments:
+        raw_deployments = [
+            {
+                "deploymentId": "primary",
+                "providerId": config.get("provider_protocol", "openai"),
+                "model": config["provider_model"],
+                "modelFamilyId": model_family(config["provider_model"]),
+                "providerProtocol": config.get(
+                    "provider_protocol", "openai"
+                ),
+                "apiMode": config["api_mode"],
+                "reasoningMode": config["reasoning_mode"],
+                "apiKey": config["api_key"],
+                "baseUrl": config["base_url"],
+                "structuredMode": "json_object",
+                "streaming": True,
+                "backendAllowed": True,
+                "allowedEnvironments": [
+                    "development", "demo", "test", "production"
+                ],
+            }
+        ]
+        for index, fallback in enumerate(fallback_model_profiles(config), 1):
+            raw_deployments.append({
+                "deploymentId": str(
+                    fallback.get("deploymentId") or f"fallback-{index}"
+                ),
+                "providerId": str(
+                    fallback.get("providerId")
+                    or fallback.get("providerProtocol", "openai")
+                ),
+                "model": str(fallback["model"]),
+                "modelFamilyId": str(
+                    fallback.get("modelFamilyId")
+                    or model_family(str(fallback["model"]))
+                ),
+                "providerProtocol": fallback.get(
+                    "providerProtocol", "openai"
+                ),
+                "apiMode": fallback["apiMode"],
+                "reasoningMode": fallback["reasoningMode"],
+                "apiKey": fallback.get("apiKey") or config["api_key"],
+                "baseUrl": fallback.get("baseUrl") or config["base_url"],
+                "structuredMode": fallback.get(
+                    "structuredMode", "json_object"
+                ),
+                "streaming": fallback.get("streaming", True),
+                "backendAllowed": fallback.get("backendAllowed", True),
+                "allowedEnvironments": fallback.get(
+                    "allowedEnvironments",
+                    ["development", "demo", "test", "production"],
+                ),
+            })
+
+    deployments = []
+    for raw in raw_deployments:
+        adapter_config = {
+            "provider_protocol": raw.get("providerProtocol", "openai"),
+            "api_mode": raw.get("apiMode", "chat_completions"),
+            "reasoning_mode": raw.get("reasoningMode", "optional"),
         }
-        adapters.append(build_provider_adapter(
-            fallback.get("apiKey") or config["api_key"],
-            model,
-            fallback.get("baseUrl") or config["base_url"],
-            provider_capabilities(fallback_config),
-        ))
-    return FallbackAiAdapter(adapters) if len(adapters) > 1 else primary
+        adapter = build_provider_adapter(
+            str(raw.get("apiKey") or config["api_key"]),
+            str(raw["model"]),
+            str(raw.get("baseUrl") or config["base_url"]),
+            provider_capabilities(adapter_config),
+        )
+        deployments.append(
+            ModelDeployment(
+                deployment_id=str(raw["deploymentId"]),
+                provider_id=str(
+                    raw.get("providerId")
+                    or adapter_config["provider_protocol"]
+                ),
+                model=str(raw["model"]),
+                model_family_id=str(raw.get("modelFamilyId") or ""),
+                adapter=adapter,
+                structured_mode=str(
+                    raw.get("structuredMode") or "unsupported"
+                ),
+                streaming=bool(raw.get("streaming", True)),
+                backend_allowed=bool(raw.get("backendAllowed", False)),
+                allowed_environments=tuple(
+                    raw.get("allowedEnvironments")
+                    or ("development", "test")
+                ),
+                status=str(raw.get("status") or "active"),
+            )
+        )
+
+    registry = ModelDeploymentRegistry(
+        deployments,
+        environment=str(config.get("environment") or settings.app_mode),
+    )
+    deployment_ids = tuple(item.deployment_id for item in deployments)
+    configured_routes = dict(config.get("routes") or {})
+    legacy_route_aliases = {
+        "assessment": (
+            AiPurpose.ASSESSMENT_PROBE.value,
+            AiPurpose.ASSESSMENT_EVALUATION.value,
+        ),
+        "feedback_resolution": (
+            AiPurpose.FEEDBACK_STYLE.value,
+            AiPurpose.FEEDBACK_ACCURACY.value,
+        ),
+    }
+    for legacy, purposes in legacy_route_aliases.items():
+        if legacy not in configured_routes:
+            continue
+        for purpose in purposes:
+            configured_routes.setdefault(purpose, configured_routes[legacy])
+
+    policies = {}
+    legacy_model_routes = {
+        item.model: item.deployment_id for item in deployments
+    }
+    for purpose in AiPurpose:
+        raw_ids = tuple(configured_routes.get(purpose.value) or ())
+        configured_ids = (
+            raw_ids
+            if explicit_deployments
+            else tuple(legacy_model_routes.get(item, item) for item in raw_ids)
+        )
+        policies[purpose.value] = RoutePolicy(
+            purpose=purpose.value,
+            deployment_ids=configured_ids or deployment_ids,
+            policy_version=str(
+                config.get("route_policy_version") or "ai_route_v1"
+            ),
+        )
+    return PurposeAiGateway(
+        registry,
+        policies,
+        config_version_id=str(
+            config.get("config_version_id") or "runtime-legacy"
+        ),
+    )
 
 
 def managed_source_verifier(adapter):
@@ -271,9 +395,19 @@ def create_app(
         ),
         "reasoning_mode": settings.openai_reasoning_mode,
         "fallbacks": [],
+        "routes": {},
+        "deployments": [],
+        "config_version_id": "environment-v1",
+        "route_policy_version": "ai_route_v1",
+        "environment": effective_app_mode,
     }
     configured_runtime = saved_runtime or environment_runtime
-    configured_runtime["fallbacks"] = fallback_model_profiles(configured_runtime)
+    configured_runtime["environment"] = effective_app_mode
+    configured_runtime["fallbacks"] = (
+        []
+        if configured_runtime.get("deployments")
+        else fallback_model_profiles(configured_runtime)
+    )
     configured_capabilities = provider_capabilities(configured_runtime)
     if ai is not None:
         adapter = ai
@@ -288,6 +422,10 @@ def create_app(
                 DEFAULT_PROVIDER_CAPABILITIES,
             ),
             "fallbacks": [],
+            "routes": {},
+            "deployments": [],
+            "config_version_id": "injected-v1",
+            "route_policy_version": "ai_route_v1",
         }
     else:
         adapter = (
@@ -302,6 +440,14 @@ def create_app(
             "provider_model": configured_runtime["provider_model"],
             "capabilities": configured_capabilities,
             "fallbacks": configured_runtime["fallbacks"],
+            "routes": configured_runtime.get("routes", {}),
+            "deployments": configured_runtime.get("deployments", []),
+            "config_version_id": configured_runtime.get(
+                "config_version_id", "runtime-legacy"
+            ),
+            "route_policy_version": configured_runtime.get(
+                "route_policy_version", "ai_route_v1"
+            ),
         }
     if hasattr(adapter, "set_usage_recorder"):
         adapter.set_usage_recorder(usage_recorder)
@@ -414,6 +560,13 @@ def create_app(
                         storage,
                         scope=demo_user_scope(persona.user_id),
                     ).ensure_demo_seed()
+        with sessions() as db:
+            backfilled_lookaheads = backfill_missing_lookahead_tasks(db)
+            if backfilled_lookaheads:
+                logger.info(
+                    "Queued %s missing section lookahead task(s)",
+                    backfilled_lookaheads,
+                )
         app.state.sessions, app.state.ai, app.state.source_verifier, app.state.attachment_storage = sessions, adapter, verifier, storage
         app.state.ai_usage_recorder = usage_recorder
         app.state.ai_runtime = initial_runtime
@@ -585,6 +738,35 @@ def create_app(
             "fallbackModels": [
                 item["model"] for item in runtime.get("fallbacks", [])
             ],
+            "routes": (
+                request.app.state.ai.route_snapshot()
+                if callable(getattr(request.app.state.ai, "route_snapshot", None))
+                else {}
+            ),
+            "deployments": [
+                {
+                    "deploymentId": item.get("deploymentId"),
+                    "providerId": item.get("providerId"),
+                    "model": item.get("model"),
+                    "modelFamilyId": item.get("modelFamilyId"),
+                    "providerProtocol": item.get("providerProtocol"),
+                    "apiMode": item.get("apiMode"),
+                    "reasoningMode": item.get("reasoningMode"),
+                    "structuredMode": item.get("structuredMode"),
+                    "streaming": item.get("streaming"),
+                    "backendAllowed": item.get("backendAllowed"),
+                    "allowedEnvironments": item.get("allowedEnvironments"),
+                    "status": item.get("status"),
+                    "apiKeyStored": bool(item.get("apiKey")),
+                }
+                for item in runtime.get("deployments", [])
+            ],
+            "configVersionId": runtime.get(
+                "config_version_id", "runtime-legacy"
+            ),
+            "routePolicyVersion": runtime.get(
+                "route_policy_version", "ai_route_v1"
+            ),
             "baseUrl": runtime["base_url"],
             "apiKeyStored": bool(runtime["api_key"]),
             "ephemeral": request.app.state.runtime_store is None,
@@ -1085,6 +1267,30 @@ def create_app(
     ):
         return ProductEventService(session, scope.user_id).append(body.events)
 
+    @app.post("/api/study-activity/heartbeat", status_code=202)
+    def record_study_activity(
+        body: StudyActivityHeartbeat,
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        ProfileService(session, scope.user_id).require_complete()
+        return StudyActivityService(
+            session,
+            user_id=scope.user_id,
+        ).heartbeat(body)
+
+    @app.get("/api/study-activity/today")
+    def study_activity_today(
+        timezone_name: str = Query(alias="timezone", min_length=1, max_length=64),
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        ProfileService(session, scope.user_id).require_complete()
+        return StudyActivityService(
+            session,
+            user_id=scope.user_id,
+        ).today(timezone_name)
+
     @app.post("/api/learning-preferences/evidence", status_code=202)
     def record_learning_preference_evidence(
         body: LearningPreferenceEvidenceCreate,
@@ -1236,17 +1442,50 @@ def create_app(
         current = request.app.state.ai_runtime
         if body.mode == "demo":
             candidate = LocalDemoAdapter()
-            next_runtime = {**current, "mode": "demo", "capabilities": candidate.capabilities}
+            next_runtime = {
+                **current,
+                "mode": "demo",
+                "capabilities": candidate.capabilities,
+                "routes": {},
+                "deployments": [],
+                "config_version_id": f"runtime-{uuid4().hex}",
+                "route_policy_version": body.route_policy_version,
+            }
         else:
-            api_key = body.api_key.get_secret_value().strip() if body.api_key else current["api_key"]
-            if not api_key:
+            api_key = (
+                body.api_key.get_secret_value().strip()
+                if body.api_key
+                else current["api_key"]
+            )
+            if body.deployments is not None:
+                deployment_keys_complete = bool(body.deployments) and all(
+                    item.api_key
+                    and item.api_key.get_secret_value().strip()
+                    for item in body.deployments
+                )
+            else:
+                current_deployments = current.get("deployments", [])
+                deployment_keys_complete = bool(
+                    current_deployments
+                ) and all(
+                    str(item.get("apiKey") or "").strip()
+                    for item in current_deployments
+                )
+            if not api_key and not deployment_keys_complete:
                 raise AppError("请填写 API Key", code="AI_RUNTIME_KEY_REQUIRED", status=400)
             base_url = body.base_url.strip()
             if base_url:
                 parsed = urlparse(base_url)
-                local_http = parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "::1", "localhost"}
+                local_http = (
+                    parsed.scheme == "http"
+                    and parsed.hostname in {"127.0.0.1", "::1", "localhost"}
+                )
                 if parsed.scheme != "https" and not local_http:
-                    raise AppError("Base URL 必须使用 HTTPS；本机服务可使用 HTTP", code="AI_RUNTIME_BASE_URL_INVALID", status=400)
+                    raise AppError(
+                        "Base URL 必须使用 HTTPS；本机服务可使用 HTTP",
+                        code="AI_RUNTIME_BASE_URL_INVALID",
+                        status=400,
+                    )
             capabilities = ProviderCapabilities(
                 protocol=body.provider_protocol,
                 api_mode=(
@@ -1271,23 +1510,100 @@ def create_app(
                 "api_mode": body.api_mode,
                 "reasoning_mode": body.reasoning_mode,
                 "fallbacks": fallback_profiles,
+                "routes": (
+                    {}
+                    if body.deployments is not None
+                    else current.get("routes", {})
+                    if base_url == current.get("base_url")
+                    else {}
+                ),
+                "deployments": (
+                    [
+                        {
+                            "deploymentId": item.deployment_id,
+                            "providerId": item.provider_id,
+                            "model": item.model,
+                            "modelFamilyId": item.model_family_id,
+                            "providerProtocol": item.provider_protocol,
+                            "apiMode": item.api_mode,
+                            "reasoningMode": item.reasoning_mode,
+                            "apiKey": (
+                                item.api_key.get_secret_value().strip()
+                                if item.api_key
+                                else api_key
+                            ),
+                            "baseUrl": item.base_url or base_url,
+                            "structuredMode": item.structured_mode,
+                            "streaming": item.streaming,
+                            "backendAllowed": item.backend_allowed,
+                            "allowedEnvironments": item.allowed_environments,
+                            "status": item.status,
+                        }
+                        for item in body.deployments
+                    ]
+                    if body.deployments is not None
+                    else current.get("deployments", [])
+                ),
+                "config_version_id": f"runtime-{uuid4().hex}",
+                "route_policy_version": body.route_policy_version,
+                "environment": effective_app_mode,
             }
-            candidate_runtime["fallbacks"] = fallback_model_profiles(
-                candidate_runtime
+            if body.routes is not None:
+                candidate_runtime["routes"] = body.routes
+            for deployment in candidate_runtime["deployments"]:
+                deployment_base_url = str(
+                    deployment.get("baseUrl") or ""
+                ).strip()
+                if not deployment_base_url:
+                    continue
+                parsed_deployment_url = urlparse(deployment_base_url)
+                deployment_local_http = (
+                    parsed_deployment_url.scheme == "http"
+                    and parsed_deployment_url.hostname
+                    in {"127.0.0.1", "::1", "localhost"}
+                )
+                if (
+                    parsed_deployment_url.scheme != "https"
+                    and not deployment_local_http
+                ):
+                    raise AppError(
+                        "模型部署 Base URL 必须使用 HTTPS；本机服务可使用 HTTP",
+                        code="AI_RUNTIME_BASE_URL_INVALID",
+                        status=400,
+                    )
+            candidate_runtime["fallbacks"] = (
+                []
+                if candidate_runtime["deployments"]
+                else fallback_model_profiles(candidate_runtime)
             )
-            candidate = build_runtime_adapter(candidate_runtime)
+            try:
+                candidate = build_runtime_adapter(candidate_runtime)
+            except ValueError as error:
+                raise AppError(
+                    "模型池或用途路由配置无效",
+                    code="AI_RUNTIME_ROUTE_INVALID",
+                    status=400,
+                ) from error
             if hasattr(candidate, "set_usage_recorder"):
                 candidate.set_usage_recorder(request.app.state.ai_usage_recorder)
             try:
-                primary_check = getattr(
-                    candidate,
-                    "check_primary_connection",
-                    candidate.check_connection,
+                connection_check = (
+                    candidate.check_connection
+                    if candidate_runtime["deployments"]
+                    else getattr(
+                        candidate,
+                        "check_primary_connection",
+                        candidate.check_connection,
+                    )
                 )
-                await primary_check()
+                await connection_check()
             except Exception:
                 await candidate.close()
-                raise AppError("连接验证失败，请检查 API Key、Base URL 和模型名称", code="AI_RUNTIME_CONNECTION_FAILED", status=400)
+                raise AppError(
+                    "连接验证失败，请检查 API Key、Base URL 和模型名称",
+                    code="AI_RUNTIME_CONNECTION_FAILED",
+                    status=400,
+                )
             next_runtime = {
                 "mode": "provider",
                 "api_key": api_key,
@@ -1295,6 +1611,12 @@ def create_app(
                 "provider_model": body.model.strip(),
                 "capabilities": capabilities,
                 "fallbacks": candidate_runtime["fallbacks"],
+                "routes": candidate_runtime["routes"],
+                "deployments": candidate_runtime["deployments"],
+                "config_version_id": candidate_runtime["config_version_id"],
+                "route_policy_version": candidate_runtime[
+                    "route_policy_version"
+                ],
             }
         if request.app.state.runtime_store:
             try:
@@ -1448,6 +1770,13 @@ def create_app(
     @app.post("/api/shelves", status_code=201)
     def create_shelf(body: ShelfCreate, s: SlowService = Depends(service)): return s.create_shelf(body)
 
+    @app.post("/api/learning-start/preview", status_code=201)
+    def learning_start_preview(
+        body: LearningStartPreviewCreate,
+        s: SlowService = Depends(service),
+    ):
+        return s.learning_start_preview(body)
+
     @app.post("/api/plans", status_code=201)
     async def create_plan(
         request: Request,
@@ -1516,7 +1845,7 @@ def create_app(
     def reorder_chapters(book_id: str, body: ChapterOrder, s: SlowService = Depends(service)): return s.reorder_chapters(book_id, body.chapter_ids)
 
     @app.post("/api/books/{book_id}/chapters/replan")
-    async def replan_chapters(book_id: str, s: SlowService = Depends(service)): return await s.replan_chapters(book_id)
+    async def replan_chapters(book_id: str, body: BookReplanCreate | None = None, s: SlowService = Depends(service)): return await s.replan_chapters(book_id, body)
 
     @app.post("/api/books/{book_id}/chapters/replan/{proposal_id}/confirm")
     def confirm_replan(book_id: str, proposal_id: str, s: SlowService = Depends(service)): return s.confirm_replan(book_id, proposal_id)
@@ -1529,6 +1858,43 @@ def create_app(
 
     @app.post("/api/chapters/{chapter_id}/generate")
     async def generate_chapter(chapter_id: str, s: SlowService = Depends(service)): return await s.generate_chapter(chapter_id)
+
+    @app.post("/api/chapters/{chapter_id}/skip")
+    def skip_chapter(
+        chapter_id: str,
+        body: ChapterSkipCreate,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return s.skip_chapter(chapter_id, body, idempotency_key)
+
+    @app.post("/api/chapters/{chapter_id}/resume")
+    def resume_chapter(
+        chapter_id: str,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return s.resume_chapter(chapter_id, idempotency_key)
+
+    @app.post("/api/chapters/{chapter_id}/challenge/prepare")
+    async def prepare_chapter_challenge(
+        chapter_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return await s.prepare_chapter_challenge(chapter_id)
+
+    @app.post("/api/chapters/{chapter_id}/challenge/submit")
+    def submit_chapter_challenge(
+        chapter_id: str,
+        body: ChapterChallengeSubmit,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return s.submit_chapter_challenge(
+            chapter_id,
+            body,
+            idempotency_key,
+        )
 
     @app.get("/api/sections/{section_id}")
     def section(section_id: str, s: SlowService = Depends(service)): return s.section(section_id)
@@ -1578,6 +1944,13 @@ def create_app(
     ):
         return s.due_reviews(daily_budget)
 
+    @app.get("/api/knowledge-map")
+    def knowledge_map(
+        series_id: str | None = Query(default=None),
+        s: SlowService = Depends(service),
+    ):
+        return s.knowledge_map(series_id)
+
     @app.post("/api/reviews/{assignment_id}/start")
     async def start_review(
         assignment_id: str,
@@ -1593,6 +1966,42 @@ def create_app(
         s: SlowService = Depends(service),
     ):
         return s.submit_review(assignment_id, body, idempotency_key)
+
+    @app.post("/api/reviews/{assignment_id}/reinforcement")
+    async def start_review_reinforcement(
+        assignment_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return await s.start_review_reinforcement(assignment_id)
+
+    @app.post("/api/knowledge-targets/{target_id}/reinforcement")
+    async def start_target_reinforcement(
+        target_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return await s.start_target_reinforcement(target_id)
+
+    @app.get("/api/reinforcements/active")
+    def active_reinforcement(
+        s: SlowService = Depends(service),
+    ):
+        return s.active_reinforcement()
+
+    @app.get("/api/reinforcements/{run_id}")
+    def reinforcement_run(
+        run_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return s.reinforcement_run(run_id)
+
+    @app.post("/api/reinforcements/{run_id}/respond")
+    def respond_reinforcement(
+        run_id: str,
+        body: ReinforcementRespond,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return s.respond_reinforcement(run_id, body, idempotency_key)
 
     @app.post("/api/reviews/{assignment_id}/skip")
     def skip_review(
@@ -1696,6 +2105,9 @@ def create_app(
 
     @app.post("/api/books/{book_id}/capstone")
     def submit_capstone(book_id: str, body: AttachmentSubmit, s: SlowService = Depends(service)): return s.submit_book_capstone(book_id, body.content, body.attachment_ids)
+
+    @app.post("/api/books/{book_id}/settlement")
+    def settle_book(book_id: str, s: SlowService = Depends(service)): return s.settle_book(book_id)
 
     @app.post("/api/books/{book_id}/capstone/attachments", status_code=201)
     async def upload_capstone_attachment(book_id: str, request: Request, s: SlowService = Depends(service)):

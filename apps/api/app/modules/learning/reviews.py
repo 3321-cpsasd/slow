@@ -20,6 +20,7 @@ from ...domain.learning import grade_choice_quiz
 from ...infrastructure.tables import (
     AssessmentObservation,
     AssessmentTarget,
+    ContentBlockVersion,
     ContentVersion,
     LearningContractVersion,
     LearningMissionVersion,
@@ -33,6 +34,8 @@ from ...infrastructure.tables import (
     now,
 )
 from .assessment import record_scoring_facts
+from .assessment_items import publish_assessment_item_versions
+from .knowledge_ranks import knowledge_node_views_for_targets
 from .content_governance_store import (
     bind_remediation_questions_to_source_claims,
     governance_view_for_quiz,
@@ -389,6 +392,11 @@ class ReviewAssignmentService:
                 )
             ).all()
         } if assignments else {}
+        node_views = knowledge_node_views_for_targets(
+            self.db,
+            user_id=self.user_id,
+            target_ids=set(targets),
+        )
         return {
             "selectionRunId": selection.id,
             "asOf": _utc(selection.as_of).isoformat(),
@@ -408,6 +416,9 @@ class ReviewAssignmentService:
                     "basePriority": item.base_priority,
                     "effectivePriority": item.effective_priority,
                     "quizSetId": item.review_quiz_set_id,
+                    "knowledgeNode": node_views.get(
+                        targets[item.assessment_target_id].concept_revision_id or ""
+                    ),
                 }
                 for item in assignments
             ],
@@ -442,6 +453,8 @@ class ReviewAssignmentService:
                                 "correct",
                                 "explanation",
                                 "claim_block_indexes",
+                                "distractor_diagnostics",
+                                "distractorDiagnostics",
                             }
                         },
                         "selectionMode": (
@@ -568,6 +581,27 @@ class ReviewAssignmentService:
         )
         self.db.add(quiz)
         self.db.flush()
+        block_ids_by_position = {
+            item.position: item.id
+            for item in self.db.scalars(
+                select(ContentBlockVersion)
+                .where(ContentBlockVersion.content_version_id == content.id)
+                .order_by(ContentBlockVersion.position)
+            ).all()
+        }
+        evidence_block_ids = [
+            block_ids_by_position[index]
+            for index in question.get("claim_block_indexes", [])
+            if index in block_ids_by_position
+        ]
+        published_questions = publish_assessment_item_versions(
+            self.db,
+            quiz=quiz,
+            questions=[question],
+            evidence_block_ids_by_position=[evidence_block_ids],
+            uid=_uid,
+        )
+        question = published_questions[0]
         governance = reevaluate_generated_governance(
             self.db,
             quiz_id=quiz.id,
@@ -722,6 +756,10 @@ class ReviewAssignmentService:
                 "status": "candidate",
                 "ruleVersion": qualification.rule_version,
                 "reasons": [],
+            },
+            "reinforcement": {
+                "available": not grade.passed,
+                "reason": "wake_failed" if not grade.passed else "not_needed",
             },
         }
         assignment.response_json = _dump(response)

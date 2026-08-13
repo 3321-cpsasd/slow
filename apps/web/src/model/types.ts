@@ -2,6 +2,22 @@ export type SectionSummary = { id:string; position:number; title:string; questio
 export type Attachment = { id:string; filename:string; mediaType:string; byteSize:number; sha256:string; createdAt:string };
 export type Practice = { id:string; title:string; instructions:Record<string,unknown>; submission:Record<string,unknown>; attachments:Attachment[]; evidenceMode:'file_attachment'|'structured_only_legacy'; status:string };
 export type Capstone = { id:string; title:string; brief:Record<string,unknown>; submission:Record<string,unknown>; attachments:Attachment[]; evidenceMode:'file_attachment'|'structured_only_legacy'; status:string };
+export type BookSettlement = {
+  bookId:string;
+  bookTitle:string;
+  status:'completed';
+  chapterCount:number;
+  completedChapterCount:number;
+  sectionCount:number;
+  completedSectionCount:number;
+  verificationScore:number;
+  verificationTotal:number;
+  verificationRate:number|null;
+  perfectSectionCount:number;
+  reviewSectionCount:number;
+  ruleVersion:string;
+  settledAt:string|null;
+};
 export type ChapterWorkloadHint = { level:'anomalous'|'light'|'typical'|'extended'; sectionCount:number; typicalRange:[number,number]; technicalRange:[number,number]; message:string };
 export type Chapter = { id:string; position:number; title:string; objective:string; status:string; generated:boolean; workloadHint:ChapterWorkloadHint|null; sections:SectionSummary[]; practice:null|Practice };
 export type Book = { id:string; position:number; title:string; description:string; estimatedMinutes:number; outlineStatus:'draft'|'confirmed'; outlineVersion:number; outlineConfirmedAt:string|null; status:string; progress:number; practiceProgress:number; chapters:Chapter[]; capstone:null|Capstone };
@@ -17,6 +33,21 @@ export type Series = {
 };
 export type Shelf = { id:string; name:string; domain:string; specialty:string; tags:string[]; series:Series[] };
 export type ShelfCreateInput = { name:string };
+export type LearningStartPreference =
+  | 'practical_application'
+  | 'understand_principles'
+  | 'case_based'
+  | 'practice_heavy';
+export type LearningStartPreview = {
+  schemaVersion:'learning_start_preview_v1';
+  previewId:string;
+  availability:'ready'|'not_ready';
+  topic:string;
+  title:string;
+  nodes:{conceptRevisionId:string;label:string;meaning:string}[];
+  edges:{id:string;from:string;to:string;type:string;label:string}[];
+  message:string;
+};
 export type ResumePosition = {
   learningRunId:string;
   sectionId:string;
@@ -35,6 +66,17 @@ export type DailyModeState = {
   activatedAt:string|null;
   expiresAt:string|null;
   version:number;
+  serverNow:string;
+};
+export type StudyActivityKind = 'reading_thinking'|'verification_review'|'ask_ai';
+export type StudyActivitySummary = {
+  date:string;
+  timezone:string;
+  totalSeconds:number;
+  categories:{activityKind:StudyActivityKind;seconds:number}[];
+  episodes:{startedAt:string;endedAt:string;durationSeconds:number}[];
+  measurementRuleVersion:string;
+  estimated:true;
   serverNow:string;
 };
 export type Bootstrap = {
@@ -227,7 +269,7 @@ export type FeedbackReceipt = {
   scope:'global'|'content_block';
   createdAt:string;
   regeneration:{
-    status:'stream_ready'|'queued'|'blocked'|'not_applicable';
+    status:'stream_ready'|'recorded_only'|'queued'|'blocked'|'needs_review'|'not_applicable';
     reasonCode:string|null;
     task:LearningTask|null;
   };
@@ -247,6 +289,46 @@ export type Question = {
   assessmentTargetId?:string;
   evidenceBlockIds?:string[];
   selectionMode:'single'|'multiple';
+};
+export type ChapterChallenge = {
+  schemaVersion:'chapter_challenge_view_v1';
+  chapterId:string;
+  chapterTitle:string;
+  objective:string;
+  status:'ready';
+  questionCount:number;
+  sections:{
+    sectionId:string;
+    position:number;
+    title:string;
+    quizSetId:string;
+    questions:Question[];
+  }[];
+};
+export type ChapterChallengeResult = {
+  schemaVersion:'chapter_challenge_result_v1';
+  attemptId:string;
+  chapterId:string;
+  passed:boolean;
+  passedSectionCount:number;
+  totalSectionCount:number;
+  sectionResults:{
+    sectionId:string;
+    position:number;
+    title:string;
+    status:'passed'|'needs_learning';
+    score:number;
+    total:number;
+  }[];
+  nextChapterId?:string|null;
+  nextBookId?:string|null;
+};
+export type ChapterRouteResult = {
+  chapterId:string;
+  status:'skipped'|'available';
+  reason?:'not_focus'|'defer_unknown'|'challenge_exit';
+  nextChapterId?:string|null;
+  nextBookId?:string|null;
 };
 export type QuizGovernance = {
   decisionId:string;
@@ -279,6 +361,43 @@ export type DueReviews = {
   ruleVersion:string;
   items:ReviewAssignmentItem[];
 };
+export type KnowledgeMapNode = {
+  conceptRevisionId:string;
+  label:string;
+  rank:'unranked'|'bronze'|'silver'|'gold'|'platinum'|'diamond'|'master';
+  rankOrder:number;
+  rankLabel:string;
+  meaning:string;
+  capabilityScope:string;
+  rankCeiling:string;
+  rankCeilingLabel:string;
+  atCeiling:boolean;
+  stars:number;
+  activation:'learning'|'active'|'due'|'reassessment';
+  stabilityDays:number;
+  nextDueAt:string|null;
+  evidenceCount:number;
+  independentEvidenceCount:number;
+  targetCount:number;
+  recommendedTargetId:string;
+  verifiedTargetCount:number;
+  required:boolean;
+  routeContexts:{seriesId:string;seriesTitle:string;bookId:string;bookTitle:string;chapterId:string;chapterTitle:string;sectionId:string;sectionTitle:string;required:boolean;contractVersionId:string}[];
+  nextAction:{kind:'reinforce'|'wake'|'learn'|'maintain'|'advance';label:string};
+};
+export type KnowledgeMap = {
+  schemaVersion:'personal_knowledge_map_v1';
+  ruleVersion:string;
+  rankRuleVersion:string;
+  availability:'ready'|'partial'|'not_ready';
+  scope:{seriesId:string|null;series:{id:string;title:string;shelfId:string;shelfName:string}[];definition:string};
+  progress:{verifiedTargets:number;requiredTargets:number;coveragePpm:number;activeNodes:number;needsWakeNodes:number;reassessmentNodes:number;rankCounts:Record<string,number>;basis:string};
+  learnerProfile:{nodeCount?:number;rankedNodeCount?:number;activeNodeCount?:number;needsAttentionNodeCount?:number;evidenceCount?:number;independentEvidenceCount?:number;profileRuleVersion?:string;sourceObservationWatermark?:number};
+  nodes:KnowledgeMapNode[];
+  edges:{id:string;from:string;to:string;type:string;label:string}[];
+  excluded:{provisionalTargetCount:number;missingRubricNodeCount:number};
+  message:string;
+};
 export type ReviewSession = {
   assignmentId:string;
   status:'started';
@@ -297,6 +416,41 @@ export type ReviewResult = {
   passed:boolean;
   results:QuizResult['results'];
   retentionQualification:{status:string;ruleVersion:string;reasons:string[]};
+  reinforcement:{available:boolean;reason:'wake_failed'|'not_needed'};
+};
+export type ReinforcementActivity = {
+  activityKey:'diagnose'|'repair'|'recompose'|'verify';
+  type:'diagnose'|'repair'|'recompose'|'verify';
+  evidenceRole:'diagnostic'|'instructional'|'run_only'|'formal_immediate';
+  payload:{
+    heading:string;
+    prompt?:string;
+    content?:string;
+    case?:{heading:string;content:string;source:string}|null;
+    round?:number;
+    options?:{code:string;label:string}[];
+    hypothesis?:{
+      causeCode:string;
+      label:string;
+      status:'supported'|'tentative'|'abstained';
+      confidence:number;
+      evidenceCount:number;
+      message:string;
+    };
+    question?:Question;
+  };
+};
+export type ReinforcementRun = {
+  runId:string;
+  status:'preparing'|'active'|'completed'|'replan_required';
+  state:'prepare'|'diagnose'|'repair'|'recompose'|'verify'|'complete'|'replan_required';
+  objective:string;
+  entryMode:'wake_failure'|'active_reinforcement';
+  progress:{stage:number;totalStages:number;activityCount:number;maxActivities:number;repairRounds:number;maxRepairRounds:number};
+  evidenceBoundary:string;
+  currentActivity:ReinforcementActivity|null;
+  feedback:{kind:string;message:string;correct?:boolean}|null;
+  outcome:{kind:'recovered'|'needsReplan';message:string}|null;
 };
 export type Generation = {id:string;operation:string;attempt:number;status:string;model:string;trace:Record<string,unknown>;errorCode?:string;error?:string;startedAt:string;finishedAt?:string;durationMs:number};
 export type SourceVerification = {url:string;reachable:boolean;statusCode:number;pinned:boolean;verificationStatus?:'verified'|'server_unverifiable'|'failed'};
@@ -417,6 +571,49 @@ export type LearningTask = {
   createdAt?:string;
   updatedAt?:string;
 };
+export type KnowledgeRank =
+  | 'unranked'
+  | 'bronze'
+  | 'silver'
+  | 'gold'
+  | 'platinum'
+  | 'diamond'
+  | 'master';
+export type KnowledgeNodeView = {
+  conceptRevisionId:string;
+  label:string;
+  rank:KnowledgeRank;
+  rankOrder:number;
+  rankLabel:string;
+  meaning:string;
+  capabilityScope?:string;
+  rankPolicyVersion?:string;
+  rankCeiling?:KnowledgeRank;
+  rankCeilingLabel?:string;
+  atCeiling?:boolean;
+  stars:number;
+  highestRank:KnowledgeRank;
+  highestStars:number;
+  activation:'learning'|'active'|'due'|'reassessment';
+  stabilityDays:number;
+  nextDueAt:string|null;
+  evidenceCount:number;
+  independentEvidenceCount:number;
+  rankRuleVersion:string;
+  sourceObservationWatermark:number;
+};
+export type KnowledgeSettlement = {
+  settlementId:string;
+  ruleVersion:string;
+  updates:{
+    conceptRevisionId:string;
+    label:string;
+    before:KnowledgeNodeView;
+    after:KnowledgeNodeView;
+    change:'rank_up'|'star_up'|'needs_reinforcement'|'reactivated'|'confirmed';
+    message:string;
+  }[];
+};
 export type QuizResult = {
   attemptId:string;
   score:number;
@@ -432,6 +629,7 @@ export type QuizResult = {
     missedOptions?:number[];
     incorrectOptions?:number[];
   }[];
+  knowledgeSettlement?:KnowledgeSettlement|null;
   questions?:Question[];
   remediation:Remediation|null;
   nextQuiz:Section['quiz'];
