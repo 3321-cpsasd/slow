@@ -22,13 +22,18 @@ from app.application.lesson_generation import (
 )
 from app.application.standard_content import StandardContentService
 from app.infrastructure.tables import (
+    AssessmentTarget,
     AssessmentItemEvidenceBlock,
     AssessmentItemVersion,
     Base,
+    Concept,
+    ConceptRevision,
     ContentBlockAssessmentTarget,
     ContentVersion,
     GenerationRun,
+    LearningContractAssessmentTarget,
     LearningContractVersion,
+    LearningObjective,
     QuizSet,
     Section,
     SectionFallbackBinding,
@@ -409,6 +414,72 @@ def test_atomic_publisher_normalizes_explicit_bindings_and_rolls_back():
             status="validating",
             model="test-model",
         )
+        db.add_all([section, contract, run])
+        for position, (suffix, dimension) in enumerate(
+            (("core", "mechanism"), ("boundary", "boundary")),
+            1,
+        ):
+            concept = Concept(
+                id=f"concept_{suffix}",
+                namespace="test_route",
+                concept_key=suffix,
+                canonical_name=suffix,
+                origin="route_scoped",
+            )
+            revision = ConceptRevision(
+                id=f"revision_{suffix}",
+                concept_id=concept.id,
+                revision=1,
+                label=suffix,
+                definition=suffix,
+                scope_json=json.dumps(
+                    {
+                        "rankPolicy": {
+                            "version": "knowledge_rank_policy_v1",
+                            "capabilityScope": suffix,
+                            "rankCeiling": "master",
+                            "dimensionRanks": {
+                                "recognition": "bronze",
+                                "mechanism": "silver",
+                                "application": "gold",
+                                "boundary": "platinum",
+                                "transfer": "diamond",
+                            },
+                        }
+                    }
+                ),
+                verification_status="route_scoped",
+            )
+            objective = LearningObjective(
+                id=f"objective_{suffix}",
+                namespace="test_route",
+                objective_key=suffix,
+                statement=suffix,
+                verification_status="route_scoped",
+            )
+            target = AssessmentTarget(
+                id=f"target_{suffix}",
+                concept_revision_id=revision.id,
+                learning_objective_id=objective.id,
+                objective_key=f"route:test:{suffix}",
+                objective_statement=suffix,
+                dimension=dimension,
+                target_depth="deep",
+                identity_status="route_scoped_knowledge",
+            )
+            db.add_all([concept, revision, objective, target])
+            db.add(
+                LearningContractAssessmentTarget(
+                    id=f"contract_target_{suffix}",
+                    contract_version_id=contract.id,
+                    assessment_target_id=target.id,
+                    position=position,
+                    required=position == 1,
+                    verification_policy="choice_quiz_v1",
+                    diagnostic_only=False,
+                )
+            )
+        db.flush()
         validated = validate_lesson_candidate(spec(), candidate())
         published = publish_lesson_candidate(
             db,
@@ -706,7 +777,7 @@ def test_legacy_content_never_claims_current_boundary_validation():
         legacy = client.get(f"/api/sections/{section_id}").json()
         assert legacy["content"]["boundaryValidation"] == {
             "status": "legacy",
-            "ruleVersion": "lesson_candidate_gate_v12",
+            "ruleVersion": "lesson_candidate_gate_v13",
         }
 
 

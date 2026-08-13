@@ -8,9 +8,11 @@ from uuid import uuid4
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ...core.errors import AppError
 from ...infrastructure.tables import (
     AssessmentGateState,
     AssessmentObservation,
+    AssessmentTarget,
     LearningContractAssessmentTarget,
     LearningDecisionSnapshot,
     QuizAttempt,
@@ -24,6 +26,7 @@ from .domain import (
 )
 from .knowledge_ranks import (
     KNOWLEDGE_RANK_RULE_VERSION,
+    RANK_SETTLEABLE_IDENTITY_STATUSES,
     knowledge_node_views_for_targets,
     knowledge_settlement,
 )
@@ -231,6 +234,24 @@ def append_knowledge_settlement_snapshot(
         user_id=attempt.user_id,
         target_ids=target_ids,
     )
+    expected_concept_ids = set(
+        db.scalars(
+            select(AssessmentTarget.concept_revision_id).where(
+                AssessmentTarget.id.in_(target_ids),
+                AssessmentTarget.identity_status.in_(
+                    RANK_SETTLEABLE_IDENTITY_STATUSES
+                ),
+                AssessmentTarget.concept_revision_id.is_not(None),
+            )
+        ).all()
+    )
+    missing_concept_ids = expected_concept_ids - set(after)
+    if missing_concept_ids:
+        raise AppError(
+            "本次能力结算不完整，答案尚未写入，请稍后重试",
+            code="KNOWLEDGE_SETTLEMENT_INCOMPLETE",
+            status=500,
+        )
     output = knowledge_settlement(before, after)
     source_watermark = max(
         (

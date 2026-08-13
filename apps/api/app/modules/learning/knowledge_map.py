@@ -27,6 +27,7 @@ from ...infrastructure.tables import (
 from .knowledge_profile import learner_knowledge_profile_view
 from .knowledge_ranks import (
     KNOWLEDGE_RANK_RULE_VERSION,
+    RANK_SETTLEABLE_IDENTITY_STATUSES,
     knowledge_node_views_for_concepts,
 )
 
@@ -184,7 +185,7 @@ class KnowledgeMapService:
         formal_targets = {
             target_id: target
             for target_id, target in targets.items()
-            if target.identity_status == "published_knowledge_graph"
+            if target.identity_status in RANK_SETTLEABLE_IDENTITY_STATUSES
             and target.concept_revision_id
         }
         concept_ids = {

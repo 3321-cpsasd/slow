@@ -1364,7 +1364,11 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
     assert first.status_code == replay.status_code == 200
     assert replay.json()["attemptId"] == first.json()["attemptId"]
     assert replay.json()["knowledgeSettlement"] == first.json()["knowledgeSettlement"]
-    assert first.json()["knowledgeSettlement"]["updates"] == []
+    settlement_updates = first.json()["knowledgeSettlement"]["updates"]
+    assert len(settlement_updates) == 1
+    assert settlement_updates[0]["change"] == "rank_up"
+    assert settlement_updates[0]["before"]["rank"] == "unranked"
+    assert settlement_updates[0]["after"]["rank"] == "bronze"
     assert first.json()["knowledgeSettlement"]["settlementId"]
     with client.app.state.sessions() as db:
         attempts = db.scalars(
@@ -1419,8 +1423,11 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
         assert gate_output["passed"] is True
         assert gate_output["unresolvedRequiredTargetIds"] == []
         settlement = decisions[1]
-        assert settlement.rule_version == "knowledge_rank_v2"
-        assert json.loads(settlement.output_decision_json)["updates"] == []
+        assert settlement.rule_version == "knowledge_rank_v3"
+        frozen_updates = json.loads(settlement.output_decision_json)["updates"]
+        assert len(frozen_updates) == 1
+        assert frozen_updates[0]["change"] == "rank_up"
+        assert frozen_updates[0]["after"]["rank"] == "bronze"
         progression = decisions[2]
         assert progression.rule_version == "progression_v2_book_outline_gate"
         assert json.loads(progression.input_snapshot_json)["section_id"] == section["id"]

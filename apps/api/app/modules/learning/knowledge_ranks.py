@@ -21,8 +21,13 @@ from ...infrastructure.tables import (
 )
 
 
-KNOWLEDGE_RANK_RULE_VERSION = "knowledge_rank_v2"
+KNOWLEDGE_RANK_RULE_VERSION = "knowledge_rank_v3"
 KNOWLEDGE_RANK_POLICY_VERSION = "knowledge_rank_policy_v1"
+RANK_SETTLEABLE_IDENTITY_STATUSES = (
+    "published_knowledge_graph",
+    "route_scoped_knowledge",
+)
+RANK_SETTLEABLE_REVISION_STATUSES = ("reviewed", "route_scoped")
 
 RANKS = {
     "unranked": (0, "尚未验证", "还没有足够证据形成能力判断"),
@@ -203,15 +208,17 @@ def rebuild_knowledge_node_projections(
         target.concept_revision_id
         for target in targets.values()
         if target.concept_revision_id
-        and target.identity_status == "published_knowledge_graph"
+        and target.identity_status in RANK_SETTLEABLE_IDENTITY_STATUSES
     }
-    reviewed_revisions = (
+    rankable_revisions = (
         {
             item.id: item
             for item in db.scalars(
                 select(ConceptRevision).where(
                     ConceptRevision.id.in_(concept_ids),
-                    ConceptRevision.verification_status == "reviewed",
+                    ConceptRevision.verification_status.in_(
+                        RANK_SETTLEABLE_REVISION_STATUSES
+                    ),
                 )
             ).all()
         }
@@ -220,7 +227,7 @@ def rebuild_knowledge_node_projections(
     )
     policies = {
         concept_id: policy
-        for concept_id, revision in reviewed_revisions.items()
+        for concept_id, revision in rankable_revisions.items()
         if (policy := rank_policy_for_revision(revision)) is not None
     }
     by_concept: dict[str, list[AssessmentObservation]] = defaultdict(list)
@@ -414,7 +421,9 @@ def knowledge_node_views_for_targets(
         db.scalars(
             select(AssessmentTarget.concept_revision_id).where(
                 AssessmentTarget.id.in_(target_ids),
-                AssessmentTarget.identity_status == "published_knowledge_graph",
+                AssessmentTarget.identity_status.in_(
+                    RANK_SETTLEABLE_IDENTITY_STATUSES
+                ),
                 AssessmentTarget.concept_revision_id.is_not(None),
             )
         ).all()
@@ -423,7 +432,9 @@ def knowledge_node_views_for_targets(
         db.scalars(
             select(ConceptRevision).where(
                 ConceptRevision.id.in_(concept_ids),
-                ConceptRevision.verification_status == "reviewed",
+                ConceptRevision.verification_status.in_(
+                    RANK_SETTLEABLE_REVISION_STATUSES
+                ),
             )
         ).all()
         if concept_ids
@@ -467,7 +478,9 @@ def knowledge_node_views_for_concepts(
     revisions = db.scalars(
         select(ConceptRevision).where(
             ConceptRevision.id.in_(concept_revision_ids),
-            ConceptRevision.verification_status == "reviewed",
+            ConceptRevision.verification_status.in_(
+                RANK_SETTLEABLE_REVISION_STATUSES
+            ),
         )
     ).all()
     policies = {
