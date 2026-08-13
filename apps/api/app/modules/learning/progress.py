@@ -20,6 +20,27 @@ def _uid(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex}"
 
 
+def best_score_pair(
+    current_score: int,
+    current_total: int,
+    candidate_score: int,
+    candidate_total: int,
+) -> tuple[int, int]:
+    """Keep score and denominator from the same, strongest attempt."""
+
+    if candidate_total <= 0:
+        return current_score, current_total
+    if current_total <= 0:
+        return candidate_score, candidate_total
+    candidate_weighted = candidate_score * current_total
+    current_weighted = current_score * candidate_total
+    if candidate_weighted > current_weighted:
+        return candidate_score, candidate_total
+    if candidate_weighted == current_weighted and candidate_total > current_total:
+        return candidate_score, candidate_total
+    return current_score, current_total
+
+
 class ProgressStore:
     """The only write gateway for user learning-state projections."""
 

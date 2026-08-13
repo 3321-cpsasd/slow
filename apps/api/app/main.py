@@ -43,6 +43,7 @@ from .demo_personas import LOCAL_DEMO_PERSONAS
 from .infrastructure.database import build_database
 from .infrastructure.tables import Base, LearningTask, QuizAttempt, Remediation, Shelf, User, now
 from .modules.learning.tasks import (
+    backfill_missing_book_start_preloads,
     backfill_missing_lookahead_tasks,
     claim_task,
     heartbeat_task,
@@ -561,6 +562,12 @@ def create_app(
                         scope=demo_user_scope(persona.user_id),
                     ).ensure_demo_seed()
         with sessions() as db:
+            backfilled_book_starts = backfill_missing_book_start_preloads(db)
+            if backfilled_book_starts:
+                logger.info(
+                    "Queued %s missing book-start preload task(s)",
+                    backfilled_book_starts,
+                )
             backfilled_lookaheads = backfill_missing_lookahead_tasks(db)
             if backfilled_lookaheads:
                 logger.info(

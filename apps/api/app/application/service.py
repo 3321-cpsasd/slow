@@ -1,10 +1,10 @@
-from asyncio import CancelledError, sleep
+from asyncio import CancelledError, gather, sleep
 import hashlib
 import json
 from uuid import uuid4
 
 from sqlalchemy import event, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 from ..auth.context import UserScope, WorkerExecutionContext
 from ..auth.profile import ProfileService
 
@@ -1202,29 +1202,74 @@ class SlowService:
             chapter_id,
             first_section_status="preparing",
         )
-        target = self.db.scalar(
+        targets = self.db.scalars(
             select(Section)
             .where(Section.chapter_id == chapter_id)
             .order_by(Section.position)
-        )
-        if not target:
+            .limit(2)
+        ).all()
+        if not targets:
             raise AppError(
                 "首章没有可生成的小节",
                 code="INITIAL_SECTION_MISSING",
                 status=500,
             )
+        target = targets[0]
         target_progress = self.progress.for_section(target)
         payload = load(task.payload_json, {})
         payload["targetSectionId"] = target.id
+        payload["prefetchSectionIds"] = [item.id for item in targets]
         task.payload_json = dump(payload)
         if target_progress.status != "preparing":
             self.progress.set_status(target_progress, "preparing")
         self.db.commit()
-        await self.generate_section(target.id)
+
+        async def generate_target(section_id: str):
+            if self.db.get_bind().dialect.name == "sqlite":
+                return await self._generate_preload_target(section_id)
+            factory = sessionmaker(
+                bind=self.db.get_bind(),
+                expire_on_commit=False,
+            )
+            with factory() as child_db:
+                child = SlowService(
+                    child_db,
+                    self.ai,
+                    self.source_verifier,
+                    self.attachment_storage,
+                    scope=self.scope,
+                )
+                return await child._generate_preload_target(section_id)
+
+        if self.db.get_bind().dialect.name == "sqlite":
+            generated = []
+            for item in targets:
+                try:
+                    generated.append(await generate_target(item.id))
+                except BaseException as error:
+                    generated.append(error)
+        else:
+            generated = await gather(
+                *(generate_target(item.id) for item in targets),
+                return_exceptions=True,
+            )
+        if isinstance(generated[0], BaseException):
+            raise generated[0]
+
+        self.db.expire_all()
+        target_progress = self.progress.for_section(target)
         self.progress.set_status(target_progress, "available")
         self._enqueue_lookahead(task, target)
         self.db.commit()
-        return {"targetSectionId": target.id}
+        return {
+            "targetSectionId": target.id,
+            "prefetchSectionIds": [item.id for item in targets],
+            "prefetchedSectionIds": [
+                item.id
+                for item, result in zip(targets, generated, strict=True)
+                if not isinstance(result, BaseException)
+            ],
+        }
 
     def _next_existing_section(self, source: Section) -> Section | None:
         context = self.contexts.resolve_section(

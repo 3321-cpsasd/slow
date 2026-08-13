@@ -960,17 +960,54 @@ class PurposeAiGateway:
         )
 
     def _purpose_supports(self, purpose: AiPurpose, method: str) -> bool:
+        return bool(self._purpose_candidates(purpose, method))
+
+    def _purpose_candidates(
+        self,
+        purpose: AiPurpose,
+        method: str,
+    ) -> tuple[ModelDeployment, ...]:
         envelope = AiTaskEnvelope(
             purpose,
             AuthorityLevel.CANDIDATE_ONLY,
             CapabilityRequirements(structured=True),
         )
-        return any(
-            hasattr(deployment.adapter, method)
+        return tuple(
+            deployment
             for deployment in self.registry.eligible(
                 self._policy(purpose),
                 envelope,
             )
+            if hasattr(deployment.adapter, method)
+        )
+
+    def _supports_distinct_assessment_roles(self) -> bool:
+        item_authors = self._purpose_candidates(
+            AiPurpose.ASSESSMENT_ITEM_AUTHOR,
+            "author_lesson_questions",
+        )
+        reviewers = self._purpose_candidates(
+            AiPurpose.ASSESSMENT_ITEM_REVIEW,
+            "review_lesson_questions",
+        )
+        adjudicators = self._purpose_candidates(
+            AiPurpose.ASSESSMENT_ANSWER_ADJUDICATION,
+            "adjudicate_lesson_questions",
+        )
+        return any(
+            len({
+                item_author.deployment_id,
+                reviewer.deployment_id,
+                adjudicator.deployment_id,
+            }) == 3
+            and len({
+                item_author.model_family_id,
+                reviewer.model_family_id,
+                adjudicator.model_family_id,
+            }) == 3
+            for item_author in item_authors
+            for reviewer in reviewers
+            for adjudicator in adjudicators
         )
 
     async def _trusted_lesson_pipeline(self, spec, validator=None):
@@ -1078,35 +1115,11 @@ class PurposeAiGateway:
                 AiPurpose.LESSON_AUTHOR,
                 "author_lesson_content",
             ),
-            self._purpose_supports(
-                AiPurpose.ASSESSMENT_ITEM_AUTHOR,
-                "author_lesson_questions",
-            ),
-            self._purpose_supports(
-                AiPurpose.ASSESSMENT_ITEM_REVIEW,
-                "review_lesson_questions",
-            ),
-            self._purpose_supports(
-                AiPurpose.ASSESSMENT_ANSWER_ADJUDICATION,
-                "adjudicate_lesson_questions",
-            ),
+            self._supports_distinct_assessment_roles(),
         ))
 
     def _supports_trusted_quiz_pipeline(self) -> bool:
-        return all((
-            self._purpose_supports(
-                AiPurpose.ASSESSMENT_ITEM_AUTHOR,
-                "author_lesson_questions",
-            ),
-            self._purpose_supports(
-                AiPurpose.ASSESSMENT_ITEM_REVIEW,
-                "review_lesson_questions",
-            ),
-            self._purpose_supports(
-                AiPurpose.ASSESSMENT_ANSWER_ADJUDICATION,
-                "adjudicate_lesson_questions",
-            ),
-        ))
+        return self._supports_distinct_assessment_roles()
 
     async def _trusted_quiz_pipeline(
         self,

@@ -9,6 +9,7 @@ from ...auth.context import Principal, WorkerExecutionContext
 from ...core.errors import AppError, safe_error_code
 from ...infrastructure.tables import (
     Book,
+    BookProgress,
     Chapter,
     ContentVersion,
     LearningRun,
@@ -32,6 +33,98 @@ TASK_TYPES = {
 PRELOAD_TASK_TYPES = {"initial_book_preload", "next_section_preload"}
 MANUALLY_EXTENSIBLE_TASK_TYPES = PRELOAD_TASK_TYPES | {"remediation_generation"}
 MANUAL_TASK_RETRY_BUDGET = 3
+
+
+def backfill_missing_book_start_preloads(db: Session) -> int:
+    """Queue first-section readiness for available books missing published content."""
+
+    published_first_pair_exists = (
+        select(QuizSet.id)
+        .join(ContentVersion, ContentVersion.id == QuizSet.content_version_id)
+        .join(Section, Section.id == QuizSet.section_id)
+        .where(
+            Section.chapter_id == Chapter.id,
+            Section.position == 1,
+            QuizSet.publication_status == "published",
+            ContentVersion.section_id == Section.id,
+            ContentVersion.publication_status == "published",
+        )
+        .exists()
+    )
+    candidates = db.execute(
+        select(
+            LearningRun.id,
+            LearningRun.user_id,
+            Book.id,
+            Book.outline_version,
+            Chapter.id,
+        )
+        .join(
+            BookProgress,
+            and_(
+                BookProgress.learning_run_id == LearningRun.id,
+                BookProgress.user_id == LearningRun.user_id,
+            ),
+        )
+        .join(Book, Book.id == BookProgress.book_id)
+        .join(Chapter, Chapter.book_id == Book.id)
+        .where(
+            LearningRun.status == "active",
+            BookProgress.status == "available",
+            Book.series_id == LearningRun.series_id,
+            Book.outline_status == "confirmed",
+            Book.deleted_at.is_(None),
+            Chapter.position == 1,
+            ~published_first_pair_exists,
+        )
+    ).all()
+
+    created = 0
+    for learning_run_id, user_id, book_id, outline_version, chapter_id in candidates:
+        idempotency_key = (
+            f"book-start:{book_id}:outline:{outline_version}"
+        )
+        existing = db.scalar(
+            select(LearningTask).where(
+                LearningTask.learning_run_id == learning_run_id,
+                LearningTask.task_type == "initial_book_preload",
+                LearningTask.idempotency_key == idempotency_key,
+            )
+        )
+        if existing:
+            if (
+                existing.status == "failed"
+                and existing.attempt_count < existing.max_attempts
+            ):
+                existing.status = "pending"
+                existing.error_code = ""
+                existing.error_message = ""
+                existing.lease_owner = None
+                existing.lease_token = None
+                existing.lease_expires_at = None
+                existing.heartbeat_at = None
+                existing.updated_at = now()
+                created += 1
+            continue
+        db.add(LearningTask(
+            id=f"task_{uuid4().hex}",
+            learning_run_id=learning_run_id,
+            section_id=None,
+            user_id=user_id,
+            task_type="initial_book_preload",
+            idempotency_key=idempotency_key,
+            trigger_id=f"startup-book-ready:{book_id}",
+            payload_json=json.dumps(
+                {"chapterId": chapter_id},
+                ensure_ascii=False,
+            ),
+            status="pending",
+        ))
+        created += 1
+
+    if created:
+        db.commit()
+    return created
 
 
 def backfill_missing_lookahead_tasks(db: Session) -> int:

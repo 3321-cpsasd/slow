@@ -12,6 +12,7 @@ from ...infrastructure.tables import (
     Chapter,
     ChapterProgress,
     ChapterRevision,
+    LearningTask,
     Section,
     now,
 )
@@ -249,6 +250,35 @@ class BookPlanningService:
         book.outline_confirmed_at = now()
         proposal.action = "ai_replan_confirmed"
         self._unlock_after_previous_book(book)
+        first_chapter = self.db.scalar(
+            select(Chapter)
+            .where(Chapter.book_id == book.id)
+            .order_by(Chapter.position)
+        )
+        book_progress = self.progress.for_book(book)
+        if first_chapter and book_progress.status == "available":
+            idempotency_key = (
+                f"book-start:{book.id}:outline:{book.outline_version}"
+            )
+            existing_preload = self.db.scalar(
+                select(LearningTask.id).where(
+                    LearningTask.learning_run_id == run.id,
+                    LearningTask.task_type == "initial_book_preload",
+                    LearningTask.idempotency_key == idempotency_key,
+                )
+            )
+            if not existing_preload:
+                self.db.add(LearningTask(
+                    id=_uid("task"),
+                    learning_run_id=run.id,
+                    section_id=None,
+                    user_id=self.user_id,
+                    task_type="initial_book_preload",
+                    idempotency_key=idempotency_key,
+                    trigger_id=proposal.id,
+                    payload_json=_dump({"chapterId": first_chapter.id}),
+                    status="pending",
+                ))
         self.db.commit()
         return self.book_view(book.id)
 

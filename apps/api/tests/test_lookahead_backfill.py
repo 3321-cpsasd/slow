@@ -9,6 +9,7 @@ from app.infrastructure.database import build_database
 from app.infrastructure.tables import (
     Base,
     Book,
+    BookProgress,
     Chapter,
     ContentVersion,
     LearningPlan,
@@ -21,7 +22,10 @@ from app.infrastructure.tables import (
     Shelf,
     User,
 )
-from app.modules.learning.tasks import backfill_missing_lookahead_tasks
+from app.modules.learning.tasks import (
+    backfill_missing_book_start_preloads,
+    backfill_missing_lookahead_tasks,
+)
 from app.services.attachment_storage import LocalAttachmentStorage
 from app.services.source_verifier import AcceptingSourceVerifier
 
@@ -168,6 +172,63 @@ def test_backfill_queues_one_idempotent_buffer_without_unlocking_target(db):
 
     assert backfill_missing_lookahead_tasks(db) == 0
     assert db.scalar(select(func.count()).select_from(LearningTask)) == 1
+
+
+def test_backfill_queues_book_start_when_available_book_lacks_first_content(db):
+    seed_active_route(db)
+    db.add(BookProgress(
+        id="book_progress_backfill",
+        learning_run_id="run_backfill",
+        user_id="user_backfill",
+        book_id="book_backfill",
+        status="available",
+    ))
+    db.delete(db.get(QuizSet, "quiz_source"))
+    db.delete(db.get(ContentVersion, "content_source"))
+    db.commit()
+
+    assert backfill_missing_book_start_preloads(db) == 1
+
+    task = db.scalar(select(LearningTask))
+    assert task.task_type == "initial_book_preload"
+    assert task.section_id is None
+    assert task.idempotency_key == "book-start:book_backfill:outline:1"
+    assert task.trigger_id == "startup-book-ready:book_backfill"
+    assert json.loads(task.payload_json) == {"chapterId": "chapter_backfill"}
+    assert backfill_missing_book_start_preloads(db) == 0
+
+
+def test_book_start_backfill_requeues_failed_task_with_remaining_budget(db):
+    seed_active_route(db)
+    db.add(BookProgress(
+        id="book_progress_backfill",
+        learning_run_id="run_backfill",
+        user_id="user_backfill",
+        book_id="book_backfill",
+        status="available",
+    ))
+    db.delete(db.get(QuizSet, "quiz_source"))
+    db.delete(db.get(ContentVersion, "content_source"))
+    db.commit()
+
+    assert backfill_missing_book_start_preloads(db) == 1
+    task = db.scalar(select(LearningTask))
+    task.status = "failed"
+    task.attempt_count = 1
+    task.max_attempts = 3
+    task.error_code = "AI_ELIGIBLE_DEPLOYMENT_UNAVAILABLE"
+    task.error_message = "no independent adjudicator"
+    db.commit()
+
+    assert backfill_missing_book_start_preloads(db) == 1
+    assert db.scalar(select(func.count()).select_from(LearningTask)) == 1
+    db.refresh(task)
+    assert task.status == "pending"
+    assert task.attempt_count == 1
+    assert task.max_attempts == 3
+    assert task.error_code == ""
+    assert task.error_message == ""
+    assert backfill_missing_book_start_preloads(db) == 0
 
 
 def test_backfill_skips_locked_source_and_end_of_route(db):

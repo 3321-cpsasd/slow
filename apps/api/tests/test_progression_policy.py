@@ -1,4 +1,11 @@
 from app.modules.learning.domain import ProgressionPolicy, ProgressionSnapshot
+from app.modules.learning.progress import best_score_pair
+
+
+def test_best_score_pair_never_combines_different_attempts():
+    assert best_score_pair(3, 4, 1, 1) == (1, 1)
+    assert best_score_pair(4, 5, 2, 3) == (4, 5)
+    assert best_score_pair(1, 1, 4, 4) == (4, 4)
 
 
 def test_progression_unlocks_next_section_without_completing_parent():

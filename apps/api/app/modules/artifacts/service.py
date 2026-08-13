@@ -331,7 +331,11 @@ class ArtifactService:
             item for item in section_progresses if item.status == "completed"
         ]
         scored_sections = [item for item in completed_sections if item.total_score > 0]
-        best_score = sum(item.best_score for item in scored_sections)
+        bounded_scores = [
+            min(max(item.best_score, 0), item.total_score)
+            for item in scored_sections
+        ]
+        best_score = sum(bounded_scores)
         total_score = sum(item.total_score for item in scored_sections)
         summary = {
             "bookId": book.id,
@@ -356,7 +360,7 @@ class ArtifactService:
                 item.total_score > 0 and item.best_score < item.total_score
                 for item in completed_sections
             ),
-            "ruleVersion": "book_settlement_v1",
+            "ruleVersion": "book_settlement_v2_bounded_score_pairs",
         }
 
         progress = self.capstone_progress(capstone)

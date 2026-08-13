@@ -37,7 +37,7 @@ from .assessment import (
 )
 from .assessment_items import immutable_questions_for_quiz
 from .content_governance_store import governance_view_for_quiz
-from .progress import ProgressStore
+from .progress import ProgressStore, best_score_pair
 from .contracts import open_run_section
 from .decision_snapshots import (
     append_assessment_gate_snapshot,
@@ -431,6 +431,12 @@ class SubmitQuiz:
         )
         completion_passed = grade.passed if was_completed else gate_decision.passed
         attempt.passed = completion_passed
+        best_score, best_total = best_score_pair(
+            section_progress.best_score,
+            section_progress.total_score,
+            grade.score,
+            grade.total,
+        )
         first_completion = False
         if completion_passed and not was_completed:
             transition = self.db.execute(
@@ -442,8 +448,8 @@ class SubmitQuiz:
                 )
                 .values(
                     status="completed",
-                    best_score=max(section_progress.best_score, grade.score),
-                    total_score=grade.total,
+                    best_score=best_score,
+                    total_score=best_total,
                     ask_me_unlocked=(
                         section_progress.ask_me_unlocked or grade.perfect
                     ),
@@ -455,8 +461,8 @@ class SubmitQuiz:
             first_completion = transition.rowcount == 1
             self.db.expire(section_progress)
         else:
-            section_progress.best_score = max(section_progress.best_score, grade.score)
-            section_progress.total_score = grade.total
+            section_progress.best_score = best_score
+            section_progress.total_score = best_total
             section_progress.ask_me_unlocked |= grade.perfect
             section_progress.version += 1
             section_progress.updated_at = now()
@@ -641,6 +647,12 @@ class SubmitQuiz:
             self.uow.commit()
             return response
 
+        best_score, best_total = best_score_pair(
+            section_progress.best_score,
+            section_progress.total_score,
+            score,
+            len(results),
+        )
         transition = self.db.execute(
             update(SectionProgress)
             .where(
@@ -650,8 +662,8 @@ class SubmitQuiz:
             )
             .values(
                 status="completed",
-                best_score=max(section_progress.best_score, score),
-                total_score=len(results),
+                best_score=best_score,
+                total_score=best_total,
                 version=section_progress.version + 1,
                 updated_at=now(),
             )

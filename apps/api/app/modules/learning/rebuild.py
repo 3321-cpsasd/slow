@@ -1,5 +1,6 @@
 import json
 from collections import defaultdict
+from fractions import Fraction
 from uuid import uuid4
 
 from sqlalchemy import delete, select
@@ -229,7 +230,13 @@ def rebuild_user_projections(db: Session, *, user_id: str) -> dict:
                     attempts = attempts_by_section.get(section.id, [])
                     best = max(
                         attempts,
-                        key=lambda item: (item["score"], item["total"]),
+                        key=lambda item: (
+                            Fraction(item["score"], item["total"])
+                            if item["total"]
+                            else Fraction(-1, 1),
+                            item["total"],
+                            item["score"],
+                        ),
                         default={"score": 0, "total": 0},
                     )
                     completed = section_completed.get(section.id, False)

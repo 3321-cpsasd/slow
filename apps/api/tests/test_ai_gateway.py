@@ -455,7 +455,7 @@ def test_trusted_assessment_uses_three_distinct_model_families():
     assert [call[0] for call in adjudicator.calls] == ["adjudicate_lesson_questions"]
 
 
-def test_trusted_assessment_fails_when_adjudicator_is_not_independent():
+def test_lesson_falls_back_to_single_call_without_three_independent_families():
     content = TrustedAssessmentStub("qwen3.8-max", "content")
     item_author = TrustedAssessmentStub("deepseek-v4", "item")
     reviewer = TrustedAssessmentStub("glm-5.2", "review")
@@ -484,10 +484,12 @@ def test_trusted_assessment_fails_when_adjudicator_is_not_independent():
         }],
     }
 
-    with pytest.raises(AiError) as raised:
-        asyncio.run(router.generate_lesson(spec))
+    result = asyncio.run(router.generate_lesson(spec))
 
-    assert raised.value.code == "AI_ELIGIBLE_DEPLOYMENT_UNAVAILABLE"
+    assert result == {"model": "qwen3.8-max"}
+    assert [call[0] for call in content.calls] == ["generate_lesson"]
+    assert item_author.calls == []
+    assert reviewer.calls == []
 
 
 def test_single_delayed_review_item_uses_the_same_trusted_pipeline():

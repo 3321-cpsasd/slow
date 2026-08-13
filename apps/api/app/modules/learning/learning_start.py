@@ -42,6 +42,7 @@ from .decision_snapshots import (
     append_knowledge_settlement_snapshot,
 )
 from .knowledge_ranks import knowledge_node_views_for_targets
+from .progress import best_score_pair
 
 
 LEARNING_START_PREVIEW_SCHEMA_VERSION = "learning_start_preview_v1"
@@ -572,8 +573,12 @@ class ChapterChoiceService:
                 section_context.chapter,
                 section_context.book,
             )
-            progress.best_score = max(progress.best_score, grade.score)
-            progress.total_score = grade.total
+            progress.best_score, progress.total_score = best_score_pair(
+                progress.best_score,
+                progress.total_score,
+                grade.score,
+                grade.total,
+            )
             progress.ask_me_unlocked |= grade.perfect
             progress.version += 1
             progress.updated_at = now()

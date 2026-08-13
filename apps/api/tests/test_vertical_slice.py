@@ -43,6 +43,7 @@ from app.infrastructure.tables import (
     AskMeDiscussionTopic,
     AskMeDiscussionTurnRecord,
     Book,
+    Chapter,
     ChapterRevision,
     ChapterChallengeAttempt,
     ChapterRouteDecisionEvent,
@@ -3553,12 +3554,22 @@ def test_complete_first_book_attachments_and_enter_second(client):
     assert settlement.json()["status"] == "completed"
     assert settlement.json()["completedChapterCount"] == settlement.json()["chapterCount"]
     assert settlement.json()["completedSectionCount"] == settlement.json()["sectionCount"]
-    assert settlement.json()["verificationRate"] >= 80
-    assert settlement.json()["ruleVersion"] == "book_settlement_v1"
+    assert 80 <= settlement.json()["verificationRate"] <= 100
+    assert settlement.json()["ruleVersion"] == "book_settlement_v2_bounded_score_pairs"
+    with client.app.state.sessions() as db:
+        legacy_progress = db.scalar(
+            select(SectionProgress)
+            .join(Section, Section.id == SectionProgress.section_id)
+            .join(Chapter, Chapter.id == Section.chapter_id)
+            .where(Chapter.book_id == first_book["id"])
+        )
+        legacy_progress.best_score = legacy_progress.total_score + 2
+        db.commit()
     replayed_settlement = client.post(
         f"/api/books/{first_book['id']}/settlement"
     )
     assert replayed_settlement.status_code == 200
+    assert replayed_settlement.json()["verificationRate"] <= 100
     assert replayed_settlement.json()["settledAt"] == settlement.json()["settledAt"]
     assert client.get(f"/api/books/{first_book['id']}/capstone").json()["status"] == "completed"
     capstone_file = client.post(f"/api/books/{first_book['id']}/capstone/attachments", content=b"capstone evidence", headers={"x-filename":"capstone.txt","content-type":"text/plain"})
@@ -3592,6 +3603,16 @@ def test_complete_first_book_attachments_and_enter_second(client):
     assert activated.status_code == 200
     assert activated.json()["outlineStatus"] == "confirmed"
     assert activated.json()["status"] == "available"
+    queued = client.get(f"/api/series/{series['id']}").json()[
+        "initializationTask"
+    ]
+    assert queued["type"] == "initial_book_preload"
+    prepared = wait_for_task(client, queued["taskId"], timeout=5)
+    assert prepared["status"] == "succeeded"
+    assert len(prepared["result"]["prefetchSectionIds"]) == 2
+    assert prepared["result"]["prefetchedSectionIds"] == (
+        prepared["result"]["prefetchSectionIds"]
+    )
     final = client.get(f"/api/series/{series['id']}").json()
     dashboard = client.get("/api/bootstrap").json()["milestoneDashboard"]
     live_chapter_ids = {
@@ -3605,16 +3626,31 @@ def test_complete_first_book_attachments_and_enter_second(client):
         for criterion in milestone["criteria"]
     )
     second_chapter = final["books"][1]["chapters"][0]
-    assert second_chapter["generated"] is False
-    second_chapter = client.post(
-        f"/api/chapters/{second_chapter['id']}/generate"
-    ).json()
-    second_section = client.post(
-        f"/api/sections/{second_chapter['sections'][0]['id']}/generate"
+    assert second_chapter["generated"] is True
+    assert second_chapter["sections"][0]["status"] == "available"
+    assert second_chapter["sections"][1]["status"] == "locked"
+    second_section = client.get(
+        f"/api/sections/{second_chapter['sections'][0]['id']}"
     ).json()
     assert second_section["content"] is not None
     assert second_section["generation"]["trace"]["memoryApplied"] is True
     assert second_section["generation"]["trace"]["memoryConceptCount"] > 0
+    with client.app.state.sessions() as db:
+        buffered_content = db.scalar(
+            select(ContentVersion).where(
+                ContentVersion.section_id
+                == second_chapter["sections"][1]["id"],
+                ContentVersion.publication_status == "published",
+            )
+        )
+        buffered_quiz = db.scalar(
+            select(QuizSet).where(
+                QuizSet.section_id == second_chapter["sections"][1]["id"],
+                QuizSet.publication_status == "published",
+            )
+        )
+        assert buffered_content is not None
+        assert buffered_quiz is not None
 
 
 class FailingLessonAi(FakeAi):

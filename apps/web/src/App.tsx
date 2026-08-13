@@ -407,6 +407,7 @@ export default function App() {
   const [shelf, setShelf] = useState<Shelf | null>(null);
   const [series, setSeries] = useState<Series | null>(null);
   const [section, setSection] = useState<Section | null>(null);
+  const [directoryBookId, setDirectoryBookId] = useState('');
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -887,6 +888,8 @@ export default function App() {
       '正在读取小节…',
       () => openAndTrackSection(sectionId),
     );
+    const targetBook = series?.books.find((book) => bookContainsSection(book, sectionId));
+    if (targetBook) setDirectoryBookId(targetBook.id);
     setSection(value);
     return value;
   };
@@ -1005,8 +1008,28 @@ export default function App() {
           const refreshed = await api.series(value.id);
           if (!isCurrent()) return false;
           setSeries(refreshed);
-          setSection(null);
-          updateBrowserLocation(seriesPath(refreshed.id), 'replace');
+          const targetSectionId = typeof task.result?.targetSectionId === 'string'
+            ? task.result.targetSectionId
+            : null;
+          const targetBook = targetSectionId
+            ? refreshed.books.find((book) => bookContainsSection(book, targetSectionId))
+            : null;
+          if (targetSectionId && targetBook) {
+            setDirectoryBookId(targetBook.id);
+            updateBrowserLocation(
+              seriesPath(refreshed.id, targetSectionId),
+              'replace',
+            );
+            const readySection = await run(
+              '正在打开第一节…',
+              () => openAndTrackSection(targetSectionId),
+            );
+            if (!isCurrent()) return false;
+            setSection(readySection);
+          } else {
+            setSection(null);
+            updateBrowserLocation(seriesPath(refreshed.id), 'replace');
+          }
           return true;
         }
         if (task.status === 'failed') {
@@ -1039,6 +1062,7 @@ export default function App() {
     seriesId: string,
     requestedSectionId: string | null = null,
     historyMode: 'push' | 'replace' | 'none' = 'push',
+    requestedBookId: string | null = null,
   ) => {
     const requestVersion = historyMode === 'none'
       ? routeRequestVersion.current
@@ -1051,6 +1075,10 @@ export default function App() {
     )) || null);
     setSeries(value);
     setView('learn');
+    const requestedBook = requestedBookId
+      ? value.books.find((book) => book.id === requestedBookId) || null
+      : null;
+    if (requestedBook) setDirectoryBookId(requestedBook.id);
     if (
       value.initializationTask
       && !['failed', 'succeeded'].includes(value.initializationTask.status)
@@ -1075,9 +1103,18 @@ export default function App() {
       : false;
     const initial = requestedBelongsToSeries
       ? requestedSectionId!
-      : resumeBelongsToSeries && value.progress > 0
+      : !requestedBook && resumeBelongsToSeries && value.progress > 0
         ? resumeSection!
         : null;
+    const initialBook = initial
+      ? value.books.find((book) => bookContainsSection(book, initial)) || null
+      : requestedBook;
+    setDirectoryBookId(
+      initialBook?.id
+      || value.books.find((book) => book.status !== 'locked')?.id
+      || value.books[0]?.id
+      || '',
+    );
     if (initial) {
       updateBrowserLocation(
         seriesPath(value.id, initial),
@@ -1128,13 +1165,21 @@ export default function App() {
     }
   };
 
-  const startNextBook = async () => {
+  const startNextBook = async (bookId: string) => {
     if (!series) return;
-    const nextBook = series.books.find(
-      (book, index) => index > 0 && book.status !== 'locked' && book.status !== 'completed',
-    );
+    const nextBook = series.books.find((book) => book.id === bookId);
     const firstChapter = nextBook?.chapters[0];
     if (!firstChapter) return;
+    setDirectoryBookId(nextBook.id);
+    setSection(null);
+    if (
+      series.initializationTask
+      && !['failed', 'succeeded'].includes(series.initializationTask.status)
+    ) {
+      updateBrowserLocation(seriesPath(series.id), 'replace');
+      await monitorInitialSection(series);
+      return;
+    }
     const availableSection = firstChapter.sections.find(
       (item) => item.status !== 'locked' && item.status !== 'completed',
     );
@@ -1835,7 +1880,10 @@ export default function App() {
             data={data}
             dailyMode={data?.dailyMode?.dailyMode || data?.dailyMode?.lastDailyMode || 'slow'}
             onOpen={openShelf}
-            onContinue={openSeries}
+            onContinue={(seriesId, sectionId, bookId) => (
+              openSeries(seriesId, sectionId, 'push', bookId)
+            )}
+            onActivateBook={activateBook}
             onOpenReview={openReviewCenter}
             onCreate={async (body) => {
               const value = await run('正在创建书架…', () => api.createShelf(body));
@@ -1859,7 +1907,10 @@ export default function App() {
               setView('learn');
               void monitorInitialSection(value);
             }}
-            onOpen={openSeries}
+            onOpen={(seriesId, sectionId, bookId) => {
+              void openSeries(seriesId, sectionId, 'push', bookId);
+            }}
+            onActivateBook={activateBook}
             onDelete={async (seriesId) => {
               await run('正在从书架移除系列…', async () => {
                 await api.deleteSeries(seriesId);
@@ -1963,6 +2014,7 @@ export default function App() {
               userId={auth.user.id}
               series={series}
               section={section}
+              directoryBookId={directoryBookId}
               dailyMode={activityDailyMode || data?.dailyMode?.dailyMode || 'slow'}
               onSelectSection={loadSection}
               onGenerateSection={generateSection}
@@ -2050,6 +2102,12 @@ export default function App() {
               () => api.confirmBookReplan(bookReplan.book.id, proposal.proposalId),
             );
             await refreshSeries();
+            const refreshed = await api.bootstrap();
+            setData(refreshed);
+            if (shelf) {
+              setShelf(refreshed.shelves.find((item) => item.id === shelf.id) || null);
+            }
+            setNotice('新目录已采用，这本书现在可以开始学习。');
           }}
         />
       )}
@@ -2871,6 +2929,12 @@ function bookProgressLabel(book: Book, isCurrent: boolean) {
   return '待开始';
 }
 
+function bookReadyForOutlineReview(series: Series, bookIndex: number) {
+  const book = series.books[bookIndex];
+  if (!book || book.outlineStatus !== 'draft') return false;
+  return bookIndex === 0 || series.books[bookIndex - 1]?.status === 'completed';
+}
+
 function nextBookSection(book: Book) {
   for (const chapter of book.chapters) {
     const section = chapter.sections.find((item) => item.status !== 'locked' && item.status !== 'completed');
@@ -3334,13 +3398,15 @@ function Home({
   dailyMode,
   onOpen,
   onContinue,
+  onActivateBook,
   onOpenReview,
   onCreate,
 }: {
   data: Bootstrap | null;
   dailyMode: DailyMode;
   onOpen: (shelf: Shelf) => void;
-  onContinue: (seriesId: string, sectionId?: string | null) => Promise<void>;
+  onContinue: (seriesId: string, sectionId?: string | null, bookId?: string | null) => Promise<void>;
+  onActivateBook: (book: Book) => Promise<void>;
   onOpenReview: () => void;
   onCreate: (body: ShelfCreateInput) => Promise<void>;
 }) {
@@ -3503,8 +3569,9 @@ function Home({
                       </div>
                     </header>
                     <div className="home-book-grid">
-                      {itemSeries.books.map((book) => {
+                      {itemSeries.books.map((book, bookIndex) => {
                         const details = bookProgressDetails(book);
+                        const canReviewOutline = bookReadyForOutlineReview(itemSeries, bookIndex);
                         const isTodayBook = Boolean(
                           itemSeries.id === dashboard?.today?.seriesId
                           && bookContainsSection(book, dashboard.today.sectionId),
@@ -3519,14 +3586,17 @@ function Home({
                         return (
                           <button
                             type="button"
-                            className={`home-book-card is-${book.status} ${isTodayBook ? 'is-today' : ''}`}
+                            className={`home-book-card is-${book.status} ${isTodayBook ? 'is-today' : ''} ${canReviewOutline ? 'is-outline-ready' : ''}`}
                             key={book.id}
-                            disabled={locked}
-                            onClick={() => void onContinue(itemSeries.id, nextSection)}
+                            disabled={locked && !canReviewOutline}
+                            onClick={() => {
+                              if (canReviewOutline) void onActivateBook(book);
+                              else void onContinue(itemSeries.id, nextSection, book.id);
+                            }}
                           >
                             <span className="home-book-topline">
                               <small>第 {book.position} 本</small>
-                              <em>{bookProgressLabel(book, isTodayBook)}</em>
+                              <em>{canReviewOutline ? '待确认' : bookProgressLabel(book, isTodayBook)}</em>
                             </span>
                             <strong>{book.title}</strong>
                             <span className="home-book-progress-copy">
@@ -3551,8 +3621,14 @@ function Home({
                               <i style={{ width: `${book.progress}%` }} />
                             </span>
                             <span className="home-book-action">
-                              {locked ? '完成前一本后解锁' : isTodayBook || book.progress > 0 ? '继续学习' : '打开这本'}
-                              {!locked && <i aria-hidden="true">→</i>}
+                              {canReviewOutline
+                                ? '查看并确认目录'
+                                : locked
+                                  ? '完成前一本后解锁'
+                                  : isTodayBook || book.progress > 0
+                                    ? '继续学习'
+                                    : '打开这本'}
+                              {(!locked || canReviewOutline) && <i aria-hidden="true">→</i>}
                             </span>
                           </button>
                         );
@@ -4419,13 +4495,15 @@ function ShelfPage({
   onBack,
   onCreate,
   onOpen,
+  onActivateBook,
   onDelete,
 }: {
   shelf: Shelf;
   profile: LearningProfile;
   onBack: () => void;
   onCreate: (body: object, idempotencyKey: string) => Promise<void>;
-  onOpen: (id: string, sectionId?: string | null) => void;
+  onOpen: (id: string, sectionId?: string | null, bookId?: string | null) => void;
+  onActivateBook: (book: Book) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
 }) {
   const [showPlan, setShowPlan] = useState(false);
@@ -4491,6 +4569,7 @@ function ShelfPage({
               <div className="focused-series-books">
                 {item.books.map((book, bookIndex) => {
                   const details = bookProgressDetails(book);
+                  const canReviewOutline = bookReadyForOutlineReview(item, bookIndex);
                   const nextSectionId = nextBookSection(book)?.section.id
                     || book.chapters.flatMap((chapter) => chapter.sections)
                       .find((candidate) => candidate.status !== 'locked')?.id
@@ -4499,15 +4578,18 @@ function ShelfPage({
                   return (
                     <button
                       type="button"
-                      className={`focused-book-volume book-tone-${(seriesIndex + bookIndex) % 6} is-${book.status}`}
+                      className={`focused-book-volume book-tone-${(seriesIndex + bookIndex) % 6} is-${book.status} ${canReviewOutline ? 'is-outline-ready' : ''}`}
                       style={{ height: `${220 + ((bookIndex * 19) % 34)}px` }}
                       key={book.id}
-                      disabled={locked}
-                      onClick={() => onOpen(item.id, nextSectionId)}
+                      disabled={locked && !canReviewOutline}
+                      onClick={() => {
+                        if (canReviewOutline) void onActivateBook(book);
+                        else onOpen(item.id, nextSectionId, book.id);
+                      }}
                     >
                       <span className="focused-book-number">第 {book.position} 本</span>
                       <strong>{book.title}</strong>
-                      <small>{bookProgressLabel(book, false)}</small>
+                      <small>{canReviewOutline ? '待确认' : bookProgressLabel(book, false)}</small>
                       <span className="focused-book-progress">
                         <span>
                           {details.totalChapters > 0
@@ -4520,8 +4602,14 @@ function ShelfPage({
                         <b style={{ width: `${book.progress}%` }} />
                       </i>
                       <span className="focused-book-action">
-                        {locked ? '完成前一本后解锁' : book.progress > 0 ? '继续这本' : '打开这本'}
-                        {!locked && <i aria-hidden="true">→</i>}
+                        {canReviewOutline
+                          ? '查看并确认目录'
+                          : locked
+                            ? '完成前一本后解锁'
+                            : book.progress > 0
+                              ? '继续这本'
+                              : '打开这本'}
+                        {(!locked || canReviewOutline) && <i aria-hidden="true">→</i>}
                       </span>
                     </button>
                   );
@@ -5104,6 +5192,7 @@ function LearningWorkspace({
   userId,
   series,
   section,
+  directoryBookId,
   dailyMode,
   onSelectSection,
   onGenerateSection,
@@ -5123,13 +5212,14 @@ function LearningWorkspace({
   userId: string;
   series: Series;
   section: Section | null;
+  directoryBookId: string;
   dailyMode: DailyMode;
   onSelectSection: (id: string) => Promise<Section>;
   onGenerateSection: (id: string) => Promise<void>;
   onRegenerateSection: (id: string) => Promise<void>;
   onGenerateChapter: (chapter: Chapter) => Promise<void>;
   onActivateBook: (book: Book) => Promise<void>;
-  onStartNextBook: () => Promise<void>;
+  onStartNextBook: (bookId: string) => Promise<void>;
   chapterGenerationDisabled: boolean;
   generatingChapterId: string;
   onSectionChange: (section: Section | null) => void;
@@ -5475,6 +5565,7 @@ function LearningWorkspace({
       )}
       <DirectoryPanel
         series={series}
+        directoryBookId={directoryBookId}
         hidden={directoryHidden}
         onClose={() => setDirectoryHidden(true)}
         currentSectionId={section?.id}
@@ -5686,6 +5777,7 @@ function GenerateIcon() {
 
 function DirectoryPanel({
   series,
+  directoryBookId,
   hidden,
   onClose,
   currentSectionId,
@@ -5702,6 +5794,7 @@ function DirectoryPanel({
   onDeleteBook,
 }: {
   series: Series;
+  directoryBookId: string;
   hidden: boolean;
   onClose: () => void;
   currentSectionId?: string;
@@ -5710,7 +5803,7 @@ function DirectoryPanel({
   onSelectChapter: (chapter: Chapter) => void;
   onChallengeChapter: (chapter: Chapter) => void;
   onSkipChapter: (chapter: Chapter) => void;
-  onStartNextBook: () => Promise<void>;
+  onStartNextBook: (bookId: string) => Promise<void>;
   onActivateBook: (book: Book) => Promise<void>;
   chapterGenerationDisabled: boolean;
   generatingChapterId: string;
@@ -5722,10 +5815,16 @@ function DirectoryPanel({
   const activeBookIndex = series.books.findIndex((book) => book.chapters.some(
     (chapter) => chapter.sections.some((item) => item.id === currentSectionId),
   ));
-  const resolvedBookIndex = activeBookIndex >= 0
-    ? activeBookIndex
-    : Math.max(0, series.books.findIndex((book) => book.status !== 'locked'));
+  const focusedBookIndex = series.books.findIndex((book) => book.id === directoryBookId);
+  const resolvedBookIndex = focusedBookIndex >= 0
+    ? focusedBookIndex
+    : activeBookIndex >= 0
+      ? activeBookIndex
+      : Math.max(0, series.books.findIndex((book) => book.status !== 'locked'));
   const activeBook = series.books[resolvedBookIndex];
+  const nextBook = activeBook?.status === 'completed'
+    ? series.books[resolvedBookIndex + 1]
+    : null;
   const [settlementTarget, setSettlementTarget] = useState<Book | null>(null);
   const [settlement, setSettlement] = useState<BookSettlement | null>(null);
   const [settlementLoading, setSettlementLoading] = useState(false);
@@ -5766,13 +5865,15 @@ function DirectoryPanel({
           <b>路线 {activeBook?.progress || 0}%</b>
         </div>
       </div>
-      {series.books[0]?.status === 'completed'
-        && series.books[1]
-        && series.books[1].status !== 'locked' && (
+      {nextBook && nextBook.status !== 'locked' && (
           <div className="next-book-callout" role="status">
-            <b>{series.books[0].chapters.some((chapter) => chapter.status === 'skipped') ? '第一册路线已走完' : '第一册已完成'}</b>
-            <span>第二册《{series.books[1].title}》已经解锁。</span>
-            <button className="secondary-button" onClick={onStartNextBook}>开始第二册</button>
+            <b>{activeBook.chapters.some((chapter) => chapter.status === 'skipped')
+              ? `第 ${activeBook.position} 册路线已走完`
+              : `第 ${activeBook.position} 册已完成`}</b>
+            <span>第 {nextBook.position} 册《{nextBook.title}》已经解锁。</span>
+            <button className="secondary-button" onClick={() => void onStartNextBook(nextBook.id)}>
+              开始第 {nextBook.position} 册
+            </button>
           </div>
       )}
       <nav className="book-tree">
