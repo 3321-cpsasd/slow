@@ -311,6 +311,10 @@ export const api = {
   aiRuntime:()=>call<import('../model/types').AiRuntime>('/api/runtime/ai'),
   updateAiRuntime:(body:object)=>call<import('../model/types').AiRuntime>('/api/runtime/ai',{method:'PUT',body:JSON.stringify(body)}),
   createPlan:(body:object,idempotencyKey:string)=>call<import('../model/types').Series>('/api/plans',{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},body:JSON.stringify(body)}),
+  learningStartPreview:(body:object)=>call<import('../model/types').LearningStartPreview>('/api/learning-start/preview',{
+    method:'POST',
+    body:JSON.stringify(body),
+  }),
   series:(id:string)=>call<import('../model/types').Series>(`/api/series/${id}`),
   confirmMilestonePath:(id:string)=>call<{seriesId:string;status:string;version:number;goalProfileVersion:number}>(`/api/series/${id}/milestone-path/confirm`,{method:'POST'}),
   deleteSeries:(id:string)=>call<void>(`/api/series/${id}`,{method:'DELETE'}),
@@ -318,6 +322,21 @@ export const api = {
   replanBook:(id:string)=>call<import('../model/types').BookReplanProposal>(`/api/books/${id}/chapters/replan`,{method:'POST'}),
   confirmBookReplan:(id:string,proposalId:string)=>call<import('../model/types').Book>(`/api/books/${id}/chapters/replan/${proposalId}/confirm`,{method:'POST'}),
   chapter:(id:string)=>call<import('../model/types').Chapter>(`/api/chapters/${id}/generate`,{method:'POST'}),
+  skipChapter:(id:string,reason:'not_focus'|'defer_unknown'|'challenge_exit',idempotencyKey:string)=>call<import('../model/types').ChapterRouteResult>(`/api/chapters/${id}/skip`,{
+    method:'POST',
+    headers:{'Idempotency-Key':idempotencyKey},
+    body:JSON.stringify({reason}),
+  }),
+  resumeChapter:(id:string,idempotencyKey:string)=>call<import('../model/types').Chapter>(`/api/chapters/${id}/resume`,{
+    method:'POST',
+    headers:{'Idempotency-Key':idempotencyKey},
+  }),
+  prepareChapterChallenge:(id:string)=>call<import('../model/types').ChapterChallenge>(`/api/chapters/${id}/challenge/prepare`,{method:'POST'}),
+  submitChapterChallenge:(id:string,sections:{sectionId:string;quizSetId:string;answers:number[][]}[],idempotencyKey:string)=>call<import('../model/types').ChapterChallengeResult>(`/api/chapters/${id}/challenge/submit`,{
+    method:'POST',
+    headers:{'Idempotency-Key':idempotencyKey},
+    body:JSON.stringify({sections}),
+  }),
   section:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}`),
   openSection:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}/open`,{method:'POST'}),
   generateSection:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}/generate`,{method:'POST'}),

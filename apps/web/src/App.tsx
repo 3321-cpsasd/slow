@@ -42,6 +42,8 @@ import type {
   PrivacyState,
   RegistrationResult,
   Chapter,
+  ChapterChallenge,
+  ChapterChallengeResult,
   DueReviews,
   DailyMode,
   DailyModeDuration,
@@ -49,6 +51,8 @@ import type {
   LearningTask,
   LearningProfile,
   LearningPreferences,
+  LearningStartPreference,
+  LearningStartPreview,
   KnowledgeSettlement,
   KnowledgeMap,
   KnowledgeMapNode,
@@ -411,7 +415,7 @@ export default function App() {
     && new Date(data.dailyMode.expiresAt).getTime() > Date.now(),
   );
 
-  const dailyModePromptEnabled = data?.profile.preferences.dailyModePromptEnabled ?? true;
+  const dailyModePromptEnabled = data?.profile.preferences.dailyModePromptEnabled ?? false;
 
   const loadAuthenticatedState = async () => {
     const value = await api.authMe();
@@ -570,11 +574,9 @@ export default function App() {
     const state = data?.dailyMode;
     if (!state) return;
     if (!state.active || !state.expiresAt) {
-      if (dailyModePromptEnabled && !(view === 'learn' && section && activityDailyMode)) {
-        setDailyModeDialogOpen(true);
-      }
       return;
     }
+    setDailyModeDialogOpen(false);
     const expire = () => {
       setData((current) => current ? {
         ...current,
@@ -590,8 +592,6 @@ export default function App() {
       } : current);
       if (view === 'learn' && section && activityDailyMode) {
         setDailyModeExpiredDuringActivity(true);
-      } else if (dailyModePromptEnabled) {
-        setDailyModeDialogOpen(true);
       }
     };
     const remaining = new Date(state.expiresAt).getTime() - Date.now();
@@ -601,7 +601,7 @@ export default function App() {
     }
     const timer = window.setTimeout(expire, Math.min(remaining, 2_147_000_000));
     return () => window.clearTimeout(timer);
-  }, [data?.dailyMode?.version, data?.dailyMode?.active, data?.dailyMode?.expiresAt, dailyModePromptEnabled, view, section?.id, activityDailyMode]);
+  }, [data?.dailyMode?.version, data?.dailyMode?.active, data?.dailyMode?.expiresAt, view, section?.id, activityDailyMode]);
 
   const run = async <T,>(label: string, action: () => Promise<T>) => {
     setBusy(label);
@@ -743,7 +743,7 @@ export default function App() {
     setSection(null);
     setActivityDailyMode(null);
     setDailyModeExpiredDuringActivity(false);
-    if (dailyModePromptEnabled && !hasActiveDailyMode()) setDailyModeDialogOpen(true);
+    setDailyModeDialogOpen(false);
     void api.bootstrap()
       .then(setData)
       .catch((reason) => setError(reason instanceof Error ? reason.message : '主页刷新失败'));
@@ -837,12 +837,14 @@ export default function App() {
   const loadSection = async (
     sectionId: string,
     historyMode: 'push' | 'replace' | 'none' = 'push',
+    promptForDailyMode = true,
   ) => {
     if (series) updateBrowserLocation(seriesPath(series.id, sectionId), historyMode);
-    if (dailyModePromptEnabled && !hasActiveDailyMode()) {
+    if (promptForDailyMode && dailyModePromptEnabled && !hasActiveDailyMode()) {
       setPendingSectionId(sectionId);
       setDailyModeDialogOpen(true);
       if (section) return section;
+      return api.section(sectionId);
     }
     const value = await run(
       '正在读取小节…',
@@ -856,6 +858,7 @@ export default function App() {
     mode: DailyMode,
     duration: DailyModeDuration,
     source: DailyModeSource,
+    promptEnabled?: boolean,
   ) => {
     setDailyModeBusy(true);
     setError('');
@@ -865,7 +868,38 @@ export default function App() {
         { dailyMode: mode, duration, timezone, source },
         `daily-mode-${crypto.randomUUID()}`,
       );
-      setData((current) => current ? { ...current, dailyMode: updated } : current);
+      let updatedProfile: LearningProfile | null = null;
+      let promptPreferenceFailed = false;
+      if (
+        source === 'dialog'
+        && typeof promptEnabled === 'boolean'
+        && data
+        && data.profile.preferences.dailyModePromptEnabled !== promptEnabled
+      ) {
+        const profile = data.profile;
+        try {
+          updatedProfile = await api.updateProfile({
+            profession: profile.profession,
+            stage: profile.stage,
+            purpose: profile.purpose,
+            domains: profile.domains,
+            experience: profile.experience,
+            weeklyMinutes: profile.weeklyMinutes,
+            targetDate: profile.targetDate,
+            preferences: {
+              ...profile.preferences,
+              dailyModePromptEnabled: promptEnabled,
+            },
+          });
+        } catch {
+          promptPreferenceFailed = true;
+        }
+      }
+      setData((current) => current ? {
+        ...current,
+        dailyMode: updated,
+        profile: updatedProfile || current.profile,
+      } : current);
       if (source === 'header_toggle') {
         if (section) setActivityDailyMode(mode);
         setNotice(mode === 'fast'
@@ -874,6 +908,9 @@ export default function App() {
       }
       setDailyModeExpiredDuringActivity(false);
       setDailyModeDialogOpen(false);
+      if (promptPreferenceFailed) {
+        setNotice('学习模式已开始；“不再自动弹出”未能保存，可稍后在学习画像中关闭。');
+      }
       if (pendingSectionId) {
         const target = pendingSectionId;
         setPendingSectionId('');
@@ -892,7 +929,7 @@ export default function App() {
     for (const book of value.books) {
       for (const chapter of book.chapters) {
         const match = chapter.sections.find(
-          (item) => item.status !== 'locked' && item.status !== 'completed',
+          (item) => !['locked', 'completed', 'skipped'].includes(item.status),
         );
         if (match) return match.id;
         completedFallback ||= chapter.sections.find(
@@ -930,37 +967,17 @@ export default function App() {
         if (task.status === 'succeeded') {
           const refreshed = await api.series(value.id);
           if (!isCurrent()) return false;
-          const targetSectionId = typeof task.result?.targetSectionId === 'string'
-            ? task.result.targetSectionId
-            : firstUsableSection(refreshed);
-          let openedSection: Section | null = null;
-          if (targetSectionId) {
-            openedSection = await api.openSection(targetSectionId);
-            if (!isCurrent()) return false;
-          }
           setSeries(refreshed);
-          if (targetSectionId && openedSection) {
-            updateBrowserLocation(seriesPath(refreshed.id, targetSectionId), 'replace');
-            applyOpenedSection(openedSection, targetSectionId);
-            setSection(openedSection);
-          }
+          setSection(null);
+          updateBrowserLocation(seriesPath(refreshed.id), 'replace');
           return true;
         }
         if (task.status === 'failed') {
           const refreshed = await api.series(value.id);
           if (!isCurrent()) return false;
-          const fallbackSectionId = firstUsableSection(refreshed);
-          let openedSection: Section | null = null;
-          if (fallbackSectionId) {
-            openedSection = await api.openSection(fallbackSectionId);
-            if (!isCurrent()) return false;
-          }
           setSeries(refreshed);
-          if (fallbackSectionId && openedSection) {
-            updateBrowserLocation(seriesPath(refreshed.id, fallbackSectionId), 'replace');
-            applyOpenedSection(openedSection, fallbackSectionId);
-            setSection(openedSection);
-          }
+          setSection(null);
+          updateBrowserLocation(seriesPath(refreshed.id), 'replace');
           setError(generationFailureMessage(task, '第一节内容'));
           return true;
         }
@@ -1008,28 +1025,28 @@ export default function App() {
     const resumeBelongsToSeries = resumeSection
       ? value.books.some((book) => book.chapters.some(
         (chapter) => chapter.sections.some(
-          (item) => item.id === resumeSection && item.status !== 'locked',
+          (item) => item.id === resumeSection && !['locked', 'skipped'].includes(item.status),
         ),
       ))
       : false;
     const requestedBelongsToSeries = requestedSectionId
       ? value.books.some((book) => book.chapters.some(
         (chapter) => chapter.sections.some(
-          (item) => item.id === requestedSectionId && item.status !== 'locked',
+          (item) => item.id === requestedSectionId && !['locked', 'skipped'].includes(item.status),
         ),
       ))
       : false;
     const initial = requestedBelongsToSeries
       ? requestedSectionId!
-      : resumeBelongsToSeries
+      : resumeBelongsToSeries && value.progress > 0
         ? resumeSection!
-        : firstUsableSection(value);
+        : null;
     if (initial) {
       updateBrowserLocation(
         seriesPath(value.id, initial),
         historyMode === 'none' ? 'none' : 'replace',
       );
-      await loadSection(initial, 'none');
+      await loadSection(initial, 'none', false);
     } else setSection(null);
   };
 
@@ -1064,7 +1081,9 @@ export default function App() {
     try {
       const updated = await run('正在规划本章小节…', () => api.chapter(chapter.id));
       await refreshSeries();
-      const first = updated.sections.find((item) => item.status !== 'locked');
+      const first = updated.sections.find(
+        (item) => !['locked', 'completed', 'skipped'].includes(item.status),
+      ) || updated.sections.find((item) => item.status === 'completed');
       if (first) await loadSection(first.id);
     } finally {
       chapterGenerationRequests.current.delete(chapter.id);
@@ -1616,13 +1635,8 @@ export default function App() {
   const showDailyModeDialog = Boolean(
     data?.dailyMode
     && dailyModePromptEnabled
-    && (
-      dailyModeDialogOpen
-      || (
-        !data.dailyMode.active
-        && !(view === 'learn' && section && activityDailyMode)
-      )
-    ),
+    && dailyModeDialogOpen
+    && !hasActiveDailyMode(),
   );
   const currentMilestonePath = data?.milestoneDashboard.path || null;
   const activeMilestonePath = currentMilestonePath?.seriesId === series?.id
@@ -1920,7 +1934,7 @@ export default function App() {
                 setSeries(updated);
                 if (deletingCurrentBook) {
                   const initial = firstUsableSection(updated);
-                  if (initial) await loadSection(initial);
+                  if (initial) await loadSection(initial, 'push', false);
                   else setSection(null);
                 }
               });
@@ -3562,7 +3576,7 @@ const DEFAULT_LEARNING_PREFERENCES: LearningPreferences = {
   explanationDensity: 'auto',
   formatPreferences: [],
   interactionRhythm: 'auto',
-  dailyModePromptEnabled: true,
+  dailyModePromptEnabled: false,
 };
 
 const PROFILE_PREFERENCE_OPTIONS = {
@@ -3857,7 +3871,7 @@ function ProfileCenterPage({
   const [formatPreferences, setFormatPreferences] = useState(initialPreferences.formatPreferences);
   const [interactionRhythm, setInteractionRhythm] = useState(initialPreferences.interactionRhythm);
   const [dailyModePromptEnabled, setDailyModePromptEnabled] = useState(
-    initialPreferences.dailyModePromptEnabled ?? true,
+    initialPreferences.dailyModePromptEnabled ?? false,
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -4037,7 +4051,8 @@ function ProfileCenterPage({
             <legend>学习节奏</legend>
             <label className="profile-toggle-row">
               <span>
-                <b>进入学习前询问 Fast / Slow 模式</b>
+                <b>进入学习前自动询问 Fast / Slow 模式</b>
+                <small>关闭时沿用上次选择，也可以随时从顶部切换。</small>
               </span>
               <input
                 type="checkbox"
@@ -4314,7 +4329,7 @@ function ShelfPage({
           {showPlan ? '取消创建' : '＋ 创建学习系列'}
         </button>
       </div>
-      {showPlan && <PlanForm profile={profile} submit={onCreate} onCancel={() => setShowPlan(false)} />}
+      {showPlan && <PlanForm shelfId={shelf.id} profile={profile} submit={onCreate} onCancel={() => setShowPlan(false)} />}
       <div className="series-shelf-heading">
         <span>学习系列</span>
       </div>
@@ -4421,10 +4436,12 @@ function TrashIcon({ size = 16 }: { size?: number }) {
 }
 
 function PlanForm({
+  shelfId,
   profile,
   submit,
   onCancel,
 }: {
+  shelfId: string;
   profile: LearningProfile;
   submit: (body: object, idempotencyKey: string) => Promise<void>;
   onCancel: () => void;
@@ -4439,29 +4456,200 @@ function PlanForm({
   const [experience, setExperience] = useState(profile.experience || '暂无直接经验，希望从当前基础开始建立理解。');
   const [purpose, setPurpose] = useState(profile.purpose);
   const [depth, setDepth] = useState('');
+  const [step, setStep] = useState<'details' | 'start' | 'map'>('details');
+  const [preview, setPreview] = useState<LearningStartPreview | null>(null);
+  const [selectedConcepts, setSelectedConcepts] = useState<string[]>([]);
+  const [learningPreferences, setLearningPreferences] = useState<LearningStartPreference[]>([]);
   const [formError, setFormError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [previewing, setPreviewing] = useState(false);
   const idempotencyKey = useRef(crypto.randomUUID());
-  const send = async (event: FormEvent) => {
+  const planDetails = { shelfId, topic, role: background, experience, purpose, depth, details: '' };
+  const continueToStart = (event: FormEvent) => {
     event.preventDefault();
-    if (submitting) return;
+    if (submitting || previewing) return;
     if (!depth) {
       setFormError('请选择目标深度');
+      return;
+    }
+    setFormError('');
+    setStep('start');
+  };
+  const submitPlan = async (mode: 'direct' | 'guided') => {
+    if (submitting) return;
+    if (mode === 'guided' && !selectedConcepts.length) {
+      setFormError('至少点亮一个你愿意投入时间的方向');
       return;
     }
     setFormError('');
     setSubmitting(true);
     try {
       await submit(
-        { topic, role: background, experience, purpose, depth, details: '' },
+        mode === 'guided' && preview
+          ? {
+              ...planDetails,
+              startMode: 'guided',
+              learningStartSelection: {
+                previewId: preview.previewId,
+                selectedConceptRevisionIds: selectedConcepts,
+                learningPreferences,
+              },
+            }
+          : { ...planDetails, startMode: 'direct' },
         idempotencyKey.current,
       );
-    } catch {
+    } catch (reason) {
       setSubmitting(false);
+      setFormError(reason instanceof Error ? reason.message : '学习路线生成失败，请稍后重试');
     }
   };
+  const openKnowledgeMap = async () => {
+    if (previewing) return;
+    setPreviewing(true);
+    setFormError('');
+    try {
+      const value = await api.learningStartPreview(planDetails);
+      setPreview(value);
+      setSelectedConcepts([]);
+      setLearningPreferences([]);
+      setStep('map');
+    } catch (reason) {
+      setFormError(reason instanceof Error ? reason.message : '暂时无法打开知识版图');
+    } finally {
+      setPreviewing(false);
+    }
+  };
+  const returnToDetails = () => {
+    idempotencyKey.current = crypto.randomUUID();
+    setPreview(null);
+    setSelectedConcepts([]);
+    setLearningPreferences([]);
+    setFormError('');
+    setStep('details');
+  };
+
+  if (step === 'start') {
+    return (
+      <section className="learning-start-flow" id="create-series-form" aria-labelledby="learning-start-title">
+        <header className="learning-start-heading">
+          <div>
+            <p className="eyebrow">最后一步</p>
+            <h2 id="learning-start-title">这次想怎么开始？</h2>
+            <p>课程结构不变，只决定哪些内容多投入，哪些内容先轻一点。</p>
+          </div>
+          <span className="learning-start-topic">{topic}</span>
+        </header>
+        <div className="learning-start-options">
+          <button
+            type="button"
+            disabled={submitting || previewing}
+            onClick={() => void submitPlan('direct')}
+          >
+            <span className="learning-start-option-number">01</span>
+            <small>直接开始</small>
+            <b>让系统从零安排</b>
+            <p>按你的背景和目标生成完整路线，适合还不确定重点的时候。</p>
+            <i aria-hidden="true">→</i>
+          </button>
+          <button
+            type="button"
+            className="featured"
+            disabled={submitting || previewing}
+            onClick={() => void openKnowledgeMap()}
+          >
+            <span className="learning-start-option-number">02</span>
+            <small>先挑重点</small>
+            <b>点亮想学的方向</b>
+            <p>从知识关系中凭直觉点选。没点亮的不会消失，只会降低优先级。</p>
+            <i aria-hidden="true">↗</i>
+          </button>
+        </div>
+        {formError && <p className="plan-form-error" role="alert">{formError}</p>}
+        <footer className="learning-start-footer">
+          <button type="button" className="quiet-button" disabled={submitting || previewing} onClick={returnToDetails}>← 修改学习目标</button>
+          <span>{submitting ? '正在生成学习路线…' : previewing ? '正在展开知识关系…' : '之后每章仍可以选择学习、挑战或暂时略过'}</span>
+        </footer>
+      </section>
+    );
+  }
+
+  if (step === 'map' && preview) {
+    const ready = preview.availability === 'ready' && preview.nodes.length > 0;
+    return (
+      <section className="learning-start-flow knowledge-interest-step" id="create-series-form" aria-labelledby="knowledge-interest-title">
+        <header className="learning-start-heading">
+          <div>
+            <p className="eyebrow">凭直觉选择</p>
+            <h2 id="knowledge-interest-title">点亮你真正关心的内容</h2>
+            <p>{preview.message}</p>
+          </div>
+          <span className="knowledge-selection-count">已点亮 <b>{selectedConcepts.length}</b></span>
+        </header>
+        {ready ? (
+          <KnowledgeInterestGraph
+            preview={preview}
+            selected={selectedConcepts}
+            onToggle={(conceptId) => {
+              setSelectedConcepts((current) => (
+                current.includes(conceptId)
+                  ? current.filter((item) => item !== conceptId)
+                  : [...current, conceptId]
+              ));
+              setFormError('');
+            }}
+          />
+        ) : (
+          <div className="knowledge-interest-empty">
+            <span aria-hidden="true">◌</span>
+            <h3>这个方向暂时没有可选择的知识关系</h3>
+            <p>可以先直接开始，进入每一章时仍然能学习、挑战或略过。</p>
+          </div>
+        )}
+        {ready && (
+          <fieldset className="learning-preference-picks">
+            <legend>再选一两个学习偏好 <small>可选</small></legend>
+            {([
+              ['practical_application', '实际应用'],
+              ['understand_principles', '理解原理'],
+              ['case_based', '案例带入'],
+              ['practice_heavy', '多做练习'],
+            ] as [LearningStartPreference, string][]).map(([value, label]) => {
+              const selected = learningPreferences.includes(value);
+              return (
+                <button
+                  type="button"
+                  key={value}
+                  className={selected ? 'selected' : ''}
+                  aria-pressed={selected}
+                  onClick={() => setLearningPreferences((current) => {
+                    if (selected) return current.filter((item) => item !== value);
+                    return current.length < 2 ? [...current, value] : current;
+                  })}
+                >
+                  <span aria-hidden="true">{selected ? '●' : '○'}</span>{label}
+                </button>
+              );
+            })}
+          </fieldset>
+        )}
+        {formError && <p className="plan-form-error" role="alert">{formError}</p>}
+        <footer className="learning-start-footer">
+          <button type="button" className="quiet-button" disabled={submitting} onClick={() => { setStep('start'); setFormError(''); }}>← 换一种开始方式</button>
+          <button
+            type="button"
+            className="primary-button"
+            disabled={submitting}
+            onClick={() => void submitPlan(ready ? 'guided' : 'direct')}
+          >
+            {submitting ? '正在生成学习路线…' : ready ? '按这些重点开始 →' : '直接开始 →'}
+          </button>
+        </footer>
+      </section>
+    );
+  }
+
   return (
-    <form className="plan-form" id="create-series-form" onSubmit={send}>
+    <form className="plan-form" id="create-series-form" onSubmit={continueToStart}>
       <label>
         学习内容
         <input required disabled={submitting} value={topic} onChange={(event) => setTopic(event.target.value)} placeholder="输入你想学习的内容" />
@@ -4499,13 +4687,72 @@ function PlanForm({
       </fieldset>
       <div className="plan-form-actions">
         <button type="button" className="quiet-button" disabled={submitting} onClick={onCancel}>取消</button>
-        <button className="primary-button" disabled={submitting}>{submitting ? '正在生成，请稍候…' : '生成目录方案'}</button>
+        <button className="primary-button" disabled={submitting}>继续选择开始方式 →</button>
       </div>
     </form>
   );
 }
 
+function KnowledgeInterestGraph({
+  preview,
+  selected,
+  onToggle,
+}: {
+  preview: LearningStartPreview;
+  selected: string[];
+  onToggle: (conceptId: string) => void;
+}) {
+  const points = useMemo(() => {
+    const count = preview.nodes.length;
+    return preview.nodes.map((node, index) => {
+      const ring = count > 8 && index % 3 !== 0 ? 35 : 24;
+      const angle = -Math.PI / 2 + ((Math.PI * 2 * index) / Math.max(count, 1));
+      return {
+        ...node,
+        x: 50 + Math.cos(angle) * ring,
+        y: 50 + Math.sin(angle) * ring,
+      };
+    });
+  }, [preview]);
+  const pointById = new Map(points.map((point) => [point.conceptRevisionId, point]));
+  return (
+    <div className="knowledge-interest-graph" aria-label="可点选的知识关系图">
+      <svg aria-hidden="true" viewBox="0 0 100 100" preserveAspectRatio="none">
+        {preview.edges.map((edge) => {
+          const from = pointById.get(edge.from);
+          const to = pointById.get(edge.to);
+          if (!from || !to) return null;
+          const active = selected.includes(edge.from) && selected.includes(edge.to);
+          return <line key={edge.id} x1={from.x} y1={from.y} x2={to.x} y2={to.y} className={active ? 'active' : ''} />;
+        })}
+      </svg>
+      {points.map((point, index) => {
+        const active = selected.includes(point.conceptRevisionId);
+        return (
+          <button
+            type="button"
+            key={point.conceptRevisionId}
+            className={active ? 'active' : ''}
+            aria-pressed={active}
+            title={point.meaning}
+            style={{ '--node-x': `${point.x}%`, '--node-y': `${point.y}%`, '--node-delay': `${index * 20}ms` } as CSSProperties}
+            onClick={() => onToggle(point.conceptRevisionId)}
+          >
+            <span aria-hidden="true" />
+            <b>{point.label}</b>
+          </button>
+        );
+      })}
+      <div className="knowledge-interest-center" aria-hidden="true">
+        <span>你的目标</span>
+        <b>{preview.topic}</b>
+      </div>
+    </div>
+  );
+}
+
 type WorkspacePanel = 'directory' | 'qa';
+type ChapterLaunchAction = 'challenge' | 'skip';
 type WorkspaceLayoutRatios = {
   threeDirectory: number;
   threeQa: number;
@@ -4516,9 +4763,12 @@ type WorkspaceLayoutRatioKey = keyof WorkspaceLayoutRatios;
 
 const workspacePanelSizing = {
   directory: { defaultWidth: 240, minWidth: 220, maxWidth: 360 },
-  qa: { defaultWidth: 380, minWidth: 300, maxWidth: 480 },
+  qa: { defaultWidth: 380, minWidth: 300, maxWidth: Number.POSITIVE_INFINITY },
 } as const;
-const workspaceReaderMinWidth = 512;
+// Side panels share at most this proportion. The remaining reader width is
+// therefore stable across laptop and wide desktop viewports without relying
+// on one fixed-pixel breakpoint.
+const workspaceReaderMinRatio = 0.48;
 const workspaceRatioMigrationReferenceWidth = 1440;
 const defaultWorkspaceLayoutRatios: WorkspaceLayoutRatios = {
   threeDirectory: workspacePanelSizing.directory.defaultWidth / workspaceRatioMigrationReferenceWidth,
@@ -4635,7 +4885,7 @@ function fitVisibleWorkspacePanelWidths(
   if (!directoryHidden && !qaHidden) {
     const availableForPanels = Math.max(
       workspacePanelSizing.directory.minWidth + workspacePanelSizing.qa.minWidth,
-      workspaceWidth - workspaceReaderMinWidth,
+      workspaceWidth * (1 - workspaceReaderMinRatio),
     );
     let overflow = Math.max(0, nextDirectoryWidth + nextQaWidth - availableForPanels);
     const qaReduction = Math.min(overflow, nextQaWidth - workspacePanelSizing.qa.minWidth);
@@ -4646,10 +4896,14 @@ function fitVisibleWorkspacePanelWidths(
     nextDirectoryWidth = clampWorkspacePanelWidth(
       'directory',
       nextDirectoryWidth,
-      workspaceWidth - workspaceReaderMinWidth,
+      workspaceWidth * (1 - workspaceReaderMinRatio),
     );
   } else if (!qaHidden) {
-    nextQaWidth = clampWorkspacePanelWidth('qa', nextQaWidth, workspaceWidth - workspaceReaderMinWidth);
+    nextQaWidth = clampWorkspacePanelWidth(
+      'qa',
+      nextQaWidth,
+      workspaceWidth * (1 - workspaceReaderMinRatio),
+    );
   }
   return { directoryWidth: nextDirectoryWidth, qaWidth: nextQaWidth };
 }
@@ -4713,7 +4967,7 @@ function LearningWorkspace({
   onActivateBook: (book: Book) => Promise<void>;
   chapterGenerationDisabled: boolean;
   generatingChapterId: string;
-  onSectionChange: (section: Section) => void;
+  onSectionChange: (section: Section | null) => void;
   onRefreshSeries: () => Promise<void>;
   onDeleteBook: (bookId: string) => Promise<void>;
   onFeedbackBlock: (block: Block) => void;
@@ -4721,6 +4975,8 @@ function LearningWorkspace({
   onQaVisibilityChange: (open: boolean) => void;
 }) {
   const [selectedBlockId, setSelectedBlockId] = useState('');
+  const [selectedChapterId, setSelectedChapterId] = useState('');
+  const [chapterLaunchAction, setChapterLaunchAction] = useState<ChapterLaunchAction | null>(null);
   const [selectedQuote, setSelectedQuote] = useState<TextQuote | null>(null);
   const [explanationRequest, setExplanationRequest] = useState<ExplanationRequest | null>(null);
   const [compactLayout, setCompactLayout] = useState(() => window.matchMedia('(max-width: 900px)').matches);
@@ -4835,9 +5091,52 @@ function LearningWorkspace({
     setSelectedBlockId(section?.content?.blocks[0]?.id || '');
     setSelectedQuote(null);
     setExplanationRequest(null);
+    if (section?.id) setChapterLaunchAction(null);
   }, [section?.id, section?.content?.id]);
 
   const location = useMemo(() => findSectionLocation(series, section?.id), [series, section?.id]);
+  const routeChapters = useMemo(
+    () => series.books.flatMap((book) => book.chapters),
+    [series],
+  );
+  const selectedChapter = routeChapters.find((chapter) => chapter.id === selectedChapterId) || null;
+  useEffect(() => {
+    if (location?.chapter.id) {
+      setSelectedChapterId(location.chapter.id);
+      return;
+    }
+    if (selectedChapter && selectedChapter.status !== 'locked') return;
+    const next = routeChapters.find((chapter) => chapter.status === 'available')
+      || routeChapters.find((chapter) => chapter.status === 'skipped')
+      || null;
+    setSelectedChapterId(next?.id || '');
+  }, [location?.chapter.id, selectedChapter?.id, selectedChapter?.status, routeChapters]);
+  const selectChapter = async (chapter: Chapter) => {
+    if (chapter.status === 'locked') return;
+    setSelectedChapterId(chapter.id);
+    setChapterLaunchAction(null);
+    if (compactLayout) setDirectoryHidden(true);
+    if (chapter.status === 'skipped') {
+      await api.resumeChapter(chapter.id, `resume-${crypto.randomUUID()}`);
+      await onRefreshSeries();
+    }
+    const first = chapter.sections.find(
+      (item) => !['locked', 'completed'].includes(item.status),
+    ) || chapter.sections.find((item) => item.status === 'completed');
+    if (chapter.generated && first) {
+      await onSelectSection(first.id);
+      return;
+    }
+    await onGenerateChapter(chapter);
+  };
+  const openChapterAction = (chapter: Chapter, action: ChapterLaunchAction) => {
+    if (chapter.status === 'locked' || chapter.status === 'completed') return;
+    setSelectedChapterId(chapter.id);
+    setChapterLaunchAction(action);
+    onSectionChange(null);
+    updateBrowserLocation(seriesPath(series.id), 'push');
+    if (compactLayout) setDirectoryHidden(true);
+  };
   const activeBlockId = selectedBlockId || section?.content?.blocks[0]?.id || '';
   const selectBlock = (blockId: string) => {
     setSelectedBlockId(blockId);
@@ -4872,7 +5171,7 @@ function LearningWorkspace({
     const otherWidth = panel === 'directory'
       ? (!qaHidden && !otherPanelWillClose ? qaWidth : 0)
       : (!directoryHidden && !otherPanelWillClose ? directoryWidth : 0);
-    return workspaceWidth - workspaceReaderMinWidth - otherWidth;
+    return workspaceWidth * (1 - workspaceReaderMinRatio) - otherWidth;
   };
   const persistPanelRatio = (
     panel: WorkspacePanel,
@@ -4979,7 +5278,7 @@ function LearningWorkspace({
     let nextWidth = currentWidth;
     const step = event.shiftKey ? 32 : 12;
     if (event.key === 'Home') nextWidth = workspacePanelSizing[panel].minWidth;
-    else if (event.key === 'End') nextWidth = workspacePanelSizing[panel].maxWidth;
+    else if (event.key === 'End') nextWidth = panelAvailableWidth(panel);
     else if (event.key === 'ArrowLeft') nextWidth += panel === 'directory' ? -step : step;
     else if (event.key === 'ArrowRight') nextWidth += panel === 'directory' ? step : -step;
     else return;
@@ -5014,8 +5313,11 @@ function LearningWorkspace({
         hidden={directoryHidden}
         onClose={() => setDirectoryHidden(true)}
         currentSectionId={section?.id}
+        currentChapterId={selectedChapter?.id}
         onSelectSection={onSelectSection}
-        onGenerateChapter={onGenerateChapter}
+        onSelectChapter={selectChapter}
+        onChallengeChapter={(chapter) => openChapterAction(chapter, 'challenge')}
+        onSkipChapter={(chapter) => openChapterAction(chapter, 'skip')}
         onStartNextBook={onStartNextBook}
         onActivateBook={onActivateBook}
         chapterGenerationDisabled={chapterGenerationDisabled}
@@ -5026,6 +5328,8 @@ function LearningWorkspace({
       <ReaderPanel
         series={series}
         section={section}
+        chapter={selectedChapter}
+        chapterAction={chapterLaunchAction}
         dailyMode={dailyMode}
         studySessionSeconds={studyActivity.sessionSeconds}
         studyPaused={studyActivity.paused}
@@ -5051,6 +5355,14 @@ function LearningWorkspace({
         onGenerate={() => section && onGenerateSection(section.id)}
         onRegenerate={() => (section ? onRegenerateSection(section.id) : Promise.resolve())}
         onSelectSection={onSelectSection}
+        onSelectChapter={(chapterId) => {
+          const target = routeChapters.find((chapter) => chapter.id === chapterId);
+          if (target) void selectChapter(target);
+        }}
+        onCloseChapterAction={() => {
+          setChapterLaunchAction(null);
+          setDirectoryHidden(false);
+        }}
         onSectionChange={onSectionChange}
         onRefreshSeries={onRefreshSeries}
         onFeedbackBlock={onFeedbackBlock}
@@ -5134,6 +5446,7 @@ function LearningWorkspace({
         const width = panel === 'directory' ? directoryWidth : qaWidth;
         const sizing = workspacePanelSizing[panel];
         const panelName = panel === 'directory' ? '目录' : '答疑';
+        const maximumWidth = Math.max(sizing.minWidth, Math.min(sizing.maxWidth, panelAvailableWidth(panel)));
         return (
           <div
             key={panel}
@@ -5142,7 +5455,7 @@ function LearningWorkspace({
             aria-label={hidden ? `展开${panelName}` : `调整${panelName}宽度`}
             aria-orientation="vertical"
             aria-valuemin={sizing.minWidth}
-            aria-valuemax={sizing.maxWidth}
+            aria-valuemax={Math.round(maximumWidth)}
             aria-valuenow={Math.round(width)}
             aria-expanded={!hidden}
             tabIndex={0}
@@ -5211,8 +5524,11 @@ function DirectoryPanel({
   hidden,
   onClose,
   currentSectionId,
+  currentChapterId,
   onSelectSection,
-  onGenerateChapter,
+  onSelectChapter,
+  onChallengeChapter,
+  onSkipChapter,
   onStartNextBook,
   onActivateBook,
   chapterGenerationDisabled,
@@ -5224,8 +5540,11 @@ function DirectoryPanel({
   hidden: boolean;
   onClose: () => void;
   currentSectionId?: string;
+  currentChapterId?: string;
   onSelectSection: (id: string) => Promise<Section>;
-  onGenerateChapter: (chapter: Chapter) => Promise<void>;
+  onSelectChapter: (chapter: Chapter) => void;
+  onChallengeChapter: (chapter: Chapter) => void;
+  onSkipChapter: (chapter: Chapter) => void;
   onStartNextBook: () => Promise<void>;
   onActivateBook: (book: Book) => Promise<void>;
   chapterGenerationDisabled: boolean;
@@ -5249,14 +5568,14 @@ function DirectoryPanel({
         <h2>{series.title}</h2>
         <div className="series-progress">
           <span><i style={{ width: `${series.progress}%` }} /></span>
-          <b>{series.progress}%</b>
+          <b>路线 {series.progress}%</b>
         </div>
       </div>
       {series.books[0]?.status === 'completed'
         && series.books[1]
         && series.books[1].status !== 'locked' && (
           <div className="next-book-callout" role="status">
-            <b>第一册已完成</b>
+            <b>{series.books[0].chapters.some((chapter) => chapter.status === 'skipped') ? '第一册路线已走完' : '第一册已完成'}</b>
             <span>第二册《{series.books[1].title}》已经解锁。</span>
             <button className="secondary-button" onClick={onStartNextBook}>开始第二册</button>
           </div>
@@ -5267,8 +5586,11 @@ function DirectoryPanel({
             key={book.id}
             book={book}
             currentSectionId={currentSectionId}
+            currentChapterId={currentChapterId}
             onSelectSection={onSelectSection}
-            onGenerateChapter={onGenerateChapter}
+            onSelectChapter={onSelectChapter}
+            onChallengeChapter={onChallengeChapter}
+            onSkipChapter={onSkipChapter}
             canActivate={
               book.outlineStatus === 'draft'
               && (index === 0 || series.books[index - 1].status === 'completed')
@@ -5335,8 +5657,11 @@ function DirectoryPanel({
 function BookTree({
   book,
   currentSectionId,
+  currentChapterId,
   onSelectSection,
-  onGenerateChapter,
+  onSelectChapter,
+  onChallengeChapter,
+  onSkipChapter,
   canActivate,
   onActivate,
   chapterGenerationDisabled,
@@ -5346,8 +5671,11 @@ function BookTree({
 }: {
   book: Book;
   currentSectionId?: string;
+  currentChapterId?: string;
   onSelectSection: (id: string) => Promise<Section>;
-  onGenerateChapter: (chapter: Chapter) => Promise<void>;
+  onSelectChapter: (chapter: Chapter) => void;
+  onChallengeChapter: (chapter: Chapter) => void;
+  onSkipChapter: (chapter: Chapter) => void;
   canActivate: boolean;
   onActivate: (book: Book) => Promise<void>;
   chapterGenerationDisabled: boolean;
@@ -5374,7 +5702,9 @@ function BookTree({
             {book.outlineStatus === 'draft'
               ? '待确认'
               : book.status === 'completed'
-                ? '已完成'
+                ? book.chapters.some((chapter) => chapter.status === 'skipped')
+                  ? '路线已走完'
+                  : '已完成'
                 : book.status === 'locked'
                   ? '未解锁'
                   : '已解锁'}
@@ -5403,35 +5733,44 @@ function BookTree({
       <div className="chapter-tree">
         {book.chapters.map((chapter) => {
           const chapterLocked = chapter.status === 'locked';
+          const chapterBusy = generatingChapterId === chapter.id;
           return (
             <div className="chapter-node" key={chapter.id}>
               {chapter.generated || chapterLocked ? (
-                <div
-                  className={`chapter-title ${chapterLocked ? 'locked' : ''}`}
+                <button
+                  type="button"
+                  className={`chapter-title chapter-select ${chapterLocked ? 'locked' : ''} ${currentChapterId === chapter.id && !currentSectionId ? 'active' : ''} ${chapter.status}`}
+                  disabled={chapterLocked}
                   aria-label={chapterLocked
                     ? `第 ${chapter.position} 章 ${chapter.title}，未解锁`
-                    : `第 ${chapter.position} 章 ${chapter.title}`}
+                    : `学习第 ${chapter.position} 章 ${chapter.title}`}
+                  onClick={() => onSelectChapter(chapter)}
                 >
                   <span>第 {chapter.position} 章</span>
                   <b>{chapter.title}</b>
                   {chapterLocked && <LockIcon size={13} />}
-                </div>
+                  {chapter.status === 'skipped' && <small>暂时继续</small>}
+                </button>
               ) : (
                 <button
-                  className="chapter-title chapter-entry"
-                  aria-label={`生成第 ${chapter.position} 章 ${chapter.title} 的小节并进入`}
-                  disabled={chapterGenerationDisabled || generatingChapterId === chapter.id}
-                  onClick={() => onGenerateChapter(chapter)}
+                  className={`chapter-title chapter-entry chapter-select ${currentChapterId === chapter.id && !currentSectionId ? 'active' : ''}`}
+                  aria-label={`学习第 ${chapter.position} 章 ${chapter.title}`}
+                  disabled={chapterGenerationDisabled || chapterBusy}
+                  onClick={() => onSelectChapter(chapter)}
                 >
                   <span>第 {chapter.position} 章</span>
-                  <b>
-                    {generatingChapterId === chapter.id
-                      ? '正在规划本章小节…'
-                      : chapter.title}
-                  </b>
-                  <GenerateIcon />
+                  <b>{chapter.title}</b>
+                  <i aria-hidden="true">→</i>
                 </button>
               )}
+            {!chapterLocked && chapter.status !== 'completed' && (
+              <div className="chapter-route-actions" aria-label={`第 ${chapter.position} 章的其他学习方式`}>
+                <button type="button" disabled={chapterBusy} onClick={() => onChallengeChapter(chapter)}>直接挑战</button>
+                {chapter.status !== 'skipped' && (
+                  <button type="button" disabled={chapterBusy} onClick={() => onSkipChapter(chapter)}>暂时略过</button>
+                )}
+              </div>
+            )}
             {chapter.generated ? (
               <div className="section-tree">
                 {chapter.workloadHint && chapter.workloadHint.level !== 'typical' && (
@@ -5456,7 +5795,7 @@ function BookTree({
                   {chapterLocked ? <LockIcon size={10} /> : <GenerateIcon />}
                 </span>
                 <small>
-                  {chapterLocked ? '完成上一章后解锁' : '点击章名开始'}
+                  {chapterLocked ? '完成上一章后解锁' : chapterBusy ? '正在准备本章…' : '点击章节标题开始学习'}
                 </small>
               </div>
             )}
@@ -5493,6 +5832,8 @@ function SectionTreeButton({
   const preparing = item.status === 'preparing';
   const state = item.status === 'completed'
     ? '✓'
+    : item.status === 'skipped'
+      ? '↷'
     : item.status === 'locked'
       ? <LockIcon size={11} />
       : preparing
@@ -5502,7 +5843,7 @@ function SectionTreeButton({
   return (
     <button
       className={`section-tree-button ${active ? 'active' : ''} ${item.status}`}
-      disabled={item.status === 'locked' || preparing}
+      disabled={item.status === 'locked' || item.status === 'skipped' || preparing}
       aria-label={`${sectionNumber} ${item.title}`}
       onClick={onClick}
     >
@@ -5513,9 +5854,279 @@ function SectionTreeButton({
   );
 }
 
+function ChapterLaunchPanel({
+  chapter,
+  initialAction,
+  onCancel,
+  onSelectSection,
+  onSelectChapter,
+  onRefreshSeries,
+}: {
+  chapter: Chapter;
+  initialAction: ChapterLaunchAction;
+  onCancel: () => void;
+  onSelectSection: (id: string) => Promise<Section>;
+  onSelectChapter: (chapterId: string) => void;
+  onRefreshSeries: () => Promise<void>;
+}) {
+  const [screen, setScreen] = useState<'preparing' | 'skip' | 'challenge' | 'result'>(
+    initialAction === 'challenge' ? 'preparing' : 'skip',
+  );
+  const [challenge, setChallenge] = useState<ChapterChallenge | null>(null);
+  const [result, setResult] = useState<ChapterChallengeResult | null>(null);
+  const [answers, setAnswers] = useState<Record<string, number[][]>>({});
+  const [busy, setBusy] = useState('');
+  const [localError, setLocalError] = useState('');
+  const preparedActionRef = useRef('');
+
+  const ensureActive = async () => {
+    if (chapter.status !== 'skipped') return;
+    await api.resumeChapter(chapter.id, `resume-${crypto.randomUUID()}`);
+    await onRefreshSeries();
+  };
+  const prepareChallenge = async () => {
+    setScreen('preparing');
+    setBusy('challenge');
+    setLocalError('');
+    try {
+      await ensureActive();
+      const value = await api.prepareChapterChallenge(chapter.id);
+      setChallenge(value);
+      setAnswers(Object.fromEntries(value.sections.map((section) => [
+        section.sectionId,
+        section.questions.map(() => []),
+      ])));
+      setScreen('challenge');
+    } catch (reason) {
+      setLocalError(reason instanceof Error ? reason.message : '章挑战暂时没有准备好');
+    } finally {
+      setBusy('');
+    }
+  };
+  useEffect(() => {
+    const actionKey = `${chapter.id}:${initialAction}`;
+    if (preparedActionRef.current === actionKey) return;
+    preparedActionRef.current = actionKey;
+    setChallenge(null);
+    setResult(null);
+    setAnswers({});
+    setBusy('');
+    setLocalError('');
+    if (initialAction === 'challenge') void prepareChallenge();
+    else setScreen('skip');
+  }, [chapter.id, initialAction]);
+  const skipChapter = async (reason: 'not_focus' | 'defer_unknown' | 'challenge_exit') => {
+    setBusy(`skip-${reason}`);
+    setLocalError('');
+    try {
+      const route = await api.skipChapter(chapter.id, reason, `skip-${crypto.randomUUID()}`);
+      await onRefreshSeries();
+      if (route.nextChapterId) onSelectChapter(route.nextChapterId);
+    } catch (error) {
+      setLocalError(error instanceof Error ? error.message : '暂时无法略过本章');
+    } finally {
+      setBusy('');
+    }
+  };
+  const toggleAnswer = (
+    sectionId: string,
+    questionIndex: number,
+    optionIndex: number,
+    mode: 'single' | 'multiple',
+  ) => {
+    setAnswers((current) => {
+      const sectionAnswers = (current[sectionId] || []).map((item) => [...item]);
+      const selected = sectionAnswers[questionIndex] || [];
+      sectionAnswers[questionIndex] = mode === 'single'
+        ? [optionIndex]
+        : selected.includes(optionIndex)
+          ? selected.filter((item) => item !== optionIndex)
+          : [...selected, optionIndex].sort((left, right) => left - right);
+      return { ...current, [sectionId]: sectionAnswers };
+    });
+  };
+  const allAnswered = challenge?.sections.every((section) => (
+    answers[section.sectionId]?.length === section.questions.length
+    && answers[section.sectionId].every((answer) => answer.length > 0)
+  )) ?? false;
+  const submitChallenge = async () => {
+    if (!challenge || !allAnswered) return;
+    setBusy('grading');
+    setLocalError('');
+    try {
+      const graded = await api.submitChapterChallenge(
+        chapter.id,
+        challenge.sections.map((section) => ({
+          sectionId: section.sectionId,
+          quizSetId: section.quizSetId,
+          answers: answers[section.sectionId],
+        })),
+        `challenge-${crypto.randomUUID()}`,
+      );
+      setResult(graded);
+      setScreen('result');
+      await onRefreshSeries();
+    } catch (reason) {
+      setLocalError(reason instanceof Error ? reason.message : '章挑战提交失败');
+    } finally {
+      setBusy('');
+    }
+  };
+
+  if (screen === 'preparing') {
+    return (
+      <div className="chapter-launch-scroll chapter-route-pending">
+        <button type="button" className="quiet-button" disabled={Boolean(busy)} onClick={onCancel}>← 返回目录</button>
+        <span aria-hidden="true" />
+        <p className="eyebrow">直接挑战</p>
+        <h1>正在准备本章验证</h1>
+        <p>会按小节出题，答对的部分直接形成掌握证据。</p>
+        {localError && <p className="chapter-launch-error" role="alert">{localError}</p>}
+        {localError && (
+          <button type="button" className="secondary-button" disabled={Boolean(busy)} onClick={() => void prepareChallenge()}>重新准备</button>
+        )}
+      </div>
+    );
+  }
+
+  if (screen === 'challenge' && challenge) {
+    let questionNumber = 0;
+    return (
+      <div className="chapter-launch-scroll challenge-screen">
+        <header className="chapter-challenge-heading">
+          <button type="button" className="quiet-button" disabled={Boolean(busy)} onClick={onCancel}>← 返回目录</button>
+          <p className="eyebrow">直接挑战 · {challenge.questionCount} 题</p>
+          <h1>{challenge.chapterTitle}</h1>
+          <p>每一组对应一个小节。答完后只留下真正薄弱的部分。</p>
+        </header>
+        <div className="chapter-challenge-sections">
+          {challenge.sections.map((section) => (
+            <section key={section.sectionId} className="chapter-challenge-section">
+              <header>
+                <span>{String(section.position).padStart(2, '0')}</span>
+                <div><small>小节验证</small><h2>{section.title}</h2></div>
+              </header>
+              {section.questions.map((question, questionIndex) => {
+                questionNumber += 1;
+                const selected = answers[section.sectionId]?.[questionIndex] || [];
+                return (
+                  <fieldset key={`${section.sectionId}-${questionIndex}`} className="chapter-challenge-question">
+                    <legend><span>{String(questionNumber).padStart(2, '0')}</span>{question.prompt}</legend>
+                    {question.options.map((option, optionIndex) => (
+                      <button
+                        type="button"
+                        key={option}
+                        className={selected.includes(optionIndex) ? 'selected' : ''}
+                        aria-pressed={selected.includes(optionIndex)}
+                        onClick={() => toggleAnswer(
+                          section.sectionId,
+                          questionIndex,
+                          optionIndex,
+                          question.selectionMode,
+                        )}
+                      >
+                        <span aria-hidden="true">{String.fromCharCode(65 + optionIndex)}</span>{option}
+                      </button>
+                    ))}
+                  </fieldset>
+                );
+              })}
+            </section>
+          ))}
+        </div>
+        {localError && <p className="chapter-launch-error" role="alert">{localError}</p>}
+        <footer className="chapter-challenge-submit">
+          <span>{allAnswered ? '已经答完，可以查看薄弱小节' : '完成全部题目后提交'}</span>
+          <button type="button" className="primary-button" disabled={!allAnswered || Boolean(busy)} onClick={() => void submitChallenge()}>
+            {busy === 'grading' ? '正在判断…' : '提交挑战 →'}
+          </button>
+        </footer>
+      </div>
+    );
+  }
+
+  if (screen === 'result' && result) {
+    const weakSections = result.sectionResults.filter((item) => item.status === 'needs_learning');
+    return (
+      <div className={`chapter-launch-scroll challenge-result ${result.passed ? 'passed' : 'partial'}`}>
+        <header>
+          <span className="challenge-result-mark" aria-hidden="true">{result.passed ? '✓' : weakSections.length}</span>
+          <p className="eyebrow">挑战结果</p>
+          <h1>{result.passed ? '这一章可以放心略过' : `重点只剩 ${weakSections.length} 个薄弱小节`}</h1>
+          <p>{result.passed
+            ? '本次答题已经形成掌握证据，本章按通过处理。'
+            : '答对的小节已经记为完成；薄弱小节不会被算作掌握。'}</p>
+        </header>
+        <div className="challenge-result-sections">
+          {result.sectionResults.map((item) => (
+            <article key={item.sectionId} className={item.status}>
+              <span>{item.status === 'passed' ? '✓' : '!'}</span>
+              <div><small>第 {item.position} 节 · {item.score}/{item.total}</small><b>{item.title}</b></div>
+              <em>{item.status === 'passed' ? '已通过' : '建议学习'}</em>
+            </article>
+          ))}
+        </div>
+        {localError && <p className="chapter-launch-error" role="alert">{localError}</p>}
+        <div className="challenge-result-actions">
+          {weakSections.length > 0 ? (
+            <>
+              <button type="button" className="primary-button" disabled={Boolean(busy)} onClick={() => void onSelectSection(weakSections[0].sectionId)}>
+                学习薄弱小节 →
+              </button>
+              <button type="button" className="quiet-button" disabled={Boolean(busy)} onClick={() => void skipChapter('challenge_exit')}>
+                {busy ? '正在继续…' : '暂时继续下一章'}
+              </button>
+              <small>继续不代表通过；后续依赖这里时会提醒回来补。</small>
+            </>
+          ) : (
+            <button type="button" className="primary-button" onClick={() => result.nextChapterId ? onSelectChapter(result.nextChapterId) : onCancel()}>
+              {result.nextChapterId ? '进入下一章 →' : '返回目录'}
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (screen === 'skip') {
+    return (
+      <div className="chapter-launch-scroll chapter-skip-screen">
+        <header>
+          <button type="button" className="quiet-button" disabled={Boolean(busy)} onClick={onCancel}>← 返回目录</button>
+          <p className="eyebrow">暂时略过</p>
+          <h1>为什么不学这一章？</h1>
+          <p>原因不同，系统对你的学习画像也会不同处理。</p>
+        </header>
+        <div className="chapter-skip-reasons">
+          <button type="button" disabled={Boolean(busy)} onClick={() => void skipChapter('not_focus')}>
+            <span aria-hidden="true">◎</span>
+            <small>不属于重点</small>
+            <b>这不是我的目标</b>
+            <p>只降低路线优先级，不判断你会或不会，也不改变知识段位。</p>
+            <i aria-hidden="true">→</i>
+          </button>
+          <button type="button" disabled={Boolean(busy)} onClick={() => void skipChapter('defer_unknown')}>
+            <span aria-hidden="true">↷</span>
+            <small>以后再说</small>
+            <b>我还不会，但现在先继续</b>
+            <p>本章暂不计为掌握；后面真正依赖这里时，会提醒回来补。</p>
+            <i aria-hidden="true">→</i>
+          </button>
+        </div>
+        {localError && <p className="chapter-launch-error" role="alert">{localError}</p>}
+        <aside className="chapter-skip-note">系列最终完成时，关键目标仍然需要有效证据；略过不是通过。</aside>
+      </div>
+    );
+  }
+
+  return null;
+}
+
 function ReaderPanel({
   series,
   section,
+  chapter,
+  chapterAction,
   dailyMode,
   studySessionSeconds,
   studyPaused,
@@ -5533,6 +6144,8 @@ function ReaderPanel({
   onGenerate,
   onRegenerate,
   onSelectSection,
+  onSelectChapter,
+  onCloseChapterAction,
   onSectionChange,
   onRefreshSeries,
   onFeedbackBlock,
@@ -5542,6 +6155,8 @@ function ReaderPanel({
 }: {
   series: Series;
   section: Section | null;
+  chapter: Chapter | null;
+  chapterAction: ChapterLaunchAction | null;
   dailyMode: DailyMode;
   studySessionSeconds: number;
   studyPaused: boolean;
@@ -5559,6 +6174,8 @@ function ReaderPanel({
   onGenerate: () => void;
   onRegenerate: () => Promise<void>;
   onSelectSection: (id: string) => Promise<Section>;
+  onSelectChapter: (chapterId: string) => void;
+  onCloseChapterAction: () => void;
   onSectionChange: (section: Section) => void;
   onRefreshSeries: () => Promise<void>;
   onFeedbackBlock: (block: Block) => void;
@@ -5710,7 +6327,16 @@ function ReaderPanel({
           onToggleDirectory={onToggleDirectory}
           onToggleQa={onToggleQa}
         />
-        <SeriesRoutePreview series={series} />
+        {chapter && chapterAction ? (
+          <ChapterLaunchPanel
+            chapter={chapter}
+            initialAction={chapterAction}
+            onCancel={onCloseChapterAction}
+            onSelectSection={onSelectSection}
+            onSelectChapter={onSelectChapter}
+            onRefreshSeries={onRefreshSeries}
+          />
+        ) : <SeriesRoutePreview series={series} />}
       </main>
     );
   }
@@ -5982,7 +6608,11 @@ function ReaderPanelToggles({
           aria-expanded={true}
           aria-label="收起目录"
           title="收起目录"
-          onClick={onToggleDirectory}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleDirectory();
+          }}
         >
           ‹
         </button>
@@ -6004,7 +6634,11 @@ function ReaderPanelToggles({
           aria-expanded={true}
           aria-label="收起答疑"
           title="收起答疑"
-          onClick={onToggleQa}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleQa();
+          }}
         >
           ›
         </button>
@@ -7599,8 +8233,10 @@ function QaPanel({
   const [adoptingExchange, setAdoptingExchange] = useState('');
   const [adoptedExchange, setAdoptedExchange] = useState('');
   const [confirmedPreference, setConfirmedPreference] = useState<Record<string, boolean>>({});
+  const [latestAnswerWaiting, setLatestAnswerWaiting] = useState(false);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
+  const followLatestAnswerRef = useRef(true);
   const askingRef = useRef(false);
   const explanationRequestRef = useRef('');
   const draftExplanationRef = useRef<ExplanationRequest | null>(null);
@@ -7632,9 +8268,20 @@ function QaPanel({
     draftExplanationRef.current = draftExplanation;
   }, [draftExplanation]);
 
-  useEffect(() => {
+  const scrollToLatestAnswer = (behavior: ScrollBehavior = 'smooth') => {
     const node = messagesRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
+    if (!node) return;
+    followLatestAnswerRef.current = true;
+    setLatestAnswerWaiting(false);
+    node.scrollTo({ top: node.scrollHeight, behavior });
+  };
+
+  useEffect(() => {
+    if (!followLatestAnswerRef.current) return;
+    const frame = requestAnimationFrame(() => {
+      if (followLatestAnswerRef.current) scrollToLatestAnswer('auto');
+    });
+    return () => cancelAnimationFrame(frame);
   }, [messages]);
 
   const loadHistory = async () => {
@@ -7689,6 +8336,8 @@ function QaPanel({
       : draftExplanation
         ? 'unsaved'
         : undefined;
+    followLatestAnswerRef.current = true;
+    setLatestAnswerWaiting(false);
     setMessages((current) => [
       ...current,
       {
@@ -7834,7 +8483,25 @@ function QaPanel({
               )}
             </div>
           )}
-          <div className="qa-messages" ref={messagesRef}>
+          <div className="qa-message-stage">
+            <div
+              className="qa-messages"
+              ref={messagesRef}
+              role="region"
+              aria-label="答疑记录"
+              tabIndex={0}
+              onScroll={(event) => {
+                const node = event.currentTarget;
+                const nearLatest = node.scrollHeight - node.scrollTop - node.clientHeight <= 56;
+                if (nearLatest) {
+                  followLatestAnswerRef.current = true;
+                  setLatestAnswerWaiting(false);
+                } else if (askingRef.current) {
+                  followLatestAnswerRef.current = false;
+                  setLatestAnswerWaiting(true);
+                }
+              }}
+            >
             {historyStatus === 'loading' && (
               <div className="qa-history-state" role="status" aria-live="polite">
                 <span className="streaming-dots" aria-hidden="true"><i /><i /><i /></span>
@@ -7848,7 +8515,7 @@ function QaPanel({
                 <button type="button" onClick={() => void loadHistory()}>重新读取</button>
               </div>
             )}
-            {historyStatus === 'loaded' && messages.length === 0 && !draftExplanation && (
+            {historyStatus === 'loaded' && messages.length === 0 && !draftExplanation && !selectedQuote && (
               <div className="qa-suggestion">
                 <span>可以这样问</span>
                 <button onClick={() => { setDraftExplanation(null); setQuestion(dailyMode === 'fast' ? '用一句结论和三个要点解释这段。' : '这个机制最容易被误解的地方是什么？'); }}>{dailyMode === 'fast' ? '用一句结论和三个要点解释这段。' : '这个机制最容易被误解的地方是什么？'}</button>
@@ -8014,6 +8681,16 @@ function QaPanel({
                 )}
               </div>
             ))}
+            </div>
+            {latestAnswerWaiting && (
+              <button
+                type="button"
+                className="qa-latest-answer"
+                onClick={() => scrollToLatestAnswer()}
+              >
+                回到最新回答 <span aria-hidden="true">↓</span>
+              </button>
+            )}
           </div>
           <div className="qa-composer">
             <textarea

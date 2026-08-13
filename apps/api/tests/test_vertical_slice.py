@@ -44,6 +44,8 @@ from app.infrastructure.tables import (
     AskMeDiscussionTurnRecord,
     Book,
     ChapterRevision,
+    ChapterChallengeAttempt,
+    ChapterRouteDecisionEvent,
     ContentBlockClaimAnchor,
     ContentBlockVersion,
     ContentVersion,
@@ -64,6 +66,7 @@ from app.infrastructure.tables import (
     LearningPlan,
     LearningRun,
     LearningRunSectionBinding,
+    LearningStartPreview,
     MilestonePath,
     MilestonePathRevision,
     QuizAttempt,
@@ -76,6 +79,7 @@ from app.infrastructure.tables import (
     SectionAssessmentTarget,
     SectionProgress,
     Series,
+    SeriesLearningStartPreference,
     SourceClaimBinding,
     SourceClaimVersion,
     SourceVersion,
@@ -2446,6 +2450,151 @@ def test_deleting_available_book_requires_next_outline_confirmation(client):
 
 def create_series(client):
     return client.post("/api/plans", json={"shelfId":"shelf_technology","topic":"Kubernetes","role":"技术人员","experience":"会 Docker","depth":"deep"}).json()
+
+
+def test_learning_start_preview_falls_back_and_direct_choice_is_auditable(client):
+    body = {
+        "shelfId": "shelf_technology",
+        "topic": "Kubernetes",
+        "role": "技术人员",
+        "experience": "会 Docker",
+        "purpose": "参与部署排障",
+        "depth": "deep",
+        "details": "理解机制",
+    }
+
+    preview = client.post("/api/learning-start/preview", json=body)
+    assert preview.status_code == 201
+    assert preview.json()["availability"] == "not_ready"
+    assert preview.json()["nodes"] == []
+
+    created = client.post(
+        "/api/plans",
+        json={**body, "startMode": "direct"},
+        headers={"Idempotency-Key": "direct-learning-start-1"},
+    )
+    assert created.status_code == 201
+    with client.app.state.sessions() as db:
+        stored_preview = db.get(LearningStartPreview, preview.json()["previewId"])
+        preference = db.scalar(
+            select(SeriesLearningStartPreference).where(
+                SeriesLearningStartPreference.series_id == created.json()["id"]
+            )
+        )
+        assert stored_preview.user_id == "user_demo"
+        assert preference.start_mode == "direct"
+        assert json.loads(preference.selected_concept_revision_ids_json) == []
+
+
+def test_chapter_skip_records_route_choice_without_fake_mastery(client):
+    series = create_series(client)
+    wait_for_task(client, series["initializationTask"]["taskId"])
+    refreshed = client.get(f"/api/series/{series['id']}").json()
+    chapter, next_chapter = refreshed["books"][0]["chapters"][:2]
+
+    blocked = client.post(
+        f"/api/chapters/{next_chapter['id']}/skip",
+        json={"reason": "not_focus"},
+        headers={"Idempotency-Key": "skip-locked-chapter-1"},
+    )
+    assert blocked.status_code == 403
+    assert blocked.json()["code"] == "CHAPTER_LOCKED"
+
+    with client.app.state.sessions() as db:
+        evidence_before = db.scalar(
+            select(func.count()).select_from(LearningEvidence)
+        )
+
+    skipped = client.post(
+        f"/api/chapters/{chapter['id']}/skip",
+        json={"reason": "not_focus"},
+        headers={"Idempotency-Key": "skip-not-focus-chapter-1"},
+    )
+    assert skipped.status_code == 200
+    assert skipped.json()["status"] == "skipped"
+    assert skipped.json()["nextChapterId"] == next_chapter["id"]
+
+    route = client.get(f"/api/series/{series['id']}").json()
+    assert route["books"][0]["chapters"][0]["status"] == "skipped"
+    assert route["books"][0]["chapters"][1]["status"] == "available"
+    with client.app.state.sessions() as db:
+        assert db.scalar(select(func.count()).select_from(LearningEvidence)) == evidence_before
+        event = db.scalar(
+            select(ChapterRouteDecisionEvent).where(
+                ChapterRouteDecisionEvent.chapter_id == chapter["id"]
+            )
+        )
+        assert event.reason == "not_focus"
+
+
+def test_chapter_challenge_keeps_weak_sections_and_can_continue(client):
+    series = create_series(client)
+    wait_for_task(client, series["initializationTask"]["taskId"])
+    refreshed = client.get(f"/api/series/{series['id']}").json()
+    chapter, next_chapter = refreshed["books"][0]["chapters"][:2]
+
+    prepared = client.post(
+        f"/api/chapters/{chapter['id']}/challenge/prepare"
+    )
+    assert prepared.status_code == 200, prepared.json()
+    challenge = prepared.json()
+    assert len(challenge["sections"]) == 3
+    assert all(
+        "correct" not in question and "explanation" not in question
+        for section in challenge["sections"]
+        for question in section["questions"]
+    )
+    submissions = []
+    for index, section in enumerate(challenge["sections"]):
+        choice = 0 if index == 0 else 1
+        submissions.append(
+            {
+                "sectionId": section["sectionId"],
+                "quizSetId": section["quizSetId"],
+                "answers": [[choice] for _ in section["questions"]],
+            }
+        )
+
+    graded = client.post(
+        f"/api/chapters/{chapter['id']}/challenge/submit",
+        json={"sections": submissions},
+        headers={"Idempotency-Key": "partial-chapter-challenge-1"},
+    )
+    assert graded.status_code == 200, graded.json()
+    result = graded.json()
+    assert result["passed"] is False
+    assert [item["status"] for item in result["sectionResults"]] == [
+        "needs_learning",
+        "passed",
+        "passed",
+    ]
+    route = client.get(f"/api/series/{series['id']}").json()
+    assert route["books"][0]["chapters"][0]["status"] == "available"
+    assert [
+        item["status"]
+        for item in route["books"][0]["chapters"][0]["sections"]
+    ] == ["available", "completed", "completed"]
+
+    continued = client.post(
+        f"/api/chapters/{chapter['id']}/skip",
+        json={"reason": "challenge_exit"},
+        headers={"Idempotency-Key": "continue-after-challenge-1"},
+    )
+    assert continued.status_code == 200
+    assert continued.json()["nextChapterId"] == next_chapter["id"]
+    with client.app.state.sessions() as db:
+        attempt = db.scalar(
+            select(ChapterChallengeAttempt).where(
+                ChapterChallengeAttempt.chapter_id == chapter["id"]
+            )
+        )
+        assert attempt.passed is False
+        facts = db.scalars(
+            select(AssessmentObservation).where(
+                AssessmentObservation.source_type == "chapter_challenge"
+            )
+        ).all()
+        assert facts
 
 
 def test_shelf_topics_are_rebuilt_from_confirmed_series(client):

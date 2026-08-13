@@ -47,3 +47,4 @@
 | [ADR-0013](0013-evidence-guided-reinforcement-agent.md) | Accepted，MVP 已实现 | 到期唤醒失败后的有界诊断、补强、重组与独立验证 |
 | [ADR-0014](0014-purpose-aware-ai-gateway.md) | Accepted，第一阶段已实现 | 用途感知 AI 网关、模型池路由、评估独立性与准确性反馈复核边界 |
 | [ADR-0015](0015-rank-settleable-learning-contracts.md) | Accepted，已实现 | 新小节段位可结算身份、系列内稳定复用与发布失败关闭 |
+| [ADR-0016](0016-learning-start-and-chapter-route-choices.md) | Accepted，MVP 已实现 | 系列启动兴趣选择、章级挑战与显式略过的路线/掌握分离 |

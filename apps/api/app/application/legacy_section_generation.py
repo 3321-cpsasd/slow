@@ -77,6 +77,7 @@ async def generate_legacy_section(
     regenerate=False,
     supersede_remediation_id=None,
     regeneration_feedback=None,
+    allow_locked_diagnostic=False,
     resource_key=None,
     owner_id=None,
 ):
@@ -86,6 +87,7 @@ async def generate_legacy_section(
                 section_id,
                 regenerate=regenerate,
                 regeneration_feedback=regeneration_feedback,
+                allow_locked_diagnostic=allow_locked_diagnostic,
                 resource_key=resource_key,
                 owner_id=owner_id,
             )
@@ -222,6 +224,7 @@ async def generate_legacy_section(
     if (
         section_progress.status == "locked"
         and not isinstance(self.scope, WorkerExecutionContext)
+        and not allow_locked_diagnostic
     ):
         raise AppError("小节未解锁", code="SECTION_LOCKED", status=403)
     if (

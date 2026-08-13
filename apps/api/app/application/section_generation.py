@@ -286,6 +286,7 @@ class SectionGenerationCoordinator:
         regenerate=False,
         supersede_remediation_id=None,
         regeneration_feedback=None,
+        allow_locked_diagnostic=False,
         resource_key=None,
         owner_id=None,
     ):
@@ -295,6 +296,7 @@ class SectionGenerationCoordinator:
                     section_id,
                     regenerate=regenerate,
                     regeneration_feedback=regeneration_feedback,
+                    allow_locked_diagnostic=allow_locked_diagnostic,
                     resource_key=resource_key,
                     owner_id=owner_id,
                 )
@@ -315,6 +317,7 @@ class SectionGenerationCoordinator:
             regenerate=regenerate,
             supersede_remediation_id=supersede_remediation_id,
             regeneration_feedback=regeneration_feedback,
+            allow_locked_diagnostic=allow_locked_diagnostic,
             resource_key=resource_key,
             owner_id=owner_id,
         )
@@ -325,6 +328,7 @@ class SectionGenerationCoordinator:
         *,
         regenerate: bool,
         regeneration_feedback: dict | None,
+        allow_locked_diagnostic: bool,
         resource_key: str | None,
         owner_id: str | None,
     ):
@@ -402,6 +406,7 @@ class SectionGenerationCoordinator:
         if (
             section_progress.status == "locked"
             and not isinstance(self.scope, WorkerExecutionContext)
+            and not allow_locked_diagnostic
         ):
             raise AppError("小节未解锁", code="SECTION_LOCKED", status=403)
         if (
@@ -997,6 +1002,7 @@ class SectionGenerationCoordinator:
         regenerate=False,
         supersede_remediation_id=None,
         regeneration_feedback=None,
+        allow_locked_diagnostic=False,
         resource_key=None,
         owner_id=None,
     ):
@@ -1010,6 +1016,7 @@ class SectionGenerationCoordinator:
             regenerate=regenerate,
             supersede_remediation_id=supersede_remediation_id,
             regeneration_feedback=regeneration_feedback,
+            allow_locked_diagnostic=allow_locked_diagnostic,
             resource_key=resource_key,
             owner_id=owner_id,
         )

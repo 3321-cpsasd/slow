@@ -156,10 +156,16 @@ export function DailyModeDialog({
 }: {
   state: DailyModeState;
   busy: boolean;
-  onActivate: (mode: DailyMode, duration: DailyModeDuration, source: 'dialog') => Promise<void>;
+  onActivate: (
+    mode: DailyMode,
+    duration: DailyModeDuration,
+    source: 'dialog',
+    promptEnabled: boolean,
+  ) => Promise<void>;
 }) {
   const [selectedMode, setSelectedMode] = useState<DailyMode | null>(null);
   const [duration, setDuration] = useState<DailyModeDuration>(state.duration || '1h');
+  const [doNotAskAgain, setDoNotAskAgain] = useState(true);
   const dialogRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
@@ -169,7 +175,9 @@ export function DailyModeDialog({
     const trapFocus = (event: KeyboardEvent) => {
       if (event.key !== 'Tab') return;
       const focusable = Array.from(
-        dialogRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled)') || [],
+        dialogRef.current?.querySelectorAll<HTMLElement>(
+          'button:not(:disabled), input:not(:disabled)',
+        ) || [],
       );
       if (!focusable.length) return;
       const first = focusable[0];
@@ -299,10 +307,27 @@ export function DailyModeDialog({
             <span className="daily-mode-expiry-preview">{previewExpiry(duration)}</span>
           </div>
           <div className="daily-mode-footer-action">
+            <label className="daily-mode-prompt-choice">
+              <input
+                type="checkbox"
+                checked={doNotAskAgain}
+                disabled={busy}
+                onChange={(event) => setDoNotAskAgain(event.target.checked)}
+              />
+              <span>
+                <b>以后不再自动弹出</b>
+                <small>可在学习画像中重新开启</small>
+              </span>
+            </label>
             <button
               type="button"
               disabled={!selectedMode || busy}
-              onClick={() => selectedMode && void onActivate(selectedMode, duration, 'dialog')}
+              onClick={() => selectedMode && void onActivate(
+                selectedMode,
+                duration,
+                'dialog',
+                !doNotAskAgain,
+              )}
             >
               {busy
                 ? '正在同步…'
