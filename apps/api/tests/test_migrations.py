@@ -196,6 +196,7 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
             "standard_lesson_package_targets",
             "section_fallback_bindings",
             "route_admission_decisions",
+            "learning_evidence_invalidations",
             "assessment_distractor_diagnostics",
             "remediation_diagnoses",
             "learning_start_previews",
