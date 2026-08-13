@@ -21,6 +21,8 @@ from migrate_sqlite_to_postgres import (
 
 API_ROOT = Path(__file__).resolve().parents[1]
 
+pytestmark = pytest.mark.postgresql
+
 
 def _upgrade(url: str) -> None:
     environment = os.environ.copy()

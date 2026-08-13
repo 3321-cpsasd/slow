@@ -100,6 +100,9 @@ from app.modules.learning.content_governance_store import (
 from app.modules.learning.rebuild import rebuild_user_projections
 
 
+pytestmark = pytest.mark.api_vertical
+
+
 class FakeAi:
     configured, model = True, "fake-structured"
     allow_legacy_lesson_generation_for_tests = True
@@ -263,24 +266,19 @@ class FakeAi:
 class ParallelWorkflowAi(FakeAi):
     def __init__(self):
         self.parallel_phase = False
-        self.next_section_started = Event()
-        self.release_next_section = Event()
+        self.note_started = Event()
+        self.release_note = Event()
         self.events: list[str] = []
 
     async def note(self, request):
         if self.parallel_phase:
             self.events.append("note_start")
-            await asyncio.to_thread(self.next_section_started.wait, 2)
+            self.note_started.set()
+            released = await asyncio.to_thread(self.release_note.wait, 3)
+            if not released:
+                raise TimeoutError("test did not release note generation")
             self.events.append("note_end")
         return await super().note(request)
-
-    async def lesson(self, request, memory, prior_questions=None):
-        if self.parallel_phase:
-            self.events.append("next_section_start")
-            self.next_section_started.set()
-            await asyncio.to_thread(self.release_next_section.wait, 3)
-            self.events.append("next_section_end")
-        return await super().lesson(request, memory, prior_questions)
 
 
 class MissingLineageAi(FakeAi):
@@ -767,24 +765,33 @@ def test_cached_next_section_becomes_ready_without_waiting_for_note(tmp_path):
         ).json()
         tasks = {task["type"]: task for task in result["workflowTasks"]}
 
-        assert wait_for_task(
-            parallel_client,
-            tasks["next_section_preload"]["taskId"],
-        )["status"] == "succeeded"
-        ready_series = parallel_client.get(
-            f"/api/series/{series['id']}"
-        ).json()
-        ready_sections = ready_series["books"][0]["chapters"][0]["sections"]
-        assert ready_sections[0]["status"] == "completed"
-        assert ready_sections[1]["status"] == "available"
-        assert parallel_client.get(
-            f"/api/sections/{ready_sections[1]['id']}"
-        ).status_code == 200
+        assert ai.note_started.wait(1), "note generation did not start"
+        try:
+            assert wait_for_task(
+                parallel_client,
+                tasks["next_section_preload"]["taskId"],
+            )["status"] == "succeeded"
+            note_task = parallel_client.get(
+                f"/api/learning-tasks/{tasks['note_generation']['taskId']}"
+            ).json()
+            assert note_task["status"] == "running"
+            ready_series = parallel_client.get(
+                f"/api/series/{series['id']}"
+            ).json()
+            ready_sections = ready_series["books"][0]["chapters"][0]["sections"]
+            assert ready_sections[0]["status"] == "completed"
+            assert ready_sections[1]["status"] == "available"
+            assert parallel_client.get(
+                f"/api/sections/{ready_sections[1]['id']}"
+            ).status_code == 200
+        finally:
+            ai.release_note.set()
 
         assert wait_for_task(
             parallel_client,
             tasks["note_generation"]["taskId"],
         )["status"] == "succeeded"
+        assert ai.events == ["note_start", "note_end"]
 
         ready_series = parallel_client.get(
             f"/api/series/{series['id']}"

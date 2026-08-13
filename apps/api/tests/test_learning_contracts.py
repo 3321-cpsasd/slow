@@ -253,6 +253,7 @@ def test_route_target_reuses_identity_inside_series_without_cross_route_guessing
     assert db.scalar(select(func.count()).select_from(AssessmentTarget)) == 1
 
 
+@pytest.mark.migration
 def test_0030_upgrades_populated_0029_without_changing_target_id(tmp_path):
     database = tmp_path / "contracts-0029.db"
     environment = {

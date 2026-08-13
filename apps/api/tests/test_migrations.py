@@ -14,6 +14,8 @@ from app.infrastructure.tables import Base
 API_ROOT = Path(__file__).resolve().parents[1]
 HEAD_REVISION = "0062_learning_start_choices"
 
+pytestmark = pytest.mark.migration
+
 
 def run_alembic(database: Path, *arguments: str) -> None:
     environment = {
