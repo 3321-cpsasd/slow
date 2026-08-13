@@ -35,7 +35,7 @@ from .ai.gateway import (
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, ChapterChallengeSubmit, ChapterCreate, ChapterOrder, ChapterSkipCreate, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, LearningStartPreviewCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ReinforcementRespond, ResumeUpdate, ReviewSubmit, ShelfCreate, StudyActivityHeartbeat
+from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, BookReplanCreate, ChapterChallengeSubmit, ChapterCreate, ChapterOrder, ChapterSkipCreate, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, LearningStartPreviewCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ReinforcementRespond, ResumeUpdate, ReviewSubmit, ShelfCreate, StudyActivityHeartbeat
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -1845,7 +1845,7 @@ def create_app(
     def reorder_chapters(book_id: str, body: ChapterOrder, s: SlowService = Depends(service)): return s.reorder_chapters(book_id, body.chapter_ids)
 
     @app.post("/api/books/{book_id}/chapters/replan")
-    async def replan_chapters(book_id: str, s: SlowService = Depends(service)): return await s.replan_chapters(book_id)
+    async def replan_chapters(book_id: str, body: BookReplanCreate | None = None, s: SlowService = Depends(service)): return await s.replan_chapters(book_id, body)
 
     @app.post("/api/books/{book_id}/chapters/replan/{proposal_id}/confirm")
     def confirm_replan(book_id: str, proposal_id: str, s: SlowService = Depends(service)): return s.confirm_replan(book_id, proposal_id)
@@ -2105,6 +2105,9 @@ def create_app(
 
     @app.post("/api/books/{book_id}/capstone")
     def submit_capstone(book_id: str, body: AttachmentSubmit, s: SlowService = Depends(service)): return s.submit_book_capstone(book_id, body.content, body.attachment_ids)
+
+    @app.post("/api/books/{book_id}/settlement")
+    def settle_book(book_id: str, s: SlowService = Depends(service)): return s.settle_book(book_id)
 
     @app.post("/api/books/{book_id}/capstone/attachments", status_code=201)
     async def upload_capstone_attachment(book_id: str, request: Request, s: SlowService = Depends(service)):

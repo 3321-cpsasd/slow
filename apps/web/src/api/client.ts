@@ -319,7 +319,10 @@ export const api = {
   confirmMilestonePath:(id:string)=>call<{seriesId:string;status:string;version:number;goalProfileVersion:number}>(`/api/series/${id}/milestone-path/confirm`,{method:'POST'}),
   deleteSeries:(id:string)=>call<void>(`/api/series/${id}`,{method:'DELETE'}),
   deleteBook:(id:string)=>call<void>(`/api/books/${id}`,{method:'DELETE'}),
-  replanBook:(id:string)=>call<import('../model/types').BookReplanProposal>(`/api/books/${id}/chapters/replan`,{method:'POST'}),
+  replanBook:(id:string,body?:{feedback?:string;previousProposalId?:string})=>call<import('../model/types').BookReplanProposal>(`/api/books/${id}/chapters/replan`,{
+    method:'POST',
+    body:body ? JSON.stringify(body) : undefined,
+  }),
   confirmBookReplan:(id:string,proposalId:string)=>call<import('../model/types').Book>(`/api/books/${id}/chapters/replan/${proposalId}/confirm`,{method:'POST'}),
   chapter:(id:string)=>call<import('../model/types').Chapter>(`/api/chapters/${id}/generate`,{method:'POST'}),
   skipChapter:(id:string,reason:'not_focus'|'defer_unknown'|'challenge_exit',idempotencyKey:string)=>call<import('../model/types').ChapterRouteResult>(`/api/chapters/${id}/skip`,{
@@ -399,6 +402,7 @@ export const api = {
   practice:(id:string,content:object,attachmentIds:string[])=>call<import('../model/types').Practice>(`/api/chapters/${id}/practice`,{method:'POST',body:JSON.stringify({content,attachmentIds})}),
   uploadCapstone:(id:string,file:File)=>call<import('../model/types').Attachment>(`/api/books/${id}/capstone/attachments`,{method:'POST',headers:{'Content-Type':file.type||'application/octet-stream','X-Filename':encodeURIComponent(file.name)},body:file}),
   capstone:(id:string,content:object,attachmentIds:string[])=>call<import('../model/types').Capstone>(`/api/books/${id}/capstone`,{method:'POST',body:JSON.stringify({content,attachmentIds})}),
+  settleBook:(id:string)=>call<import('../model/types').BookSettlement>(`/api/books/${id}/settlement`,{method:'POST'}),
   updateChapter:(id:string,body:object)=>call<import('../model/types').Chapter>(`/api/chapters/${id}`,{method:'PATCH',body:JSON.stringify(body)}),
   addChapter:(id:string,body:object)=>call<import('../model/types').Chapter>(`/api/books/${id}/chapters`,{method:'POST',body:JSON.stringify(body)}),
   deleteChapter:(id:string)=>call<void>(`/api/chapters/${id}`,{method:'DELETE'}),

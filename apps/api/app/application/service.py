@@ -611,8 +611,12 @@ class SlowService:
     def reorder_chapters(self, book_id, chapter_ids):
         return self.catalog_commands.reorder_chapters(book_id, chapter_ids)
 
-    async def replan_chapters(self, book_id):
-        return await self.book_planning.propose(book_id)
+    async def replan_chapters(self, book_id, body=None):
+        return await self.book_planning.propose(
+            book_id,
+            feedback=body.feedback if body else "",
+            previous_proposal_id=body.previous_proposal_id if body else None,
+        )
 
     def confirm_replan(self, book_id, proposal_id):
         return self.book_planning.confirm(book_id, proposal_id)
@@ -2348,6 +2352,9 @@ class SlowService:
         return self.artifact_service.submit_book_capstone(
             book_id, content, attachment_ids
         )
+
+    def settle_book(self, book_id):
+        return self.artifact_service.settle_book(book_id)
 
     def _capstone_progress(self, capstone):
         return self.artifact_service.capstone_progress(capstone)
