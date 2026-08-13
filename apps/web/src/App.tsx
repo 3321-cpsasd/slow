@@ -779,19 +779,28 @@ export default function App() {
 
   const goHome = () => showHome('push');
 
-  const returnToShelf = () => {
-    if (!shelf) {
+  const returnToShelf = async () => {
+    const shelfId = shelf?.id;
+    if (!shelfId) {
       goHome();
       return;
     }
-    routeRequestVersion.current += 1;
-    updateBrowserLocation(shelfPath(shelf.id), 'push');
-    setShowUserMenu(false);
-    setSeries(null);
-    setSection(null);
-    setActivityDailyMode(null);
-    setDailyModeExpiredDuringActivity(false);
-    setView('shelf');
+    try {
+      const refreshed = await run('正在返回书架…', () => api.bootstrap());
+      const refreshedShelf = refreshed.shelves.find((item) => item.id === shelfId) || null;
+      setData(refreshed);
+      setShelf(refreshedShelf);
+      routeRequestVersion.current += 1;
+      updateBrowserLocation(refreshedShelf ? shelfPath(shelfId) : '/', 'push');
+      setShowUserMenu(false);
+      setSeries(null);
+      setSection(null);
+      setActivityDailyMode(null);
+      setDailyModeExpiredDuringActivity(false);
+      setView(refreshedShelf ? 'shelf' : 'home');
+    } catch {
+      // Stay in the current learning view so stale shelf data is never presented.
+    }
   };
 
   const openProfileCenter = (nextSection: 'profile' | 'account' = 'profile') => {
@@ -3331,7 +3340,7 @@ function Home({
   data: Bootstrap | null;
   dailyMode: DailyMode;
   onOpen: (shelf: Shelf) => void;
-  onContinue: (seriesId: string) => Promise<void>;
+  onContinue: (seriesId: string, sectionId?: string | null) => Promise<void>;
   onOpenReview: () => void;
   onCreate: (body: ShelfCreateInput) => Promise<void>;
 }) {
