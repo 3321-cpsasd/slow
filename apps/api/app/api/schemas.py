@@ -29,6 +29,32 @@ class ShelfCreate(ApiModel):
         return normalized
 
 
+LearningStartPreferenceKey = Literal[
+    "practical_application",
+    "understand_principles",
+    "case_based",
+    "practice_heavy",
+]
+
+
+class LearningStartSelection(ApiModel):
+    preview_id: str = Field(min_length=1, max_length=160)
+    selected_concept_revision_ids: list[str] = Field(min_length=1, max_length=120)
+    learning_preferences: list[LearningStartPreferenceKey] = Field(
+        default_factory=list, max_length=2
+    )
+
+    @model_validator(mode="after")
+    def selection_is_unique(self):
+        if len(self.selected_concept_revision_ids) != len(
+            set(self.selected_concept_revision_ids)
+        ):
+            raise ValueError("点亮的知识方向不能重复")
+        if len(self.learning_preferences) != len(set(self.learning_preferences)):
+            raise ValueError("学习偏好不能重复")
+        return self
+
+
 class PlanCreate(ApiModel):
     shelf_id: str
     topic: str = Field(min_length=1, max_length=160)
@@ -37,6 +63,26 @@ class PlanCreate(ApiModel):
         max_length=80,
         description="学习者的专业、身份或当前背景",
     )
+    experience: str = Field(min_length=1, max_length=500)
+    purpose: str = Field(default="", max_length=1000)
+    depth: Literal["overview", "deep", "mastery"]
+    details: str = Field(default="", max_length=3000)
+    start_mode: Literal["direct", "guided"] = "direct"
+    learning_start_selection: LearningStartSelection | None = None
+
+    @model_validator(mode="after")
+    def guided_start_requires_selection(self):
+        if self.start_mode == "guided" and self.learning_start_selection is None:
+            raise ValueError("先挑重点需要至少点亮一个知识方向")
+        if self.start_mode == "direct" and self.learning_start_selection is not None:
+            raise ValueError("直接开始不能附带知识版图选择")
+        return self
+
+
+class LearningStartPreviewCreate(ApiModel):
+    shelf_id: str
+    topic: str = Field(min_length=1, max_length=160)
+    role: str = Field(min_length=1, max_length=80)
     experience: str = Field(min_length=1, max_length=500)
     purpose: str = Field(default="", max_length=1000)
     depth: Literal["overview", "deep", "mastery"]
@@ -67,6 +113,38 @@ class MissionAdoptionCreate(ApiModel):
     reason: str = Field(min_length=1, max_length=2000)
 
 
+class AiDeploymentUpdate(ApiModel):
+    deployment_id: str = Field(
+        min_length=1, max_length=160, pattern=r"^[A-Za-z0-9_.:-]+$"
+    )
+    provider_id: str = Field(
+        min_length=1, max_length=160, pattern=r"^[A-Za-z0-9_.:-]+$"
+    )
+    model: str = Field(min_length=1, max_length=160)
+    model_family_id: str = Field(
+        min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_.:-]+$"
+    )
+    provider_protocol: Literal["openai", "anthropic"] = "openai"
+    api_mode: Literal["responses", "chat_completions", "messages"] = (
+        "chat_completions"
+    )
+    reasoning_mode: Literal["optional", "required", "disabled"] = "optional"
+    api_key: SecretStr | None = None
+    base_url: str = Field(default="", max_length=1000)
+    structured_mode: Literal[
+        "native_schema", "json_object", "prompt_json", "unsupported"
+    ] = "unsupported"
+    streaming: bool = True
+    backend_allowed: bool = False
+    allowed_environments: list[
+        Literal["development", "demo", "test", "production"]
+    ] = Field(
+        default_factory=lambda: ["development", "test"],
+        min_length=1,
+    )
+    status: Literal["active", "quarantined", "disabled"] = "active"
+
+
 class AiRuntimeUpdate(ApiModel):
     mode: Literal["provider", "demo"] = "provider"
     provider_protocol: Literal["openai", "anthropic"] = "openai"
@@ -75,6 +153,45 @@ class AiRuntimeUpdate(ApiModel):
     model: str = Field(default="gpt-5", min_length=1, max_length=160)
     api_mode: Literal["responses", "chat_completions"] = "responses"
     reasoning_mode: Literal["optional", "required", "disabled"] = "optional"
+    deployments: list[AiDeploymentUpdate] | None = None
+    routes: dict[str, list[str]] | None = None
+    route_policy_version: str = Field(default="ai_route_v1", max_length=80)
+
+    @model_validator(mode="after")
+    def validate_ai_routes(self):
+        allowed_purposes = {
+            "default",
+            "curriculum",
+            "curriculum_review",
+            "lesson_author",
+            "assessment_item_author",
+            "assessment_item_review",
+            "assessment_answer_adjudication",
+            "ask_ai",
+            "feedback_style",
+            "feedback_accuracy",
+            "assessment_probe",
+            "assessment_evaluation",
+            "note",
+            "source_repair",
+            "source_review",
+            "quality_review",
+        }
+        if self.deployments is None and self.routes is not None:
+            raise ValueError("更新用途路由时必须同时提交完整模型部署池")
+        if self.deployments is not None:
+            identifiers = [item.deployment_id for item in self.deployments]
+            if len(identifiers) != len(set(identifiers)):
+                raise ValueError("模型部署 ID 不能重复")
+            known = set(identifiers)
+            for purpose, deployment_ids in (self.routes or {}).items():
+                if purpose not in allowed_purposes:
+                    raise ValueError(f"不支持的用途路由 {purpose}")
+                if not deployment_ids:
+                    raise ValueError(f"用途路由 {purpose} 不能为空")
+                if any(item not in known for item in deployment_ids):
+                    raise ValueError(f"用途路由 {purpose} 引用了未知部署")
+        return self
 
 
 class PasswordLogin(ApiModel):
@@ -235,7 +352,7 @@ class LearningPreferences(ApiModel):
     interaction_rhythm: Literal[
         "auto", "low_interruption", "balanced", "frequent_checkins"
     ] = "auto"
-    daily_mode_prompt_enabled: bool = Field(default=True, strict=True)
+    daily_mode_prompt_enabled: bool = Field(default=False, strict=True)
 
 
 class LearningPreferenceEvidenceCreate(ApiModel):
@@ -438,3 +555,42 @@ class ChapterUpdate(ApiModel):
 
 class ChapterOrder(ApiModel):
     chapter_ids: list[str] = Field(min_length=1)
+
+
+class ChapterSkipCreate(ApiModel):
+    reason: Literal["not_focus", "defer_unknown", "challenge_exit"]
+
+
+class ChapterChallengeSectionSubmission(ApiModel):
+    section_id: str = Field(min_length=1, max_length=160)
+    quiz_set_id: str = Field(min_length=1, max_length=160)
+    answers: list[list[int]] = Field(min_length=1, max_length=30)
+
+
+class ChapterChallengeSubmit(ApiModel):
+    sections: list[ChapterChallengeSectionSubmission] = Field(
+        min_length=1, max_length=12
+    )
+
+    @model_validator(mode="after")
+    def sections_are_unique(self):
+        section_ids = [item.section_id for item in self.sections]
+        if len(section_ids) != len(set(section_ids)):
+            raise ValueError("章挑战不能重复提交同一小节")
+        return self
+
+
+class BookReplanCreate(ApiModel):
+    feedback: str = Field(default="", max_length=3000)
+    previous_proposal_id: str | None = Field(default=None, min_length=1, max_length=160)
+
+    @field_validator("feedback")
+    @classmethod
+    def normalize_feedback(cls, value: str):
+        return value.strip()
+
+    @model_validator(mode="after")
+    def feedback_requires_proposal(self):
+        if self.previous_proposal_id and not self.feedback:
+            raise ValueError("针对目录重做时必须说明希望如何调整")
+        return self

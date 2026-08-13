@@ -29,12 +29,13 @@ from ..infrastructure.tables import (
     Section,
 )
 from ..modules.learning.assessment_items import publish_assessment_item_versions
+from ..modules.learning.contracts import require_rank_settleable_contract
 
 
 LESSON_GENERATION_PIPELINE_VERSION = "lesson_generation_v3"
 LESSON_GENERATION_SCHEMA_VERSION = "generated_lesson_composition_candidate_v7"
 LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_composition_prompt_v11"
-LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v12"
+LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v13"
 LESSON_CONTEXT_POLICY_VERSION = "lesson_generation_context_v2"
 AI_CONTENT_LABEL_SCHEMA_VERSION = "ai_content_label_v2"
 
@@ -668,6 +669,7 @@ def publish_lesson_candidate(
 ) -> PublishedLesson:
     """Stage all authoritative rows in the caller's single transaction."""
 
+    require_rank_settleable_contract(db, contract)
     candidate = validated.candidate
     content = ContentVersion(
         id=uid("content"),
@@ -855,6 +857,17 @@ def publish_lesson_candidate(
             "correct": question.correct,
             "explanation": question.explanation,
             "difficulty": question.difficulty,
+            "answerAuthority": question.answer_authority,
+            "optionVerdicts": [
+                {
+                    "optionId": item.option_id,
+                    "decision": item.decision,
+                    "evidenceBlockKey": item.evidence_block_key,
+                    "rationale": item.rationale,
+                    "causeCode": item.cause_code,
+                }
+                for item in question.option_verdicts
+            ],
             "distractorDiagnostics": [
                 {
                     "optionIndex": item.option_index,

@@ -283,7 +283,7 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
         "explanationDensity": "auto",
         "formatPreferences": [],
         "interactionRhythm": "auto",
-        "dailyModePromptEnabled": True,
+        "dailyModePromptEnabled": False,
     }
     assert resumed.json()["required"] is True
 

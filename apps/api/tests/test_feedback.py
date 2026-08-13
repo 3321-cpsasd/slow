@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
@@ -197,7 +198,7 @@ def test_content_feedback_binds_the_exact_visible_content_block():
 
         assert response.status_code == 201
         assert response.json()["regeneration"] == {
-            "status": "recorded_only",
+            "status": "stream_ready",
             "reasonCode": None,
             "task": None,
         }
@@ -216,6 +217,79 @@ def test_content_feedback_binds_the_exact_visible_content_block():
                     LearningTask.task_type == "content_feedback_regeneration"
                 )
             ) == 0
+
+
+def test_content_feedback_records_but_blocks_repair_for_a_stale_version():
+    with feedback_client() as client:
+        section_id, content_version_id, block = visible_content(client)
+        with client.app.state.sessions() as db:
+            db.add(ContentVersion(
+                id="feedback_content_2",
+                section_id=section_id,
+                version=100,
+                blocks_json=json.dumps([block], ensure_ascii=False),
+                sources_json="[]",
+                confidence="high",
+                publication_status="published",
+            ))
+            db.commit()
+
+        response = client.post(
+            "/api/feedback",
+            headers=feedback_headers("feedback-stale-version"),
+            json={
+                "scope": "content_block",
+                "feedbackType": "unclear",
+                "message": "这是旧版本上的反馈",
+                "sectionId": section_id,
+                "contentVersionId": content_version_id,
+                "blockId": block["id"],
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["regeneration"] == {
+            "status": "blocked",
+            "reasonCode": "FEEDBACK_CONTENT_VERSION_STALE",
+            "task": None,
+        }
+        with client.app.state.sessions() as db:
+            assert db.scalar(select(func.count()).select_from(UserFeedback)) == 1
+
+
+@pytest.mark.parametrize(
+    ("feedback_type", "reason_code"),
+    [
+        ("inaccurate", "FEEDBACK_ACCURACY_REVIEW_REQUIRED"),
+        ("other", "FEEDBACK_CLASSIFICATION_REQUIRED"),
+    ],
+)
+def test_content_feedback_that_cannot_safely_rewrite_enters_review(
+    feedback_type,
+    reason_code,
+):
+    with feedback_client() as client:
+        section_id, content_version_id, block = visible_content(client)
+
+        response = client.post(
+            "/api/feedback",
+            headers=feedback_headers(f"review-{feedback_type}-feedback"),
+            json={
+                "scope": "content_block",
+                "feedbackType": feedback_type,
+                "message": "请先核实这段内容",
+                "sectionId": section_id,
+                "contentVersionId": content_version_id,
+                "blockId": block["id"],
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["regeneration"] == {
+            "status": "needs_review",
+            "reasonCode": reason_code,
+            "task": None,
+        }
 
 
 def test_content_feedback_rejects_a_block_outside_the_bound_version():

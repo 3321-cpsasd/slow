@@ -176,6 +176,24 @@ class FallbackAiAdapter:
     async def chapter(self, request, memory):
         return await self._call("chapter", request, memory)
 
+    async def review_chapter_outline(self, payload):
+        return await self._call("review_chapter_outline", payload)
+
+    async def teaching_blueprint(self, request, memory):
+        return await self._call("teaching_blueprint", request, memory)
+
+    async def author_lesson_content(self, spec):
+        return await self._call("author_lesson_content", spec)
+
+    async def author_lesson_questions(self, payload):
+        return await self._call("author_lesson_questions", payload)
+
+    async def review_lesson_questions(self, payload):
+        return await self._call("review_lesson_questions", payload)
+
+    async def adjudicate_lesson_questions(self, payload):
+        return await self._call("adjudicate_lesson_questions", payload)
+
     async def generate_lesson(self, spec):
         return await self._call("generate_lesson", spec)
 
@@ -201,6 +219,27 @@ class FallbackAiAdapter:
 
     async def note(self, request):
         return await self._call("note", request)
+
+    async def answer(self, request):
+        return await self._call("answer", request)
+
+    async def ask_me(self, request):
+        return await self._call("ask_me", request)
+
+    async def ask_me_probe(self, request):
+        return await self._call("ask_me_probe", request)
+
+    async def evaluate_ask_me(self, request):
+        return await self._call("evaluate_ask_me", request)
+
+    async def ask_me_discussion(self, request):
+        return await self._call("ask_me_discussion", request)
+
+    async def evaluate_ask_me_discussion(self, request):
+        return await self._call("evaluate_ask_me_discussion", request)
+
+    async def ask_me_discussion_probe(self, request):
+        return await self._call("ask_me_discussion_probe", request)
 
     async def replan_book(self, request, memory):
         return await self._call("replan_book", request, memory)

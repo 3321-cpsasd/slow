@@ -1,7 +1,11 @@
 import asyncio
 
 from .contracts import (
+    AskMeDiscussionEvaluation,
+    AskMeDiscussionProbe,
     AskMeDiscussionTurn,
+    AskMeEvaluation,
+    AskMeProbe,
     AskMeTurn,
     ChoiceQuestion,
     ClaimSupportReview,
@@ -213,6 +217,7 @@ class LocalDemoAdapter:
                     options=["忽略机制直接猜测", "依据机制和边界进行判断", "把示例当作普遍定律"],
                     correct=[1],
                     explanation="正文要求同时依据机制、观察线索和适用边界判断。",
+                    answer_authority="demo_fixture_v1",
                 )
             )
         return GeneratedLessonCandidate(
@@ -398,6 +403,20 @@ class LocalDemoAdapter:
             rationale="演示评估仅检查是否提交了自主回答。" if answered else "",
         )
 
+    async def ask_me_probe(self, request):
+        return AskMeProbe(
+            dimension=request["dimension"],
+            prompt=f"请用自己的话回答 {request['dimension']} 维度的问题，并给出一个可验证例子。",
+        )
+
+    async def evaluate_ask_me(self, request):
+        return AskMeEvaluation(
+            dimension=request.get("evaluatesDimension", request["dimension"]),
+            evaluation="partial",
+            rationale="演示评估仅确认提交了自主回答。",
+            evidence_sufficiency="insufficient",
+        )
+
     async def ask_me_discussion(self, request):
         answer = str(request.get("previousAnswer", "")).strip()
         topic = request.get("currentTopic") or {}
@@ -436,6 +455,23 @@ class LocalDemoAdapter:
             follow_up_prompt="什么证据会让你改变刚才的判断？",
             follow_up_purpose="检查判断依据是否稳定，并探测可能遗漏的边界。",
             topic_sufficiency=sufficient,
+        )
+
+    async def evaluate_ask_me_discussion(self, request):
+        combined = await self.ask_me_discussion(request)
+        return AskMeDiscussionEvaluation(
+            evaluation=combined.evaluation,
+            correct_points=combined.correct_points,
+            issues=combined.issues,
+            suggestions=combined.suggestions,
+            topic_sufficiency=combined.topic_sufficiency,
+        )
+
+    async def ask_me_discussion_probe(self, request):
+        topic = request.get("currentTopic") or {}
+        return AskMeDiscussionProbe(
+            follow_up_prompt=f"请再为“{topic.get('title', '当前主题')}”补充一个边界反例。",
+            follow_up_purpose="继续观察边界条件和证据选择。",
         )
 
     async def replan_book(self, request, memory):

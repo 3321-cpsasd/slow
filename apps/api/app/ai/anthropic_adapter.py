@@ -219,7 +219,7 @@ class AnthropicAdapter(OpenAiAdapter):
             code="AI_STRUCTURED_OUTPUT_INVALID",
         ) from error
 
-    async def generate_lesson(self, spec: dict):
+    async def _generate_lesson_legacy(self, spec: dict):
         """Anthropic v2 lesson generation uses exactly one Messages request."""
 
         self._begin_structured_operation()

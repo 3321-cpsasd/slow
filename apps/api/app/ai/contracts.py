@@ -82,6 +82,60 @@ class GeneratedChapter(StrictModel):
     sections: list[GeneratedSectionOutline] = Field(min_length=2, max_length=12)
 
 
+CHAPTER_OUTLINE_REVIEW_ISSUES = Literal[
+    "adjacent_scope_overlap",
+    "repeated_definition",
+    "repeated_mechanism",
+    "repeated_example",
+    "repeated_assessment_target",
+    "progression_gap",
+]
+
+
+class ChapterSectionReviewEdit(StrictModel):
+    """Minimal outline edit; curriculum identities are not editable."""
+
+    title: str | None = Field(default=None, min_length=2, max_length=240)
+    question: str | None = Field(default=None, min_length=4, max_length=1000)
+    objectives: list[str] | None = Field(default=None, min_length=1, max_length=4)
+
+    @model_validator(mode="after")
+    def changes_something(self):
+        if self.title is None and self.question is None and self.objectives is None:
+            raise ValueError("outline edit must change at least one field")
+        return self
+
+
+class ChapterSectionReview(StrictModel):
+    section_slot: str = Field(pattern=r"^S(?:[1-9]|1[0-2])$")
+    decision: Literal["accept", "edit"]
+    issues: list[CHAPTER_OUTLINE_REVIEW_ISSUES] = Field(
+        default_factory=list,
+        max_length=6,
+    )
+    edit: ChapterSectionReviewEdit | None = None
+
+    @model_validator(mode="after")
+    def valid_decision_shape(self):
+        if self.decision == "accept":
+            if self.issues or self.edit is not None:
+                raise ValueError("accepted outline sections cannot carry edits")
+        elif not self.issues or self.edit is None:
+            raise ValueError("outline edit requires issues and changed fields")
+        return self
+
+
+class ChapterOutlineReviewBatch(StrictModel):
+    sections: list[ChapterSectionReview] = Field(min_length=2, max_length=12)
+
+    @model_validator(mode="after")
+    def unique_sections(self):
+        slots = [item.section_slot for item in self.sections]
+        if len(slots) != len(set(slots)):
+            raise ValueError("outline review section slots must be unique")
+        return self
+
+
 class TeachingBlueprintBlock(StrictModel):
     kind: Literal["text", "code", "formula", "table", "diagram"]
     role: Literal[
@@ -170,6 +224,26 @@ class DistractorDiagnostic(StrictModel):
     rationale: str = Field(min_length=4, max_length=500)
 
 
+class GeneratedLessonOptionVerdict(StrictModel):
+    """Blind adjudicator judgment for one candidate-local option."""
+
+    option_id: str = Field(pattern=r"^O[1-6]$")
+    decision: Literal["satisfies", "does_not_satisfy"]
+    evidence_block_key: str = Field(
+        pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,63}$"
+    )
+    rationale: str = Field(min_length=4, max_length=1000)
+    cause_code: DIAGNOSTIC_CAUSES | Literal[""] = ""
+
+    @model_validator(mode="after")
+    def valid_diagnostic_shape(self):
+        if self.decision == "satisfies" and self.cause_code:
+            raise ValueError("satisfying options cannot carry a diagnostic cause")
+        if self.decision == "does_not_satisfy" and not self.cause_code:
+            raise ValueError("non-satisfying options require a diagnostic cause")
+        return self
+
+
 class ChoiceQuestion(StrictModel):
     prompt: str
     options: list[str] = Field(min_length=3, max_length=6)
@@ -178,6 +252,17 @@ class ChoiceQuestion(StrictModel):
     objective: str
     explanation: str
     difficulty: Literal["standard"] = "standard"
+    answer_authority: Literal[
+        "blind_model_adjudication_v1",
+        "deterministic_rule_v1",
+        "reviewed_package_v1",
+        "demo_fixture_v1",
+        "legacy_author_declared",
+    ] = "legacy_author_declared"
+    option_verdicts: list[GeneratedLessonOptionVerdict] = Field(
+        default_factory=list,
+        max_length=6,
+    )
     claim_block_indexes: list[int] = Field(default_factory=list)
     distractor_diagnostics: list[DistractorDiagnostic] = Field(
         default_factory=list, max_length=5
@@ -201,6 +286,11 @@ class ChoiceQuestion(StrictModel):
             set(range(len(self.options))) - set(self.correct)
         ):
             raise ValueError("diagnostics must cover every incorrect option")
+        verdict_ids = [item.option_id for item in self.option_verdicts]
+        if verdict_ids and set(verdict_ids) != {
+            f"O{index + 1}" for index in range(len(self.options))
+        }:
+            raise ValueError("option verdicts must cover every option exactly once")
         return self
 
 
@@ -367,6 +457,17 @@ class GeneratedLessonQuestion(StrictModel):
     correct: list[int] = Field(min_length=1, max_length=6)
     explanation: str = Field(min_length=4, max_length=3000)
     difficulty: Literal["standard"] = "standard"
+    answer_authority: Literal[
+        "blind_model_adjudication_v1",
+        "deterministic_rule_v1",
+        "reviewed_package_v1",
+        "demo_fixture_v1",
+        "legacy_author_declared",
+    ] = "legacy_author_declared"
+    option_verdicts: list[GeneratedLessonOptionVerdict] = Field(
+        default_factory=list,
+        max_length=6,
+    )
     distractor_diagnostics: list[DistractorDiagnostic] = Field(
         default_factory=list, max_length=5
     )
@@ -390,6 +491,11 @@ class GeneratedLessonQuestion(StrictModel):
             set(range(len(self.options))) - set(self.correct)
         ):
             raise ValueError("diagnostics must cover every incorrect option")
+        verdict_ids = [item.option_id for item in self.option_verdicts]
+        if verdict_ids and set(verdict_ids) != {
+            f"O{index + 1}" for index in range(len(self.options))
+        }:
+            raise ValueError("option verdicts must cover every option exactly once")
         return self
 
 
@@ -403,7 +509,7 @@ class GeneratedLessonFeedbackReplacement(StrictModel):
 
 
 class GeneratedLessonCandidate(StrictModel):
-    """A versioned single-call candidate; it has no publication authority."""
+    """A versioned, answer-adjudicated candidate with no publication authority."""
 
     decision: Literal["candidate", "replan_required"] = "candidate"
     replan_code: Literal["", "PREREQUISITE_GAP_REQUIRES_REPLAN"] = ""
@@ -461,14 +567,44 @@ class GeneratedLessonSlotBlock(StrictModel):
         return self
 
 
+class GeneratedLessonSlotContentCandidate(StrictModel):
+    """Lesson body candidate authored before any assessment item exists."""
+
+    decision: Literal["candidate", "replan_required"] = "candidate"
+    replan_code: Literal["", "PREREQUISITE_GAP_REQUIRES_REPLAN"] = ""
+    replan_reason: str = Field(default="", max_length=2000)
+    confidence: Literal["high", "medium", "low"] = "medium"
+    blocks: list[GeneratedLessonSlotBlock] = Field(default_factory=list, max_length=12)
+    feedback_replacement_slot: str = Field(default="", max_length=32)
+
+    @model_validator(mode="after")
+    def valid_decision_shape(self):
+        if self.decision == "replan_required":
+            if self.replan_code != "PREREQUISITE_GAP_REQUIRES_REPLAN":
+                raise ValueError("replan decision requires the fixed replan code")
+            if not self.replan_reason.strip():
+                raise ValueError("replan decision requires a reason")
+            if self.blocks or self.feedback_replacement_slot:
+                raise ValueError("replan decision cannot contain publishable content")
+            return self
+        if self.replan_code or self.replan_reason:
+            raise ValueError("candidate decision cannot carry replan fields")
+        if not 2 <= len(self.blocks) <= 12:
+            raise ValueError("content candidate requires 2-12 content blocks")
+        slots = [block.slot for block in self.blocks]
+        if len(slots) != len(set(slots)):
+            raise ValueError("lesson block slots must be unique")
+        return self
+
+
 class GeneratedLessonSlotQuestion(StrictModel):
-    """A question names only a server-preallocated target slot."""
+    """Legacy combined-call question; new item authoring uses a narrower schema."""
 
     target_slot: str = Field(pattern=r"^T[1-8]$")
     prompt: str = Field(min_length=4, max_length=2000)
     options: list[str] = Field(min_length=3, max_length=6)
-    correct: list[int] = Field(min_length=1, max_length=6)
-    explanation: str = Field(min_length=4, max_length=3000)
+    correct: list[int] = Field(default_factory=list, max_length=6)
+    explanation: str = Field(default="", max_length=3000)
     distractor_diagnostics: list[DistractorDiagnostic] = Field(
         default_factory=list, max_length=5
     )
@@ -481,15 +617,136 @@ class GeneratedLessonSlotQuestion(StrictModel):
             raise ValueError("correct indexes must be unique")
         if any(index < 0 or index >= len(self.options) for index in self.correct):
             raise ValueError("correct index out of range")
-        diagnostic_indexes = [item.option_index for item in self.distractor_diagnostics]
-        if len(diagnostic_indexes) != len(set(diagnostic_indexes)):
-            raise ValueError("distractor diagnostic indexes must be unique")
-        if any(index in self.correct for index in diagnostic_indexes):
-            raise ValueError("correct options cannot carry distractor diagnostics")
-        if diagnostic_indexes and set(diagnostic_indexes) != (
-            set(range(len(self.options))) - set(self.correct)
-        ):
-            raise ValueError("diagnostics must cover every incorrect option")
+        return self
+
+
+class LessonQuestionAuthorItem(StrictModel):
+    """Answerless item-author contract that rejects all answer fields."""
+
+    target_slot: str = Field(pattern=r"^T[1-8]$")
+    prompt: str = Field(min_length=4, max_length=2000)
+    options: list[str] = Field(min_length=3, max_length=6)
+
+    @model_validator(mode="after")
+    def unique_options(self):
+        if len(self.options) != len({item.strip() for item in self.options}):
+            raise ValueError("authored options must be unique")
+        return self
+
+
+class LessonQuestionAuthorBatch(StrictModel):
+    """Answerless questions authored only after the lesson body is frozen."""
+
+    questions: list[LessonQuestionAuthorItem] = Field(min_length=1, max_length=5)
+
+
+QUESTION_REVIEW_ISSUES = Literal[
+    "question_not_answerable_from_evidence",
+    "multiple_valid_options",
+    "no_valid_option",
+    "missing_condition",
+    "option_overlap",
+    "factual_contradiction",
+    "target_scope_drift",
+    "implausible_distractor",
+]
+
+
+class LessonQuestionReviewEdit(StrictModel):
+    """Minimal answerless edit; target identity is deliberately not editable."""
+
+    prompt: str | None = Field(default=None, min_length=4, max_length=2000)
+    options: list[str] | None = Field(default=None, min_length=3, max_length=6)
+
+    @model_validator(mode="after")
+    def valid_edit(self):
+        if self.prompt is None and self.options is None:
+            raise ValueError("question edit must change prompt or options")
+        if self.options is not None and len(self.options) != len({
+            item.strip() for item in self.options
+        }):
+            raise ValueError("edited options must be unique")
+        return self
+
+
+class LessonQuestionReview(StrictModel):
+    item_slot: str = Field(pattern=r"^Q[1-5]$")
+    decision: Literal["accept", "edit", "reject"]
+    issues: list[QUESTION_REVIEW_ISSUES] = Field(default_factory=list, max_length=8)
+    edit: LessonQuestionReviewEdit | None = None
+
+    @model_validator(mode="after")
+    def valid_decision_shape(self):
+        if self.decision == "accept":
+            if self.issues or self.edit is not None:
+                raise ValueError("accepted questions cannot carry issues or edits")
+        elif self.decision == "edit":
+            if not self.issues or self.edit is None:
+                raise ValueError("question edit requires issues and changed fields")
+        else:
+            if not self.issues or self.edit is not None:
+                raise ValueError("rejection requires issues and no edit")
+        return self
+
+
+class LessonQuestionReviewBatch(StrictModel):
+    questions: list[LessonQuestionReview] = Field(min_length=1, max_length=5)
+
+    @model_validator(mode="after")
+    def unique_questions(self):
+        item_slots = [item.item_slot for item in self.questions]
+        if len(item_slots) != len(set(item_slots)):
+            raise ValueError("review item slots must be unique")
+        return self
+
+
+class LessonQuestionOptionAdjudication(StrictModel):
+    """One blind judgment; the service derives the answer from all judgments."""
+
+    option_id: str = Field(pattern=r"^O[1-6]$")
+    decision: Literal[
+        "satisfies",
+        "does_not_satisfy",
+        "indeterminate",
+    ]
+    evidence_slot: str = Field(pattern=r"^T[1-8]_CORE$")
+    rationale: str = Field(min_length=4, max_length=1000)
+    cause_code: DIAGNOSTIC_CAUSES | Literal[""] = ""
+
+    @model_validator(mode="after")
+    def valid_cause(self):
+        if self.decision == "does_not_satisfy" and not self.cause_code:
+            raise ValueError("rejected options require a diagnostic cause")
+        if self.decision != "does_not_satisfy" and self.cause_code:
+            raise ValueError("only rejected options can carry a diagnostic cause")
+        return self
+
+
+class LessonQuestionAdjudication(StrictModel):
+    item_slot: str = Field(pattern=r"^Q[1-5]$")
+    option_verdicts: list[LessonQuestionOptionAdjudication] = Field(
+        min_length=3,
+        max_length=6,
+    )
+
+    @model_validator(mode="after")
+    def unique_options(self):
+        option_ids = [item.option_id for item in self.option_verdicts]
+        if len(option_ids) != len(set(option_ids)):
+            raise ValueError("adjudication option ids must be unique")
+        return self
+
+
+class LessonQuestionAdjudicationBatch(StrictModel):
+    """Read-only blind verdicts for every reviewed question in one lesson."""
+
+    questions: list[LessonQuestionAdjudication] = Field(min_length=1, max_length=5)
+
+    @model_validator(mode="after")
+    def unique_questions(self):
+        item_slots = [item.item_slot for item in self.questions]
+        if len(item_slots) != len(set(item_slots)):
+            raise ValueError("adjudication item slots must be unique")
         return self
 
 
@@ -652,6 +909,18 @@ class AskMeTurn(StrictModel):
     rationale: str = ""
 
 
+class AskMeProbe(StrictModel):
+    dimension: Literal["mechanism", "boundary", "transfer"]
+    prompt: str = Field(min_length=4, max_length=2000)
+
+
+class AskMeEvaluation(StrictModel):
+    dimension: Literal["mechanism", "boundary", "transfer"]
+    evaluation: Literal["strong", "partial", "weak"]
+    rationale: str = Field(min_length=4, max_length=2000)
+    evidence_sufficiency: Literal["sufficient", "insufficient"]
+
+
 class AskMeFeedbackIssue(StrictModel):
     kind: Literal[
         "factual_error",
@@ -673,6 +942,19 @@ class AskMeDiscussionTurn(StrictModel):
     follow_up_prompt: str
     follow_up_purpose: str
     topic_sufficiency: Literal["insufficient", "sufficient"]
+
+
+class AskMeDiscussionEvaluation(StrictModel):
+    evaluation: Literal["strong", "partial", "weak"]
+    correct_points: list[str] = Field(default_factory=list, max_length=5)
+    issues: list[AskMeFeedbackIssue] = Field(default_factory=list, max_length=5)
+    suggestions: list[str] = Field(min_length=1, max_length=5)
+    topic_sufficiency: Literal["insufficient", "sufficient"]
+
+
+class AskMeDiscussionProbe(StrictModel):
+    follow_up_prompt: str = Field(min_length=4, max_length=2000)
+    follow_up_purpose: str = Field(min_length=4, max_length=1000)
 
 
 class ReplannedChapter(StrictModel):

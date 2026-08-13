@@ -33,7 +33,7 @@
 
 | ADR | 状态 | 主题 |
 | --- | --- | --- |
-| [ADR-0001](0001-lesson-generation-v2.md) | Accepted，正文与补救题发布边界已实现 | 小节正文与测验的一次生成、确定性门禁和原子发布 |
+| [ADR-0001](0001-lesson-generation-v2.md) | 部分被 ADR-0016 取代；发布边界继续有效 | Learning Contract、稳定绑定、失败关闭和原子发布 |
 | [ADR-0002](0002-curriculum-planning-boundaries.md) | Accepted，核心切片已实现 | 分层课程规划、书籍目录激活、语义冻结和小节数量软约束 |
 | [ADR-0003](0003-modular-monolith-boundaries.md) | Accepted，第一阶段已实现 | 应用模块化单体、写入权边界和渐进式门面迁移 |
 | [ADR-0004](0004-curriculum-baseline-authority.md) | Accepted，首个发布纵向切片已通过 M2 | 真实课程基准、候选知识图、人工发布边界和目标覆盖门禁 |
@@ -45,3 +45,9 @@
 | [ADR-0011](0011-m3-pilot-readiness.md) | Accepted，实施中 | 模型故障透明恢复、五类错因、补救有效性、跨类型质量与偏好授权 |
 | [ADR-0012](0012-on-demand-knowledge-universe-and-learner-memory.md) | Accepted，第一阶段实现中 | 按需知识宇宙、个人知识子网、三层学习记忆与可信知识段位 |
 | [ADR-0013](0013-evidence-guided-reinforcement-agent.md) | Accepted，MVP 已实现 | 到期唤醒失败后的有界诊断、补强、重组与独立验证 |
+| [ADR-0014](0014-purpose-aware-ai-gateway.md) | Accepted，第一阶段已实现 | 用途感知 AI 网关、模型池路由、评估独立性与准确性反馈复核边界 |
+| [ADR-0015](0015-rank-settleable-learning-contracts.md) | Accepted，已实现 | 新小节段位可结算身份、系列内稳定复用与发布失败关闭 |
+| [ADR-0016](0016-trusted-assessment-model-roles.md) | Accepted，已实现 | 全部正式选择题的出题、独立审题和答案盲判职责分离 |
+| [ADR-0017](0017-independent-chapter-scope-review.md) | Accepted，已实现 | 独立模型通读整章，以最小编辑消除小节知识增量重复 |
+| [ADR-0018](0018-m4-trustworthy-adaptive-learning.md) | Accepted，实现完成，等待真实模型验收 | M4 可信测评、口试职责、跨书适配和生产失败关闭的统一验收合同 |
+| [ADR-0019](0019-learning-start-and-chapter-route-choices.md) | Accepted，MVP 已实现 | 系列启动兴趣选择、章级挑战与显式略过的路线/掌握分离 |

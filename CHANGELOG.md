@@ -19,6 +19,9 @@ Slow 的重要变更记录在这里。本项目采用 [Keep a Changelog](https:/
 
 ### Added · 新增
 
+- Added ADR-0015 and made rank-settleability a formal lesson-publication gate: new generated targets receive stable series-scoped knowledge identities and node-local rank rubrics, post-quiz settlement fails closed if incomplete, and first independent choice-quiz success now awards the scoped Bronze rank instead of an empty receipt.
+- 新增 ADR-0015，并把“段位可结算”纳入正式小节发布门禁：新生成目标会取得系列内稳定知识身份与节点局部段位量规；答题后结算缺失时回滚失败；首次独立选择题验证会获得对应范围的“青铜 · 了解”，不再返回空回执。
+
 - Completed the ADR-0012 MVP loop with publication-gated node rubrics, a personal knowledge-map API and responsive evidence field, rebuildable evidence-only learner profile summaries, task-scoped teaching actions shared by future generation and review, and a versioned BKT registry with offline time-split calibration, shadow activation, and fail-closed online promotion.
 - 完成 ADR-0012 的 MVP 核心闭环：知识节点量规发布门禁、个人知识版图 API 与响应式证据场、可重建的纯证据画像摘要、生成与复习共享的任务级教学动作，以及包含离线时间切分校准、影子运行和失败关闭上线门禁的版本化 BKT 参数注册链。
 

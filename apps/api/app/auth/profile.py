@@ -38,7 +38,7 @@ DEFAULT_LEARNING_PREFERENCES = {
     "explanationDensity": "auto",
     "formatPreferences": [],
     "interactionRhythm": "auto",
-    "dailyModePromptEnabled": True,
+    "dailyModePromptEnabled": False,
 }
 PREFERENCE_VALUES = {
     "openingStyle": {"auto", "problem_first", "example_first", "concept_first"},
@@ -271,7 +271,7 @@ class ProfileService:
                 for alias in aliases["dailyModePromptEnabled"]
                 if value.get(alias) is not None
             ),
-            True,
+            False,
         )
         if isinstance(prompt_enabled, bool):
             result["dailyModePromptEnabled"] = prompt_enabled
