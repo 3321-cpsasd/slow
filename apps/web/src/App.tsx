@@ -169,6 +169,21 @@ function PasswordVisibilityToggle({
   );
 }
 
+function AppLoadingScreen({ message }: { message: string }) {
+  return (
+    <div className="app-shell app-loading-shell">
+      <div className="app-loading-card" role="status" aria-live="polite" aria-atomic="true">
+        <span className="brand" aria-hidden="true">
+          <span className="brand-mark"><i /></span>
+          <b>slow</b>
+        </span>
+        <span className="app-loading-progress" aria-hidden="true"><i /></span>
+        <p>{message}</p>
+      </div>
+    </div>
+  );
+}
+
 const routeFromLocation = (): AppRoute => {
   const parts = window.location.pathname.split('/').filter(Boolean).map((part) => {
     try {
@@ -374,6 +389,9 @@ export default function App() {
   const [renewedRecoveryCode, setRenewedRecoveryCode] = useState('');
   const [data, setData] = useState<Bootstrap | null>(null);
   const [view, setView] = useState<View>(() => routeFromLocation().view);
+  const [restoringInitialRoute, setRestoringInitialRoute] = useState(
+    () => routeFromLocation().view !== 'home',
+  );
   const [shelf, setShelf] = useState<Shelf | null>(null);
   const [series, setSeries] = useState<Series | null>(null);
   const [section, setSection] = useState<Section | null>(null);
@@ -465,6 +483,7 @@ export default function App() {
       setSeries(null);
       setSection(null);
       setView('home');
+      setRestoringInitialRoute(false);
       setAuthPanel('login');
       setShowUserMenu(false);
       window.history.replaceState({}, '', '/');
@@ -1147,62 +1166,62 @@ export default function App() {
     const route = routeFromLocation();
     setShowUserMenu(false);
     setError('');
-    if (route.view === 'home') {
-      setView('home');
-      setShelf(null);
-      setSeries(null);
-      setSection(null);
-      return;
-    }
-    if (route.view === 'profile') {
-      setProfileSection(route.section);
-      setView('profile');
-      setShelf(null);
-      setSeries(null);
-      setSection(null);
-      return;
-    }
-    if (route.view === 'knowledge') {
-      setView('knowledge');
-      setShelf(null);
-      setSeries(null);
-      setSection(null);
-      return;
-    }
-    if (route.view === 'review') {
-      setView('review');
-      setShelf(null);
-      setSeries(null);
-      setSection(null);
-      return;
-    }
-    if (route.view === 'shelf') {
-      const targetShelf = data.shelves.find((item) => item.id === route.shelfId);
-      if (!targetShelf) {
-        updateBrowserLocation('/', 'replace');
+    try {
+      if (route.view === 'home') {
         setView('home');
         setShelf(null);
         setSeries(null);
         setSection(null);
-        setError('这个书架不存在，或当前账号无权访问。');
         return;
       }
-      openShelf(targetShelf, 'none');
-      return;
-    }
+      if (route.view === 'profile') {
+        setProfileSection(route.section);
+        setView('profile');
+        setShelf(null);
+        setSeries(null);
+        setSection(null);
+        return;
+      }
+      if (route.view === 'knowledge') {
+        setView('knowledge');
+        setShelf(null);
+        setSeries(null);
+        setSection(null);
+        return;
+      }
+      if (route.view === 'review') {
+        setView('review');
+        setShelf(null);
+        setSeries(null);
+        setSection(null);
+        return;
+      }
+      if (route.view === 'shelf') {
+        const targetShelf = data.shelves.find((item) => item.id === route.shelfId);
+        if (!targetShelf) {
+          updateBrowserLocation('/', 'replace');
+          setView('home');
+          setShelf(null);
+          setSeries(null);
+          setSection(null);
+          setError('这个书架不存在，或当前账号无权访问。');
+          return;
+        }
+        openShelf(targetShelf, 'none');
+        return;
+      }
 
-    setBusy('正在恢复上次浏览位置…');
-    try {
+      setBusy('正在恢复上次浏览位置…');
       const restoredSeries = await api.series(route.seriesId);
       if (requestVersion !== routeRequestVersion.current) return;
       const restoredShelf = data.shelves.find((item) => (
         item.series.some((candidate) => candidate.id === restoredSeries.id)
       )) || null;
-      setShelf(restoredShelf);
-      setSeries(restoredSeries);
-      setView('learn');
       if (!route.sectionId) {
+        setShelf(restoredShelf);
+        setSeries(restoredSeries);
         setSection(null);
+        setView('learn');
         if (
           restoredSeries.initializationTask
           && !['failed', 'succeeded'].includes(restoredSeries.initializationTask.status)
@@ -1218,12 +1237,21 @@ export default function App() {
       ));
       if (!sectionCanOpen) {
         updateBrowserLocation(seriesPath(restoredSeries.id), 'replace');
+        setShelf(restoredShelf);
+        setSeries(restoredSeries);
         setSection(null);
+        setView('learn');
         setError('这个小节尚未解锁，已返回当前系列目录。');
         return;
       }
       const restoredSection = await openAndTrackSection(route.sectionId);
-      if (requestVersion === routeRequestVersion.current) setSection(restoredSection);
+      if (requestVersion !== routeRequestVersion.current) return;
+      // Commit the complete destination together so a hard refresh does not
+      // visibly walk through the series directory before showing the section.
+      setShelf(restoredShelf);
+      setSeries(restoredSeries);
+      setSection(restoredSection);
+      setView('learn');
     } catch (reason) {
       if (requestVersion !== routeRequestVersion.current) return;
       updateBrowserLocation('/', 'replace');
@@ -1233,7 +1261,10 @@ export default function App() {
       setSection(null);
       setError(reason instanceof Error ? reason.message : '无法恢复这个浏览位置。');
     } finally {
-      if (requestVersion === routeRequestVersion.current) setBusy('');
+      if (requestVersion === routeRequestVersion.current) {
+        setBusy('');
+        setRestoringInitialRoute(false);
+      }
     }
   };
 
@@ -1251,6 +1282,10 @@ export default function App() {
 
   if (exitReceipt) {
     return <AccountExitReceiptPage receipt={exitReceipt} onClose={() => setExitReceipt(null)} />;
+  }
+
+  if (!authChecked) {
+    return <AppLoadingScreen message="正在打开你的书架…" />;
   }
 
   if(!auth) {
@@ -1611,6 +1646,10 @@ export default function App() {
         onLogout={logout}
       />
     );
+  }
+
+  if (restoringInitialRoute) {
+    return <AppLoadingScreen message="正在回到你刚才阅读的位置…" />;
   }
 
   const showDailyModeDialog = Boolean(
@@ -5574,6 +5613,11 @@ function ReaderPanel({
   const [regenerationClock, setRegenerationClock] = useState(Date.now());
   const [reviewTargetBlockId, setReviewTargetBlockId] = useState('');
   const readerScrollRef = useRef<HTMLDivElement>(null);
+  const tabScrollPositionsRef = useRef<Record<ReaderTab, number>>({
+    content: 0,
+    quiz: 0,
+    note: 0,
+  });
   const reviewHighlightTimerRef = useRef<number | null>(null);
   const regenerationDialogRef = useModalFocus<HTMLElement>({
     open: regenerationConfirmOpen,
@@ -5588,6 +5632,7 @@ function ReaderPanel({
     setSelectionPopup(null);
     setRegenerationConfirmOpen(false);
     setReviewTargetBlockId('');
+    tabScrollPositionsRef.current = { content: 0, quiz: 0, note: 0 };
     if (reviewHighlightTimerRef.current !== null) {
       window.clearTimeout(reviewHighlightTimerRef.current);
       reviewHighlightTimerRef.current = null;
@@ -5611,6 +5656,9 @@ function ReaderPanel({
   }, [regenerating]);
 
   const switchTab = (nextTab: ReaderTab) => {
+    if (readerScrollRef.current) {
+      tabScrollPositionsRef.current[tab] = readerScrollRef.current.scrollTop;
+    }
     if (nextTab === 'quiz' && tab !== 'quiz' && section) {
       telemetry.track('quiz_viewed', {
         view: 'learn',
@@ -5621,7 +5669,9 @@ function ReaderPanel({
     onTabChange(nextTab);
     setTab(nextTab);
     requestAnimationFrame(() => {
-      if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
+      if (readerScrollRef.current) {
+        readerScrollRef.current.scrollTop = tabScrollPositionsRef.current[nextTab];
+      }
     });
   };
 
@@ -5634,6 +5684,9 @@ function ReaderPanel({
       return;
     }
 
+    if (readerScrollRef.current) {
+      tabScrollPositionsRef.current[tab] = readerScrollRef.current.scrollTop;
+    }
     onSelectBlock(blockId);
     onTabChange('content');
     setTab('content');
@@ -5784,6 +5837,7 @@ function ReaderPanel({
               onSelectSection={onSelectSection}
               onReviewContent={reviewContent}
               onSubmissionComplete={() => {
+                tabScrollPositionsRef.current.quiz = 0;
                 if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
               }}
             />
