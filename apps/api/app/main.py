@@ -28,7 +28,7 @@ from .ai.fallback_adapter import FallbackAiAdapter
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ResumeUpdate, ReviewSubmit, ShelfCreate
+from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, ChapterCreate, ChapterOrder, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ReinforcementRespond, ResumeUpdate, ReviewSubmit, ShelfCreate, StudyActivityHeartbeat
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -36,6 +36,7 @@ from .demo_personas import LOCAL_DEMO_PERSONAS
 from .infrastructure.database import build_database
 from .infrastructure.tables import Base, LearningTask, QuizAttempt, Remediation, Shelf, User, now
 from .modules.learning.tasks import claim_task, heartbeat_task, recoverable_task_ids
+from .modules.learning.study_activity import StudyActivityService
 from .modules.feedback.service import FeedbackService
 from .modules.telemetry.service import ProductEventService
 from .modules.library.context import ActiveLearningContextResolver
@@ -1085,6 +1086,30 @@ def create_app(
     ):
         return ProductEventService(session, scope.user_id).append(body.events)
 
+    @app.post("/api/study-activity/heartbeat", status_code=202)
+    def record_study_activity(
+        body: StudyActivityHeartbeat,
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        ProfileService(session, scope.user_id).require_complete()
+        return StudyActivityService(
+            session,
+            user_id=scope.user_id,
+        ).heartbeat(body)
+
+    @app.get("/api/study-activity/today")
+    def study_activity_today(
+        timezone_name: str = Query(alias="timezone", min_length=1, max_length=64),
+        scope: UserScope = Depends(current_scope),
+        session: Session = Depends(db),
+    ):
+        ProfileService(session, scope.user_id).require_complete()
+        return StudyActivityService(
+            session,
+            user_id=scope.user_id,
+        ).today(timezone_name)
+
     @app.post("/api/learning-preferences/evidence", status_code=202)
     def record_learning_preference_evidence(
         body: LearningPreferenceEvidenceCreate,
@@ -1578,6 +1603,13 @@ def create_app(
     ):
         return s.due_reviews(daily_budget)
 
+    @app.get("/api/knowledge-map")
+    def knowledge_map(
+        series_id: str | None = Query(default=None),
+        s: SlowService = Depends(service),
+    ):
+        return s.knowledge_map(series_id)
+
     @app.post("/api/reviews/{assignment_id}/start")
     async def start_review(
         assignment_id: str,
@@ -1593,6 +1625,42 @@ def create_app(
         s: SlowService = Depends(service),
     ):
         return s.submit_review(assignment_id, body, idempotency_key)
+
+    @app.post("/api/reviews/{assignment_id}/reinforcement")
+    async def start_review_reinforcement(
+        assignment_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return await s.start_review_reinforcement(assignment_id)
+
+    @app.post("/api/knowledge-targets/{target_id}/reinforcement")
+    async def start_target_reinforcement(
+        target_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return await s.start_target_reinforcement(target_id)
+
+    @app.get("/api/reinforcements/active")
+    def active_reinforcement(
+        s: SlowService = Depends(service),
+    ):
+        return s.active_reinforcement()
+
+    @app.get("/api/reinforcements/{run_id}")
+    def reinforcement_run(
+        run_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return s.reinforcement_run(run_id)
+
+    @app.post("/api/reinforcements/{run_id}/respond")
+    def respond_reinforcement(
+        run_id: str,
+        body: ReinforcementRespond,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return s.respond_reinforcement(run_id, body, idempotency_key)
 
     @app.post("/api/reviews/{assignment_id}/skip")
     def skip_review(

@@ -758,7 +758,9 @@ class SectionGenerationCoordinator:
                     status=409
                     if failure.code == "PREREQUISITE_GAP_REQUIRES_REPLAN"
                     else 502,
-                    retryable=False,
+                    retryable=(
+                        failure.code != "PREREQUISITE_GAP_REQUIRES_REPLAN"
+                    ),
                     details=failure.location,
                 ) from failure
 
@@ -892,6 +894,7 @@ class SectionGenerationCoordinator:
                     {
                         **load(failed_run.trace_json, {}),
                         "stage": "failed",
+                        "aiHarness": self._ai_harness_trace(),
                         "modelAttempts": (
                             self.ai.fallback_trace()
                             if callable(getattr(self.ai, "fallback_trace", None))

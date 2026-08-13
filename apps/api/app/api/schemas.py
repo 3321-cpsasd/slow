@@ -143,6 +143,7 @@ ProductEventName = Literal[
     "shelf_viewed",
     "learning_viewed",
     "profile_viewed",
+    "review_center_viewed",
     "section_viewed",
     "quiz_viewed",
     "feedback_opened",
@@ -166,7 +167,7 @@ class ProductEventCreate(ApiModel):
     event_name: ProductEventName
     occurred_at: datetime
     page_path: str = Field(default="/", min_length=1, max_length=500)
-    view: Literal["", "home", "shelf", "learn", "profile"] = ""
+    view: Literal["", "home", "shelf", "learn", "profile", "knowledge", "review"] = ""
     entity_type: Literal["", "shelf", "series", "book", "chapter", "section"] = ""
     entity_id: str = Field(default="", max_length=160, pattern=r"^[A-Za-z0-9_.:-]*$")
     properties: dict[str, str | int | float | bool] = Field(default_factory=dict)
@@ -187,6 +188,29 @@ class ProductEventBatch(ApiModel):
     )
 
     events: list[ProductEventCreate] = Field(min_length=1, max_length=25)
+
+
+class StudyActivityHeartbeat(ApiModel):
+    model_config = ConfigDict(
+        alias_generator=camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+    event_id: str = Field(min_length=8, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
+    client_session_id: str = Field(
+        min_length=8,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+    client_sequence: int = Field(ge=0, le=2_147_483_647)
+    activity_kind: Literal[
+        "reading_thinking",
+        "verification_review",
+        "ask_ai",
+    ]
+    section_id: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9_.:-]+$")
+    timezone: str = Field(min_length=1, max_length=64)
 
 
 ProfileStage = Literal[
@@ -285,6 +309,13 @@ class ReviewSubmit(ApiModel):
     answers: list[list[int]] = Field(min_length=1, max_length=5)
 
 
+class ReinforcementRespond(ApiModel):
+    activity_key: str = Field(min_length=1, max_length=64)
+    selected_options: list[int] = Field(default_factory=list, max_length=6)
+    response_text: str = Field(default="", max_length=2000)
+    acknowledged: bool = False
+
+
 class AskRequest(ApiModel):
     block_id: str
     question: str = Field(min_length=1, max_length=3000)
@@ -345,7 +376,7 @@ class FeedbackCreate(ApiModel):
     ]
     message: str = Field(default="", max_length=4000)
     page_path: str = Field(default="/", max_length=500)
-    view: Literal["", "home", "shelf", "learn", "profile"] = ""
+    view: Literal["", "home", "shelf", "learn", "profile", "knowledge", "review"] = ""
     section_id: str | None = Field(default=None, max_length=160)
     content_version_id: str | None = Field(default=None, max_length=160)
     block_id: str | None = Field(default=None, max_length=160)

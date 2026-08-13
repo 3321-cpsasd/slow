@@ -131,6 +131,50 @@ def test_product_events_reject_arbitrary_text_and_inconsistent_context(tmp_path)
         assert free_form_error.json()["code"] == "PRODUCT_EVENT_PROPERTIES_INVALID"
 
 
+def test_global_feedback_event_accepts_knowledge_view(tmp_path):
+    with make_client(tmp_path) as client:
+        csrf = login(client)
+        accept_privacy(client, csrf)
+
+        response = client.post(
+            "/api/events/batch",
+            headers={"X-CSRF-Token": csrf},
+            json=event_payload(
+                eventId="evt_knowledge_feedback",
+                eventName="feedback_opened",
+                pagePath="/knowledge",
+                view="knowledge",
+                entityType="",
+                entityId="",
+                properties={"scope": "global"},
+            ),
+        )
+
+        assert response.status_code == 202
+
+
+def test_review_center_event_accepts_review_view(tmp_path):
+    with make_client(tmp_path) as client:
+        csrf = login(client)
+        accept_privacy(client, csrf)
+
+        response = client.post(
+            "/api/events/batch",
+            headers={"X-CSRF-Token": csrf},
+            json=event_payload(
+                eventId="evt_review_center_view",
+                eventName="review_center_viewed",
+                pagePath="/review",
+                view="review",
+                entityType="",
+                entityId="",
+                properties={},
+            ),
+        )
+
+        assert response.status_code == 202
+
+
 def test_explanation_style_events_accept_only_bounded_preference_evidence(tmp_path):
     with make_client(tmp_path) as client:
         csrf = login(client)

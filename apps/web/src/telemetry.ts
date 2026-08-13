@@ -5,6 +5,7 @@ export type ProductEventName =
   | 'shelf_viewed'
   | 'learning_viewed'
   | 'profile_viewed'
+  | 'review_center_viewed'
   | 'section_viewed'
   | 'quiz_viewed'
   | 'feedback_opened'
@@ -15,7 +16,7 @@ export type ProductEventName =
   | 'frontend_error';
 
 type ProductEventContext = {
-  view?: '' | 'home' | 'shelf' | 'learn' | 'profile';
+  view?: '' | 'home' | 'shelf' | 'learn' | 'profile' | 'knowledge' | 'review';
   entityType?: '' | 'shelf' | 'series' | 'book' | 'chapter' | 'section';
   entityId?: string;
   properties?: Record<string, string | number | boolean>;

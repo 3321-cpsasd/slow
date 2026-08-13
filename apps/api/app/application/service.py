@@ -61,7 +61,10 @@ from ..modules.learning.generation_leases import (
 )
 from ..modules.learning.milestones import MilestoneService
 from ..modules.learning.missions import MissionService
+from ..modules.learning.knowledge_map import KnowledgeMapService
+from ..modules.learning.knowledge_ranks import knowledge_node_views_for_targets
 from ..modules.learning.reviews import ReviewAssignmentService
+from ..modules.learning.reinforcements import ReinforcementService
 from ..modules.learning.contracts import (
     open_run_section,
 )
@@ -1390,6 +1393,11 @@ class SlowService:
             .limit(limit)
         ).all()
         target_ids = [target.id for _, target in projection_rows]
+        node_views = knowledge_node_views_for_targets(
+            self.db,
+            user_id=self.user_id,
+            target_ids=set(target_ids),
+        )
         evidence_counts = dict(
             self.db.execute(
                 select(
@@ -1403,8 +1411,21 @@ class SlowService:
                 .group_by(AssessmentObservation.assessment_target_id)
             ).all()
         ) if target_ids else {}
-        result = [
-            {
+        result = []
+        for state, target in projection_rows:
+            node = node_views.get(target.concept_revision_id or "")
+            teaching_action = (
+                "wake"
+                if node and node["activation"] == "due"
+                else "scaffold"
+                if node and node["activation"] == "reassessment"
+                else "compress"
+                if node and node["activation"] == "active" and node["rankOrder"] >= 3
+                else "connect"
+                if node and node["activation"] == "active"
+                else "teach"
+            )
+            result.append({
                 "concept": target.objective_statement,
                 "mastery": round(state.p_known_ppm / 10_000),
                 "evidenceCount": evidence_counts.get(target.id, 0),
@@ -1420,9 +1441,19 @@ class SlowService:
                 "parameterSetVersion": state.parameter_set_version,
                 "projectionRuleVersion": state.projection_rule_version,
                 "sourceObservationWatermark": state.source_observation_watermark,
-            }
-            for state, target in projection_rows
-        ]
+                **({
+                    "knowledgeNode": {
+                        "conceptRevisionId": node["conceptRevisionId"],
+                        "capabilityScope": node["capabilityScope"],
+                        "rank": node["rank"],
+                        "rankLabel": node["rankLabel"],
+                        "rankCeiling": node["rankCeiling"],
+                        "activation": node["activation"],
+                        "evidenceCount": node["evidenceCount"],
+                    },
+                    "teachingAction": teaching_action,
+                } if node else {"teachingAction": "teach"}),
+            })
 
         # Ask Me and pre-M2 evidence still use the legacy memory projection.
         # Keep it as a compatibility fallback, but never let it override a BKT
@@ -1455,6 +1486,12 @@ class SlowService:
                 if len(result) == limit:
                     break
         return result
+
+    def knowledge_map(self, series_id: str | None = None):
+        return KnowledgeMapService(
+            self.db,
+            user_id=self.user_id,
+        ).view(series_id=series_id)
 
     def learning_memory(self, shelf_id=None):
         if shelf_id:
@@ -1499,6 +1536,41 @@ class SlowService:
             body.answers,
             idempotency_key=idempotency_key,
         )
+
+    async def start_review_reinforcement(self, assignment_id: str):
+        return await ReinforcementService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+        ).start_for_review(assignment_id)
+
+    async def start_target_reinforcement(self, target_id: str):
+        return await ReinforcementService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+        ).start_for_target(target_id)
+
+    def reinforcement_run(self, run_id: str):
+        return ReinforcementService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+        ).view(run_id)
+
+    def active_reinforcement(self):
+        return ReinforcementService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+        ).active()
+
+    def respond_reinforcement(self, run_id: str, body, idempotency_key=None):
+        return ReinforcementService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+        ).respond(run_id, body, idempotency_key=idempotency_key)
 
     def skip_review(self, assignment_id: str):
         return ReviewAssignmentService(

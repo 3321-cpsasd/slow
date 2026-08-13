@@ -94,11 +94,11 @@ Slow 目前处于邀请制 Alpha 阶段。你可以访问 [slow.net.cn](https://
 ### 开发者与贡献者
 
 - [产品底层基因](PRODUCT_DNA.md)：产品层级、学习粒度与证据边界。
-- [系统全景](docs/SYSTEM_OVERVIEW.md)：代码架构、模块、数据流和 AI 接入。
-- [架构说明](docs/ARCHITECTURE.md)：模块化单体边界与依赖规则。
 - [架构决策记录](docs/decisions/README.md)：正文生成、课程规划、UI 表达和连续学习等决策。
-- [质量门禁](docs/QUALITY_GATES.md)：测试、评测与发布要求。
-- [产品边界](docs/PRODUCT_BOUNDARY.md)：当前阶段的明确范围与非目标。
+- [正文生成与原子发布](docs/decisions/0001-lesson-generation-v2.md)：Learning Contract、内容版本和发布门禁。
+- [课程规划边界](docs/decisions/0002-curriculum-planning-boundaries.md)：系列、书、章、节如何形成与重规划。
+- [模块化单体边界](docs/decisions/0003-modular-monolith-boundaries.md)：应用、领域模块和基础设施的依赖规则。
+- [界面表达边界](docs/decisions/0007-user-interface-expression-boundary.md)：内部机制如何转换为用户可理解的状态与行动。
 - [试点运营](deploy/PILOT_OPERATIONS.md)：邀请制测试和运营流程。
 
 ## 本地运行
@@ -201,7 +201,6 @@ The core loop is: **goal → personalized textbook → section-level study → a
 - User documentation: [3321-cpsasd.github.io/slow](https://3321-cpsasd.github.io/slow/)
 - Alpha access: [alpha@slow.net.cn](mailto:alpha@slow.net.cn)
 - Product contract: [PRODUCT_DNA.md](PRODUCT_DNA.md)
-- System overview: [docs/SYSTEM_OVERVIEW.md](docs/SYSTEM_OVERVIEW.md)
 - Architecture decisions: [docs/decisions](docs/decisions/README.md)
 
 Local development requires Python 3.12+, Node.js 22+, and pnpm 11+. Follow the commands in [Local development](#本地运行) to start the application.

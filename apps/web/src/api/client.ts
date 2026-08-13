@@ -124,68 +124,6 @@ async function streamQa(
   return completed;
 }
 
-async function streamFeedbackRepair(
-  feedbackId:string,
-  onDelta:(delta:string)=>void,
-):Promise<import('../model/types').FeedbackRepairResult>{
-  const response = await request(`/api/feedback/${feedbackId}/repair/stream`, {
-    method:'POST',
-    headers:{
-      'Accept':'text/event-stream',
-      ...(csrfToken ? {'X-CSRF-Token':csrfToken} : {}),
-    },
-  });
-  if(!response.ok){
-    if(response.status === 401) unauthorizedHandler?.();
-    const text = await response.text();
-    const payload = parsePayload(text);
-    throw new ApiError(
-      String(payload?.message || '补救内容生成失败'),
-      response.status,
-      String(payload?.code || 'FEEDBACK_REPAIR_FAILED'),
-      Boolean(payload?.retryable),
-    );
-  }
-  if(!response.body) throw new Error('浏览器不支持流式补救');
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let completed:import('../model/types').FeedbackRepairResult|undefined;
-  const consume = (frame:string) => {
-    let eventType = 'message';
-    const dataLines:string[] = [];
-    for(const line of frame.split(/\r?\n/)){
-      if(line.startsWith('event:')) eventType = line.slice(6).trim();
-      if(line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
-    }
-    if(!dataLines.length) return;
-    const payload = JSON.parse(dataLines.join('\n')) as Record<string,unknown>;
-    if(eventType === 'delta') onDelta(String(payload.delta || ''));
-    if(eventType === 'done') completed = payload as import('../model/types').FeedbackRepairResult;
-    if(eventType === 'error') {
-      throw new ApiError(
-        '补救内容暂时没有完成，请稍后重试',
-        200,
-        String(payload.code || 'FEEDBACK_REPAIR_FAILED'),
-        Boolean(payload.retryable),
-      );
-    }
-  };
-  while(true){
-    const {value,done} = await reader.read();
-    buffer += decoder.decode(value,{stream:!done});
-    const frames = buffer.split(/\r?\n\r?\n/);
-    buffer = frames.pop() || '';
-    for(const frame of frames){
-      if(frame.trim()) consume(frame);
-    }
-    if(done) break;
-  }
-  if(buffer.trim()) consume(buffer);
-  if(!completed) throw new Error('补救内容流意外结束');
-  return completed;
-}
-
 export const api = {
   setUnauthorizedHandler:(handler:()=>void)=>{ unauthorizedHandler = handler; },
   authConfig:()=>call<import('../model/types').AuthConfig>('/api/auth/config'),
@@ -249,6 +187,19 @@ export const api = {
     keepalive:true,
     body:JSON.stringify(body),
   }),
+  studyActivityHeartbeat:(body:{
+    eventId:string;
+    clientSessionId:string;
+    clientSequence:number;
+    activityKind:import('../model/types').StudyActivityKind;
+    sectionId:string;
+    timezone:string;
+  })=>call<{accepted:boolean;duplicated:boolean;serverNow:string;measurementRuleVersion:string}>('/api/study-activity/heartbeat',{
+    method:'POST',
+    keepalive:true,
+    body:JSON.stringify(body),
+  }),
+  studyActivityToday:(timezone:string)=>call<import('../model/types').StudyActivitySummary>(`/api/study-activity/today?timezone=${encodeURIComponent(timezone)}`),
   onboarding:()=>call<import('../model/types').OnboardingState>('/api/onboarding'),
   saveProfileDraft:(body:object)=>call<import('../model/types').OnboardingState>('/api/onboarding/profile',{
     method:'PATCH',
@@ -291,7 +242,6 @@ export const api = {
     headers:{'Idempotency-Key':idempotencyKey},
     body:JSON.stringify(body),
   }),
-  streamFeedbackRepair:(feedbackId:string,onDelta:(delta:string)=>void)=>streamFeedbackRepair(feedbackId,onDelta),
   createShelf:(body:import('../model/types').ShelfCreateInput)=>call<import('../model/types').Shelf>('/api/shelves',{method:'POST',body:JSON.stringify(body)}),
   updateResume:(sectionId:string,blockId='')=>call<import('../model/types').ResumePosition>(`/api/sections/${sectionId}/resume`,{method:'PUT',body:JSON.stringify({blockId})}),
   aiRuntime:()=>call<import('../model/types').AiRuntime>('/api/runtime/ai'),
@@ -319,11 +269,22 @@ export const api = {
     {method:'POST'},
   ),
   dueReviews:(dailyBudget=10)=>call<import('../model/types').DueReviews>(`/api/reviews/due?daily_budget=${dailyBudget}`),
+  knowledgeMap:(seriesId?:string)=>call<import('../model/types').KnowledgeMap>(
+    `/api/knowledge-map${seriesId ? `?series_id=${encodeURIComponent(seriesId)}` : ''}`,
+  ),
   startReview:(assignmentId:string)=>call<import('../model/types').ReviewSession>(`/api/reviews/${assignmentId}/start`,{method:'POST'}),
   submitReview:(assignmentId:string,answers:number[][],idempotencyKey:string)=>call<import('../model/types').ReviewResult>(`/api/reviews/${assignmentId}/submit`,{
     method:'POST',
     headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},
     body:JSON.stringify({answers}),
+  }),
+  startReviewReinforcement:(assignmentId:string)=>call<import('../model/types').ReinforcementRun>(`/api/reviews/${assignmentId}/reinforcement`,{method:'POST'}),
+  startTargetReinforcement:(targetId:string)=>call<import('../model/types').ReinforcementRun>(`/api/knowledge-targets/${targetId}/reinforcement`,{method:'POST'}),
+  activeReinforcement:()=>call<import('../model/types').ReinforcementRun|null>('/api/reinforcements/active'),
+  respondReinforcement:(runId:string,body:{activityKey:string;selectedOptions?:number[];responseText?:string;acknowledged?:boolean},idempotencyKey:string)=>call<import('../model/types').ReinforcementRun>(`/api/reinforcements/${runId}/respond`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},
+    body:JSON.stringify(body),
   }),
   skipReview:(assignmentId:string)=>call<{assignmentId:string;status:'skipped'}>(`/api/reviews/${assignmentId}/skip`,{method:'POST'}),
   learningTask:(id:string)=>call<import('../model/types').LearningTask>(`/api/learning-tasks/${id}`),
