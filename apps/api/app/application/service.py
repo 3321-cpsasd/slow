@@ -61,7 +61,10 @@ from ..modules.learning.generation_leases import (
 )
 from ..modules.learning.milestones import MilestoneService
 from ..modules.learning.missions import MissionService
+from ..modules.learning.knowledge_map import KnowledgeMapService
+from ..modules.learning.knowledge_ranks import knowledge_node_views_for_targets
 from ..modules.learning.reviews import ReviewAssignmentService
+from ..modules.learning.reinforcements import ReinforcementService
 from ..modules.learning.contracts import (
     open_run_section,
 )
@@ -596,10 +599,12 @@ class SlowService:
         chapter_id,
         *,
         first_section_status="available",
+        allow_locked_preload=False,
     ):
         return await self.chapter_planning.generate(
             chapter_id,
             first_section_status=first_section_status,
+            allow_locked_preload=allow_locked_preload,
         )
 
     async def generate_section(
@@ -944,6 +949,18 @@ class SlowService:
                 code="CONTENT_FEEDBACK_FACT_MISSING",
                 status=409,
             )
+        if feedback.feedback_type == "inaccurate":
+            raise AppError(
+                "准确性反馈必须经过独立证据或人工复核，不能直接触发改写",
+                code="FEEDBACK_ACCURACY_REVIEW_REQUIRED",
+                status=409,
+            )
+        if feedback.feedback_type == "other":
+            raise AppError(
+                "未分类反馈不能直接触发改写",
+                code="FEEDBACK_CLASSIFICATION_REQUIRED",
+                status=409,
+            )
         prior_runs = self.db.scalars(
             select(GenerationRun)
             .where(
@@ -1132,6 +1149,54 @@ class SlowService:
             .order_by(Section.position)
         )
 
+    async def _lookahead_target_in_book(self, source: Section) -> Section | None:
+        """Return the next section, planning the next chapter without unlocking it."""
+
+        context = self.contexts.resolve_section(
+            user_id=self.user_id,
+            section_id=source.id,
+        )
+        target = self.db.scalar(
+            select(Section)
+            .where(
+                Section.chapter_id == context.chapter.id,
+                Section.position > source.position,
+            )
+            .order_by(Section.position)
+        )
+        if target:
+            return target
+
+        next_chapter = self.db.scalar(
+            select(Chapter)
+            .where(
+                Chapter.book_id == context.book.id,
+                Chapter.position > context.chapter.position,
+            )
+            .order_by(Chapter.position)
+        )
+        if not next_chapter:
+            return None
+
+        target = self.db.scalar(
+            select(Section)
+            .where(Section.chapter_id == next_chapter.id)
+            .order_by(Section.position)
+        )
+        if target:
+            return target
+
+        await self.generate_chapter(
+            next_chapter.id,
+            first_section_status="locked",
+            allow_locked_preload=True,
+        )
+        return self.db.scalar(
+            select(Section)
+            .where(Section.chapter_id == next_chapter.id)
+            .order_by(Section.position)
+        )
+
     def _enqueue_lookahead(self, parent: LearningTask, source: Section) -> None:
         existing = self.db.scalar(
             select(LearningTask).where(
@@ -1181,16 +1246,24 @@ class SlowService:
             user_id=self.user_id,
             section_id=source_section_id,
         ).section
-        target = self._next_existing_section(source)
+        target = await self._lookahead_target_in_book(source)
         if not target:
-            return {"targetSectionId": None, "endOfAvailableRoute": True}
+            return {
+                "targetSectionId": None,
+                "endOfAvailableRoute": True,
+                "endOfBook": True,
+            }
         target_progress = self.progress.for_section(target)
         # This task is a content buffer only. It must never unlock or mark the
         # target as preparing, because access is still owned by progression.
         if target_progress.status == "completed":
             return {"targetSectionId": target.id, "alreadyCompleted": True}
         await self._generate_preload_target(target.id)
-        return {"targetSectionId": target.id, "endOfAvailableRoute": False}
+        return {
+            "targetSectionId": target.id,
+            "endOfAvailableRoute": False,
+            "endOfBook": False,
+        }
 
     async def _preload_next_section(
         self,
@@ -1390,6 +1463,11 @@ class SlowService:
             .limit(limit)
         ).all()
         target_ids = [target.id for _, target in projection_rows]
+        node_views = knowledge_node_views_for_targets(
+            self.db,
+            user_id=self.user_id,
+            target_ids=set(target_ids),
+        )
         evidence_counts = dict(
             self.db.execute(
                 select(
@@ -1403,8 +1481,21 @@ class SlowService:
                 .group_by(AssessmentObservation.assessment_target_id)
             ).all()
         ) if target_ids else {}
-        result = [
-            {
+        result = []
+        for state, target in projection_rows:
+            node = node_views.get(target.concept_revision_id or "")
+            teaching_action = (
+                "wake"
+                if node and node["activation"] == "due"
+                else "scaffold"
+                if node and node["activation"] == "reassessment"
+                else "compress"
+                if node and node["activation"] == "active" and node["rankOrder"] >= 3
+                else "connect"
+                if node and node["activation"] == "active"
+                else "teach"
+            )
+            result.append({
                 "concept": target.objective_statement,
                 "mastery": round(state.p_known_ppm / 10_000),
                 "evidenceCount": evidence_counts.get(target.id, 0),
@@ -1420,9 +1511,19 @@ class SlowService:
                 "parameterSetVersion": state.parameter_set_version,
                 "projectionRuleVersion": state.projection_rule_version,
                 "sourceObservationWatermark": state.source_observation_watermark,
-            }
-            for state, target in projection_rows
-        ]
+                **({
+                    "knowledgeNode": {
+                        "conceptRevisionId": node["conceptRevisionId"],
+                        "capabilityScope": node["capabilityScope"],
+                        "rank": node["rank"],
+                        "rankLabel": node["rankLabel"],
+                        "rankCeiling": node["rankCeiling"],
+                        "activation": node["activation"],
+                        "evidenceCount": node["evidenceCount"],
+                    },
+                    "teachingAction": teaching_action,
+                } if node else {"teachingAction": "teach"}),
+            })
 
         # Ask Me and pre-M2 evidence still use the legacy memory projection.
         # Keep it as a compatibility fallback, but never let it override a BKT
@@ -1455,6 +1556,12 @@ class SlowService:
                 if len(result) == limit:
                     break
         return result
+
+    def knowledge_map(self, series_id: str | None = None):
+        return KnowledgeMapService(
+            self.db,
+            user_id=self.user_id,
+        ).view(series_id=series_id)
 
     def learning_memory(self, shelf_id=None):
         if shelf_id:
@@ -1499,6 +1606,41 @@ class SlowService:
             body.answers,
             idempotency_key=idempotency_key,
         )
+
+    async def start_review_reinforcement(self, assignment_id: str):
+        return await ReinforcementService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+        ).start_for_review(assignment_id)
+
+    async def start_target_reinforcement(self, target_id: str):
+        return await ReinforcementService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+        ).start_for_target(target_id)
+
+    def reinforcement_run(self, run_id: str):
+        return ReinforcementService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+        ).view(run_id)
+
+    def active_reinforcement(self):
+        return ReinforcementService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+        ).active()
+
+    def respond_reinforcement(self, run_id: str, body, idempotency_key=None):
+        return ReinforcementService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+        ).respond(run_id, body, idempotency_key=idempotency_key)
 
     def skip_review(self, assignment_id: str):
         return ReviewAssignmentService(
@@ -1583,6 +1725,18 @@ class SlowService:
                 "反馈不存在或不属于当前用户",
                 code="FEEDBACK_NOT_FOUND",
                 status=404,
+            )
+        if feedback.feedback_type == "inaccurate":
+            raise AppError(
+                "这条准确性反馈需要独立证据或人工复核；原正文保持不变",
+                code="FEEDBACK_ACCURACY_REVIEW_REQUIRED",
+                status=409,
+            )
+        if feedback.feedback_type == "other":
+            raise AppError(
+                "这条反馈需要先确认问题类型；原正文保持不变",
+                code="FEEDBACK_CLASSIFICATION_REQUIRED",
+                status=409,
             )
         content = self.db.get(ContentVersion, feedback.content_version_id)
         if not content or content.section_id != feedback.section_id:

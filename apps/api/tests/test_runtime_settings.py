@@ -1,9 +1,11 @@
+import json
 import stat
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.ai.port import ProviderCapabilities
+from app.api.schemas import AiRuntimeUpdate
 from app.main import create_app, fallback_model_profiles
 from app.services.attachment_storage import LocalAttachmentStorage
 from app.services.runtime_settings import RuntimeSettingsStore
@@ -39,6 +41,10 @@ def saved_demo_runtime():
                 "reasoningMode": "required",
             },
         ],
+        "routes": {
+            "lesson_author": ["provider-model"],
+            "ask_ai": ["qwen3.8-max-preview"],
+        },
     }
 
 
@@ -57,7 +63,113 @@ def test_runtime_settings_round_trip_with_private_file_permissions(tmp_path):
         "kimi/kimi-k3",
     ]
     assert restored["fallbacks"][0]["apiKey"] == "fallback-server-only-secret"
+    assert restored["routes"] == {
+        "lesson_author": ["provider-model"],
+        "ask_ai": ["qwen3.8-max-preview"],
+    }
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_runtime_settings_v4_round_trip_deployment_registry(tmp_path):
+    path = tmp_path / "runtime-ai.json"
+    store = RuntimeSettingsStore(path)
+    runtime = saved_demo_runtime()
+    runtime.update({
+        "config_version_id": "config-v4",
+        "route_policy_version": "policy-v2",
+        "deployments": [{
+            "deploymentId": "author-a",
+            "providerId": "provider-a",
+            "model": "qwen3.8-max",
+            "modelFamilyId": "qwen",
+            "providerProtocol": "openai",
+            "apiMode": "chat_completions",
+            "reasoningMode": "optional",
+            "apiKey": "deployment-secret",
+            "baseUrl": "https://provider.example/v1",
+            "structuredMode": "json_object",
+            "streaming": True,
+            "backendAllowed": True,
+            "allowedEnvironments": ["development", "test"],
+            "status": "active",
+        }],
+        "routes": {
+            "lesson_author": ["author-a"],
+            "ask_ai": ["author-a"],
+        },
+    })
+
+    store.save(runtime)
+    restored = store.load()
+
+    assert restored["config_version_id"] == "config-v4"
+    assert restored["route_policy_version"] == "policy-v2"
+    assert restored["deployments"][0]["deploymentId"] == "author-a"
+    assert restored["deployments"][0]["apiKey"] == "deployment-secret"
+    assert restored["routes"]["lesson_author"] == ["author-a"]
+
+
+def test_runtime_settings_accepts_per_deployment_keys_without_global_key(
+    tmp_path,
+):
+    path = tmp_path / "runtime-ai.json"
+    store = RuntimeSettingsStore(path)
+    runtime = saved_demo_runtime()
+    runtime.update({
+        "mode": "provider",
+        "api_key": "",
+        "deployments": [{
+            "deploymentId": "author-a",
+            "providerId": "provider-a",
+            "model": "qwen3.8-max",
+            "modelFamilyId": "qwen",
+            "apiKey": "deployment-only-secret",
+            "structuredMode": "json_object",
+        }],
+        "routes": {"lesson_author": ["author-a"]},
+    })
+
+    store.save(runtime)
+    restored = store.load()
+
+    assert restored["api_key"] == ""
+    assert restored["deployments"][0]["apiKey"] == (
+        "deployment-only-secret"
+    )
+
+
+def test_runtime_update_rejects_unknown_route_purpose():
+    with pytest.raises(ValueError, match="不支持的用途路由"):
+        AiRuntimeUpdate.model_validate({
+            "mode": "provider",
+            "model": "qwen3.8-max",
+            "deployments": [{
+                "deploymentId": "author-a",
+                "providerId": "provider-a",
+                "model": "qwen3.8-max",
+                "modelFamilyId": "qwen",
+            }],
+            "routes": {"invented_purpose": ["author-a"]},
+        })
+
+
+def test_runtime_settings_reject_route_to_unknown_deployment(tmp_path):
+    path = tmp_path / "runtime-ai.json"
+    runtime = saved_demo_runtime()
+    RuntimeSettingsStore(path).save(runtime)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["deployments"] = [{
+        "deploymentId": "author-a",
+        "providerId": "provider-a",
+        "model": "qwen3.8-max",
+        "modelFamilyId": "qwen",
+        "structuredMode": "json_object",
+    }]
+    payload["routes"] = {"ask_ai": ["missing"]}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="引用了未知部署"):
+        RuntimeSettingsStore(path).load()
 
 
 def test_fallback_profiles_exclude_disabled_bundled_models_and_normalize_qwen():

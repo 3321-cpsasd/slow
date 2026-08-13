@@ -176,6 +176,9 @@ class FallbackAiAdapter:
     async def chapter(self, request, memory):
         return await self._call("chapter", request, memory)
 
+    async def teaching_blueprint(self, request, memory):
+        return await self._call("teaching_blueprint", request, memory)
+
     async def generate_lesson(self, spec):
         return await self._call("generate_lesson", spec)
 
@@ -201,6 +204,15 @@ class FallbackAiAdapter:
 
     async def note(self, request):
         return await self._call("note", request)
+
+    async def answer(self, request):
+        return await self._call("answer", request)
+
+    async def ask_me(self, request):
+        return await self._call("ask_me", request)
+
+    async def ask_me_discussion(self, request):
+        return await self._call("ask_me_discussion", request)
 
     async def replan_book(self, request, memory):
         return await self._call("replan_book", request, memory)

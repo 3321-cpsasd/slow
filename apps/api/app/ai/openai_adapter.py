@@ -5,7 +5,7 @@ from contextvars import ContextVar
 from urllib.parse import urlparse
 from openai import AsyncOpenAI
 from pydantic import ValidationError
-from ..core.errors import AiError
+from ..core.errors import AiError, safe_error_code
 from .contracts import (
     AskMeDiscussionTurn,
     AskMeTurn,
@@ -474,6 +474,7 @@ class OpenAiAdapter:
                 raise
             except Exception as error:
                 self.usage_recorder.fail(invocation_id, error)
+                provider_error = self._provider_error(error)
                 if isinstance(error, ValidationError):
                     self._record_structured_trace(
                         trace_entry(
@@ -482,6 +483,7 @@ class OpenAiAdapter:
                             invalid_outputs=[],
                             last_error=error,
                             outcome="failed",
+                            failure_code="AI_STRUCTURED_OUTPUT_INVALID",
                         )
                     )
                 else:
@@ -492,9 +494,13 @@ class OpenAiAdapter:
                             invalid_outputs=[],
                             last_error=None,
                             outcome="provider_failed",
+                            failure_code=(
+                                provider_error.code
+                                if provider_error
+                                else safe_error_code(error)
+                            ),
                         )
                     )
-                provider_error = self._provider_error(error)
                 if provider_error:
                     raise provider_error from error
                 raise AiError(
@@ -575,6 +581,7 @@ class OpenAiAdapter:
                     outcome="provider_failed",
                     token_budgets=token_budgets,
                     repair_attempts=repair_attempt_count,
+                    failure_code=provider_error.code,
                 )
             )
             raise provider_error from chat_error
@@ -588,6 +595,7 @@ class OpenAiAdapter:
                     outcome="failed",
                     token_budgets=token_budgets,
                     repair_attempts=repair_attempt_count,
+                    failure_code=chat_error.code,
                 )
             )
             raise chat_error
@@ -601,6 +609,7 @@ class OpenAiAdapter:
                     outcome="failed",
                     token_budgets=token_budgets,
                     repair_attempts=repair_attempt_count,
+                    failure_code="AI_STRUCTURED_OUTPUT_INVALID",
                 )
             )
         raise AiError(
@@ -789,11 +798,11 @@ class OpenAiAdapter:
 1. section.question 是本节唯一核心知识锚点。正文可以调用必要前置、机制、比较、边界、应用和迁移知识，但不能创造新的并列核心知识点或改变 Learning Contract。
 2. serverSlotPlan.targetSlots 按 targets 的顺序分配为 T1、T2……。每个 targetSlot 必须有且只有一个同名 CORE 块，例如 T2 对应 T2_CORE；该块必须完整教授相应目标的答案依据。不得创建计划外 CORE 槽位。knowledgeContext.status=ready 时，Tn_CORE 的 claim_version_ids 只能从对应 targetSlot.allowedClaimVersionIds 中选择，不能从全局 claim 列表中选择其他概念的主张。
 3. compositionPolicy 描述本节的认识方式、证据形式、推荐段落职责和案例策略。除每个 Tn_CORE 外，使用 S1、S2……创建自然需要的支持块；总块数遵守 compositionPolicy 的预算，但推荐职责不是必须逐项独占一个块。一个支持块可以通过 teaching_moves 同时承担举例、比较和揭示边界等动作，不得为凑角色机械拆块。每个块只输出 slot、kind、primary_role、teaching_moves、case_kind、case_key、heading、content、claim_version_ids；不得输出目标 ID、目标数组、relation 或 reader priority。Tn_CORE 的 primary_role 固定为 core_instruction。支持块的 primary_role 必须来自 serverSlotPlan.allowedSupportRoles。
-4. case_kind 为空表示不是案例，此时 case_key 也必须为空；使用案例时必须提供候选内稳定 case_key。同一个情境跨多个正文块展开时复用同一 case_key，只有真正不同的情境才使用不同 case_key。真实案例使用 empirical_case，原始材料使用 primary_source_case，逐步演示使用 worked_example，反例使用 counterexample，纯假设使用 hypothetical_example，面向学习者的迁移情境使用 learner_transfer。不得把假设案例写成真实事件，也不得编造学习者经历。knowledgeContext.status=ready 时，除纯活动块以及 hypothetical_example、learner_transfer 外的事实性块必须从 knowledgeContext.claims 中选择至少一个真正支持内容的 claimVersionId；每个 Tn_CORE 的主张还必须支持对应目标概念。不得猜测、改写或引用列表外 ID，所有事实表述必须保持在所引用主张的 scope、边界和假设内。
+4. case_kind 为空表示不是案例，此时 case_key 也必须为空；使用案例时必须提供候选内稳定 case_key。同一个情境跨多个正文块展开时复用同一 case_key，只有真正不同的情境才使用不同 case_key。case_kind 是当前块对案例来源或教学用途的主要强调，不是案例只能拥有的唯一身份：真实案例使用 empirical_case，原始材料使用 primary_source_case，逐步演示使用 worked_example，反例使用 counterexample，纯假设使用 hypothetical_example，面向学习者的迁移情境使用 learner_transfer。同一假设情境可以在不同块中分别作为 hypothetical_example、worked_example、counterexample 或 learner_transfer；同一事实案例也可以在不同块中作为 empirical_case、primary_source_case、worked_example 或 counterexample。但不得把同一 case_key 一处声明为事实案例、一处声明为假设案例，不得把假设案例写成真实事件，也不得编造学习者经历。knowledgeContext.status=ready 时，除纯活动块以及 hypothetical_example、learner_transfer 外的事实性块必须从 knowledgeContext.claims 中选择至少一个真正支持内容的 claimVersionId；每个 Tn_CORE 的主张还必须支持对应目标概念。不得猜测、改写或引用列表外 ID，所有事实表述必须保持在所引用主张的 scope、边界和假设内。
 5. 每道题只输出 target_slot、prompt、options、correct、explanation、distractor_diagnostics。target_slot 必须来自 serverSlotPlan；服务端会把题目确定性绑定到同名 CORE 块。不得输出 item_key、assessment_target_id 或 evidence_block_keys。每个错误选项必须且只能有一条 distractor_diagnostics，option_index 指向该错误选项；cause_code 只能是 prerequisite_gap、concept_confusion、mechanism_reasoning_break、boundary_comparison_error、application_transfer_failure，表示选择该项直接支持的最小误解假设。正确选项不得标注。rationale 只说明该错误为何体现该假设，不能把假设写成已经确认的学习者结论。
 6. 每个 required=true 的目标必须至少有一道题；总计 4-5 道。题目必须能仅根据对应 CORE 块作答，correct 使用从 0 开始的选项下标。只有一个选项成立时 correct 才能只含一个下标，且其余每个选项在题干条件下都必须明确不成立；若两个以上选项成立，必须把全部正确下标写入 correct，使其成为多选题，不能用“最佳答案”“最典型”或“更明确”等措辞强行保留为单选。explanation 必须直接引用选项的实际内容来解释知识依据，不得使用“选项 A/B/C/D”“选项 1/2/3/4”“第几个选项”或“A 项/B 项”等位置表述，因为服务端发布前会重排选项。
-7. learner、mission、depthPolicy、relevantMastery 只用于调整起点、解释深度和例子；不得把自述当作掌握证据。neighborBoundaries 用于避免与前后小节重复或越界。knowledgeContext.status=ready 时，其中冻结的 nodes、edges、claims 是本次可使用的已发布知识子图；不得引用子图之外的知识版本或声称未列出的主张已经核验。status=not_applicable 时不得把 provisional 数据伪装成正式知识图。
-8. model_only 模式不得编造来源、URL 或“已经核验”的表述；没有允许知识主张时不得把案例标为 empirical_case 或 primary_source_case，应改用明确的 hypothetical_example、worked_example、counterexample 或 learner_transfer。内容可以明确不确定性，但不得声称已通过事实核验。
+7. learner、mission、depthPolicy、relevantMastery 只用于调整起点、解释深度和例子；不得把自述当作掌握证据。relevantMastery 中 teachingAction=compress 表示只做必要连接、wake 表示先安排一次短调用再继续、scaffold 表示补充非考核脚手架、connect 表示承接已有理解、teach 表示正常教学；不得因此删除 Learning Contract 目标或改变测验范围。neighborBoundaries 用于避免与前后小节重复或越界。knowledgeContext.status=ready 时，其中冻结的 nodes、edges、claims 是本次可使用的已发布知识子图；不得引用子图之外的知识版本或声称未列出的主张已经核验。status=not_applicable 时不得把 provisional 数据伪装成正式知识图。
+8. model_only 模式不得编造来源、URL 或“已经核验”的表述；没有允许知识主张时不得把案例标为 empirical_case 或 primary_source_case。使用 hypothetical_example、worked_example、counterexample 或 learner_transfer 时必须在正文中明确它是抽象推演或假设情境，不能借教学用途标签暗示真实事实。内容可以明确不确定性，但不得声称已通过事实核验。
 9. 如果发现大型前置缺口，无法在当前小节内以非考核脚手架补足，则返回 decision=replan_required、固定 replan_code=PREREQUISITE_GAP_REQUIRES_REPLAN、清晰原因，并让 blocks/questions 为空。不得自行扩展契约。
 10. 当 feedback 非空时，先读取 feedback.blockSnapshot 中的 role、teachingMoves、caseKind 和正文；feedback_replacement_slot 必须填写本次真正替代旧段落的已有 slot。除非反馈指出原教学方式本身不合适，新块应继续完成原段落在 compositionPolicy 中承担的主要教学职责，同时不得改变目标和证据边界。当 feedback 为空时该字段必须为空字符串。
 11. content 始终是可被 GFM 正确解析的 Markdown，可按教学需要自然混合段落、无序列表、有序步骤和表格。kind 只是主要展示方式的提示，不是内容格式门禁；不确定时使用 text，text 中也可以包含任何合法 GFM 结构。不得为了匹配 kind 或职责人为拆块。较长纯正文必须按意思分段并保留空行，不得在 content 里重复 heading。
@@ -892,6 +901,7 @@ class OpenAiAdapter:
                     outcome="failed",
                     token_budgets=[output_tokens],
                     repair_attempts=0,
+                    failure_code="AI_STRUCTURED_OUTPUT_INVALID",
                 )
             )
             raise AiError(
@@ -899,6 +909,7 @@ class OpenAiAdapter:
                 code="AI_STRUCTURED_OUTPUT_INVALID",
             ) from error
         except Exception as error:
+            provider_error = self._provider_error(error)
             self._record_structured_trace(
                 trace_entry(
                     schema=GeneratedLessonSlotCandidate,
@@ -908,9 +919,13 @@ class OpenAiAdapter:
                     outcome="provider_failed",
                     token_budgets=[output_tokens],
                     repair_attempts=0,
+                    failure_code=(
+                        provider_error.code
+                        if provider_error
+                        else safe_error_code(error)
+                    ),
                 )
             )
-            provider_error = self._provider_error(error)
             if provider_error:
                 raise provider_error from error
             raise AiError(
@@ -1068,7 +1083,7 @@ class OpenAiAdapter:
         )
         return await self._parse(
             GeneratedQuiz,
-            """只为给定小节生成可确定评分的选择题。generationContext 中的 Learning Contract、assessmentTargets、policy.depthPolicy 和冻结正文决定测量边界；learner 只能用于选择熟悉的题目情境，绝不能改变正确答案、目标、难度或通过门槛。初始题集生成 4-5 道且至少一道 core=true；若 prior_questions 存在，说明这是定向替代题，questions 数量必须与 prior_questions 完全一致（可为 1-5 道），不得为凑题数加入其他已通过目标。所有题必须能定位到正文实际教授的内容并覆盖服务端给定目标，difficulty 固定为 standard。初始题集的每道题必须用 claim_block_indexes 列出作答真正依赖的正文块下标（从 0 开始），且这些块的 assessment_objectives 必须包含该题 objective；无法确定依赖时返回空数组，绝不能把所有结论块统一绑定给每道题。若 prior_questions 存在，当前 content 是临时补救内容，claim_block_indexes 必须返回空数组；服务端会依据 objective 将替代题重新绑定到冻结原正文的显式主张，禁止把补救块下标伪装成原正文下标。若 section.unverifiedSourceIndexes 非空，这些索引关联的内容属于模型生成但来源未核验：不得让 core=true 的题只依赖这部分内容，不得把具体版本、数值或时效性事实作为强掌握证据；优先考查跨来源一致的机制、边界和推理。若 prior_questions 存在且 section.remediationStrategy 非空：第 i 道题必须考查 prior_questions[i] 的同一 objective 并保持 core 值，题干可以继续围绕同一机制；至少改变题干表达或选项呈现顺序之一，不得原样复制题干和同一选项顺序。重排选项时必须同步更新 correct，使正确答案内容保持不变。若 prior_questions 存在但没有 remediationStrategy，则题干和整组选项仍必须实质不同。任何情况下都不得降低难度。中文输出。""",
+            """只为给定小节生成可确定评分的选择题。generationContext 中的 Learning Contract、assessmentTargets、policy.depthPolicy 和冻结正文决定测量边界；learner 只能用于选择熟悉的题目情境，绝不能改变正确答案、目标、难度或通过门槛。初始题集生成 4-5 道且至少一道 core=true；若 prior_questions 存在，说明这是定向替代题，questions 数量必须与 prior_questions 完全一致（可为 1-5 道），不得为凑题数加入其他已通过目标。所有题必须能定位到正文实际教授的内容并覆盖服务端给定目标，difficulty 固定为 standard。初始题集的每道题必须用 claim_block_indexes 列出作答真正依赖的正文块下标（从 0 开始），且这些块的 assessment_objectives 必须包含该题 objective；无法确定依赖时返回空数组，绝不能把所有结论块统一绑定给每道题。若 prior_questions 存在，当前 content 是临时补救内容，claim_block_indexes 必须返回空数组；服务端会依据 objective 将替代题重新绑定到冻结原正文的显式主张，禁止把补救块下标伪装成原正文下标。若 section.unverifiedSourceIndexes 非空，这些索引关联的内容属于模型生成但来源未核验：不得让 core=true 的题只依赖这部分内容，不得把具体版本、数值或时效性事实作为强掌握证据；优先考查跨来源一致的机制、边界和推理。若 prior_questions 存在且 section.remediationStrategy 非空：第 i 道题必须考查 prior_questions[i] 的同一 objective 并保持 core 值，题干可以继续围绕同一机制；至少改变题干表达或选项呈现顺序之一，不得原样复制题干和同一选项顺序。重排选项时必须同步更新 correct，使正确答案内容保持不变。若 prior_questions 存在但没有 remediationStrategy，则题干和整组选项仍必须实质不同。任何情况下都不得降低难度。当 section.reviewMode=delayed_assignment 时，每个错误选项必须且只能有一条 distractor_diagnostics：option_index 指向该错误选项，cause_code 只能是 prerequisite_gap、concept_confusion、mechanism_reasoning_break、boundary_comparison_error、application_transfer_failure，rationale 只说明该选项为什么支持这一最小误解假设，不能把假设写成已经确认的学习者结论；正确选项不得标注。中文输出。""",
             {
                 "section": request,
                 "content": content.model_dump(),

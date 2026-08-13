@@ -140,13 +140,14 @@ async function streamFeedbackRepair(
     const text = await response.text();
     const payload = parsePayload(text);
     throw new ApiError(
-      String(payload?.message || '补救内容生成失败'),
+      String(payload?.message || '正文更新没有完成'),
       response.status,
       String(payload?.code || 'FEEDBACK_REPAIR_FAILED'),
       Boolean(payload?.retryable),
+      payload?.operationId ? String(payload.operationId) : undefined,
     );
   }
-  if(!response.body) throw new Error('浏览器不支持流式补救');
+  if(!response.body) throw new Error('当前浏览器不支持接收更新结果');
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -164,7 +165,7 @@ async function streamFeedbackRepair(
     if(eventType === 'done') completed = payload as import('../model/types').FeedbackRepairResult;
     if(eventType === 'error') {
       throw new ApiError(
-        '补救内容暂时没有完成，请稍后重试',
+        String(payload.message || '正文更新暂时没有完成，请稍后重试'),
         200,
         String(payload.code || 'FEEDBACK_REPAIR_FAILED'),
         Boolean(payload.retryable),
@@ -182,7 +183,7 @@ async function streamFeedbackRepair(
     if(done) break;
   }
   if(buffer.trim()) consume(buffer);
-  if(!completed) throw new Error('补救内容流意外结束');
+  if(!completed) throw new Error('正文更新连接提前结束，请稍后重试');
   return completed;
 }
 
@@ -249,6 +250,19 @@ export const api = {
     keepalive:true,
     body:JSON.stringify(body),
   }),
+  studyActivityHeartbeat:(body:{
+    eventId:string;
+    clientSessionId:string;
+    clientSequence:number;
+    activityKind:import('../model/types').StudyActivityKind;
+    sectionId:string;
+    timezone:string;
+  })=>call<{accepted:boolean;duplicated:boolean;serverNow:string;measurementRuleVersion:string}>('/api/study-activity/heartbeat',{
+    method:'POST',
+    keepalive:true,
+    body:JSON.stringify(body),
+  }),
+  studyActivityToday:(timezone:string)=>call<import('../model/types').StudyActivitySummary>(`/api/study-activity/today?timezone=${encodeURIComponent(timezone)}`),
   onboarding:()=>call<import('../model/types').OnboardingState>('/api/onboarding'),
   saveProfileDraft:(body:object)=>call<import('../model/types').OnboardingState>('/api/onboarding/profile',{
     method:'PATCH',
@@ -319,11 +333,22 @@ export const api = {
     {method:'POST'},
   ),
   dueReviews:(dailyBudget=10)=>call<import('../model/types').DueReviews>(`/api/reviews/due?daily_budget=${dailyBudget}`),
+  knowledgeMap:(seriesId?:string)=>call<import('../model/types').KnowledgeMap>(
+    `/api/knowledge-map${seriesId ? `?series_id=${encodeURIComponent(seriesId)}` : ''}`,
+  ),
   startReview:(assignmentId:string)=>call<import('../model/types').ReviewSession>(`/api/reviews/${assignmentId}/start`,{method:'POST'}),
   submitReview:(assignmentId:string,answers:number[][],idempotencyKey:string)=>call<import('../model/types').ReviewResult>(`/api/reviews/${assignmentId}/submit`,{
     method:'POST',
     headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},
     body:JSON.stringify({answers}),
+  }),
+  startReviewReinforcement:(assignmentId:string)=>call<import('../model/types').ReinforcementRun>(`/api/reviews/${assignmentId}/reinforcement`,{method:'POST'}),
+  startTargetReinforcement:(targetId:string)=>call<import('../model/types').ReinforcementRun>(`/api/knowledge-targets/${targetId}/reinforcement`,{method:'POST'}),
+  activeReinforcement:()=>call<import('../model/types').ReinforcementRun|null>('/api/reinforcements/active'),
+  respondReinforcement:(runId:string,body:{activityKey:string;selectedOptions?:number[];responseText?:string;acknowledged?:boolean},idempotencyKey:string)=>call<import('../model/types').ReinforcementRun>(`/api/reinforcements/${runId}/respond`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},
+    body:JSON.stringify(body),
   }),
   skipReview:(assignmentId:string)=>call<{assignmentId:string;status:'skipped'}>(`/api/reviews/${assignmentId}/skip`,{method:'POST'}),
   learningTask:(id:string)=>call<import('../model/types').LearningTask>(`/api/learning-tasks/${id}`),

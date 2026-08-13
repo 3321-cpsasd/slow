@@ -71,7 +71,18 @@
       "definition": "递归把问题归约为结构相同但更简单的子问题；有效递归必须有无需继续递归的基本情形，并让每次递归调用在某种度量上更接近该基本情形。",
       "scope": {
         "course": "04831750 程序设计实习",
-        "pilotRole": "递归机制与终止条件"
+        "pilotRole": "递归机制与终止条件",
+        "rankPolicy": {
+          "version": "knowledge_rank_policy_v1",
+          "capabilityScope": "解释递归机制并判断其终止条件",
+          "rankCeiling": "platinum",
+          "dimensionRanks": {
+            "recognition": "bronze",
+            "mechanism": "silver",
+            "application": "gold",
+            "boundary": "platinum"
+          }
+        }
       },
       "boundaries": [
         "基本情形和参数推进只是通用结构，具体输入域上的终止性仍需单独证明。",
@@ -93,7 +104,18 @@
       "definition": "图遍历从一个起点按确定的组织方式访问可达顶点；DFS 递归或用栈深入未访问邻接点，BFS 用队列逐层扩展，访问标记用于避免环造成重复访问。",
       "scope": {
         "course": "04831750 程序设计实习",
-        "pilotRole": "DFS/BFS 遍历机制"
+        "pilotRole": "DFS/BFS 遍历机制",
+        "rankPolicy": {
+          "version": "knowledge_rank_policy_v1",
+          "capabilityScope": "选择并执行标准图搜索策略",
+          "rankCeiling": "platinum",
+          "dimensionRanks": {
+            "recognition": "bronze",
+            "mechanism": "silver",
+            "application": "gold",
+            "boundary": "platinum"
+          }
+        }
       },
       "boundaries": [
         "从单一起点不保证访问非连通图中的全部顶点。",
@@ -117,7 +139,19 @@
       "definition": "动态规划针对会重复求解相同子问题的递归结构，保存子问题结果以避免重复计算；可以用记忆化按需求值，也可以按依赖顺序制表求值。",
       "scope": {
         "course": "04831750 程序设计实习",
-        "pilotRole": "从递归到记忆化与制表"
+        "pilotRole": "从递归到记忆化与制表",
+        "rankPolicy": {
+          "version": "knowledge_rank_policy_v1",
+          "capabilityScope": "建立并求解标准动态规划状态模型",
+          "rankCeiling": "diamond",
+          "dimensionRanks": {
+            "recognition": "bronze",
+            "mechanism": "silver",
+            "application": "gold",
+            "boundary": "platinum",
+            "transfer": "diamond"
+          }
+        }
       },
       "boundaries": [
         "状态键必须包含决定子问题结果所需的全部信息。",

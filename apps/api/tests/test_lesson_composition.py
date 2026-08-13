@@ -139,19 +139,40 @@ def test_composition_counts_unique_case_keys_not_case_blocks():
     assert raised.value.code == "CONTENT_COMPOSITION_CASES_MISSING"
 
 
-def test_case_identity_cannot_declare_conflicting_kinds():
+def test_case_identity_allows_provenance_and_teaching_use_to_vary_by_block():
     value = candidate()
-    value.blocks[2].case_kind = "hypothetical_example"
+    value.blocks[2].case_kind = "worked_example"
     value.blocks[2].case_key = "shared_case"
-    value.blocks[3].case_kind = "learner_transfer"
+    value.blocks[3].case_kind = "hypothetical_example"
     value.blocks[3].case_key = "shared_case"
 
-    with pytest.raises(CandidateValidationFailure) as raised:
-        validate_lesson_candidate(spec(), value)
+    validated = validate_lesson_candidate(spec(), value)
 
-    assert raised.value.code == "CONTENT_CASE_IDENTITY_CONFLICT"
+    assert validated.candidate is value
+
+
+def test_case_identity_rejects_factual_and_hypothetical_provenance_conflict():
+    value = candidate()
+    value.blocks[2].case_kind = "empirical_case"
+    value.blocks[2].case_key = "shared_case"
+    value.blocks[2].claim_version_ids = ["claim_1"]
+    value.blocks[3].case_kind = "hypothetical_example"
+    value.blocks[3].case_key = "shared_case"
+
+    lesson_spec = spec()
+    lesson_spec.knowledge_context = {
+        "status": "ready",
+        "claims": [{
+            "claimVersionId": "claim_1",
+            "scope": {"conceptRevisionIds": []},
+        }],
+    }
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(lesson_spec, value)
+
+    assert raised.value.code == "CONTENT_CASE_PROVENANCE_CONFLICT"
     assert raised.value.location == {
         "caseKey": "shared_case",
-        "expectedCaseKind": "hypothetical_example",
-        "actualCaseKind": "learner_transfer",
+        "expectedCaseProvenance": "factual",
+        "actualCaseProvenance": "hypothetical",
     }

@@ -5,6 +5,7 @@ import sqlite3
 import subprocess
 import sys
 
+import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
@@ -26,7 +27,12 @@ from app.infrastructure.tables import (
     Shelf,
     User,
 )
-from app.modules.learning.contracts import ensure_m1_learning_contract
+from app.core.errors import AppError
+from app.modules.learning.contracts import (
+    ensure_m1_learning_contract,
+    require_rank_settleable_contract,
+)
+from app.modules.learning.knowledge_ranks import rank_policy_for_revision
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
@@ -180,6 +186,10 @@ def test_m1_contract_preserves_target_identity_and_is_idempotent():
     assert binding.assessment_target_id == target.id
     assert binding.required is True
 
+    with pytest.raises(AppError) as raised:
+        require_rank_settleable_contract(db, first)
+    assert raised.value.code == "CONTRACT_RANK_IDENTITY_UNSETTLEABLE"
+
 
 def test_unmaterialized_m1_section_gets_deterministic_provisional_targets():
     db = _db()
@@ -199,7 +209,48 @@ def test_unmaterialized_m1_section_gets_deterministic_provisional_targets():
     assert contract_targets[1].required is False
     assert all(item.concept_revision_id for item in targets)
     assert all(item.learning_objective_id for item in targets)
+    assert all(item.identity_status == "route_scoped_knowledge" for item in targets)
+    revisions = [db.get(ConceptRevision, item.concept_revision_id) for item in targets]
+    assert all(item.verification_status == "route_scoped" for item in revisions)
+    assert all(rank_policy_for_revision(item) is not None for item in revisions)
+    assert all(
+        rank_policy_for_revision(item)["dimensionRanks"]["recognition"] == "bronze"
+        for item in revisions
+    )
+    require_rank_settleable_contract(db, contract)
     assert db.scalar(select(func.count()).select_from(LearningObjective)) == 2
+
+
+def test_route_target_reuses_identity_inside_series_without_cross_route_guessing():
+    db = _db()
+    first_section, _ = _seed_section(db, with_target=False)
+    first_section.objectives_json = '["解释契约身份"]'
+    first_contract = ensure_m1_learning_contract(db, first_section)
+    first_binding = db.scalar(
+        select(LearningContractAssessmentTarget).where(
+            LearningContractAssessmentTarget.contract_version_id == first_contract.id
+        )
+    )
+
+    second_section = Section(
+        id="section_contract_2",
+        chapter_id=first_section.chapter_id,
+        position=2,
+        title="复用目标",
+        question="如何再次解释契约身份？",
+        objectives_json='["解释契约身份"]',
+    )
+    db.add(second_section)
+    db.flush()
+    second_contract = ensure_m1_learning_contract(db, second_section)
+    second_binding = db.scalar(
+        select(LearningContractAssessmentTarget).where(
+            LearningContractAssessmentTarget.contract_version_id == second_contract.id
+        )
+    )
+
+    assert second_binding.assessment_target_id == first_binding.assessment_target_id
+    assert db.scalar(select(func.count()).select_from(AssessmentTarget)) == 1
 
 
 def test_0030_upgrades_populated_0029_without_changing_target_id(tmp_path):

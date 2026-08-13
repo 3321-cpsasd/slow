@@ -1,4 +1,5 @@
 import itertools
+import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -21,13 +22,18 @@ from app.application.lesson_generation import (
 )
 from app.application.standard_content import StandardContentService
 from app.infrastructure.tables import (
+    AssessmentTarget,
     AssessmentItemEvidenceBlock,
     AssessmentItemVersion,
     Base,
+    Concept,
+    ConceptRevision,
     ContentBlockAssessmentTarget,
     ContentVersion,
     GenerationRun,
+    LearningContractAssessmentTarget,
     LearningContractVersion,
+    LearningObjective,
     QuizSet,
     Section,
     SectionFallbackBinding,
@@ -212,6 +218,13 @@ def test_standard_blocks_accept_mixed_gfm_regardless_of_presentation_hint():
             "| 模型 | 提供推理能力 |\n\n"
             "表格之后可以继续解释结论。"
         ),
+        "code": (
+            "下面先说明这段程序的目的。\n\n"
+            "```python\n"
+            "result = bind(target_id='stable')\n"
+            "```\n\n"
+            "代码之后的文字仍然属于普通正文。"
+        ),
     }
 
     for kind, content in markdown_samples.items():
@@ -219,6 +232,28 @@ def test_standard_blocks_accept_mixed_gfm_regardless_of_presentation_hint():
         value.blocks[0].kind = kind
         value.blocks[0].content = content
         validate_lesson_candidate(spec(), value)
+
+
+def test_unclosed_markdown_code_fence_is_rejected_before_publication():
+    value = candidate()
+    value.blocks[0].kind = "code"
+    value.blocks[0].content = (
+        "下面先说明这段程序的目的。\n\n"
+        "```python\n"
+        "result = bind(target_id='stable')\n\n"
+        "这句话原本应该显示在代码块外。"
+    )
+
+    with pytest.raises(CandidateValidationFailure) as raised:
+        validate_lesson_candidate(spec(), value)
+
+    assert raised.value.code == "CONTENT_BLOCK_LAYOUT_INVALID"
+    assert raised.value.location == {
+        "blockKey": "b1",
+        "kind": "code",
+        "rule": "unclosed_code_fence",
+        "schemaVersion": "generated_lesson_composition_candidate_v7",
+    }
 
 
 def _grounded_spec():
@@ -379,6 +414,72 @@ def test_atomic_publisher_normalizes_explicit_bindings_and_rolls_back():
             status="validating",
             model="test-model",
         )
+        db.add_all([section, contract, run])
+        for position, (suffix, dimension) in enumerate(
+            (("core", "mechanism"), ("boundary", "boundary")),
+            1,
+        ):
+            concept = Concept(
+                id=f"concept_{suffix}",
+                namespace="test_route",
+                concept_key=suffix,
+                canonical_name=suffix,
+                origin="route_scoped",
+            )
+            revision = ConceptRevision(
+                id=f"revision_{suffix}",
+                concept_id=concept.id,
+                revision=1,
+                label=suffix,
+                definition=suffix,
+                scope_json=json.dumps(
+                    {
+                        "rankPolicy": {
+                            "version": "knowledge_rank_policy_v1",
+                            "capabilityScope": suffix,
+                            "rankCeiling": "master",
+                            "dimensionRanks": {
+                                "recognition": "bronze",
+                                "mechanism": "silver",
+                                "application": "gold",
+                                "boundary": "platinum",
+                                "transfer": "diamond",
+                            },
+                        }
+                    }
+                ),
+                verification_status="route_scoped",
+            )
+            objective = LearningObjective(
+                id=f"objective_{suffix}",
+                namespace="test_route",
+                objective_key=suffix,
+                statement=suffix,
+                verification_status="route_scoped",
+            )
+            target = AssessmentTarget(
+                id=f"target_{suffix}",
+                concept_revision_id=revision.id,
+                learning_objective_id=objective.id,
+                objective_key=f"route:test:{suffix}",
+                objective_statement=suffix,
+                dimension=dimension,
+                target_depth="deep",
+                identity_status="route_scoped_knowledge",
+            )
+            db.add_all([concept, revision, objective, target])
+            db.add(
+                LearningContractAssessmentTarget(
+                    id=f"contract_target_{suffix}",
+                    contract_version_id=contract.id,
+                    assessment_target_id=target.id,
+                    position=position,
+                    required=position == 1,
+                    verification_policy="choice_quiz_v1",
+                    diagnostic_only=False,
+                )
+            )
+        db.flush()
         validated = validate_lesson_candidate(spec(), candidate())
         published = publish_lesson_candidate(
             db,
@@ -512,6 +613,24 @@ class V2FakeAi(FakeAi):
         )
 
 
+class V2FailingHarnessAi(V2FakeAi):
+    async def generate_lesson(self, lesson_spec):
+        raise RuntimeError("simulated v2 provider failure")
+
+    def structured_trace(self):
+        return [
+            {
+                "schema": "GeneratedLessonSlotCandidate",
+                "attempts": 1,
+                "repairAttempts": 0,
+                "outcome": "provider_failed",
+                "invalidOutputDigests": [],
+                "lastValidationIssues": [],
+                "tokenBudgets": [12_000],
+            }
+        ]
+
+
 def test_default_v2_route_uses_one_model_call_and_publishes_both_artifacts():
     ai = V2FakeAi()
     with TestClient(
@@ -541,6 +660,31 @@ def test_default_v2_route_uses_one_model_call_and_publishes_both_artifacts():
             ) == 4
 
 
+def test_v2_failure_persists_safe_structured_harness_audit():
+    ai = V2FailingHarnessAi()
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            ai,
+            AcceptingSourceVerifier(),
+        ),
+        raise_server_exceptions=False,
+    ) as client:
+        series = create_series(client)
+        task = wait_for_task(client, series["initializationTask"]["taskId"])
+        with client.app.state.sessions() as db:
+            run = db.scalar(
+                select(GenerationRun).order_by(GenerationRun.started_at.desc())
+            )
+            trace = json.loads(run.trace_json)
+
+            assert task["status"] == "failed"
+            assert run.status == "failed"
+            assert trace["stage"] == "failed"
+            assert trace["aiHarness"] == ai.structured_trace()
+            assert "simulated v2 provider failure" not in run.trace_json
+
+
 def test_v2_route_rejects_unbound_content_before_formal_persistence():
     ai = V2FakeAi(invalid_target=True)
     with TestClient(
@@ -558,6 +702,35 @@ def test_v2_route_rejects_unbound_content_before_formal_persistence():
             assert run.error_code == "CONTENT_ASSESSMENT_TARGET_UNBOUND"
             assert db.scalar(select(func.count()).select_from(ContentVersion)) == 0
             assert db.scalar(select(func.count()).select_from(QuizSet)) == 0
+
+
+def test_v2_candidate_gate_failure_is_exposed_as_retryable():
+    ai = V2FakeAi(invalid_target=True)
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            ai,
+            AcceptingSourceVerifier(),
+        ),
+        raise_server_exceptions=False,
+    ) as client:
+        series = create_series(client)
+        assert wait_for_task(
+            client,
+            series["initializationTask"]["taskId"],
+        )["status"] == "failed"
+        refreshed = client.get(f"/api/series/{series['id']}").json()
+        section_id = refreshed["books"][0]["chapters"][0]["sections"][0]["id"]
+
+        response = client.post(f"/api/sections/{section_id}/prepare")
+
+        assert response.status_code == 502, response.json()
+        assert response.json()["code"] == "CONTENT_ASSESSMENT_TARGET_UNBOUND"
+        assert response.json()["retryable"] is True
+        state = client.get(f"/api/sections/{section_id}").json()
+        assert state["content"] is None
+        assert state["quiz"] is None
+        assert state["generation"]["status"] == "failed"
 
 
 def test_v2_route_rejects_invalid_layout_before_formal_persistence():
@@ -604,7 +777,7 @@ def test_legacy_content_never_claims_current_boundary_validation():
         legacy = client.get(f"/api/sections/{section_id}").json()
         assert legacy["content"]["boundaryValidation"] == {
             "status": "legacy",
-            "ruleVersion": "lesson_candidate_gate_v11",
+            "ruleVersion": "lesson_candidate_gate_v13",
         }
 
 

@@ -165,12 +165,16 @@ class FeedbackService:
         body: FeedbackCreate,
         content: ContentVersion,
     ) -> dict:
+        # The feedback row remains an immutable observation. The receipt only
+        # authorizes the separately tracked repair endpoint when the user is
+        # still looking at the latest published lesson version.
         latest_content_id = self.db.scalar(
             select(ContentVersion.id)
             .where(
                 ContentVersion.section_id == body.section_id,
                 ContentVersion.learning_contract_version_id
                 == content.learning_contract_version_id,
+                ContentVersion.publication_status == "published",
             )
             .order_by(ContentVersion.version.desc())
         )
@@ -178,6 +182,18 @@ class FeedbackService:
             return {
                 "status": "blocked",
                 "reasonCode": "FEEDBACK_CONTENT_VERSION_STALE",
+                "taskId": None,
+            }
+        if body.feedback_type == "inaccurate":
+            return {
+                "status": "needs_review",
+                "reasonCode": "FEEDBACK_ACCURACY_REVIEW_REQUIRED",
+                "taskId": None,
+            }
+        if body.feedback_type == "other":
+            return {
+                "status": "needs_review",
+                "reasonCode": "FEEDBACK_CLASSIFICATION_REQUIRED",
                 "taskId": None,
             }
         return {

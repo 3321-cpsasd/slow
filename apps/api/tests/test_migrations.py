@@ -12,7 +12,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0054_m3_pilot_foundations"
+HEAD_REVISION = "0059_ai_gateway_lineage"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -236,6 +236,12 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
             row[1]
             for row in connection.execute("PRAGMA table_info(knowledge_state_projections)")
         }
+        knowledge_node_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(knowledge_node_state_projections)"
+            )
+        }
         review_columns = {
             row[1]
             for row in connection.execute("PRAGMA table_info(review_states)")
@@ -283,6 +289,10 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
             "SELECT sql FROM sqlite_master "
             "WHERE type = 'table' AND name = 'product_events'"
         ).fetchone()[0]
+        study_activity_schema = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'study_activity_pulses'"
+        ).fetchone()[0]
         curriculum_baseline_schema = connection.execute(
             "SELECT sql FROM sqlite_master "
             "WHERE type = 'table' AND name = 'curriculum_baseline_versions'"
@@ -316,6 +326,7 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
     assert "uq_privacy_consents_user_versions" in privacy_consent_schema
     assert "deletion_due_at" in account_exit_schema
     assert "uq_product_events_user_event" in product_event_schema
+    assert "uq_study_activity_pulses_user_event" in study_activity_schema
     assert "uq_curriculum_baseline_key_version" in curriculum_baseline_schema
     assert "uq_chapter_curriculum_objective" in chapter_baseline_schema
     assert {
@@ -343,6 +354,15 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
     assert "resource_key" in generation_lease_schema
     assert "UNIQUE (owner_id)" in generation_lease_schema
     assert invocation_columns["subject_user_id"][3] == 0
+    assert {
+        "purpose",
+        "authority",
+        "deployment_id",
+        "model_family_id",
+        "config_version_id",
+        "route_policy_version",
+        "fallback_index",
+    }.issubset(invocation_columns)
     assert "uq_ai_usage_measurement_source_version" in measurement_schema
     assert "token_hash" in auth_session_schema
     assert "fk_learning_resume_run_user" in resume_schema
@@ -390,6 +410,7 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
         "evidence_qualification_events",
         "assessment_gate_states",
         "knowledge_state_projections",
+        "knowledge_node_state_projections",
         "review_states",
         "learning_note_summaries",
         "learning_note_review_supplements",
@@ -449,6 +470,17 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
     }.issubset(assessment_target_columns)
     assert "projection_version" in gate_columns
     assert "projection_version" in knowledge_columns
+    assert {
+        "user_id",
+        "concept_revision_id",
+        "current_rank",
+        "current_stars",
+        "highest_rank",
+        "activation_state",
+        "next_due_at",
+        "rank_rule_version",
+        "source_observation_watermark",
+    }.issubset(knowledge_node_columns)
     assert "projection_version" in review_columns
     assert "initial_mission_version_id" in series_columns
     assert "initial_mission_version_id" in run_columns
@@ -480,6 +512,158 @@ def test_0048_empty_database_downgrades_and_upgrades(tmp_path):
         "0047_historical_schema_repair",
     )
     run_alembic(database, "upgrade", "head")
+
+
+def test_0056_backfills_rank_qualification_without_rewriting_v2(tmp_path):
+    database = tmp_path / "0056-rank-qualification.db"
+    run_alembic(database, "upgrade", "0054_m3_pilot_foundations")
+    timestamp = "2026-08-12 12:00:00"
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.executescript(
+            f"""
+            INSERT INTO users (id, name, status, created_at, updated_at)
+            VALUES ('user_rank_migration', 'Rank migration', 'active', '{timestamp}', '{timestamp}');
+            INSERT INTO shelves (
+                id, user_id, name, domain, specialty, tags_json, origin
+            ) VALUES (
+                'shelf_rank_migration', 'user_rank_migration', 'Rank',
+                'Test', 'Migration', '[]', 'demo_seed'
+            );
+            INSERT INTO learning_plans (
+                id, shelf_id, topic, role, experience, purpose, depth,
+                details, assumptions_json, confidence, status, created_at
+            ) VALUES (
+                'plan_rank_migration', 'shelf_rank_migration', 'Rank',
+                'Learner', '', 'Migration test', 'quick', '', '[]',
+                'high', 'confirmed', '{timestamp}'
+            );
+            INSERT INTO series (id, plan_id, shelf_id, title, rationale)
+            VALUES (
+                'series_rank_migration', 'plan_rank_migration',
+                'shelf_rank_migration', 'Rank', 'Migration test'
+            );
+            INSERT INTO books (
+                id, series_id, shelf_id, position, title, topic,
+                description, estimated_minutes
+            ) VALUES (
+                'book_rank_migration', 'series_rank_migration',
+                'shelf_rank_migration', 1, 'Rank', 'Rank', 'Migration test', 20
+            );
+            INSERT INTO chapters (id, book_id, position, title, objective)
+            VALUES (
+                'chapter_rank_migration', 'book_rank_migration', 1,
+                'Rank', 'Migration test'
+            );
+            INSERT INTO sections (
+                id, chapter_id, position, title, question, objectives_json
+            ) VALUES (
+                'section_rank_migration', 'chapter_rank_migration', 1,
+                'Rank', 'Migration test?', '["Migration test"]'
+            );
+            INSERT INTO learning_runs (
+                id, user_id, series_id, status, created_at
+            ) VALUES (
+                'run_rank_migration', 'user_rank_migration',
+                'series_rank_migration', 'active', '{timestamp}'
+            );
+            INSERT INTO assessment_targets (
+                id, objective_key, objective_statement, dimension,
+                target_depth, status, created_at, identity_status
+            ) VALUES (
+                'target_rank_migration', 'rank-migration', 'Migration test',
+                'application', 'standard', 'active', '{timestamp}',
+                'legacy_provisional'
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO assessment_observations (
+                id, learning_run_id, user_id, section_id,
+                assessment_target_id, correct, source_type,
+                assistance_mode, learning_episode_id, equivalence_group_id,
+                qualification_at_creation, qualification_rule_version,
+                payload_json, created_at
+            ) VALUES (
+                'observation_repeat_v2', 'run_rank_migration',
+                'user_rank_migration', 'section_rank_migration',
+                'target_rank_migration', 1, 'choice_quiz',
+                'unassisted_repeat', 'episode_repeat', 'same-question',
+                'eligible_grouped', 'evidence_v2', '{}', ?
+            )
+            """,
+            (timestamp,),
+        )
+        connection.executemany(
+            """
+            INSERT INTO evidence_qualification_events (
+                id, observation_id, projection_family, status,
+                reason, rule_version, created_at
+            ) VALUES (?, 'observation_repeat_v2', ?, ?, ?, 'evidence_v2', ?)
+            """,
+            [
+                (
+                    "qualification_repeat_gate_v2",
+                    "gate",
+                    "eligible",
+                    "historical gate",
+                    timestamp,
+                ),
+                (
+                    "qualification_repeat_mastery_v2",
+                    "mastery",
+                    "eligible_grouped",
+                    "historical mastery",
+                    timestamp,
+                ),
+                (
+                    "qualification_repeat_retention_v2",
+                    "retention",
+                    "ineligible",
+                    "historical retention",
+                    timestamp,
+                ),
+            ],
+        )
+        connection.commit()
+
+    run_alembic(database, "upgrade", "head")
+
+    with sqlite3.connect(database) as connection:
+        v2_count = connection.execute(
+            "SELECT COUNT(*) FROM evidence_qualification_events "
+            "WHERE observation_id='observation_repeat_v2' "
+            "AND rule_version='evidence_v2'"
+        ).fetchone()[0]
+        v3 = dict(
+            connection.execute(
+                "SELECT projection_family, status "
+                "FROM evidence_qualification_events "
+                "WHERE observation_id='observation_repeat_v2' "
+                "AND rule_version='evidence_v3'"
+            ).fetchall()
+        )
+    assert v2_count == 3
+    assert v3 == {
+        "gate": "eligible",
+        "mastery": "ineligible",
+        "retention": "ineligible",
+        "rank": "ineligible",
+    }
+
+    run_alembic(database, "downgrade", "0054_m3_pilot_foundations")
+    with sqlite3.connect(database) as connection:
+        v3_count = connection.execute(
+            "SELECT COUNT(*) FROM evidence_qualification_events "
+            "WHERE rule_version='evidence_v3'"
+        ).fetchone()[0]
+        node_table = connection.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='table' AND name='knowledge_node_state_projections'"
+        ).fetchone()[0]
+    assert v3_count == 0
+    assert node_table == 0
 
 
 def test_0048_downgrade_refuses_oral_assessment_facts(tmp_path):

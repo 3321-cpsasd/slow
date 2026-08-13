@@ -468,6 +468,18 @@ class SectionGenerationCoordinator:
                     status=409,
                 )
             if regeneration_feedback:
+                if regeneration_feedback.get("feedbackType") == "inaccurate":
+                    raise AppError(
+                        "准确性反馈必须经过独立证据或人工复核，不能直接触发改写",
+                        code="FEEDBACK_ACCURACY_REVIEW_REQUIRED",
+                        status=409,
+                    )
+                if regeneration_feedback.get("feedbackType") == "other":
+                    raise AppError(
+                        "未分类反馈不能直接触发改写",
+                        code="FEEDBACK_CLASSIFICATION_REQUIRED",
+                        status=409,
+                    )
                 if regeneration_feedback.get("contentVersionId") != existing.id:
                     raise AppError(
                         "反馈对应的正文已经更新，请刷新后重新反馈",
@@ -502,6 +514,51 @@ class SectionGenerationCoordinator:
                         code="FEEDBACK_BLOCK_STALE",
                         status=409,
                     )
+                author_run = (
+                    self.db.get(GenerationRun, existing.generation_run_id)
+                    if existing.generation_run_id
+                    else None
+                )
+                if not author_run or not author_run.model:
+                    raise AppError(
+                        "原正文缺少可核验的模型来源，反馈已保留但不会自动改写正文",
+                        code="FEEDBACK_AUTHOR_MODEL_UNKNOWN",
+                        status=409,
+                    )
+                regeneration_feedback = {
+                    **regeneration_feedback,
+                    "authorModel": author_run.model,
+                    "authorDeploymentId": str(
+                        next(
+                            (
+                                item.get("deploymentId")
+                                for item in reversed(
+                                    load(author_run.trace_json, {}).get(
+                                        "modelAttempts", []
+                                    )
+                                )
+                                if item.get("outcome") == "succeeded"
+                            ),
+                            "",
+                        )
+                        or ""
+                    ),
+                    "authorModelFamilyId": str(
+                        next(
+                            (
+                                item.get("modelFamilyId")
+                                for item in reversed(
+                                    load(author_run.trace_json, {}).get(
+                                        "modelAttempts", []
+                                    )
+                                )
+                                if item.get("outcome") == "succeeded"
+                            ),
+                            "",
+                        )
+                        or ""
+                    ),
+                }
 
         running = self.db.scalar(
             select(GenerationRun)
@@ -679,8 +736,18 @@ class SectionGenerationCoordinator:
                         context_pack.knowledge_context.audit_manifest()
                     ),
                     "generationMode": spec.generation_mode,
-                    "physicalCallBudget": len(
-                        getattr(self.ai, "models", [getattr(self.ai, "model", "")])
+                    "physicalCallBudget": (
+                        self.ai.lesson_call_budget(spec.payload())
+                        if callable(
+                            getattr(self.ai, "lesson_call_budget", None)
+                        )
+                        else len(
+                            getattr(
+                                self.ai,
+                                "models",
+                                [getattr(self.ai, "model", "")],
+                            )
+                        )
                     ),
                     "regenerate": regenerate,
                     **(
@@ -758,7 +825,9 @@ class SectionGenerationCoordinator:
                     status=409
                     if failure.code == "PREREQUISITE_GAP_REQUIRES_REPLAN"
                     else 502,
-                    retryable=False,
+                    retryable=(
+                        failure.code != "PREREQUISITE_GAP_REQUIRES_REPLAN"
+                    ),
                     details=failure.location,
                 ) from failure
 
@@ -892,6 +961,7 @@ class SectionGenerationCoordinator:
                     {
                         **load(failed_run.trace_json, {}),
                         "stage": "failed",
+                        "aiHarness": self._ai_harness_trace(),
                         "modelAttempts": (
                             self.ai.fallback_trace()
                             if callable(getattr(self.ai, "fallback_trace", None))

@@ -67,6 +67,38 @@ class MissionAdoptionCreate(ApiModel):
     reason: str = Field(min_length=1, max_length=2000)
 
 
+class AiDeploymentUpdate(ApiModel):
+    deployment_id: str = Field(
+        min_length=1, max_length=160, pattern=r"^[A-Za-z0-9_.:-]+$"
+    )
+    provider_id: str = Field(
+        min_length=1, max_length=160, pattern=r"^[A-Za-z0-9_.:-]+$"
+    )
+    model: str = Field(min_length=1, max_length=160)
+    model_family_id: str = Field(
+        min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_.:-]+$"
+    )
+    provider_protocol: Literal["openai", "anthropic"] = "openai"
+    api_mode: Literal["responses", "chat_completions", "messages"] = (
+        "chat_completions"
+    )
+    reasoning_mode: Literal["optional", "required", "disabled"] = "optional"
+    api_key: SecretStr | None = None
+    base_url: str = Field(default="", max_length=1000)
+    structured_mode: Literal[
+        "native_schema", "json_object", "prompt_json", "unsupported"
+    ] = "unsupported"
+    streaming: bool = True
+    backend_allowed: bool = False
+    allowed_environments: list[
+        Literal["development", "demo", "test", "production"]
+    ] = Field(
+        default_factory=lambda: ["development", "test"],
+        min_length=1,
+    )
+    status: Literal["active", "quarantined", "disabled"] = "active"
+
+
 class AiRuntimeUpdate(ApiModel):
     mode: Literal["provider", "demo"] = "provider"
     provider_protocol: Literal["openai", "anthropic"] = "openai"
@@ -75,6 +107,41 @@ class AiRuntimeUpdate(ApiModel):
     model: str = Field(default="gpt-5", min_length=1, max_length=160)
     api_mode: Literal["responses", "chat_completions"] = "responses"
     reasoning_mode: Literal["optional", "required", "disabled"] = "optional"
+    deployments: list[AiDeploymentUpdate] | None = None
+    routes: dict[str, list[str]] | None = None
+    route_policy_version: str = Field(default="ai_route_v1", max_length=80)
+
+    @model_validator(mode="after")
+    def validate_ai_routes(self):
+        allowed_purposes = {
+            "default",
+            "curriculum",
+            "lesson_author",
+            "ask_ai",
+            "feedback_style",
+            "feedback_accuracy",
+            "assessment_probe",
+            "assessment_evaluation",
+            "note",
+            "source_repair",
+            "source_review",
+            "quality_review",
+        }
+        if self.deployments is None and self.routes is not None:
+            raise ValueError("更新用途路由时必须同时提交完整模型部署池")
+        if self.deployments is not None:
+            identifiers = [item.deployment_id for item in self.deployments]
+            if len(identifiers) != len(set(identifiers)):
+                raise ValueError("模型部署 ID 不能重复")
+            known = set(identifiers)
+            for purpose, deployment_ids in (self.routes or {}).items():
+                if purpose not in allowed_purposes:
+                    raise ValueError(f"不支持的用途路由 {purpose}")
+                if not deployment_ids:
+                    raise ValueError(f"用途路由 {purpose} 不能为空")
+                if any(item not in known for item in deployment_ids):
+                    raise ValueError(f"用途路由 {purpose} 引用了未知部署")
+        return self
 
 
 class PasswordLogin(ApiModel):
@@ -143,6 +210,7 @@ ProductEventName = Literal[
     "shelf_viewed",
     "learning_viewed",
     "profile_viewed",
+    "review_center_viewed",
     "section_viewed",
     "quiz_viewed",
     "feedback_opened",
@@ -166,7 +234,7 @@ class ProductEventCreate(ApiModel):
     event_name: ProductEventName
     occurred_at: datetime
     page_path: str = Field(default="/", min_length=1, max_length=500)
-    view: Literal["", "home", "shelf", "learn", "profile"] = ""
+    view: Literal["", "home", "shelf", "learn", "profile", "knowledge", "review"] = ""
     entity_type: Literal["", "shelf", "series", "book", "chapter", "section"] = ""
     entity_id: str = Field(default="", max_length=160, pattern=r"^[A-Za-z0-9_.:-]*$")
     properties: dict[str, str | int | float | bool] = Field(default_factory=dict)
@@ -187,6 +255,29 @@ class ProductEventBatch(ApiModel):
     )
 
     events: list[ProductEventCreate] = Field(min_length=1, max_length=25)
+
+
+class StudyActivityHeartbeat(ApiModel):
+    model_config = ConfigDict(
+        alias_generator=camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+
+    event_id: str = Field(min_length=8, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
+    client_session_id: str = Field(
+        min_length=8,
+        max_length=80,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+    client_sequence: int = Field(ge=0, le=2_147_483_647)
+    activity_kind: Literal[
+        "reading_thinking",
+        "verification_review",
+        "ask_ai",
+    ]
+    section_id: str = Field(min_length=1, max_length=160, pattern=r"^[A-Za-z0-9_.:-]+$")
+    timezone: str = Field(min_length=1, max_length=64)
 
 
 ProfileStage = Literal[
@@ -285,6 +376,13 @@ class ReviewSubmit(ApiModel):
     answers: list[list[int]] = Field(min_length=1, max_length=5)
 
 
+class ReinforcementRespond(ApiModel):
+    activity_key: str = Field(min_length=1, max_length=64)
+    selected_options: list[int] = Field(default_factory=list, max_length=6)
+    response_text: str = Field(default="", max_length=2000)
+    acknowledged: bool = False
+
+
 class AskRequest(ApiModel):
     block_id: str
     question: str = Field(min_length=1, max_length=3000)
@@ -345,7 +443,7 @@ class FeedbackCreate(ApiModel):
     ]
     message: str = Field(default="", max_length=4000)
     page_path: str = Field(default="/", max_length=500)
-    view: Literal["", "home", "shelf", "learn", "profile"] = ""
+    view: Literal["", "home", "shelf", "learn", "profile", "knowledge", "review"] = ""
     section_id: str | None = Field(default=None, max_length=160)
     content_version_id: str | None = Field(default=None, max_length=160)
     block_id: str | None = Field(default=None, max_length=160)

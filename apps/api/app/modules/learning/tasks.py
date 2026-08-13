@@ -2,12 +2,22 @@ import json
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.orm import Session
 
 from ...auth.context import Principal, WorkerExecutionContext
 from ...core.errors import AppError, safe_error_code
-from ...infrastructure.tables import LearningTask, SectionProgress, now
+from ...infrastructure.tables import (
+    Book,
+    Chapter,
+    ContentVersion,
+    LearningRun,
+    LearningTask,
+    QuizSet,
+    Section,
+    SectionProgress,
+    now,
+)
 
 
 RUNNING_LEASE = timedelta(seconds=90)
@@ -22,6 +32,123 @@ TASK_TYPES = {
 PRELOAD_TASK_TYPES = {"initial_book_preload", "next_section_preload"}
 MANUALLY_EXTENSIBLE_TASK_TYPES = PRELOAD_TASK_TYPES | {"remediation_generation"}
 MANUAL_TASK_RETRY_BUDGET = 3
+
+
+def backfill_missing_lookahead_tasks(db: Session) -> int:
+    """Queue the missing one-section buffer within each active book.
+
+    This repairs orchestration only. The target remains locked until normal
+    progression unlocks it, and the lookahead worker still has to publish a
+    complete content/quiz pair through the standard generation boundary. A
+    chapter boundary does not stop the buffer; a book boundary does.
+    """
+
+    published_pair_exists = (
+        select(QuizSet.id)
+        .join(ContentVersion, ContentVersion.id == QuizSet.content_version_id)
+        .where(
+            QuizSet.section_id == Section.id,
+            QuizSet.publication_status == "published",
+            ContentVersion.section_id == Section.id,
+            ContentVersion.publication_status == "published",
+        )
+        .exists()
+    )
+    candidates = db.execute(
+        select(
+            LearningRun.id,
+            LearningRun.user_id,
+            Section.id,
+            Book.id,
+            Chapter.position,
+            Section.position,
+        )
+        .join(
+            SectionProgress,
+            and_(
+                SectionProgress.learning_run_id == LearningRun.id,
+                SectionProgress.user_id == LearningRun.user_id,
+            ),
+        )
+        .join(Section, Section.id == SectionProgress.section_id)
+        .join(Chapter, Chapter.id == Section.chapter_id)
+        .join(Book, Book.id == Chapter.book_id)
+        .where(
+            LearningRun.status == "active",
+            SectionProgress.status == "available",
+            Book.series_id == LearningRun.series_id,
+            Book.deleted_at.is_(None),
+            published_pair_exists,
+        )
+    ).all()
+
+    created = 0
+    for (
+        learning_run_id,
+        user_id,
+        source_section_id,
+        book_id,
+        chapter_position,
+        section_position,
+    ) in candidates:
+        idempotency_key = f"lookahead-after:{source_section_id}"
+        existing = db.scalar(
+            select(LearningTask.id).where(
+                LearningTask.learning_run_id == learning_run_id,
+                LearningTask.task_type == "section_lookahead_preload",
+                LearningTask.idempotency_key == idempotency_key,
+            )
+        )
+        if existing:
+            continue
+
+        later_section_exists = db.scalar(
+            select(Section.id)
+            .join(Chapter, Chapter.id == Section.chapter_id)
+            .where(
+                Chapter.book_id == book_id,
+                or_(
+                    Chapter.position > chapter_position,
+                    and_(
+                        Chapter.position == chapter_position,
+                        Section.position > section_position,
+                    ),
+                ),
+            )
+            .order_by(Chapter.position, Section.position)
+            .limit(1)
+        )
+        later_chapter_exists = db.scalar(
+            select(Chapter.id)
+            .where(
+                Chapter.book_id == book_id,
+                Chapter.position > chapter_position,
+            )
+            .order_by(Chapter.position)
+            .limit(1)
+        )
+        if not later_section_exists and not later_chapter_exists:
+            continue
+
+        db.add(LearningTask(
+            id=f"task_{uuid4().hex}",
+            learning_run_id=learning_run_id,
+            section_id=source_section_id,
+            user_id=user_id,
+            task_type="section_lookahead_preload",
+            idempotency_key=idempotency_key,
+            trigger_id=f"startup-backfill:{source_section_id}",
+            payload_json=json.dumps(
+                {"sourceSectionId": source_section_id},
+                ensure_ascii=False,
+            ),
+            status="pending",
+        ))
+        created += 1
+
+    if created:
+        db.commit()
+    return created
 
 
 def _load(value: str, default=None):

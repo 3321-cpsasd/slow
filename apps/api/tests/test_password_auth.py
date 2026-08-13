@@ -83,7 +83,7 @@ def test_production_password_login_requires_precreated_account(tmp_path):
         assert config.status_code == 200
         assert config.json()["mode"] == "password"
         assert config.json()["providerName"] == ""
-        assert config.json()["privacyNotice"]["noticeVersion"] == "2026-08-08-r2"
+        assert config.json()["privacyNotice"]["noticeVersion"] == "2026-08-12-r3"
 
         missing = login(client)
         assert missing.status_code == 401

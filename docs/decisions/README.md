@@ -42,4 +42,8 @@
 | [ADR-0007](0007-user-interface-expression-boundary.md) | Accepted，已实现首轮收敛 | 普通用户界面与内部治理、运行和审计机制的表达边界 |
 | [ADR-0008](0008-section-continuity-and-recovery.md) | Accepted，第一阶段已实现 | 一节内容缓冲、统一重新准备入口和 Recovery Agent 权限边界 |
 | [ADR-0009](0009-adaptive-lesson-composition.md) | Accepted，已实现 | 跨知识类型的动态正文编排、段落职责和案例可信边界 |
-| [ADR-0011](0011-m3-pilot-readiness.md) | Accepted，实施中 | 正式试点路线连续性、五类错因、补救有效性、跨类型质量与偏好授权 |
+| [ADR-0011](0011-m3-pilot-readiness.md) | Accepted，实施中 | 模型故障透明恢复、五类错因、补救有效性、跨类型质量与偏好授权 |
+| [ADR-0012](0012-on-demand-knowledge-universe-and-learner-memory.md) | Accepted，第一阶段实现中 | 按需知识宇宙、个人知识子网、三层学习记忆与可信知识段位 |
+| [ADR-0013](0013-evidence-guided-reinforcement-agent.md) | Accepted，MVP 已实现 | 到期唤醒失败后的有界诊断、补强、重组与独立验证 |
+| [ADR-0014](0014-purpose-aware-ai-gateway.md) | Accepted，第一阶段已实现 | 用途感知 AI 网关、模型池路由、评估独立性与准确性反馈复核边界 |
+| [ADR-0015](0015-rank-settleable-learning-contracts.md) | Accepted，已实现 | 新小节段位可结算身份、系列内稳定复用与发布失败关闭 |

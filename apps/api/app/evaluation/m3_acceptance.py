@@ -23,6 +23,13 @@ EXPECTED_KNOWLEDGE_FORMS = {
     "textual_historical",
     "social_normative",
 }
+REQUIRED_EVIDENCE_MODES = {
+    "M3-A": {"fault_drill"},
+    "M3-B": {"human_review"},
+    "M3-C": {"pilot"},
+    "M3-D": {"real_model", "human_review"},
+    "M3-E": {"pilot"},
+}
 HARD_ZERO_KEYS = {
     "contractOutsideTargets",
     "danglingEvidenceBindings",
@@ -31,7 +38,7 @@ HARD_ZERO_KEYS = {
     "remediationDifficultyDrops",
     "preferenceBoundaryViolations",
     "ungroundedRealCases",
-    "guaranteedRouteFallbackGaps",
+    "modelFailuresMisreportedAsSuccess",
     "fallbackContractMismatches",
     "learningGateBypasses",
 }
@@ -104,7 +111,7 @@ class SampleFreeze(StrictModel):
 
 
 class M3Report(StrictModel):
-    schema_version: Literal["m3_acceptance_v1"] = Field(alias="schemaVersion")
+    schema_version: Literal["m3_acceptance_v2"] = Field(alias="schemaVersion")
     sample_freeze: SampleFreeze = Field(alias="sampleFreeze")
     hard_zero: dict[str, int] = Field(alias="hardZero")
     gates: list[GateResult] = Field(min_length=5, max_length=5)
@@ -129,9 +136,16 @@ def evaluate_report(report: M3Report) -> dict:
     for gate in report.gates:
         if gate.status != "pass":
             failures.append(f"{gate.id}:{gate.status}")
+        evidence_modes = {item.run_mode for item in gate.evidence}
+        missing_modes = REQUIRED_EVIDENCE_MODES[gate.id] - evidence_modes
+        for mode in sorted(missing_modes):
+            failures.append(f"{gate.id}:missing_{mode}_evidence")
 
     thresholds = {
-        "M3-A": {"outageDrillPassRate": 1.0},
+        "M3-A": {
+            "modelFailureDisclosureRate": 1.0,
+            "modelRecoveryPassRate": 1.0,
+        },
         "M3-B": {
             "diagnosisMacroAccuracy": 0.80,
             "diagnosisMinimumClassAccuracy": 0.70,
