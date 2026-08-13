@@ -1042,20 +1042,6 @@ export default function App() {
     }
   };
 
-  const startNextBook = async () => {
-    if (!series) return;
-    const nextBook = series.books.find(
-      (book, index) => index > 0 && book.status !== 'locked' && book.status !== 'completed',
-    );
-    const firstChapter = nextBook?.chapters[0];
-    if (!firstChapter) return;
-    const availableSection = firstChapter.sections.find(
-      (item) => item.status !== 'locked' && item.status !== 'completed',
-    );
-    if (availableSection) await loadSection(availableSection.id);
-    else await openChapter(firstChapter);
-  };
-
   const activateBook = async (book: Book) => {
     const proposal = await run(
       '正在根据你最近的学习情况调整下一本书…',
@@ -1824,7 +1810,6 @@ export default function App() {
               onGenerateSection={generateSection}
               onRegenerateSection={regenerateSection}
               onGenerateChapter={openChapter}
-              onStartNextBook={startNextBook}
               onActivateBook={activateBook}
               chapterGenerationDisabled={preparingInitialSection}
               generatingChapterId={generatingChapterId}
@@ -2631,7 +2616,7 @@ function Home({
   data: Bootstrap | null;
   dailyMode: DailyMode;
   onOpen: (shelf: Shelf) => void;
-  onContinue: (seriesId: string) => Promise<void>;
+  onContinue: (seriesId: string, sectionId?: string | null) => Promise<void>;
   onCreate: (body: ShelfCreateInput) => Promise<void>;
 }) {
   const [showCreate, setShowCreate] = useState(false);
@@ -2897,7 +2882,7 @@ function Home({
           </div>
         </header>
 
-        <div className="library-shelf-grid">
+        <div className="library-shelf-stream">
         {data && data.shelves.length === 0 && (
           <div className="empty-library-message">
             <span>还没有书架</span>
@@ -2907,131 +2892,99 @@ function Home({
         )}
         {data?.shelves.map((item, shelfIndex) => {
           const itemBookCount = item.series.reduce((total, itemSeries) => total + itemSeries.books.length, 0);
-          const featuredSeries = item.series.find((itemSeries) => itemSeries.id === dashboard?.today?.seriesId)
-            || item.series.find((itemSeries) => itemSeries.progress > 0 && itemSeries.progress < 100)
-            || item.series[0]
-            || null;
-          const featuredBook = featuredSeries?.books.find((book) => (
-            featuredSeries.id === dashboard?.today?.seriesId
-            && bookContainsSection(book, dashboard.today.sectionId)
-          ))
-            || featuredSeries?.books.find((book) => book.progress > 0 && book.status !== 'completed')
-            || featuredSeries?.books.find((book) => book.status !== 'locked' && book.status !== 'completed')
-            || featuredSeries?.books[0]
-            || null;
-          const featuredBookDetails = featuredBook ? bookProgressDetails(featuredBook) : null;
-          const featuredNextSection = featuredBook ? nextBookSection(featuredBook) : null;
-          const isTodayBook = Boolean(
-            featuredSeries
-            && featuredBook
-            && featuredSeries.id === dashboard?.today?.seriesId
-            && bookContainsSection(featuredBook, dashboard.today.sectionId),
-          );
           return (
-          <button
-            className="library-shelf-card"
-            key={item.id}
-            aria-label={`进入${item.name}书架，共 ${item.series.length} 个学习系列`}
-            onClick={() => onOpen(item)}
-          >
-            <span className="shelf-index-rail" aria-hidden="true">
-              <b>{String(shelfIndex + 1).padStart(2, '0')}</b>
-              <i>领域书架</i>
-            </span>
-            <span className="shelf-card-content">
-              <span className="shelf-card-heading">
-                <span>
-                  <small>{shelfDescriptor(item) || '等待第一套教材归纳'}</small>
-                  <strong>{item.name}</strong>
-                </span>
-                <em>{item.series.length} 个系列 · {itemBookCount} 本教材</em>
+          <article className="home-shelf-section" key={item.id}>
+            <header className="home-shelf-heading">
+              <span className="home-shelf-index" aria-hidden="true">
+                {String(shelfIndex + 1).padStart(2, '0')}
               </span>
+              <div>
+                <small>{shelfDescriptor(item) || '长期学习领域'}</small>
+                <h3>{item.name}</h3>
+                <p>{item.series.length} 个系列 · {itemBookCount} 本教材</p>
+              </div>
+              <button type="button" onClick={() => onOpen(item)}>
+                管理书架 <span aria-hidden="true">→</span>
+              </button>
+            </header>
 
-              {item.tags.length > 0 && (
-                <span className="shelf-tags" aria-label="书架标签">
-                  {item.tags.slice(0, 4).map((tag) => <i key={tag}>{tag}</i>)}
-                </span>
-              )}
-
-              {featuredSeries && featuredBook && featuredBookDetails ? (
-                <span className="shelf-current-book">
-                  <span className="current-book-topline">
-                    <span>
-                      <b>{isTodayBook ? '正在学习' : '当前教材'}</b>
-                      <small>
-                        系列 {String(item.series.findIndex((candidate) => candidate.id === featuredSeries.id) + 1).padStart(2, '0')}
-                        {' · '}第 {featuredBook.position} 本
-                      </small>
-                    </span>
-                    <em className={`current-book-status is-${featuredBook.status}`}>
-                      {bookProgressLabel(featuredBook, isTodayBook)}
-                    </em>
-                  </span>
-
-                  <strong className="current-book-title">{featuredBook.title}</strong>
-                  <span className="current-book-series">
-                    <small>所属系列</small>
-                    <span>{featuredSeries.title}</span>
-                  </span>
-
-                  <span className="current-book-progress-row">
-                    <span>
-                      {featuredBookDetails.totalChapters > 0
-                        ? `${featuredBookDetails.completedChapters}/${featuredBookDetails.totalChapters} 章`
-                        : '章节待确认'}
-                      {featuredBookDetails.totalSections > 0
-                        ? ` · ${featuredBookDetails.completedSections}/${featuredBookDetails.totalSections} 节完成`
-                        : ''}
-                    </span>
-                    <b>{featuredBook.progress}%</b>
-                  </span>
-                  <span
-                    className="current-book-progress-track"
-                    role="progressbar"
-                    aria-label={`第 ${featuredBook.position} 本《${featuredBook.title}》进度`}
-                    aria-valuemin={0}
-                    aria-valuemax={100}
-                    aria-valuenow={featuredBook.progress}
-                  >
-                    <i style={{ width: `${featuredBook.progress}%` }} />
-                  </span>
-                  {featuredBookDetails.totalChapters > 0 && (
-                    <span className="current-book-chapters" aria-hidden="true">
-                      {featuredBook.chapters.map((chapter) => (
-                        <i
-                          className={chapter.status === 'completed'
-                            ? 'is-complete'
-                            : chapter.status === 'locked'
-                              ? 'is-locked'
-                              : 'is-current'}
-                          key={chapter.id}
-                        />
-                      ))}
-                    </span>
-                  )}
-
-                  {(isTodayBook || featuredNextSection) && (
-                    <span className="current-book-next">
-                      <small>{isTodayBook ? '下一节' : '从这里开始'}</small>
-                      <span>
-                        <b>{isTodayBook ? dashboard!.today!.chapterTitle : featuredNextSection!.chapter.title}</b>
-                        <i aria-hidden="true">/</i>
-                        <strong>{isTodayBook ? dashboard!.today!.sectionTitle : featuredNextSection!.section.title}</strong>
-                      </span>
-                    </span>
-                  )}
-                </span>
-              ) : (
-                <span className="shelf-current-empty">
-                  <b>还没有正在学习的教材</b>
-                </span>
-              )}
-
-              <span className="shelf-card-action">
-                {featuredBook ? '继续这本' : '打开书架'} <i aria-hidden="true">→</i>
-              </span>
-            </span>
-          </button>
+            {item.series.length > 0 ? (
+              <div className="home-series-list">
+                {item.series.map((itemSeries, seriesIndex) => (
+                  <section className="home-series-row" key={itemSeries.id}>
+                    <header>
+                      <div>
+                        <small>系列 {String(seriesIndex + 1).padStart(2, '0')}</small>
+                        <h4>{itemSeries.title}</h4>
+                      </div>
+                    </header>
+                    <div className="home-book-grid">
+                      {itemSeries.books.map((book) => {
+                        const details = bookProgressDetails(book);
+                        const isTodayBook = Boolean(
+                          itemSeries.id === dashboard?.today?.seriesId
+                          && bookContainsSection(book, dashboard.today.sectionId),
+                        );
+                        const nextSection = isTodayBook
+                          ? dashboard?.today?.sectionId || null
+                          : nextBookSection(book)?.section.id
+                            || book.chapters.flatMap((chapter) => chapter.sections)
+                              .find((candidate) => candidate.status !== 'locked')?.id
+                            || null;
+                        const locked = book.status === 'locked';
+                        return (
+                          <button
+                            type="button"
+                            className={`home-book-card is-${book.status} ${isTodayBook ? 'is-today' : ''}`}
+                            key={book.id}
+                            disabled={locked}
+                            onClick={() => void onContinue(itemSeries.id, nextSection)}
+                          >
+                            <span className="home-book-topline">
+                              <small>第 {book.position} 本</small>
+                              <em>{bookProgressLabel(book, isTodayBook)}</em>
+                            </span>
+                            <strong>{book.title}</strong>
+                            <span className="home-book-progress-copy">
+                              <span>
+                                {details.totalChapters > 0
+                                  ? `${details.completedChapters}/${details.totalChapters} 章`
+                                  : '章节待确认'}
+                                {details.totalSections > 0
+                                  ? ` · ${details.completedSections}/${details.totalSections} 节`
+                                  : ''}
+                              </span>
+                              <b>{book.progress}%</b>
+                            </span>
+                            <span
+                              className="home-book-progress-track"
+                              role="progressbar"
+                              aria-label={`第 ${book.position} 本《${book.title}》进度`}
+                              aria-valuemin={0}
+                              aria-valuemax={100}
+                              aria-valuenow={book.progress}
+                            >
+                              <i style={{ width: `${book.progress}%` }} />
+                            </span>
+                            <span className="home-book-action">
+                              {locked ? '完成前一本后解锁' : isTodayBook || book.progress > 0 ? '继续学习' : '打开这本'}
+                              {!locked && <i aria-hidden="true">→</i>}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </section>
+                ))}
+              </div>
+            ) : (
+              <button type="button" className="home-shelf-empty" onClick={() => onOpen(item)}>
+                <span>这里还没有学习系列</span>
+                <small>进入书架，创建一个明确的学习目标。</small>
+                <b>创建学习系列 <i aria-hidden="true">→</i></b>
+              </button>
+            )}
+          </article>
           );
         })}
         </div>
@@ -3673,7 +3626,7 @@ function ShelfPage({
   profile: LearningProfile;
   onBack: () => void;
   onCreate: (body: object, idempotencyKey: string) => Promise<void>;
-  onOpen: (id: string) => void;
+  onOpen: (id: string, sectionId?: string | null) => void;
   onDelete: (id: string) => Promise<void>;
 }) {
   const [showPlan, setShowPlan] = useState(false);
@@ -3706,53 +3659,91 @@ function ShelfPage({
       </div>
       {showPlan && <PlanForm profile={profile} submit={onCreate} onCancel={() => setShowPlan(false)} />}
       <div className="series-shelf-heading">
-        <span>学习系列</span>
+        <span>书架上的学习系列</span>
+        <small>每一排对应一个学习目标</small>
       </div>
-      <div className="series-bookshelf">
-        <div className="series-volume-row">
-          <span className="bookend left" aria-hidden="true" />
-          {shelf.series.map((item, index) => (
-            <article
-              className={`series-volume book-tone-${index % 6}`}
-              style={{ height: `${238 + ((index * 17) % 34)}px` }}
-              key={item.id}
-            >
-              <button
-                className="series-volume-main"
-                aria-label={`进入学习 ${item.title}`}
-                onClick={() => onOpen(item.id)}
-              >
-                <span className="series-volume-number">{String(index + 1).padStart(2, '0')}</span>
-                <span className="series-volume-kicker">slow learning series</span>
+      <div className="focused-series-shelves">
+        {shelf.series.map((item, seriesIndex) => (
+          <article className="focused-series-shelf" key={item.id}>
+            <header>
+              <span className="focused-series-number">
+                <small>系列</small>
+                <b>{String(seriesIndex + 1).padStart(2, '0')}</b>
+              </span>
+              <div className="focused-series-title">
                 <h2>{item.title}</h2>
-                <span className="series-volume-rule" />
-                <span className="series-volume-progress">
+                <span>
                   <i><b style={{ width: `${item.progress}%` }} /></i>
-                  <small>{item.progress}%</small>
+                  <small>{item.books.length} 本书 · 已完成 {item.progress}%</small>
                 </span>
-                <span className="series-volume-action">
-                  {item.progress > 0 ? '继续学习' : '进入系列'} <i aria-hidden="true">→</i>
-                </span>
-              </button>
-              <button
-                className="series-delete-button"
-                aria-label={`删除 ${item.title}`}
-                title="删除系列"
-                onClick={() => setDeleteTarget(item)}
-              >
-                <TrashIcon />
-              </button>
-            </article>
-          ))}
-          {shelf.series.length === 0 && (
-            <div className="empty-shelf-message">
-              <span>这里还没有书</span>
-              <small>点击“创建学习系列”，从一个学习主题开始。</small>
+              </div>
+              <div className="focused-series-actions">
+                <button
+                  className="series-delete-button"
+                  aria-label={`删除 ${item.title}`}
+                  title="删除系列"
+                  onClick={() => setDeleteTarget(item)}
+                >
+                  <TrashIcon />
+                </button>
+              </div>
+            </header>
+            <div className="focused-series-book-bay">
+              <div className="focused-series-books">
+                {item.books.map((book, bookIndex) => {
+                  const details = bookProgressDetails(book);
+                  const nextSectionId = nextBookSection(book)?.section.id
+                    || book.chapters.flatMap((chapter) => chapter.sections)
+                      .find((candidate) => candidate.status !== 'locked')?.id
+                    || null;
+                  const locked = book.status === 'locked';
+                  return (
+                    <button
+                      type="button"
+                      className={`focused-book-volume book-tone-${(seriesIndex + bookIndex) % 6} is-${book.status}`}
+                      style={{ height: `${220 + ((bookIndex * 19) % 34)}px` }}
+                      key={book.id}
+                      disabled={locked}
+                      onClick={() => onOpen(item.id, nextSectionId)}
+                    >
+                      <span className="focused-book-number">第 {book.position} 本</span>
+                      <strong>{book.title}</strong>
+                      <small>{bookProgressLabel(book, false)}</small>
+                      <span className="focused-book-progress">
+                        <span>
+                          {details.totalChapters > 0
+                            ? `${details.completedChapters}/${details.totalChapters} 章`
+                            : '章节待确认'}
+                        </span>
+                        <b>{book.progress}%</b>
+                      </span>
+                      <i className="focused-book-progress-track">
+                        <b style={{ width: `${book.progress}%` }} />
+                      </i>
+                      <span className="focused-book-action">
+                        {locked ? '完成前一本后解锁' : book.progress > 0 ? '继续这本' : '打开这本'}
+                        {!locked && <i aria-hidden="true">→</i>}
+                      </span>
+                    </button>
+                  );
+                })}
+                {item.books.length === 0 && (
+                  <div className="focused-series-no-books">
+                    <span>这排还没有书</span>
+                    <small>学习路径正在准备中。</small>
+                  </div>
+                )}
+              </div>
+              <span className="focused-shelf-board" aria-hidden="true"><i /></span>
             </div>
-          )}
-          <span className="bookend right" aria-hidden="true" />
-        </div>
-        <span className="series-shelf-board" aria-hidden="true"><i /></span>
+          </article>
+        ))}
+        {shelf.series.length === 0 && (
+          <div className="empty-shelf-message">
+            <span>书架还是空的</span>
+            <small>点击“创建学习系列”，新增一排围绕明确目标组织的书。</small>
+          </div>
+        )}
       </div>
       {deleteTarget && (
         <div
@@ -4080,7 +4071,6 @@ function LearningWorkspace({
   onGenerateSection,
   onRegenerateSection,
   onGenerateChapter,
-  onStartNextBook,
   onActivateBook,
   chapterGenerationDisabled,
   generatingChapterId,
@@ -4099,7 +4089,6 @@ function LearningWorkspace({
   onGenerateSection: (id: string) => Promise<void>;
   onRegenerateSection: (id: string) => Promise<void>;
   onGenerateChapter: (chapter: Chapter) => Promise<void>;
-  onStartNextBook: () => Promise<void>;
   onActivateBook: (book: Book) => Promise<void>;
   chapterGenerationDisabled: boolean;
   generatingChapterId: string;
@@ -4395,7 +4384,6 @@ function LearningWorkspace({
         currentSectionId={section?.id}
         onSelectSection={onSelectSection}
         onGenerateChapter={onGenerateChapter}
-        onStartNextBook={onStartNextBook}
         onActivateBook={onActivateBook}
         chapterGenerationDisabled={chapterGenerationDisabled}
         generatingChapterId={generatingChapterId}
@@ -4588,7 +4576,6 @@ function DirectoryPanel({
   currentSectionId,
   onSelectSection,
   onGenerateChapter,
-  onStartNextBook,
   onActivateBook,
   chapterGenerationDisabled,
   generatingChapterId,
@@ -4601,7 +4588,6 @@ function DirectoryPanel({
   currentSectionId?: string;
   onSelectSection: (id: string) => Promise<Section>;
   onGenerateChapter: (chapter: Chapter) => Promise<void>;
-  onStartNextBook: () => Promise<void>;
   onActivateBook: (book: Book) => Promise<void>;
   chapterGenerationDisabled: boolean;
   generatingChapterId: string;
@@ -4610,6 +4596,13 @@ function DirectoryPanel({
 }) {
   const [deleteTarget, setDeleteTarget] = useState<Book | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const activeBookIndex = series.books.findIndex((book) => book.chapters.some(
+    (chapter) => chapter.sections.some((item) => item.id === currentSectionId),
+  ));
+  const resolvedBookIndex = activeBookIndex >= 0
+    ? activeBookIndex
+    : Math.max(0, series.books.findIndex((book) => book.status !== 'locked'));
+  const activeBook = series.books[resolvedBookIndex];
   const deleteDialogRef = useModalFocus<HTMLElement>({
     open: Boolean(deleteTarget),
     canClose: !deleting,
@@ -4620,33 +4613,25 @@ function DirectoryPanel({
     <aside className="directory-panel" id="course-directory-panel" aria-label="课程目录" hidden={hidden}>
       <div className="directory-heading">
         <button className="panel-collapse-button" aria-label="收起目录" onClick={onClose}>收起</button>
-        <span className="panel-label">目录</span>
-        <h2>{series.title}</h2>
+        <span className="panel-label">当前书目录</span>
+        <small className="directory-series-name">{series.title}</small>
+        <h2>{activeBook?.title || '这本书'}</h2>
         <div className="series-progress">
-          <span><i style={{ width: `${series.progress}%` }} /></span>
-          <b>{series.progress}%</b>
+          <span><i style={{ width: `${activeBook?.progress || 0}%` }} /></span>
+          <b>{activeBook?.progress || 0}%</b>
         </div>
       </div>
-      {series.books[0]?.status === 'completed'
-        && series.books[1]
-        && series.books[1].status !== 'locked' && (
-          <div className="next-book-callout" role="status">
-            <b>第一册已完成</b>
-            <span>第二册《{series.books[1].title}》已经解锁。</span>
-            <button className="secondary-button" onClick={onStartNextBook}>开始第二册</button>
-          </div>
-      )}
       <nav className="book-tree">
-        {series.books.map((book, index) => (
+        {activeBook && (
           <BookTree
-            key={book.id}
-            book={book}
+            key={activeBook.id}
+            book={activeBook}
             currentSectionId={currentSectionId}
             onSelectSection={onSelectSection}
             onGenerateChapter={onGenerateChapter}
             canActivate={
-              book.outlineStatus === 'draft'
-              && (index === 0 || series.books[index - 1].status === 'completed')
+              activeBook.outlineStatus === 'draft'
+              && (resolvedBookIndex === 0 || series.books[resolvedBookIndex - 1].status === 'completed')
             }
             onActivate={onActivateBook}
             chapterGenerationDisabled={chapterGenerationDisabled}
@@ -4654,7 +4639,7 @@ function DirectoryPanel({
             onRefreshSeries={onRefreshSeries}
             onRequestDelete={setDeleteTarget}
           />
-        ))}
+        )}
       </nav>
       {deleteTarget && (
         <div
