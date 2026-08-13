@@ -2736,6 +2736,34 @@ def test_runtime_ai_settings_never_return_the_key_and_can_switch_to_demo(client)
     assert client.get("/api/health").json()["model"] == "local-demo-v1"
 
 
+def test_runtime_ai_rejects_a_pool_without_an_active_route(client):
+    response = client.put(
+        "/api/runtime/ai",
+        json={
+            "mode": "provider",
+            "apiKey": "test-provider-key",
+            "baseUrl": "http://127.0.0.1:9999/v1",
+            "model": "qwen3.8-max",
+            "deployments": [
+                {
+                    "deploymentId": "disabled-author",
+                    "providerId": "test-provider",
+                    "model": "qwen3.8-max",
+                    "modelFamilyId": "qwen",
+                    "baseUrl": "http://127.0.0.1:9999/v1",
+                    "structuredMode": "json_object",
+                    "backendAllowed": True,
+                    "allowedEnvironments": ["test"],
+                    "status": "disabled",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "AI_RUNTIME_ROUTE_INVALID"
+
+
 def test_library_read_model_has_fixed_query_budget_and_no_writes(client):
     series = create_series(client)
     first_chapter = series["books"][0]["chapters"][0]
@@ -3744,7 +3772,7 @@ def test_content_feedback_repairs_legacy_contract_bound_content(client):
     )
 
 
-def test_content_feedback_after_assessment_repairs_without_rewriting_evidence(client):
+def test_accuracy_feedback_after_assessment_preserves_content_and_evidence(client):
     series = create_series(client)
     assert wait_for_task(
         client,
@@ -3779,15 +3807,23 @@ def test_content_feedback_after_assessment_repairs_without_rewriting_evidence(cl
 
     assert submitted.status_code == 201
     receipt = submitted.json()
-    assert receipt["regeneration"]["status"] == "stream_ready"
-    events = sse_events(
-        client.post(f"/api/feedback/{receipt['id']}/repair/stream")
+    assert receipt["regeneration"] == {
+        "status": "needs_review",
+        "reasonCode": "FEEDBACK_ACCURACY_REVIEW_REQUIRED",
+        "task": None,
+    }
+    repair = client.post(f"/api/feedback/{receipt['id']}/repair/stream")
+    assert repair.status_code == 200
+    error_event = next(
+        data for event, data in sse_events(repair) if event == "error"
     )
-    assert any(event[0] == "done" for event in events)
+    assert error_event["code"] == (
+        "FEEDBACK_ACCURACY_REVIEW_REQUIRED"
+    )
     replacement = client.get(f"/api/sections/{section_id}").json()
     assert replacement["status"] == "completed"
-    assert replacement["content"]["version"] == 2
-    assert replacement["content"]["id"] != section["content"]["id"]
+    assert replacement["content"]["version"] == 1
+    assert replacement["content"]["id"] == section["content"]["id"]
     assert replacement["quiz"]["id"] == section["quiz"]["id"]
     assert replacement["latestAttemptReview"] is not None
     with client.app.state.sessions() as db:
@@ -3809,7 +3845,7 @@ def test_content_feedback_after_assessment_repairs_without_rewriting_evidence(cl
     assert feedback_task_count == 0
     assert original_attempt.quiz_set_id == section["quiz"]["id"]
     assert original_quiz.content_version_id == section["content"]["id"]
-    assert binding.content_version_id == replacement["content"]["id"]
+    assert binding.content_version_id == section["content"]["id"]
     assert binding.initial_quiz_set_id == section["quiz"]["id"]
 
 

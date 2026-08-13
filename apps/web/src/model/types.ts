@@ -238,7 +238,7 @@ export type FeedbackReceipt = {
   scope:'global'|'content_block';
   createdAt:string;
   regeneration:{
-    status:'stream_ready'|'recorded_only'|'queued'|'blocked'|'not_applicable';
+    status:'stream_ready'|'recorded_only'|'queued'|'blocked'|'needs_review'|'not_applicable';
     reasonCode:string|null;
     task:LearningTask|null;
   };

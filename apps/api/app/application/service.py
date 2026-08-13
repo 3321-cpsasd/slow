@@ -949,6 +949,18 @@ class SlowService:
                 code="CONTENT_FEEDBACK_FACT_MISSING",
                 status=409,
             )
+        if feedback.feedback_type == "inaccurate":
+            raise AppError(
+                "准确性反馈必须经过独立证据或人工复核，不能直接触发改写",
+                code="FEEDBACK_ACCURACY_REVIEW_REQUIRED",
+                status=409,
+            )
+        if feedback.feedback_type == "other":
+            raise AppError(
+                "未分类反馈不能直接触发改写",
+                code="FEEDBACK_CLASSIFICATION_REQUIRED",
+                status=409,
+            )
         prior_runs = self.db.scalars(
             select(GenerationRun)
             .where(
@@ -1713,6 +1725,18 @@ class SlowService:
                 "反馈不存在或不属于当前用户",
                 code="FEEDBACK_NOT_FOUND",
                 status=404,
+            )
+        if feedback.feedback_type == "inaccurate":
+            raise AppError(
+                "这条准确性反馈需要独立证据或人工复核；原正文保持不变",
+                code="FEEDBACK_ACCURACY_REVIEW_REQUIRED",
+                status=409,
+            )
+        if feedback.feedback_type == "other":
+            raise AppError(
+                "这条反馈需要先确认问题类型；原正文保持不变",
+                code="FEEDBACK_CLASSIFICATION_REQUIRED",
+                status=409,
             )
         content = self.db.get(ContentVersion, feedback.content_version_id)
         if not content or content.section_id != feedback.section_id:

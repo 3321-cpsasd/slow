@@ -184,6 +184,18 @@ class FeedbackService:
                 "reasonCode": "FEEDBACK_CONTENT_VERSION_STALE",
                 "taskId": None,
             }
+        if body.feedback_type == "inaccurate":
+            return {
+                "status": "needs_review",
+                "reasonCode": "FEEDBACK_ACCURACY_REVIEW_REQUIRED",
+                "taskId": None,
+            }
+        if body.feedback_type == "other":
+            return {
+                "status": "needs_review",
+                "reasonCode": "FEEDBACK_CLASSIFICATION_REQUIRED",
+                "taskId": None,
+            }
         return {
             "status": "stream_ready",
             "reasonCode": None,

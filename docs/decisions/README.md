@@ -45,3 +45,4 @@
 | [ADR-0011](0011-m3-pilot-readiness.md) | Accepted，实施中 | 模型故障透明恢复、五类错因、补救有效性、跨类型质量与偏好授权 |
 | [ADR-0012](0012-on-demand-knowledge-universe-and-learner-memory.md) | Accepted，第一阶段实现中 | 按需知识宇宙、个人知识子网、三层学习记忆与可信知识段位 |
 | [ADR-0013](0013-evidence-guided-reinforcement-agent.md) | Accepted，MVP 已实现 | 到期唤醒失败后的有界诊断、补强、重组与独立验证 |
+| [ADR-0014](0014-purpose-aware-ai-gateway.md) | Accepted，第一阶段已实现 | 用途感知 AI 网关、模型池路由、评估独立性与准确性反馈复核边界 |

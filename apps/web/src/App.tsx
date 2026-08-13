@@ -2393,6 +2393,8 @@ function FeedbackDialog({
       const blockedMessages: Record<string, string> = {
         FEEDBACK_CONTENT_VERSION_STALE: '当前正文已经更新。请刷新页面后，在最新正文上重新反馈。',
         SECTION_CONTENT_MISSING: '这段正文已不可用，请刷新页面后重试。',
+        FEEDBACK_ACCURACY_REVIEW_REQUIRED: '已记录。为避免未经核实地改写，原正文保持不变。',
+        FEEDBACK_CLASSIFICATION_REQUIRED: '已记录。需先确认问题类型，因此原正文保持不变。',
       };
       setStatus(
         blockedMessages[receipt.regeneration.reasonCode || '']

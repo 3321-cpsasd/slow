@@ -12,7 +12,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0058_reinforcement_agent"
+HEAD_REVISION = "0059_ai_gateway_lineage"
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -354,6 +354,15 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
     assert "resource_key" in generation_lease_schema
     assert "UNIQUE (owner_id)" in generation_lease_schema
     assert invocation_columns["subject_user_id"][3] == 0
+    assert {
+        "purpose",
+        "authority",
+        "deployment_id",
+        "model_family_id",
+        "config_version_id",
+        "route_policy_version",
+        "fallback_index",
+    }.issubset(invocation_columns)
     assert "uq_ai_usage_measurement_source_version" in measurement_schema
     assert "token_hash" in auth_session_schema
     assert "fk_learning_resume_run_user" in resume_schema

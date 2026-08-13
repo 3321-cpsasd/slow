@@ -19,6 +19,7 @@ from ...infrastructure.tables import (
     ContentBlockAssessmentTarget,
     ContentBlockVersion,
     ContentVersion,
+    GenerationRun,
     LearningContractAssessmentTarget,
     LearningContractVersion,
     LearningMissionVersion,
@@ -72,6 +73,30 @@ class AskMeService:
         self.uid = uid
         self.dump = dump
         self.load = load
+
+    def _author_lineage(self, binding) -> dict[str, str]:
+        content = self.db.get(ContentVersion, binding.content_version_id)
+        generation = (
+            self.db.get(GenerationRun, content.generation_run_id)
+            if content and content.generation_run_id
+            else None
+        )
+        if not generation or not generation.model:
+            return {}
+        attempts = self.load(generation.trace_json, {}).get("modelAttempts", [])
+        selected = next(
+            (
+                item
+                for item in reversed(attempts)
+                if item.get("outcome") == "succeeded"
+            ),
+            {},
+        )
+        return {
+            "authorModel": generation.model,
+            "authorDeploymentId": str(selected.get("deploymentId") or ""),
+            "authorModelFamilyId": str(selected.get("modelFamilyId") or ""),
+        }
 
     async def answer(self, section_id: str, answer: str | None):
         context = self.contexts.resolve_section(
@@ -307,6 +332,9 @@ class AskMeService:
                         "previousPrompt": turn.prompt,
                         "previousAnswer": answer,
                         "priorTurns": prior_turns,
+                        **self._author_lineage(
+                            self._binding(learning_run.id, section_id)
+                        ),
                     },
                     context_pack,
                 )
@@ -582,6 +610,7 @@ class AskMeService:
                         "finalize": False,
                         "validationAttempt": validation_attempt,
                         "requiredEvaluation": "not_evaluated",
+                        **self._author_lineage(binding),
                     },
                     context_pack,
                 )
@@ -661,6 +690,7 @@ class AskMeService:
                         "finalize": finalize,
                         "validationAttempt": validation_attempt,
                         "requiredEvaluation": ["strong", "partial", "weak"],
+                        **self._author_lineage(binding),
                     },
                     context_pack,
                 )

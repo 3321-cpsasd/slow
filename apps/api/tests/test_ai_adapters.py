@@ -20,6 +20,10 @@ from app.ai.context import policy_for
 from app.ai.local_adapter import LocalDemoAdapter
 from app.ai.openai_adapter import OpenAiAdapter
 from app.ai.port import ProviderCapabilities
+from app.ai.route_context import (
+    InvocationRouteContext,
+    invocation_route_context,
+)
 from app.auth.context import Principal
 from app.core.errors import AiError
 from app.infrastructure.database import build_database
@@ -974,6 +978,41 @@ def test_missing_usage_is_explicit_instead_of_becoming_zero():
     assert invocation.attribution_status == "system"
     assert invocation.subject_user_id is None
     assert measurement_count == 0
+
+
+def test_usage_recorder_persists_gateway_route_lineage():
+    engine, sessions = build_database("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    recorder = AiUsageRecorder(sessions)
+    route = InvocationRouteContext(
+        purpose="assessment_evaluation",
+        authority="evidence_candidate",
+        deployment_id="evaluator-prod-a",
+        model_family_id="glm",
+        config_version_id="config-v7",
+        route_policy_version="policy-v3",
+        fallback_index=1,
+    )
+
+    with invocation_route_context(route):
+        invocation_id = recorder.start(
+            provider="openai",
+            api_mode="chat_completions",
+            model="glm-5.2",
+            operation="structured_call",
+        )
+    recorder.succeed(invocation_id, None)
+
+    with sessions() as db:
+        invocation = db.get(AiInvocation, invocation_id)
+        assert invocation.purpose == "assessment_evaluation"
+        assert invocation.authority == "evidence_candidate"
+        assert invocation.deployment_id == "evaluator-prod-a"
+        assert invocation.model_family_id == "glm"
+        assert invocation.config_version_id == "config-v7"
+        assert invocation.route_policy_version == "policy-v3"
+        assert invocation.fallback_index == 1
+    engine.dispose()
 
 
 def test_usage_recorder_attributes_invocation_to_verified_principal():
