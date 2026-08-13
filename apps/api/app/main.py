@@ -2062,6 +2062,9 @@ def create_app(
     @app.post("/api/books/{book_id}/capstone")
     def submit_capstone(book_id: str, body: AttachmentSubmit, s: SlowService = Depends(service)): return s.submit_book_capstone(book_id, body.content, body.attachment_ids)
 
+    @app.post("/api/books/{book_id}/settlement")
+    def settle_book(book_id: str, s: SlowService = Depends(service)): return s.settle_book(book_id)
+
     @app.post("/api/books/{book_id}/capstone/attachments", status_code=201)
     async def upload_capstone_attachment(book_id: str, request: Request, s: SlowService = Depends(service)):
         return s.upload_book_capstone_attachment(book_id, request.headers.get("x-filename", "attachment.bin"), request.headers.get("content-type", "application/octet-stream"), await attachment_body(request))

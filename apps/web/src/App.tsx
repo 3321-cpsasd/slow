@@ -37,6 +37,7 @@ import type {
   Block,
   Book,
   BookReplanProposal,
+  BookSettlement,
   Bootstrap,
   AccountExitReceipt,
   PrivacyState,
@@ -5274,11 +5275,33 @@ function DirectoryPanel({
 }) {
   const [deleteTarget, setDeleteTarget] = useState<Book | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [settlementTarget, setSettlementTarget] = useState<Book | null>(null);
+  const [settlement, setSettlement] = useState<BookSettlement | null>(null);
+  const [settlementLoading, setSettlementLoading] = useState(false);
+  const [settlementError, setSettlementError] = useState('');
   const deleteDialogRef = useModalFocus<HTMLElement>({
     open: Boolean(deleteTarget),
     canClose: !deleting,
     onRequestClose: () => setDeleteTarget(null),
   });
+  const settlementDialogRef = useModalFocus<HTMLElement>({
+    open: Boolean(settlementTarget),
+    onRequestClose: () => setSettlementTarget(null),
+  });
+  const openSettlement = async (book: Book) => {
+    setSettlementTarget(book);
+    setSettlement(null);
+    setSettlementError('');
+    setSettlementLoading(true);
+    try {
+      setSettlement(await api.settleBook(book.id));
+      await onRefreshSeries();
+    } catch (reason) {
+      setSettlementError(reason instanceof Error ? reason.message : '全书结算暂时不可用');
+    } finally {
+      setSettlementLoading(false);
+    }
+  };
 
   return (
     <aside className="directory-panel" id="course-directory-panel" aria-label="课程目录" hidden={hidden}>
@@ -5315,7 +5338,7 @@ function DirectoryPanel({
             onActivate={onActivateBook}
             chapterGenerationDisabled={chapterGenerationDisabled}
             generatingChapterId={generatingChapterId}
-            onRefreshSeries={onRefreshSeries}
+            onOpenSettlement={openSettlement}
             onRequestDelete={setDeleteTarget}
           />
         ))}
@@ -5367,6 +5390,56 @@ function DirectoryPanel({
           </section>
         </div>
       )}
+      {settlementTarget && (
+        <div
+          className="confirm-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setSettlementTarget(null);
+          }}
+        >
+          <section
+            ref={settlementDialogRef}
+            className="book-settlement-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="book-settlement-title"
+            tabIndex={-1}
+          >
+            <header>
+              <p className="eyebrow">全书结算</p>
+              <h2 id="book-settlement-title">{settlementTarget.title}</h2>
+              <p>结算只汇总已经写入的学习与验证记录，不需要额外上传成果。</p>
+            </header>
+            {settlementLoading ? (
+              <div className="book-settlement-loading" role="status">正在汇总全书学习记录…</div>
+            ) : settlement ? (
+              <>
+                <div className="book-settlement-result">
+                  <div><strong>{settlement.completedChapterCount}/{settlement.chapterCount}</strong><span>完成章节</span></div>
+                  <div><strong>{settlement.completedSectionCount}/{settlement.sectionCount}</strong><span>完成小节</span></div>
+                  <div><strong>{settlement.verificationRate === null ? '—' : `${settlement.verificationRate}%`}</strong><span>验证最佳成绩</span></div>
+                  <div><strong>{settlement.perfectSectionCount}</strong><span>满分小节</span></div>
+                </div>
+                <div className="book-settlement-followup">
+                  <b>{settlement.reviewSectionCount > 0
+                    ? `${settlement.reviewSectionCount} 节验证未满分，可继续重点巩固`
+                    : '本书验证记录已完整结算'}</b>
+                  <p>后续复习仍以真实测验、口试和实际复习安排为准；结算不会把浏览或上传文件算作掌握。</p>
+                </div>
+              </>
+            ) : (
+              <div className="book-settlement-error" role="alert">
+                <b>暂时无法完成结算</b>
+                <p>{settlementError}</p>
+                <button className="secondary-button" onClick={() => void openSettlement(settlementTarget)}>重新结算</button>
+              </div>
+            )}
+            <footer>
+              <button data-dialog-initial-focus className="primary-button" onClick={() => setSettlementTarget(null)}>完成</button>
+            </footer>
+          </section>
+        </div>
+      )}
     </aside>
   );
 }
@@ -5380,7 +5453,7 @@ function BookTree({
   onActivate,
   chapterGenerationDisabled,
   generatingChapterId,
-  onRefreshSeries,
+  onOpenSettlement,
   onRequestDelete,
 }: {
   book: Book;
@@ -5391,7 +5464,7 @@ function BookTree({
   onActivate: (book: Book) => Promise<void>;
   chapterGenerationDisabled: boolean;
   generatingChapterId: string;
-  onRefreshSeries: () => Promise<void>;
+  onOpenSettlement: (book: Book) => Promise<void>;
   onRequestDelete: (book: Book) => void;
 }) {
   const containsCurrent = book.chapters.some((chapter) => chapter.sections.some((item) => item.id === currentSectionId));
@@ -5502,17 +5575,19 @@ function BookTree({
             </div>
           );
         })}
-        {book.capstone && (
-          <ArtifactSubmission
-            id={book.id}
-            status={book.capstone.status}
-            attachmentCount={book.capstone.attachments.length}
-            onSubmit={async (action) => {
-              await action();
-              await onRefreshSeries();
-            }}
-          />
-        )}
+        <button
+          className={`book-settlement-entry ${book.status === 'completed' ? 'enabled' : ''}`}
+          disabled={book.status !== 'completed'}
+          onClick={() => void onOpenSettlement(book)}
+        >
+          <span>{book.status === 'completed' ? '◆' : <LockIcon size={12} />}</span>
+          <b>全书结算</b>
+          <small>· {book.status !== 'completed'
+            ? '完成全书后开启'
+            : book.capstone?.status === 'completed'
+              ? '查看总结'
+              : '生成总结'}</small>
+        </button>
       </div>
     </details>
   );
@@ -8088,44 +8163,5 @@ function QaPanel({
         </>
       )}
     </aside>
-  );
-}
-
-function ArtifactSubmission({
-  id,
-  status,
-  attachmentCount,
-  onSubmit,
-}: {
-  id: string;
-  status: string;
-  attachmentCount: number;
-  onSubmit: (action: () => Promise<unknown>) => Promise<void>;
-}) {
-  const needsLegacyFile = status === 'completed' && attachmentCount === 0;
-  const enabled = status === 'available' || needsLegacyFile;
-  const upload = async (file: File) => {
-    const attachment = await api.uploadCapstone(id, file);
-    return api.capstone(id, { artifact: '全书综合成果', verification: '学习者复核记录' }, [attachment.id]);
-  };
-  return (
-    <label className={`artifact-submit capstone ${enabled ? 'enabled' : ''}`}>
-      <span className="artifact-icon">
-        {status === 'locked' ? <LockIcon size={12} /> : '◆'}
-      </span>
-      <span>全书大作业</span>
-      {status !== 'locked' && (
-        <small>· {needsLegacyFile ? '补充附件' : status === 'completed' ? '已完成' : '提交成果'}</small>
-      )}
-      <input
-        type="file"
-        hidden
-        disabled={!enabled}
-        onChange={(event) => {
-          const file = event.target.files?.[0];
-          if (file) onSubmit(() => upload(file));
-        }}
-      />
-    </label>
   );
 }

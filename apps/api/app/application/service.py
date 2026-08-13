@@ -2226,6 +2226,9 @@ class SlowService:
             book_id, content, attachment_ids
         )
 
+    def settle_book(self, book_id):
+        return self.artifact_service.settle_book(book_id)
+
     def _capstone_progress(self, capstone):
         return self.artifact_service.capstone_progress(capstone)
 

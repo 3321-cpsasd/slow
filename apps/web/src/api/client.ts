@@ -380,6 +380,7 @@ export const api = {
   practice:(id:string,content:object,attachmentIds:string[])=>call<import('../model/types').Practice>(`/api/chapters/${id}/practice`,{method:'POST',body:JSON.stringify({content,attachmentIds})}),
   uploadCapstone:(id:string,file:File)=>call<import('../model/types').Attachment>(`/api/books/${id}/capstone/attachments`,{method:'POST',headers:{'Content-Type':file.type||'application/octet-stream','X-Filename':encodeURIComponent(file.name)},body:file}),
   capstone:(id:string,content:object,attachmentIds:string[])=>call<import('../model/types').Capstone>(`/api/books/${id}/capstone`,{method:'POST',body:JSON.stringify({content,attachmentIds})}),
+  settleBook:(id:string)=>call<import('../model/types').BookSettlement>(`/api/books/${id}/settlement`,{method:'POST'}),
   updateChapter:(id:string,body:object)=>call<import('../model/types').Chapter>(`/api/chapters/${id}`,{method:'PATCH',body:JSON.stringify(body)}),
   addChapter:(id:string,body:object)=>call<import('../model/types').Chapter>(`/api/books/${id}/chapters`,{method:'POST',body:JSON.stringify(body)}),
   deleteChapter:(id:string)=>call<void>(`/api/chapters/${id}`,{method:'DELETE'}),

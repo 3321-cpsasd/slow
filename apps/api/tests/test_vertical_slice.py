@@ -3337,6 +3337,11 @@ def test_complete_first_book_attachments_and_enter_second(client):
     first_book = series["books"][0]
     assert client.get(f"/api/books/{first_book['id']}/capstone").json()["status"] == "locked"
     assert client.post(f"/api/books/{first_book['id']}/capstone", json={"content":{"too":"early"}, "attachmentIds":["missing"]}).status_code == 403
+    locked_settlement = client.post(
+        f"/api/books/{first_book['id']}/settlement"
+    )
+    assert locked_settlement.status_code == 403
+    assert locked_settlement.json()["code"] == "BOOK_SETTLEMENT_LOCKED"
     for chapter_summary in first_book["chapters"]:
         chapter = client.post(f"/api/chapters/{chapter_summary['id']}/generate").json()
         for section in chapter["sections"]:
@@ -3346,6 +3351,21 @@ def test_complete_first_book_attachments_and_enter_second(client):
         assert stored.json()["sha256"] == hashlib.sha256(b"practice evidence").hexdigest()
         practice = client.post(f"/api/chapters/{chapter['id']}/practice", json={"content":{"artifact":"evidence"}, "attachmentIds":[stored.json()["id"]]})
         assert practice.status_code == 200 and practice.json()["status"] == "completed" and practice.json()["evidenceMode"] == "file_attachment"
+    settlement = client.post(
+        f"/api/books/{first_book['id']}/settlement"
+    )
+    assert settlement.status_code == 200
+    assert settlement.json()["status"] == "completed"
+    assert settlement.json()["completedChapterCount"] == settlement.json()["chapterCount"]
+    assert settlement.json()["completedSectionCount"] == settlement.json()["sectionCount"]
+    assert settlement.json()["verificationRate"] >= 80
+    assert settlement.json()["ruleVersion"] == "book_settlement_v1"
+    replayed_settlement = client.post(
+        f"/api/books/{first_book['id']}/settlement"
+    )
+    assert replayed_settlement.status_code == 200
+    assert replayed_settlement.json()["settledAt"] == settlement.json()["settledAt"]
+    assert client.get(f"/api/books/{first_book['id']}/capstone").json()["status"] == "completed"
     capstone_file = client.post(f"/api/books/{first_book['id']}/capstone/attachments", content=b"capstone evidence", headers={"x-filename":"capstone.txt","content-type":"text/plain"})
     assert capstone_file.status_code == 201
     oversized = client.post(f"/api/books/{first_book['id']}/capstone/attachments", content=b"x", headers={"content-length": str(10 * 1024 * 1024 + 1)})
