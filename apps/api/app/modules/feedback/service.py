@@ -118,7 +118,7 @@ class FeedbackService:
                 ).encode()
             ).hexdigest()
 
-            regeneration = self._regeneration_decision()
+            regeneration = self._regeneration_decision(body, content)
 
         self._enforce_rate_limit()
         feedback_id = f"feedback_{uuid4().hex}"
@@ -160,14 +160,32 @@ class FeedbackService:
             raise
         return self._receipt(item)
 
-    @staticmethod
-    def _regeneration_decision() -> dict:
-        # Feedback is an immutable observation, not an instruction to mutate the
-        # published lesson. Any repair or whole-section regeneration must be an
-        # explicit, separately tracked action so submitting feedback never blocks
-        # the reader or silently replaces learning material.
+    def _regeneration_decision(
+        self,
+        body: FeedbackCreate,
+        content: ContentVersion,
+    ) -> dict:
+        # The feedback row remains an immutable observation. The receipt only
+        # authorizes the separately tracked repair endpoint when the user is
+        # still looking at the latest published lesson version.
+        latest_content_id = self.db.scalar(
+            select(ContentVersion.id)
+            .where(
+                ContentVersion.section_id == body.section_id,
+                ContentVersion.learning_contract_version_id
+                == content.learning_contract_version_id,
+                ContentVersion.publication_status == "published",
+            )
+            .order_by(ContentVersion.version.desc())
+        )
+        if latest_content_id != content.id:
+            return {
+                "status": "blocked",
+                "reasonCode": "FEEDBACK_CONTENT_VERSION_STALE",
+                "taskId": None,
+            }
         return {
-            "status": "recorded_only",
+            "status": "stream_ready",
             "reasonCode": None,
             "taskId": None,
         }

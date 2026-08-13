@@ -10,6 +10,7 @@ import {
 } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { MermaidDiagram } from './components/MermaidDiagram';
 import { api, ApiError } from './api/client';
 import { telemetry } from './telemetry';
 import { ProfileOnboardingFlow } from './ProfileOnboardingFlow';
@@ -1976,6 +1977,14 @@ export default function App() {
         <FeedbackDialog
           target={feedbackTarget}
           view={view}
+          onSectionChange={(updated) => {
+            setSection((current) => current?.id === updated.id ? updated : current);
+          }}
+          onRefreshSeries={refreshSeries}
+          onRepairBackgrounded={() => setNotice('反馈已收到，正文正在后台更新，你可以继续学习。')}
+          onRepairSettled={(updated) => setNotice(updated
+            ? '正文已按你的反馈完成更新。'
+            : '反馈已收到，但正文这次没有更新；原内容保持不变，可稍后重试。')}
           onClose={() => setFeedbackTarget(null)}
         />
       )}
@@ -2209,10 +2218,18 @@ function FeedbackTypeDropdown({
 function FeedbackDialog({
   target,
   view,
+  onSectionChange,
+  onRefreshSeries,
+  onRepairBackgrounded,
+  onRepairSettled,
   onClose,
 }: {
   target: FeedbackTarget;
   view: View;
+  onSectionChange: (section: Section) => void;
+  onRefreshSeries: () => Promise<void>;
+  onRepairBackgrounded: () => void;
+  onRepairSettled: (updated: boolean) => void;
   onClose: () => void;
 }) {
   const options = target.scope === 'content_block'
@@ -2233,16 +2250,35 @@ function FeedbackDialog({
   const [feedbackType, setFeedbackType] = useState(options[0][0]);
   const [message, setMessage] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [repairing, setRepairing] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [repairText, setRepairText] = useState('');
+  const [repairFeedbackId, setRepairFeedbackId] = useState('');
+  const [repairFailed, setRepairFailed] = useState(false);
   const [status, setStatus] = useState('');
   const dialogRef = useRef<HTMLElement | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const submittingRef = useRef(submitting);
+  const repairingRef = useRef(repairing);
   const onCloseRef = useRef(onClose);
+  const onRepairBackgroundedRef = useRef(onRepairBackgrounded);
+  const onRepairSettledRef = useRef(onRepairSettled);
+  const backgroundedRef = useRef(false);
   const closeTimerRef = useRef<number | undefined>(undefined);
   const submissionRef = useRef({ payload: '', key: '' });
   submittingRef.current = submitting;
+  repairingRef.current = repairing;
   onCloseRef.current = onClose;
+  onRepairBackgroundedRef.current = onRepairBackgrounded;
+  onRepairSettledRef.current = onRepairSettled;
+
+  const closeDialog = () => {
+    if (repairingRef.current) {
+      backgroundedRef.current = true;
+      onRepairBackgroundedRef.current();
+    }
+    onCloseRef.current();
+  };
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -2255,7 +2291,7 @@ function FeedbackDialog({
 
     const handleDialogKeys = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        if (!submittingRef.current) onCloseRef.current();
+        if (!submittingRef.current) closeDialog();
         return;
       }
       if (event.key !== 'Tab' || !dialog) return;
@@ -2288,6 +2324,35 @@ function FeedbackDialog({
     };
   }, [target.scope]);
 
+  const streamRepair = async (feedbackId: string) => {
+    setRepairing(true);
+    setSubmitted(true);
+    setRepairFailed(false);
+    setRepairText('');
+    setStatus('反馈已收到，正在更新这段内容。你可以关闭窗口继续学习。');
+    try {
+      await api.streamFeedbackRepair(
+        feedbackId,
+        (delta) => setRepairText((current) => current + delta),
+      );
+      if (target.scope === 'content_block') {
+        const updated = await api.section(target.sectionId);
+        onSectionChange(updated);
+        await onRefreshSeries();
+        setStatus('正文已完成更新。');
+        if (backgroundedRef.current) onRepairSettledRef.current(true);
+      }
+    } catch (reason) {
+      setRepairFailed(true);
+      setStatus(reason instanceof Error
+        ? `反馈已收到，但这次更新没有完成：${reason.message}。原正文保持不变。`
+        : '反馈已收到，但这次更新没有完成。原正文保持不变，请稍后重试。');
+      if (backgroundedRef.current) onRepairSettledRef.current(false);
+    } finally {
+      setRepairing(false);
+    }
+  };
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setSubmitting(true);
@@ -2312,13 +2377,27 @@ function FeedbackDialog({
           key: crypto.randomUUID(),
         };
       }
-      await api.submitFeedback(payload, submissionRef.current.key);
+      const receipt = await api.submitFeedback(payload, submissionRef.current.key);
       setSubmitted(true);
       setSubmitting(false);
-      setStatus(target.scope === 'content_block'
-        ? '反馈已收到。当前正文不会被改动，你可以继续学习。'
-        : '已收到。');
-      closeTimerRef.current = window.setTimeout(() => onCloseRef.current(), 5000);
+      if (target.scope === 'global') {
+        setStatus('已收到。');
+        closeTimerRef.current = window.setTimeout(() => onCloseRef.current(), 900);
+        return;
+      }
+      if (receipt.regeneration.status === 'stream_ready') {
+        setRepairFeedbackId(receipt.id);
+        await streamRepair(receipt.id);
+        return;
+      }
+      const blockedMessages: Record<string, string> = {
+        FEEDBACK_CONTENT_VERSION_STALE: '当前正文已经更新。请刷新页面后，在最新正文上重新反馈。',
+        SECTION_CONTENT_MISSING: '这段正文已不可用，请刷新页面后重试。',
+      };
+      setStatus(
+        blockedMessages[receipt.regeneration.reasonCode || '']
+        || '反馈已记录，但当前版本暂时不能自动更新。',
+      );
     } catch (reason) {
       setStatus(reason instanceof Error ? reason.message : '反馈没有提交成功，请稍后重试。');
       setSubmitting(false);
@@ -2329,7 +2408,7 @@ function FeedbackDialog({
     <div
       className="confirm-backdrop feedback-backdrop"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !submitting) onClose();
+        if (event.target === event.currentTarget && !submitting) closeDialog();
       }}
     >
       <section
@@ -2345,7 +2424,7 @@ function FeedbackDialog({
             <p className="eyebrow">{target.scope === 'content_block' ? '正文页边批注' : '告诉我们你的感受'}</p>
             <h2 id="feedback-title">{target.scope === 'content_block' ? '反馈这一段' : '全局反馈'}</h2>
           </div>
-          <button className="dialog-close" type="button" aria-label="关闭反馈" disabled={submitting} onClick={onClose}>×</button>
+          <button className="dialog-close" type="button" aria-label="关闭反馈" disabled={submitting} onClick={closeDialog}>×</button>
         </header>
         {target.scope === 'content_block' && (
           <div className="feedback-block-preview">
@@ -2375,12 +2454,30 @@ function FeedbackDialog({
             />
             <small>请勿填写密码、API Key 或其他敏感信息 · {message.length}/4000</small>
           </label>}
+          {submitted && target.scope === 'content_block' && (
+            <div className={`feedback-repair-answer ${repairFailed ? 'failed' : ''}`} aria-live="polite">
+              {repairText ? (
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{repairText}</ReactMarkdown>
+              ) : repairing ? (
+                <span className="feedback-repair-listening">正在更新正文<span aria-hidden="true">…</span></span>
+              ) : null}
+              {repairing && repairText && <i className="stream-caret" aria-hidden="true" />}
+            </div>
+          )}
           {status && <p className="feedback-status" role="status">{status}</p>}
           <div className="dialog-actions">
-            <button type="button" className="quiet-button" disabled={submitting} onClick={onClose}>{submitted ? '关闭' : '取消'}</button>
-            <button className="primary-button" disabled={submitting || submitted || ((target.scope === 'global' || feedbackType === 'other') && message.trim().length < 2)}>
-              {submitting ? '正在送出…' : submitted ? '已提交' : '发送反馈'}
+            <button type="button" className="quiet-button" disabled={submitting} onClick={closeDialog}>
+              {repairing ? '继续学习' : submitted ? '关闭' : '取消'}
             </button>
+            {repairFailed && repairFeedbackId ? (
+              <button type="button" className="primary-button" disabled={repairing} onClick={() => void streamRepair(repairFeedbackId)}>
+                {repairing ? '正在更新…' : '重试更新'}
+              </button>
+            ) : !submitted ? (
+              <button className="primary-button" disabled={submitting || ((target.scope === 'global' || feedbackType === 'other') && message.trim().length < 2)}>
+                {submitting ? '正在送出…' : '发送反馈'}
+              </button>
+            ) : null}
           </div>
         </form>
       </section>
@@ -7502,6 +7599,7 @@ function QaPanel({
   const [confirmedPreference, setConfirmedPreference] = useState<Record<string, boolean>>({});
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
+  const askingRef = useRef(false);
   const explanationRequestRef = useRef('');
   const draftExplanationRef = useRef<ExplanationRequest | null>(null);
   const selectedBlock =
@@ -7572,7 +7670,8 @@ function QaPanel({
   }, [hidden, section?.id, section?.content?.id, historyStatus]);
 
   const ask = async () => {
-    if (asking || historyStatus === 'loading' || !section || !effectiveBlockId || !question.trim()) return;
+    if (askingRef.current || historyStatus === 'loading' || !section || !effectiveBlockId || !question.trim()) return;
+    askingRef.current = true;
     const visibleQuestion = question.trim();
     const submittedQuestion = draftExplanation && visibleQuestion === draftExplanation.displayQuestion
       ? draftExplanation.question
@@ -7642,6 +7741,7 @@ function QaPanel({
           : message
       )));
     } finally {
+      askingRef.current = false;
       setAsking(false);
     }
   };
@@ -7764,16 +7864,36 @@ function QaPanel({
                         remarkPlugins={[remarkGfm]}
                         components={{
                           a: ({ node: _node, ...props }) => <a {...props} target="_blank" rel="noreferrer" />,
+                          code: ({ node: _node, className, children, ...props }) => {
+                            const language = /(?:^|\s)language-([^\s]+)/.exec(className || '')?.[1]?.toLowerCase();
+                            const source = String(children).replace(/\n$/, '');
+                            if (language === 'mermaid' && message.status === 'done') {
+                              return <MermaidDiagram source={source} />;
+                            }
+                            return <code className={className} {...props}>{children}</code>;
+                          },
                         }}
                       >
                         {message.answer}
                       </ReactMarkdown>
                     ) : (
-                      <span className="streaming-dots"><i /><i /><i /></span>
+                      <span className="qa-answer-pending" role="status">
+                        <span className="streaming-dots" aria-hidden="true"><i /><i /><i /></span>
+                        <small>已发送，正在回答，无需重复点击</small>
+                      </span>
                     )}
                     {message.status === 'streaming' && message.answer && <span className="stream-caret" />}
                   </div>
                 </div>
+                {message.status === 'error' && (
+                  <div className="qa-error-actions">
+                    <span>这次回答没有完成，问题不会重复提交。</span>
+                    <button type="button" disabled={asking} onClick={() => {
+                      setQuestion(message.question);
+                      requestAnimationFrame(() => composerRef.current?.focus());
+                    }}>重新填写</button>
+                  </div>
+                )}
                 {message.status === 'done' && message.explanationStyle && (
                   <div className="explanation-style-feedback">
                     <span>{message.preferenceRequestEventId ? '这次讲法怎么样？' : '偏好未保存'}</span>
@@ -7903,7 +8023,7 @@ function QaPanel({
                 if (event.key !== 'Enter' || event.nativeEvent.isComposing) return;
                 if (event.metaKey || event.ctrlKey || event.shiftKey) return;
                 event.preventDefault();
-                ask();
+                void ask();
               }}
               placeholder={selectedQuote ? '针对选中的内容输入问题…' : '基于当前段落继续追问…'}
             />
@@ -7912,7 +8032,7 @@ function QaPanel({
                 <label><input type="checkbox" checked={newQuestion} onChange={(event) => setNewQuestion(event.target.checked)} /> 新问题</label>
                 <span>Enter 发送 · ⌘/Ctrl + Enter 换行</span>
               </div>
-              <button disabled={asking || historyStatus === 'loading' || !question.trim()} onClick={ask}>
+              <button disabled={asking || historyStatus === 'loading' || !question.trim()} aria-busy={asking} onClick={() => void ask()}>
                 {asking ? '回答中…' : '发送 ↑'}
               </button>
             </div>

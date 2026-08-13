@@ -124,6 +124,69 @@ async function streamQa(
   return completed;
 }
 
+async function streamFeedbackRepair(
+  feedbackId:string,
+  onDelta:(delta:string)=>void,
+):Promise<import('../model/types').FeedbackRepairResult>{
+  const response = await request(`/api/feedback/${feedbackId}/repair/stream`, {
+    method:'POST',
+    headers:{
+      'Accept':'text/event-stream',
+      ...(csrfToken ? {'X-CSRF-Token':csrfToken} : {}),
+    },
+  });
+  if(!response.ok){
+    if(response.status === 401) unauthorizedHandler?.();
+    const text = await response.text();
+    const payload = parsePayload(text);
+    throw new ApiError(
+      String(payload?.message || '正文更新没有完成'),
+      response.status,
+      String(payload?.code || 'FEEDBACK_REPAIR_FAILED'),
+      Boolean(payload?.retryable),
+      payload?.operationId ? String(payload.operationId) : undefined,
+    );
+  }
+  if(!response.body) throw new Error('当前浏览器不支持接收更新结果');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let completed:import('../model/types').FeedbackRepairResult|undefined;
+  const consume = (frame:string) => {
+    let eventType = 'message';
+    const dataLines:string[] = [];
+    for(const line of frame.split(/\r?\n/)){
+      if(line.startsWith('event:')) eventType = line.slice(6).trim();
+      if(line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+    }
+    if(!dataLines.length) return;
+    const payload = JSON.parse(dataLines.join('\n')) as Record<string,unknown>;
+    if(eventType === 'delta') onDelta(String(payload.delta || ''));
+    if(eventType === 'done') completed = payload as import('../model/types').FeedbackRepairResult;
+    if(eventType === 'error') {
+      throw new ApiError(
+        String(payload.message || '正文更新暂时没有完成，请稍后重试'),
+        200,
+        String(payload.code || 'FEEDBACK_REPAIR_FAILED'),
+        Boolean(payload.retryable),
+      );
+    }
+  };
+  while(true){
+    const {value,done} = await reader.read();
+    buffer += decoder.decode(value,{stream:!done});
+    const frames = buffer.split(/\r?\n\r?\n/);
+    buffer = frames.pop() || '';
+    for(const frame of frames){
+      if(frame.trim()) consume(frame);
+    }
+    if(done) break;
+  }
+  if(buffer.trim()) consume(buffer);
+  if(!completed) throw new Error('正文更新连接提前结束，请稍后重试');
+  return completed;
+}
+
 export const api = {
   setUnauthorizedHandler:(handler:()=>void)=>{ unauthorizedHandler = handler; },
   authConfig:()=>call<import('../model/types').AuthConfig>('/api/auth/config'),
@@ -242,6 +305,7 @@ export const api = {
     headers:{'Idempotency-Key':idempotencyKey},
     body:JSON.stringify(body),
   }),
+  streamFeedbackRepair:(feedbackId:string,onDelta:(delta:string)=>void)=>streamFeedbackRepair(feedbackId,onDelta),
   createShelf:(body:import('../model/types').ShelfCreateInput)=>call<import('../model/types').Shelf>('/api/shelves',{method:'POST',body:JSON.stringify(body)}),
   updateResume:(sectionId:string,blockId='')=>call<import('../model/types').ResumePosition>(`/api/sections/${sectionId}/resume`,{method:'PUT',body:JSON.stringify({blockId})}),
   aiRuntime:()=>call<import('../model/types').AiRuntime>('/api/runtime/ai'),

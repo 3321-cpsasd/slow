@@ -3621,7 +3621,7 @@ def test_content_feedback_streams_the_model_repair_and_rebinds_only_content(clie
     assert submitted.status_code == 201, submitted.json()
     receipt = submitted.json()
     assert receipt["regeneration"] == {
-        "status": "recorded_only",
+        "status": "stream_ready",
         "reasonCode": None,
         "task": None,
     }
@@ -3731,7 +3731,7 @@ def test_content_feedback_repairs_legacy_contract_bound_content(client):
 
     assert submitted.status_code == 201, submitted.json()
     receipt = submitted.json()
-    assert receipt["regeneration"]["status"] == "recorded_only"
+    assert receipt["regeneration"]["status"] == "stream_ready"
     events = sse_events(
         client.post(f"/api/feedback/{receipt['id']}/repair/stream")
     )
@@ -3779,7 +3779,7 @@ def test_content_feedback_after_assessment_repairs_without_rewriting_evidence(cl
 
     assert submitted.status_code == 201
     receipt = submitted.json()
-    assert receipt["regeneration"]["status"] == "recorded_only"
+    assert receipt["regeneration"]["status"] == "stream_ready"
     events = sse_events(
         client.post(f"/api/feedback/{receipt['id']}/repair/stream")
     )
@@ -4511,6 +4511,118 @@ def test_lookahead_prepares_one_locked_section_without_unlocking_it(tmp_path):
             assert content is not None
             assert quiz is not None
             assert quiz.content_version_id == content.id
+
+
+def test_lookahead_crosses_chapter_but_stops_at_book_boundary(tmp_path):
+    ai = FakeAi()
+    with TestClient(create_app(
+        f"sqlite+pysqlite:///{tmp_path / 'lookahead-chapter-boundary.db'}",
+        ai,
+        AcceptingSourceVerifier(),
+        LocalAttachmentStorage(tmp_path / "lookahead-chapter-boundary-attachments"),
+    )) as buffered:
+        series = create_series(buffered)
+        initialization = wait_for_task(
+            buffered,
+            series["initializationTask"]["taskId"],
+        )
+        assert initialization["status"] == "succeeded"
+
+        with buffered.app.state.sessions() as db:
+            initial_task = db.get(
+                LearningTask,
+                series["initializationTask"]["taskId"],
+            )
+            initial_lookahead = db.scalar(
+                select(LearningTask).where(
+                    LearningTask.learning_run_id == initial_task.learning_run_id,
+                    LearningTask.task_type == "section_lookahead_preload",
+                )
+            )
+            assert initial_lookahead is not None
+            initial_lookahead_id = initial_lookahead.id
+        assert wait_for_task(buffered, initial_lookahead_id)["status"] == "succeeded"
+
+        route = buffered.get(f"/api/series/{series['id']}").json()
+        first_book = route["books"][0]
+        first_chapter = first_book["chapters"][0]
+        next_chapter = first_book["chapters"][1]
+        assert len(first_chapter["sections"]) == 3
+        assert next_chapter["sections"] == []
+        source_section_id = first_chapter["sections"][-1]["id"]
+
+        cross_chapter_task_id = f"task_{uuid4().hex}"
+        with buffered.app.state.sessions() as db:
+            initial_task = db.get(
+                LearningTask,
+                series["initializationTask"]["taskId"],
+            )
+            db.add(LearningTask(
+                id=cross_chapter_task_id,
+                learning_run_id=initial_task.learning_run_id,
+                user_id=initial_task.user_id,
+                section_id=source_section_id,
+                task_type="section_lookahead_preload",
+                idempotency_key=f"lookahead-after:{source_section_id}",
+                trigger_id="test-cross-chapter-lookahead",
+                payload_json=json.dumps({"sourceSectionId": source_section_id}),
+                status="pending",
+            ))
+            db.commit()
+        buffered.app.state.learning_task_wakeup.set()
+
+        prepared = wait_for_task(buffered, cross_chapter_task_id, timeout=5)
+        assert prepared["status"] == "succeeded"
+        assert prepared["result"]["endOfBook"] is False
+        target_id = prepared["result"]["targetSectionId"]
+
+        route = buffered.get(f"/api/series/{series['id']}").json()
+        first_book = route["books"][0]
+        generated_next_chapter = first_book["chapters"][1]
+        assert len(generated_next_chapter["sections"]) == 3
+        assert generated_next_chapter["sections"][0]["id"] == target_id
+        assert all(
+            section["status"] == "locked"
+            for section in generated_next_chapter["sections"]
+        )
+        assert buffered.get(f"/api/sections/{target_id}").status_code == 403
+        with buffered.app.state.sessions() as db:
+            assert db.scalar(select(ContentVersion).where(
+                ContentVersion.section_id == target_id,
+                ContentVersion.publication_status == "published",
+            )) is not None
+            assert db.scalar(select(QuizSet).where(
+                QuizSet.section_id == target_id,
+                QuizSet.publication_status == "published",
+            )) is not None
+
+        last_section_id = generated_next_chapter["sections"][-1]["id"]
+        book_boundary_task_id = f"task_{uuid4().hex}"
+        with buffered.app.state.sessions() as db:
+            initial_task = db.get(
+                LearningTask,
+                series["initializationTask"]["taskId"],
+            )
+            db.add(LearningTask(
+                id=book_boundary_task_id,
+                learning_run_id=initial_task.learning_run_id,
+                user_id=initial_task.user_id,
+                section_id=last_section_id,
+                task_type="section_lookahead_preload",
+                idempotency_key=f"lookahead-after:{last_section_id}",
+                trigger_id="test-book-boundary-lookahead",
+                payload_json=json.dumps({"sourceSectionId": last_section_id}),
+                status="pending",
+            ))
+            db.commit()
+        buffered.app.state.learning_task_wakeup.set()
+
+        stopped = wait_for_task(buffered, book_boundary_task_id, timeout=5)
+        assert stopped["status"] == "succeeded"
+        assert stopped["result"]["targetSectionId"] is None
+        assert stopped["result"]["endOfBook"] is True
+        route = buffered.get(f"/api/series/{series['id']}").json()
+        assert route["books"][1]["chapters"][0]["sections"] == []
 
 
 def test_runner_persists_failure_report_and_evidence_snapshot(tmp_path, monkeypatch):

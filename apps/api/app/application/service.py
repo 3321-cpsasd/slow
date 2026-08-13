@@ -599,10 +599,12 @@ class SlowService:
         chapter_id,
         *,
         first_section_status="available",
+        allow_locked_preload=False,
     ):
         return await self.chapter_planning.generate(
             chapter_id,
             first_section_status=first_section_status,
+            allow_locked_preload=allow_locked_preload,
         )
 
     async def generate_section(
@@ -1135,6 +1137,54 @@ class SlowService:
             .order_by(Section.position)
         )
 
+    async def _lookahead_target_in_book(self, source: Section) -> Section | None:
+        """Return the next section, planning the next chapter without unlocking it."""
+
+        context = self.contexts.resolve_section(
+            user_id=self.user_id,
+            section_id=source.id,
+        )
+        target = self.db.scalar(
+            select(Section)
+            .where(
+                Section.chapter_id == context.chapter.id,
+                Section.position > source.position,
+            )
+            .order_by(Section.position)
+        )
+        if target:
+            return target
+
+        next_chapter = self.db.scalar(
+            select(Chapter)
+            .where(
+                Chapter.book_id == context.book.id,
+                Chapter.position > context.chapter.position,
+            )
+            .order_by(Chapter.position)
+        )
+        if not next_chapter:
+            return None
+
+        target = self.db.scalar(
+            select(Section)
+            .where(Section.chapter_id == next_chapter.id)
+            .order_by(Section.position)
+        )
+        if target:
+            return target
+
+        await self.generate_chapter(
+            next_chapter.id,
+            first_section_status="locked",
+            allow_locked_preload=True,
+        )
+        return self.db.scalar(
+            select(Section)
+            .where(Section.chapter_id == next_chapter.id)
+            .order_by(Section.position)
+        )
+
     def _enqueue_lookahead(self, parent: LearningTask, source: Section) -> None:
         existing = self.db.scalar(
             select(LearningTask).where(
@@ -1184,16 +1234,24 @@ class SlowService:
             user_id=self.user_id,
             section_id=source_section_id,
         ).section
-        target = self._next_existing_section(source)
+        target = await self._lookahead_target_in_book(source)
         if not target:
-            return {"targetSectionId": None, "endOfAvailableRoute": True}
+            return {
+                "targetSectionId": None,
+                "endOfAvailableRoute": True,
+                "endOfBook": True,
+            }
         target_progress = self.progress.for_section(target)
         # This task is a content buffer only. It must never unlock or mark the
         # target as preparing, because access is still owned by progression.
         if target_progress.status == "completed":
             return {"targetSectionId": target.id, "alreadyCompleted": True}
         await self._generate_preload_target(target.id)
-        return {"targetSectionId": target.id, "endOfAvailableRoute": False}
+        return {
+            "targetSectionId": target.id,
+            "endOfAvailableRoute": False,
+            "endOfBook": False,
+        }
 
     async def _preload_next_section(
         self,

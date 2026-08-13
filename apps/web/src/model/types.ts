@@ -238,10 +238,17 @@ export type FeedbackReceipt = {
   scope:'global'|'content_block';
   createdAt:string;
   regeneration:{
-    status:'recorded_only'|'queued'|'blocked'|'not_applicable';
+    status:'stream_ready'|'recorded_only'|'queued'|'blocked'|'not_applicable';
     reasonCode:string|null;
     task:LearningTask|null;
   };
+};
+export type FeedbackRepairResult = {
+  feedbackId:string;
+  contentVersionId:string;
+  contentVersion:number;
+  contentBlockId:string;
+  replayed:boolean;
 };
 export type Question = {
   prompt:string;

@@ -78,8 +78,12 @@ class ChapterPlanningService:
         chapter_id: str,
         *,
         first_section_status: str = "available",
+        allow_locked_preload: bool = False,
     ) -> dict:
-        if first_section_status not in {"available", "preparing"}:
+        allowed_first_section_statuses = {"available", "preparing"}
+        if allow_locked_preload:
+            allowed_first_section_statuses.add("locked")
+        if first_section_status not in allowed_first_section_statuses:
             raise AppError(
                 "首节准备状态无效",
                 code="SECTION_PREPARATION_STATUS_INVALID",
@@ -106,6 +110,7 @@ class ChapterPlanningService:
                 resource_key=resource_key,
                 owner_id=owner_id,
                 first_section_status=first_section_status,
+                allow_locked_preload=allow_locked_preload,
             )
         finally:
             release_generation_lease(self.db, resource_key, owner_id)
@@ -134,6 +139,7 @@ class ChapterPlanningService:
         resource_key: str,
         owner_id: str,
         first_section_status: str,
+        allow_locked_preload: bool,
     ) -> dict:
         chapter_context = self.contexts.resolve_chapter(
             user_id=self.user_id,
@@ -146,7 +152,10 @@ class ChapterPlanningService:
                 code="BOOK_OUTLINE_CONFIRMATION_REQUIRED",
                 status=409,
             )
-        if self.progress.for_chapter(chapter, chapter_context.book).status == "locked":
+        if (
+            self.progress.for_chapter(chapter, chapter_context.book).status == "locked"
+            and not allow_locked_preload
+        ):
             raise AppError("请先完成前置学习", code="CHAPTER_LOCKED", status=403)
         if self._has_sections(chapter.id):
             return self.chapter_view(chapter)

@@ -35,7 +35,12 @@ from .core.errors import AppError
 from .demo_personas import LOCAL_DEMO_PERSONAS
 from .infrastructure.database import build_database
 from .infrastructure.tables import Base, LearningTask, QuizAttempt, Remediation, Shelf, User, now
-from .modules.learning.tasks import claim_task, heartbeat_task, recoverable_task_ids
+from .modules.learning.tasks import (
+    backfill_missing_lookahead_tasks,
+    claim_task,
+    heartbeat_task,
+    recoverable_task_ids,
+)
 from .modules.learning.study_activity import StudyActivityService
 from .modules.feedback.service import FeedbackService
 from .modules.telemetry.service import ProductEventService
@@ -415,6 +420,13 @@ def create_app(
                         storage,
                         scope=demo_user_scope(persona.user_id),
                     ).ensure_demo_seed()
+        with sessions() as db:
+            backfilled_lookaheads = backfill_missing_lookahead_tasks(db)
+            if backfilled_lookaheads:
+                logger.info(
+                    "Queued %s missing section lookahead task(s)",
+                    backfilled_lookaheads,
+                )
         app.state.sessions, app.state.ai, app.state.source_verifier, app.state.attachment_storage = sessions, adapter, verifier, storage
         app.state.ai_usage_recorder = usage_recorder
         app.state.ai_runtime = initial_runtime
