@@ -50,8 +50,40 @@ def upgrade():
             "assessment_answer_versions",
             ["publication_status"],
         )
+    if "learning_evidence_invalidations" not in tables:
+        op.create_table(
+            "learning_evidence_invalidations",
+            sa.Column("id", sa.String(), nullable=False),
+            sa.Column("quiz_set_id", sa.String(), nullable=False),
+            sa.Column("reason_code", sa.String(length=64), nullable=False),
+            sa.Column("actor_kind", sa.String(length=32), nullable=False),
+            sa.Column(
+                "actor_id",
+                sa.String(length=160),
+                nullable=False,
+                server_default="",
+            ),
+            sa.Column("idempotency_key", sa.String(length=160), nullable=False),
+            sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+            sa.ForeignKeyConstraint(["quiz_set_id"], ["quiz_sets.id"]),
+            sa.PrimaryKeyConstraint("id"),
+            sa.UniqueConstraint("idempotency_key"),
+        )
+        op.create_index(
+            "ix_learning_evidence_invalidations_quiz_set_id",
+            "learning_evidence_invalidations",
+            ["quiz_set_id"],
+        )
+        op.create_index(
+            "ix_learning_evidence_invalidations_reason_code",
+            "learning_evidence_invalidations",
+            ["reason_code"],
+        )
 
 
 def downgrade():
-    if "assessment_answer_versions" in set(sa.inspect(op.get_bind()).get_table_names()):
+    tables = set(sa.inspect(op.get_bind()).get_table_names())
+    if "learning_evidence_invalidations" in tables:
+        op.drop_table("learning_evidence_invalidations")
+    if "assessment_answer_versions" in tables:
         op.drop_table("assessment_answer_versions")
