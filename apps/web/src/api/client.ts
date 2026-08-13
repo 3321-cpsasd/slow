@@ -315,7 +315,10 @@ export const api = {
   confirmMilestonePath:(id:string)=>call<{seriesId:string;status:string;version:number;goalProfileVersion:number}>(`/api/series/${id}/milestone-path/confirm`,{method:'POST'}),
   deleteSeries:(id:string)=>call<void>(`/api/series/${id}`,{method:'DELETE'}),
   deleteBook:(id:string)=>call<void>(`/api/books/${id}`,{method:'DELETE'}),
-  replanBook:(id:string)=>call<import('../model/types').BookReplanProposal>(`/api/books/${id}/chapters/replan`,{method:'POST'}),
+  replanBook:(id:string,body?:{feedback?:string;previousProposalId?:string})=>call<import('../model/types').BookReplanProposal>(`/api/books/${id}/chapters/replan`,{
+    method:'POST',
+    body:body ? JSON.stringify(body) : undefined,
+  }),
   confirmBookReplan:(id:string,proposalId:string)=>call<import('../model/types').Book>(`/api/books/${id}/chapters/replan/${proposalId}/confirm`,{method:'POST'}),
   chapter:(id:string)=>call<import('../model/types').Chapter>(`/api/chapters/${id}/generate`,{method:'POST'}),
   section:(id:string)=>call<import('../model/types').Section>(`/api/sections/${id}`),

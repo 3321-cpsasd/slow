@@ -588,8 +588,12 @@ class SlowService:
     def reorder_chapters(self, book_id, chapter_ids):
         return self.catalog_commands.reorder_chapters(book_id, chapter_ids)
 
-    async def replan_chapters(self, book_id):
-        return await self.book_planning.propose(book_id)
+    async def replan_chapters(self, book_id, body=None):
+        return await self.book_planning.propose(
+            book_id,
+            feedback=body.feedback if body else "",
+            previous_proposal_id=body.previous_proposal_id if body else None,
+        )
 
     def confirm_replan(self, book_id, proposal_id):
         return self.book_planning.confirm(book_id, proposal_id)

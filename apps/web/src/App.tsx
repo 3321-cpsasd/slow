@@ -83,6 +83,8 @@ type BookReplanState = {
   book: Book;
   proposal: BookReplanProposal | null;
   status: 'preparing' | 'ready' | 'failed';
+  feedback: string;
+  previousProposalId?: string;
 };
 type ExplanationRequest = {
   requestId: string;
@@ -1112,16 +1114,23 @@ export default function App() {
     else await openChapter(firstChapter);
   };
 
-  const activateBook = async (book: Book) => {
+  const activateBook = async (
+    book: Book,
+    feedback = '',
+    previousProposalId?: string,
+  ) => {
     const requestVersion = ++bookReplanRequestVersion.current;
-    setBookReplan({ book, proposal: null, status: 'preparing' });
+    setBookReplan({ book, proposal: null, status: 'preparing', feedback, previousProposalId });
     try {
-      const proposal = await api.replanBook(book.id);
+      const proposal = await api.replanBook(
+        book.id,
+        feedback ? { feedback, previousProposalId } : undefined,
+      );
       if (requestVersion !== bookReplanRequestVersion.current) return;
-      setBookReplan({ book, proposal, status: 'ready' });
+      setBookReplan({ book, proposal, status: 'ready', feedback: '', previousProposalId: proposal.proposalId });
     } catch {
       if (requestVersion !== bookReplanRequestVersion.current) return;
-      setBookReplan({ book, proposal: null, status: 'failed' });
+      setBookReplan({ book, proposal: null, status: 'failed', feedback, previousProposalId });
     }
   };
 
@@ -2000,7 +2009,16 @@ export default function App() {
             bookReplanRequestVersion.current += 1;
             setBookReplan(null);
           }}
-          onRetry={() => activateBook(bookReplan.book)}
+          onRetry={() => activateBook(
+            bookReplan.book,
+            bookReplan.feedback,
+            bookReplan.previousProposalId,
+          )}
+          onRevise={(feedback) => activateBook(
+            bookReplan.book,
+            feedback,
+            bookReplan.proposal?.proposalId,
+          )}
           onConfirm={async () => {
             const proposal = bookReplan.proposal;
             if (!proposal) return;
@@ -2056,6 +2074,7 @@ function BookReplanDialog({
   status,
   onClose,
   onRetry,
+  onRevise,
   onConfirm,
 }: {
   book: Book;
@@ -2063,9 +2082,11 @@ function BookReplanDialog({
   status: BookReplanState['status'];
   onClose: () => void;
   onRetry: () => Promise<void>;
+  onRevise: (feedback: string) => Promise<void>;
   onConfirm: () => Promise<void>;
 }) {
   const [confirming, setConfirming] = useState(false);
+  const [feedback, setFeedback] = useState('');
   const dialogRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
@@ -2138,17 +2159,58 @@ function BookReplanDialog({
             <p>当前章节没有变化。请检查网络后重新准备，或先关闭稍后再试。</p>
           </div>
         ) : proposal ? (
-          <ol className="book-replan-outline">
-            {proposal.chapters.map((chapter, index) => (
-              <li key={`${chapter.title}-${index}`}>
-                <span>{String(index + 1).padStart(2, '0')}</span>
-                <div>
-                  <b>{chapter.title}</b>
-                  <p>{chapter.objective}</p>
-                </div>
-              </li>
-            ))}
-          </ol>
+          <>
+            <ol className="book-replan-outline">
+              {proposal.chapters.map((chapter, index) => (
+                <li key={`${chapter.title}-${index}`}>
+                  <span>{String(index + 1).padStart(2, '0')}</span>
+                  <div>
+                    <b>{chapter.title}</b>
+                    <p>{chapter.objective}</p>
+                  </div>
+                </li>
+              ))}
+            </ol>
+            <section className="book-replan-feedback" aria-labelledby="book-replan-feedback-title">
+              <div>
+                <span>和这版目录继续讨论</span>
+                <b id="book-replan-feedback-title">哪里不对，直接指出来</b>
+                <p>可以点名某一章，要求加深、删减、换顺序或补上遗漏；系统会返回下一版，不会直接采用。</p>
+              </div>
+              <textarea
+                value={feedback}
+                maxLength={3000}
+                rows={4}
+                placeholder="例如：第 2 章太泛。不要罗列共享方案，改成从训练任务的隔离目标出发，对比 time-slicing、MIG 和 vGPU 的机制与边界。"
+                aria-label="对这版目录的修改意见"
+                onChange={(event) => setFeedback(event.target.value)}
+                onKeyDown={(event) => {
+                  if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && feedback.trim()) {
+                    event.preventDefault();
+                    const instruction = feedback.trim();
+                    setFeedback('');
+                    void onRevise(instruction);
+                  }
+                }}
+              />
+              <footer>
+                <small>{feedback.length}/3000 · {navigator.platform.includes('Mac') ? '⌘' : 'Ctrl'} + Enter</small>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={!feedback.trim()}
+                  onClick={() => {
+                    const instruction = feedback.trim();
+                    if (!instruction) return;
+                    setFeedback('');
+                    void onRevise(instruction);
+                  }}
+                >
+                  按我的意见重做
+                </button>
+              </footer>
+            </section>
+          </>
         ) : null}
 
         <footer className="dialog-actions">
@@ -5516,8 +5578,12 @@ function BookTree({
   onRequestDelete: (book: Book) => void;
 }) {
   const containsCurrent = book.chapters.some((chapter) => chapter.sections.some((item) => item.id === currentSectionId));
+  const canExpand = book.status !== 'locked' || canActivate;
   return (
-    <details className="book-node" open={containsCurrent || book.status !== 'locked'}>
+    <details
+      className={`book-node ${canExpand ? '' : 'is-unavailable'}`}
+      open={canExpand && (containsCurrent || book.status !== 'locked')}
+    >
       <button
         className="book-delete-button"
         aria-label={`删除书籍 ${book.title}`}
@@ -5526,12 +5592,19 @@ function BookTree({
       >
         <TrashIcon size={14} />
       </button>
-      <summary>
+      <summary
+        aria-disabled={!canExpand}
+        onClick={(event) => {
+          if (!canExpand) event.preventDefault();
+        }}
+      >
         <span className="book-number">书 {book.position}</span>
         <span>
           <b>{book.title}</b>
           <small>
-            {book.outlineStatus === 'draft'
+            {!canExpand
+              ? '未解锁'
+              : book.outlineStatus === 'draft'
               ? '待确认'
               : book.status === 'completed'
                 ? '已完成'
@@ -5543,7 +5616,7 @@ function BookTree({
         </span>
         <i>{book.status === 'locked' ? <LockIcon /> : <ChevronIcon />}</i>
       </summary>
-      {book.outlineStatus === 'draft' && (
+      {canExpand && book.outlineStatus === 'draft' && (
         <div className="book-outline-callout" role="status">
           <span>
             <b>{canActivate ? '下一本书可以开始准备' : '下一本书将在完成前一册后调整'}</b>
@@ -5560,7 +5633,7 @@ function BookTree({
           )}
         </div>
       )}
-      <div className="chapter-tree">
+      {canExpand && <div className="chapter-tree">
         {book.chapters.map((chapter) => {
           const chapterLocked = chapter.status === 'locked';
           return (
@@ -5636,7 +5709,7 @@ function BookTree({
               ? '查看总结'
               : '生成总结'}</small>
         </button>
-      </div>
+      </div>}
     </details>
   );
 }

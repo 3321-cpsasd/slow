@@ -505,3 +505,19 @@ class ChapterUpdate(ApiModel):
 
 class ChapterOrder(ApiModel):
     chapter_ids: list[str] = Field(min_length=1)
+
+
+class BookReplanCreate(ApiModel):
+    feedback: str = Field(default="", max_length=3000)
+    previous_proposal_id: str | None = Field(default=None, min_length=1, max_length=160)
+
+    @field_validator("feedback")
+    @classmethod
+    def normalize_feedback(cls, value: str):
+        return value.strip()
+
+    @model_validator(mode="after")
+    def feedback_requires_proposal(self):
+        if self.previous_proposal_id and not self.feedback:
+            raise ValueError("针对目录重做时必须说明希望如何调整")
+        return self

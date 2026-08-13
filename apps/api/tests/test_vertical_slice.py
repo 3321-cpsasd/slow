@@ -252,6 +252,7 @@ class FakeAi:
             topic_sufficiency="insufficient",
         )
     async def replan_book(self, request, memory):
+        self.last_replan_request = request
         return ReplannedBook(rationale="根据学习记忆减少重复", chapters=[ReplannedChapter(title="重规划章节", objective="验证迁移")])
 
 
@@ -3330,6 +3331,44 @@ def test_future_chapter_edits_and_started_boundary(client):
     assert proposal.status_code == 200 and proposal.json()["requiresConfirmation"]
     confirmed = client.post(f"/api/books/{book['id']}/chapters/replan/{proposal.json()['proposalId']}/confirm")
     assert confirmed.status_code == 200 and confirmed.json()["chapters"][1]["title"] == "重规划章节"
+
+
+def test_book_replan_feedback_produces_a_new_reviewable_proposal(client):
+    series = create_series(client)
+    book = series["books"][0]
+    first = client.post(f"/api/books/{book['id']}/chapters/replan")
+    assert first.status_code == 200
+
+    feedback = "第 1 章太浅，请从机制与边界重新组织，并删除重复内容。"
+    revised = client.post(
+        f"/api/books/{book['id']}/chapters/replan",
+        json={
+            "feedback": feedback,
+            "previousProposalId": first.json()["proposalId"],
+        },
+    )
+    assert revised.status_code == 200
+    assert revised.json()["proposalId"] != first.json()["proposalId"]
+    request = client.app.state.ai.last_replan_request
+    assert request["feedback"] == feedback
+    assert request["reviewed_proposal"]["chapters"]
+
+    with client.app.state.sessions() as db:
+        revision = db.get(ChapterRevision, revised.json()["proposalId"])
+        audit = json.loads(revision.after_json)
+        assert audit["feedback"] == feedback
+        assert audit["previousProposalId"] == first.json()["proposalId"]
+
+
+def test_book_replan_feedback_rejects_an_unknown_proposal(client):
+    series = create_series(client)
+    book = series["books"][0]
+    response = client.post(
+        f"/api/books/{book['id']}/chapters/replan",
+        json={"feedback": "这版范围不对", "previousProposalId": "revision_missing"},
+    )
+    assert response.status_code == 404
+    assert response.json()["code"] == "REPLAN_PROPOSAL_NOT_FOUND"
 
 
 def test_complete_first_book_attachments_and_enter_second(client):

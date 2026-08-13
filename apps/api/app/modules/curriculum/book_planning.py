@@ -95,7 +95,13 @@ class BookPlanningService:
             for item in chapters
         ]
 
-    async def propose(self, book_id: str) -> dict:
+    async def propose(
+        self,
+        book_id: str,
+        *,
+        feedback: str = "",
+        previous_proposal_id: str | None = None,
+    ) -> dict:
         context = self.contexts.resolve_book(
             user_id=self.user_id,
             book_id=book_id,
@@ -108,6 +114,20 @@ class BookPlanningService:
                 status=409,
             )
         started, future = self._partition(book)
+        reviewed_proposal = None
+        if previous_proposal_id:
+            previous = self.db.get(ChapterRevision, previous_proposal_id)
+            if (
+                not previous
+                or previous.book_id != book.id
+                or previous.action != "ai_replan_proposal"
+            ):
+                raise AppError(
+                    "要调整的目录版本不存在，请重新打开目录",
+                    code="REPLAN_PROPOSAL_NOT_FOUND",
+                    status=404,
+                )
+            reviewed_proposal = _load(previous.after_json, {})
         request = {
             "title": book.title,
             "topic": book.topic,
@@ -120,6 +140,8 @@ class BookPlanningService:
                 {"title": item.title, "objective": item.objective}
                 for item in future
             ],
+            "feedback": feedback,
+            "reviewed_proposal": reviewed_proposal,
         }
         memory = self.memory_provider(book.shelf_id)
         mission = self.missions.current_version(context.series.id)
@@ -143,6 +165,8 @@ class BookPlanningService:
                 {
                     "rationale": generated.rationale,
                     "chapters": [item.model_dump() for item in generated.chapters],
+                    "feedback": feedback,
+                    "previousProposalId": previous_proposal_id,
                 }
             ),
         )
