@@ -6,8 +6,11 @@ on:
     branches:
       - main
     paths:
+      - ".github/workflows/ci.yml"
       - ".dockerignore"
+      - "pytest.ini"
       - "apps/api/**"
+      - "apps/ops/**"
       - "apps/web/**"
       - "deploy/**"
   workflow_dispatch:
@@ -20,9 +23,122 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  api-tests:
+  changes:
+    name: Select CI scope
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    outputs:
+      api: ${{ steps.scope.outputs.api }}
+      database: ${{ steps.scope.outputs.database }}
+      web: ${{ steps.scope.outputs.web }}
+      ops: ${{ steps.scope.outputs.ops }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Classify changed paths
+        id: scope
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "api=true" >> "$GITHUB_OUTPUT"
+            echo "database=true" >> "$GITHUB_OUTPUT"
+            echo "web=true" >> "$GITHUB_OUTPUT"
+            echo "ops=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          api=false
+          database=false
+          web=false
+          ops=false
+          while IFS= read -r path; do
+            case "$path" in
+              pytest.ini|apps/api/*|deploy/*)
+                api=true
+                ;;
+            esac
+            case "$path" in
+              pytest.ini|apps/api/alembic.ini|apps/api/requirements.txt|apps/api/migrate_sqlite_to_postgres.py|apps/api/app/infrastructure/database.py|apps/api/app/infrastructure/tables.py|apps/api/migrations/*|apps/api/tests/test_migrations.py|apps/api/tests/test_postgresql_support.py|apps/api/tests/test_content_governance_migration.py|apps/api/tests/test_learning_contracts.py|apps/api/tests/test_learning_version_bindings.py|deploy/*)
+                database=true
+                ;;
+            esac
+            case "$path" in
+              apps/web/*|deploy/*)
+                web=true
+                ;;
+            esac
+            case "$path" in
+              apps/ops/*)
+                ops=true
+                ;;
+            esac
+            case "$path" in
+              .github/workflows/ci.yml)
+                api=true
+                database=true
+                web=true
+                ops=true
+                ;;
+            esac
+          done < <(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+
+          echo "api=$api" >> "$GITHUB_OUTPUT"
+          echo "database=$database" >> "$GITHUB_OUTPUT"
+          echo "web=$web" >> "$GITHUB_OUTPUT"
+          echo "ops=$ops" >> "$GITHUB_OUTPUT"
+
+  api-core:
+    name: API core tests
+    needs: changes
+    if: needs.changes.outputs.api == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: apps/api/requirements.txt
+      - name: Install API dependencies
+        run: pip install -r apps/api/requirements.txt
+      - name: Run API core tests
+        run: >-
+          PYTHONPATH=apps/api pytest -q apps/api/tests
+          -m "not api_vertical and not migration and not postgresql"
+          --durations=20
+
+  api-vertical:
+    name: API vertical workflow tests
+    needs: changes
+    if: needs.changes.outputs.api == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: apps/api/requirements.txt
+      - name: Install API dependencies
+        run: pip install -r apps/api/requirements.txt
+      - name: Run API vertical workflow tests
+        run: >-
+          PYTHONPATH=apps/api pytest -q apps/api/tests
+          -m api_vertical
+          --durations=20
+
+  api-database:
+    name: API migration and PostgreSQL tests
+    needs: changes
+    if: needs.changes.outputs.database == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:17.6-alpine
@@ -48,10 +164,45 @@ jobs:
           cache-dependency-path: apps/api/requirements.txt
       - name: Install API dependencies
         run: pip install -r apps/api/requirements.txt
-      - name: Run API tests
-        run: PYTHONPATH=apps/api pytest -q apps/api/tests
+      - name: Run API database tests
+        run: >-
+          PYTHONPATH=apps/api pytest -q apps/api/tests
+          -m "migration or postgresql"
+          --durations=20
+
+  api-tests:
+    name: api-tests
+    needs:
+      - changes
+      - api-core
+      - api-vertical
+      - api-database
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      CHANGES_RESULT: ${{ needs.changes.result }}
+      CORE_RESULT: ${{ needs.api-core.result }}
+      VERTICAL_RESULT: ${{ needs.api-vertical.result }}
+      DATABASE_RESULT: ${{ needs.api-database.result }}
+    steps:
+      - name: Require every selected API suite to pass
+        shell: bash
+        run: |
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "CI scope selection failed"
+            exit 1
+          fi
+          for result in "$CORE_RESULT" "$VERTICAL_RESULT" "$DATABASE_RESULT"; do
+            if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
+              echo "Selected API suite did not pass: $result"
+              exit 1
+            fi
+          done
 
   web-build:
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -73,6 +224,8 @@ jobs:
 
   ops-checks:
     name: Ops tests and build
+    needs: changes
+    if: needs.changes.outputs.ops == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

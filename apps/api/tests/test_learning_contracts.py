@@ -5,6 +5,7 @@ import sqlite3
 import subprocess
 import sys
 
+import pytest
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
@@ -202,6 +203,7 @@ def test_unmaterialized_m1_section_gets_deterministic_provisional_targets():
     assert db.scalar(select(func.count()).select_from(LearningObjective)) == 2
 
 
+@pytest.mark.migration
 def test_0030_upgrades_populated_0029_without_changing_target_id(tmp_path):
     database = tmp_path / "contracts-0029.db"
     environment = {

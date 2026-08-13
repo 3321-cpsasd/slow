@@ -4,8 +4,12 @@ import sqlite3
 import subprocess
 import sys
 
+import pytest
+
 
 API_ROOT = Path(__file__).resolve().parents[1]
+
+pytestmark = pytest.mark.migration
 
 
 def _alembic(database: Path, *arguments: str) -> None:
