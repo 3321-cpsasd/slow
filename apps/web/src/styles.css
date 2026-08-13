@@ -3370,15 +3370,6 @@ button:disabled { cursor: not-allowed; }
   padding: 36px 0 0;
   border-top: 1px solid var(--line);
 }
-.quiz-draft-note {
-  margin: 12px 0 0;
-  padding: 10px 12px;
-  border-left: 2px solid #9ab2a0;
-  background: #f5f8f5;
-  color: #6d756e;
-  font-size: 11px;
-  line-height: 1.6;
-}
 .quiz-governance-notice {
   margin: 14px 0 0;
   padding: 13px 14px;

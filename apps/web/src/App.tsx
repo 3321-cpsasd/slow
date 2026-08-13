@@ -6262,9 +6262,6 @@ function Quiz({
       !section.quiz.governance?.assessmentEligible
     ),
   );
-  const hasMultipleChoice = Boolean(
-    section.quiz?.questions.some((question) => question.selectionMode === 'multiple'),
-  );
   const [answers, setAnswers] = useState<number[][]>(() => {
     const empty = section.quiz?.questions.map(() => []) || [];
     try {
@@ -6628,11 +6625,6 @@ function Quiz({
       <p className="eyebrow">完成验证后解锁下一节</p>
       <h2>小节验证</h2>
       <p className="quiz-rule">答对至少 80%，且关键题达到要求即可继续；错题会用于安排重点巩固。</p>
-      <p className="quiz-draft-note">
-        {hasMultipleChoice
-          ? '标为“多选”的题目可以选择多个答案，其余题目只能选择一个答案。'
-          : '每道题只有一个答案，选择最符合本节内容的一项。'}
-      </p>
       {quizGovernanceBlocked && (
         <aside className="quiz-governance-notice" role="alert">
           <b>这节内容需要升级后才能验证</b>
