@@ -7,7 +7,7 @@ import json
 from collections import defaultdict
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ...core.errors import AppError
@@ -20,6 +20,7 @@ from ...infrastructure.tables import (
     ContentVersion,
     LearningContractAssessmentTarget,
     LearningContractVersion,
+    QuizAttempt,
     QuizSet,
     Section,
 )
@@ -109,7 +110,41 @@ def repair_published_historical_rank_identities(db: Session) -> dict:
         .order_by(QuizSet.id)
     ).all()
 
-    contract_ids = {contract.id for _, _, contract, _, _ in published}
+    observed_quiz_ids = set(
+        db.scalars(
+            select(AssessmentObservation.quiz_set_id)
+            .where(AssessmentObservation.quiz_set_id.is_not(None))
+            .distinct()
+        ).all()
+    )
+    eligible_published = []
+    skipped_quiz_ids: set[str] = set()
+    for row in published:
+        quiz = row[0]
+        questions = _load(quiz.questions_json, [])
+        target_ids_for_quiz = [
+            str(question.get("assessmentTargetId") or "").strip()
+            if isinstance(question, dict)
+            else ""
+            for question in questions
+        ] if isinstance(questions, list) else []
+        if (
+            not target_ids_for_quiz
+            or any(not target_id for target_id in target_ids_for_quiz)
+        ):
+            if quiz.id in observed_quiz_ids:
+                raise AppError(
+                    "已有学习证据的历史题集缺少能力目标，修复已停止",
+                    code="HISTORICAL_RANK_REPAIR_EVIDENCE_QUIZ_INVALID",
+                    status=409,
+                )
+            skipped_quiz_ids.add(quiz.id)
+            continue
+        eligible_published.append(row)
+
+    contract_ids = {
+        contract.id for _, _, contract, _, _ in eligible_published
+    }
     bindings = {
         (item.contract_version_id, item.assessment_target_id)
         for item in db.scalars(
@@ -123,7 +158,7 @@ def repair_published_historical_rank_identities(db: Session) -> dict:
     }
     target_ids = {
         str(question.get("assessmentTargetId") or "").strip()
-        for quiz, _, _, _, _ in published
+        for quiz, _, _, _, _ in eligible_published
         for question in _load(quiz.questions_json, [])
         if isinstance(question, dict)
         and str(question.get("assessmentTargetId") or "").strip()
@@ -137,7 +172,7 @@ def repair_published_historical_rank_identities(db: Session) -> dict:
 
     candidates: dict[tuple[str, str], dict] = {}
     direct_pairs: set[tuple[str, str]] = set()
-    for quiz, content, contract, section, series_id in published:
+    for quiz, content, contract, section, series_id in eligible_published:
         if (
             quiz.section_id != contract.section_id
             or content.section_id != contract.section_id
@@ -148,12 +183,6 @@ def repair_published_historical_rank_identities(db: Session) -> dict:
                 status=409,
             )
         questions = _load(quiz.questions_json, [])
-        if not isinstance(questions, list) or not questions:
-            raise AppError(
-                "历史题集缺少可核对的能力目标，修复已停止",
-                code="HISTORICAL_RANK_REPAIR_QUIZ_INVALID",
-                status=409,
-            )
         for question in questions:
             target_id = (
                 str(question.get("assessmentTargetId") or "").strip()
@@ -297,9 +326,20 @@ def repair_published_historical_rank_identities(db: Session) -> dict:
         ):
             replay_totals[key] += int(replay.get(key, 0))
     db.flush()
+    skipped_attempts = int(
+        db.scalar(
+            select(func.count(QuizAttempt.id)).where(
+                QuizAttempt.quiz_set_id.in_(skipped_quiz_ids)
+            )
+        )
+        or 0
+    ) if skipped_quiz_ids else 0
     return {
         "ruleVersion": HISTORICAL_RANK_IDENTITY_RULE_VERSION,
         "publishedQuizSetsScanned": len(published),
+        "eligibleQuizSets": len(eligible_published),
+        "legacyQuizSetsSkipped": len(skipped_quiz_ids),
+        "legacyAttemptsWithoutTargetEvidence": skipped_attempts,
         "alreadySettleablePairs": len(direct_pairs),
         "identityDecisionsCreated": len(created_pairs),
         "destinationTargets": len(destination_ids),

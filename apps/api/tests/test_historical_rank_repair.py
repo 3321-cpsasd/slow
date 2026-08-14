@@ -44,6 +44,8 @@ def _seed_published_legacy_lesson(
     db: Session,
     *,
     bind_contract: bool = True,
+    quiz_has_target: bool = True,
+    include_observation: bool = True,
 ) -> None:
     db.add(User(id="user_history", name="历史学习者"))
     db.add(
@@ -171,11 +173,18 @@ def _seed_published_legacy_lesson(
             learning_contract_version_id="contract_history",
             generation=1,
             questions_json=json.dumps(
-                [{"assessmentTargetId": "target_history"}]
+                [
+                    {"assessmentTargetId": "target_history"}
+                    if quiz_has_target
+                    else {"prompt": "没有能力目标的旧题"}
+                ]
             ),
             publication_status="published",
         )
     )
+    if not include_observation:
+        db.flush()
+        return
     observation = AssessmentObservation(
         id="observation_history",
         learning_run_id="run_history",
@@ -265,3 +274,30 @@ def test_repair_fails_closed_when_quiz_target_is_not_contract_bound() -> None:
 
         assert error.value.code == "HISTORICAL_RANK_REPAIR_TARGET_UNBOUND"
         assert db.scalar(select(AssessmentTargetRankIdentityDecision)) is None
+
+
+def test_repair_audits_but_skips_unobserved_quiz_without_target_ids() -> None:
+    with _session() as db:
+        _seed_published_legacy_lesson(
+            db,
+            quiz_has_target=False,
+            include_observation=False,
+        )
+
+        report = repair_published_historical_rank_identities(db)
+
+        assert report["eligibleQuizSets"] == 0
+        assert report["legacyQuizSetsSkipped"] == 1
+        assert report["identityDecisionsCreated"] == 0
+
+
+def test_repair_refuses_observed_quiz_without_target_ids() -> None:
+    with _session() as db:
+        _seed_published_legacy_lesson(db, quiz_has_target=False)
+
+        with pytest.raises(AppError) as error:
+            repair_published_historical_rank_identities(db)
+
+        assert error.value.code == (
+            "HISTORICAL_RANK_REPAIR_EVIDENCE_QUIZ_INVALID"
+        )
