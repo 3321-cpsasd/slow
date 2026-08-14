@@ -619,6 +619,7 @@ export type QuizResult = {
   score:number;
   total:number;
   passed:boolean;
+  reassessmentEligible:boolean;
   perfect:boolean;
   results:{
     correct:boolean;

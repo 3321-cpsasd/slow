@@ -844,6 +844,9 @@ class SubmitQuiz:
             "score": score,
             "total": len(results),
             "passed": attempt.passed,
+            "reassessmentEligible": (
+                not attempt.passed and passing_score(score, len(results))
+            ),
             "perfect": bool(results) and score == len(results),
             "results": results,
             "knowledgeSettlement": knowledge_settlement,

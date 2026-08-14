@@ -822,6 +822,7 @@ def test_complete_real_shape_vertical_slice(client):
     quiz_id = section["quiz"]["id"]
     failed = client.post(f"/api/sections/{section_id}/quiz", json={"quizSetId":quiz_id,"answers":[[0],[0],[0],[1],[1]]}).json()
     assert failed["passed"] is False
+    assert failed["reassessmentEligible"] is False
     assert failed["results"][0] == {
         "correct": False,
         "explanation": "因为 B1",
@@ -1102,6 +1103,12 @@ def test_legacy_four_of_five_attempt_can_be_reassessed(client):
             ),
         ])
         db.commit()
+
+    latest_review = client.get(
+        f"/api/sections/{section['id']}"
+    ).json()["latestAttemptReview"]
+    assert latest_review["attemptId"] == "attempt_legacy_three_of_five"
+    assert latest_review["reassessmentEligible"] is False
 
     promoted = client.post(
         f"/api/sections/{section['id']}/quiz-attempts/attempt_legacy_four_of_five/reassess"

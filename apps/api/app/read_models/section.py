@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..core.errors import AppError
+from ..domain.learning import passing_score
 from ..infrastructure.tables import (
     ContentVersion,
     GenerationRun,
@@ -239,6 +240,16 @@ class SectionReadModel:
                     ),
                     "total": len(latest_results),
                     "passed": latest_attempt.passed,
+                    "reassessmentEligible": (
+                        not latest_attempt.passed
+                        and passing_score(
+                            sum(
+                                bool(item.get("correct"))
+                                for item in latest_results
+                            ),
+                            len(latest_results),
+                        )
+                    ),
                     "perfect": bool(latest_results)
                     and all(item.get("correct") for item in latest_results),
                     "results": latest_results,

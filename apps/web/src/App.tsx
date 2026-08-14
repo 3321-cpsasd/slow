@@ -7300,7 +7300,7 @@ function Quiz({
     ? nextSectionTask.result.targetSectionId
     : null;
   const eligibleUnderCurrentPolicy = Boolean(
-    result && !result.passed && result.total > 0 && result.score / result.total >= 0.6,
+    result && !result.passed && result.reassessmentEligible,
   );
 
   useEffect(() => {
@@ -7350,9 +7350,14 @@ function Quiz({
   }, [section.id]);
 
   useEffect(() => {
-    if (!result || result.passed || remediationTask?.status !== 'failed') return;
+    if (
+      !result ||
+      result.passed ||
+      !remediationTask ||
+      remediationTask.status === 'succeeded'
+    ) return;
     let cancelled = false;
-    const reconcileFailedRemediation = async () => {
+    const reconcileRemediation = async () => {
       try {
         const latest = await api.learningTask(remediationTask.taskId);
         if (cancelled) return;
@@ -7366,21 +7371,23 @@ function Quiz({
           await onRefreshSeries();
           return;
         }
-        void monitorTasks([latest], false).catch(() => {
-          setWorkflowRunning(false);
-          setSubmissionError('暂时无法更新后续内容，请稍后再试。');
-        });
+        if (remediationTask.status === 'failed') {
+          void monitorTasks([latest], false).catch(() => {
+            setWorkflowRunning(false);
+            setSubmissionError('暂时无法更新后续内容，请稍后再试。');
+          });
+        }
       } catch {
         // A transient refresh failure must not replace the saved quiz result.
       }
     };
-    const reconcileOnFocus = () => { void reconcileFailedRemediation(); };
+    const reconcileOnFocus = () => { void reconcileRemediation(); };
     const reconcileWhenVisible = () => {
       if (document.visibilityState === 'visible') reconcileOnFocus();
     };
     window.addEventListener('focus', reconcileOnFocus);
     document.addEventListener('visibilitychange', reconcileWhenVisible);
-    void reconcileFailedRemediation();
+    if (remediationTask.status === 'failed') void reconcileRemediation();
     return () => {
       cancelled = true;
       window.removeEventListener('focus', reconcileOnFocus);
@@ -7939,13 +7946,14 @@ function QuizReview({
           </>
         ) : remediationReady ? (
           <>
-            <span>补充教学已准备好</span>
+            <span>补充教学与新题已准备好</span>
+            <small>先回看这次错题对应的内容，再用一组新题重新验证。</small>
             <button
               className="primary-button"
               disabled={openingRemediation}
               onClick={onOpenRemediation}
             >
-              {openingRemediation ? '正在打开…' : '开始补充教学与变式题'}
+              {openingRemediation ? '正在打开…' : '开始补充教学与新题'}
             </button>
           </>
         ) : remediationTask?.status === 'failed' || failedWorkflowTasks.length > 0 ? (
@@ -7965,7 +7973,8 @@ function QuizReview({
           </>
         ) : (
           <>
-            <span><i />正在准备补充教学</span>
+            <span><i />正在准备补充教学与新题</span>
+            <small>准备完成后，这里会自动出现下一步，无需刷新页面。</small>
           </>
         )}
       </div>
