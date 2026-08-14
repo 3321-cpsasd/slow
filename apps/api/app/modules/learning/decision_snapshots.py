@@ -12,7 +12,6 @@ from ...core.errors import AppError
 from ...infrastructure.tables import (
     AssessmentGateState,
     AssessmentObservation,
-    AssessmentTarget,
     LearningContractAssessmentTarget,
     LearningDecisionSnapshot,
     QuizAttempt,
@@ -26,9 +25,9 @@ from .domain import (
 )
 from .knowledge_ranks import (
     KNOWLEDGE_RANK_RULE_VERSION,
-    RANK_SETTLEABLE_IDENTITY_STATUSES,
     knowledge_node_views_for_targets,
     knowledge_settlement,
+    require_effective_rank_targets,
 )
 
 
@@ -229,22 +228,22 @@ def append_knowledge_settlement_snapshot(
 ) -> dict:
     """Freeze the user-facing knowledge change derived from immutable facts."""
 
+    effective_targets = require_effective_rank_targets(
+        db,
+        learning_contract_version_id=attempt.learning_contract_version_id,
+        target_ids=target_ids,
+    )
     after = knowledge_node_views_for_targets(
         db,
         user_id=attempt.user_id,
         target_ids=target_ids,
+        learning_contract_version_id=attempt.learning_contract_version_id,
     )
-    expected_concept_ids = set(
-        db.scalars(
-            select(AssessmentTarget.concept_revision_id).where(
-                AssessmentTarget.id.in_(target_ids),
-                AssessmentTarget.identity_status.in_(
-                    RANK_SETTLEABLE_IDENTITY_STATUSES
-                ),
-                AssessmentTarget.concept_revision_id.is_not(None),
-            )
-        ).all()
-    )
+    expected_concept_ids = {
+        target.concept_revision_id
+        for target in effective_targets.values()
+        if target.concept_revision_id
+    }
     missing_concept_ids = expected_concept_ids - set(after)
     if missing_concept_ids:
         raise AppError(
@@ -253,6 +252,12 @@ def append_knowledge_settlement_snapshot(
             status=500,
         )
     output = knowledge_settlement(before, after)
+    if target_ids and not output["updates"]:
+        raise AppError(
+            "本次能力结算没有形成段位记录，答案尚未写入，请稍后重试",
+            code="KNOWLEDGE_SETTLEMENT_EMPTY",
+            status=500,
+        )
     source_watermark = max(
         (
             int(view.get("sourceObservationWatermark", 0))

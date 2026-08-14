@@ -35,7 +35,10 @@ from ...infrastructure.tables import (
 )
 from .assessment import record_scoring_facts
 from .assessment_items import publish_assessment_item_versions
-from .knowledge_ranks import knowledge_node_views_for_targets
+from .knowledge_ranks import (
+    knowledge_node_views_for_targets,
+    resolve_effective_rank_target,
+)
 from .content_governance_store import (
     bind_remediation_questions_to_source_claims,
     governance_view_for_quiz,
@@ -392,11 +395,33 @@ class ReviewAssignmentService:
                 )
             ).all()
         } if assignments else {}
-        node_views = knowledge_node_views_for_targets(
-            self.db,
-            user_id=self.user_id,
-            target_ids=set(targets),
-        )
+        targets_by_contract: dict[str, set[str]] = {}
+        for assignment in assignments:
+            targets_by_contract.setdefault(
+                assignment.learning_contract_version_id, set()
+            ).add(assignment.assessment_target_id)
+        node_views: dict[str, dict] = {}
+        for contract_id, target_ids in targets_by_contract.items():
+            node_views.update(
+                knowledge_node_views_for_targets(
+                    self.db,
+                    user_id=self.user_id,
+                    target_ids=target_ids,
+                    learning_contract_version_id=contract_id,
+                )
+            )
+        effective_concepts_by_assignment = {}
+        for assignment in assignments:
+            effective = resolve_effective_rank_target(
+                self.db,
+                source_target=targets[assignment.assessment_target_id],
+                learning_contract_version_id=(
+                    assignment.learning_contract_version_id
+                ),
+            )
+            effective_concepts_by_assignment[assignment.id] = (
+                effective.concept_revision_id if effective else None
+            )
         return {
             "selectionRunId": selection.id,
             "asOf": _utc(selection.as_of).isoformat(),
@@ -417,7 +442,7 @@ class ReviewAssignmentService:
                     "effectivePriority": item.effective_priority,
                     "quizSetId": item.review_quiz_set_id,
                     "knowledgeNode": node_views.get(
-                        targets[item.assessment_target_id].concept_revision_id or ""
+                        effective_concepts_by_assignment[item.id] or ""
                     ),
                 }
                 for item in assignments

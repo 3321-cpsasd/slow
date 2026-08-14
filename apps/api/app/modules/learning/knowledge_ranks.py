@@ -10,9 +10,11 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ...core.errors import AppError
 from ...infrastructure.tables import (
     AssessmentObservation,
     AssessmentTarget,
+    AssessmentTargetRankIdentityDecision,
     ConceptRevision,
     KnowledgeNodeStateProjection,
     KnowledgeStateProjection,
@@ -100,6 +102,145 @@ def rank_policy_for_revision(revision: ConceptRevision) -> dict | None:
     return validate_rank_policy_payload(raw)
 
 
+def _validated_direct_rank_target(
+    db: Session,
+    target: AssessmentTarget | None,
+    *,
+    source_target: AssessmentTarget | None = None,
+) -> AssessmentTarget | None:
+    if (
+        target is None
+        or target.identity_status not in RANK_SETTLEABLE_IDENTITY_STATUSES
+        or not target.concept_revision_id
+    ):
+        return None
+    if source_target is not None and (
+        source_target.dimension != target.dimension
+        or source_target.target_depth != target.target_depth
+    ):
+        return None
+    revision = db.get(ConceptRevision, target.concept_revision_id)
+    policy = rank_policy_for_revision(revision) if revision else None
+    if (
+        revision is None
+        or revision.verification_status not in RANK_SETTLEABLE_REVISION_STATUSES
+        or policy is None
+        or target.dimension not in policy["dimensionRanks"]
+    ):
+        return None
+    return target
+
+
+def resolve_effective_rank_target(
+    db: Session,
+    *,
+    source_target: AssessmentTarget,
+    learning_contract_version_id: str | None,
+) -> AssessmentTarget | None:
+    """Resolve rank identity without rewriting the frozen assessment target."""
+
+    direct = _validated_direct_rank_target(db, source_target)
+    if direct is not None:
+        return direct
+
+    query = select(AssessmentTargetRankIdentityDecision).where(
+        AssessmentTargetRankIdentityDecision.source_assessment_target_id
+        == source_target.id
+    )
+    if learning_contract_version_id:
+        decision = db.scalar(
+            query.where(
+                AssessmentTargetRankIdentityDecision.source_contract_version_id
+                == learning_contract_version_id
+            ).order_by(
+                AssessmentTargetRankIdentityDecision.created_at.desc(),
+                AssessmentTargetRankIdentityDecision.id.desc(),
+            )
+        )
+        decisions = [decision] if decision else []
+    else:
+        rows = db.scalars(
+            query.order_by(
+                AssessmentTargetRankIdentityDecision.created_at.desc(),
+                AssessmentTargetRankIdentityDecision.id.desc(),
+            )
+        ).all()
+        latest_by_contract: dict[str, AssessmentTargetRankIdentityDecision] = {}
+        for item in rows:
+            latest_by_contract.setdefault(item.source_contract_version_id, item)
+        decisions = list(latest_by_contract.values())
+
+    if not decisions or any(
+        item.decision != "approved" or not item.destination_assessment_target_id
+        for item in decisions
+    ):
+        return None
+    destination_ids = {
+        item.destination_assessment_target_id
+        for item in decisions
+        if item.destination_assessment_target_id
+    }
+    if len(destination_ids) != 1:
+        return None
+    destination = db.get(AssessmentTarget, next(iter(destination_ids)))
+    return _validated_direct_rank_target(
+        db,
+        destination,
+        source_target=source_target,
+    )
+
+
+def require_effective_rank_targets(
+    db: Session,
+    *,
+    learning_contract_version_id: str | None,
+    target_ids: set[str],
+) -> dict[str, AssessmentTarget]:
+    """Fail closed unless every assessed target can produce a rank receipt."""
+
+    cleaned_ids = {item for item in target_ids if item}
+    if not cleaned_ids:
+        raise AppError(
+            "本节缺少可结算的能力目标，请重新打开后再试",
+            code="KNOWLEDGE_SETTLEMENT_TARGET_MISSING",
+            status=409,
+        )
+    sources = {
+        item.id: item
+        for item in db.scalars(
+            select(AssessmentTarget).where(AssessmentTarget.id.in_(cleaned_ids))
+        ).all()
+    }
+    if set(sources) != cleaned_ids:
+        raise AppError(
+            "本节能力目标不完整，请重新打开后再试",
+            code="KNOWLEDGE_SETTLEMENT_TARGET_INVALID",
+            status=409,
+        )
+    resolved = {
+        target_id: resolve_effective_rank_target(
+            db,
+            source_target=source,
+            learning_contract_version_id=learning_contract_version_id,
+        )
+        for target_id, source in sources.items()
+    }
+    unsettled = sorted(
+        target_id for target_id, target in resolved.items() if target is None
+    )
+    if unsettled:
+        raise AppError(
+            "本节的能力记录正在升级，请稍后重新打开再试",
+            code="KNOWLEDGE_SETTLEMENT_IDENTITY_UNAVAILABLE",
+            status=409,
+        )
+    return {
+        target_id: target
+        for target_id, target in resolved.items()
+        if target is not None
+    }
+
+
 # Private alias retained for older internal callers while publication and read
 # models use the explicit public boundary above.
 _rank_policy = rank_policy_for_revision
@@ -141,7 +282,7 @@ def _signature(observation: AssessmentObservation) -> str:
 
 def _rank_for_evidence(
     observations: list[AssessmentObservation],
-    targets: dict[str, AssessmentTarget],
+    effective_targets_by_observation_id: dict[str, AssessmentTarget],
     retention_rounds: int,
     policy: dict,
 ) -> tuple[str, int, int]:
@@ -152,7 +293,7 @@ def _rank_for_evidence(
         (
             RANKS[
                 policy["dimensionRanks"][
-                    _dimension(item, targets[item.assessment_target_id])
+                    _dimension(item, effective_targets_by_observation_id[item.id])
                 ]
             ][0],
             item,
@@ -192,23 +333,38 @@ def rebuild_knowledge_node_projections(
     user_id: str,
     observations: list[AssessmentObservation],
     rank_observation_ids: set[str],
+    effective_rank_targets_by_observation_id: dict[str, AssessmentTarget] | None = None,
 ) -> int:
-    target_ids = {item.assessment_target_id for item in observations}
-    targets = (
+    source_target_ids = {item.assessment_target_id for item in observations}
+    source_targets = (
         {
             item.id: item
             for item in db.scalars(
-                select(AssessmentTarget).where(AssessmentTarget.id.in_(target_ids))
+                select(AssessmentTarget).where(
+                    AssessmentTarget.id.in_(source_target_ids)
+                )
             ).all()
         }
-        if target_ids
+        if source_target_ids
         else {}
     )
+    effective_targets_by_observation_id = (
+        effective_rank_targets_by_observation_id
+        if effective_rank_targets_by_observation_id is not None
+        else {
+            item.id: source_targets[item.assessment_target_id]
+            for item in observations
+            if item.assessment_target_id in source_targets
+            and _validated_direct_rank_target(
+                db, source_targets[item.assessment_target_id]
+            )
+        }
+    )
+    target_ids = source_target_ids
     concept_ids = {
         target.concept_revision_id
-        for target in targets.values()
+        for target in effective_targets_by_observation_id.values()
         if target.concept_revision_id
-        and target.identity_status in RANK_SETTLEABLE_IDENTITY_STATUSES
     }
     rankable_revisions = (
         {
@@ -232,7 +388,7 @@ def rebuild_knowledge_node_projections(
     }
     by_concept: dict[str, list[AssessmentObservation]] = defaultdict(list)
     for observation in observations:
-        target = targets.get(observation.assessment_target_id)
+        target = effective_targets_by_observation_id.get(observation.id)
         if (
             observation.id in rank_observation_ids
             and target
@@ -282,7 +438,7 @@ def rebuild_knowledge_node_projections(
         concept_target_ids = {
             item.assessment_target_id
             for item in items
-            if item.assessment_target_id in targets
+            if item.assessment_target_id in source_targets
         }
         retention_rounds = max(
             (
@@ -293,7 +449,10 @@ def rebuild_knowledge_node_projections(
             default=0,
         )
         rank, stars, independent_count = _rank_for_evidence(
-            items, targets, retention_rounds, policies[concept_id]
+            items,
+            effective_targets_by_observation_id,
+            retention_rounds,
+            policies[concept_id],
         )
         rank_order = RANKS[rank][0]
         relevant_reviews = [
@@ -414,20 +573,30 @@ def knowledge_node_views_for_targets(
     *,
     user_id: str,
     target_ids: set[str],
+    learning_contract_version_id: str | None = None,
 ) -> dict[str, dict]:
     if not target_ids:
         return {}
-    concept_ids = set(
-        db.scalars(
-            select(AssessmentTarget.concept_revision_id).where(
-                AssessmentTarget.id.in_(target_ids),
-                AssessmentTarget.identity_status.in_(
-                    RANK_SETTLEABLE_IDENTITY_STATUSES
-                ),
-                AssessmentTarget.concept_revision_id.is_not(None),
+    source_targets = db.scalars(
+        select(AssessmentTarget).where(AssessmentTarget.id.in_(target_ids))
+    ).all()
+    effective_targets = [
+        effective
+        for source in source_targets
+        if (
+            effective := resolve_effective_rank_target(
+                db,
+                source_target=source,
+                learning_contract_version_id=learning_contract_version_id,
             )
-        ).all()
-    )
+        )
+        is not None
+    ]
+    concept_ids = {
+        item.concept_revision_id
+        for item in effective_targets
+        if item.concept_revision_id
+    }
     revisions = (
         db.scalars(
             select(ConceptRevision).where(

@@ -62,7 +62,10 @@ from ..modules.learning.generation_leases import (
 from ..modules.learning.milestones import MilestoneService
 from ..modules.learning.missions import MissionService
 from ..modules.learning.knowledge_map import KnowledgeMapService
-from ..modules.learning.knowledge_ranks import knowledge_node_views_for_targets
+from ..modules.learning.knowledge_ranks import (
+    knowledge_node_views_for_targets,
+    resolve_effective_rank_target,
+)
 from ..modules.learning.learning_start import (
     ChapterChoiceService,
     LearningStartService,
@@ -1655,7 +1658,16 @@ class SlowService:
         ) if target_ids else {}
         result = []
         for state, target in projection_rows:
-            node = node_views.get(target.concept_revision_id or "")
+            effective_target = resolve_effective_rank_target(
+                self.db,
+                source_target=target,
+                learning_contract_version_id=None,
+            )
+            node = node_views.get(
+                effective_target.concept_revision_id
+                if effective_target and effective_target.concept_revision_id
+                else ""
+            )
             teaching_action = (
                 "wake"
                 if node and node["activation"] == "due"

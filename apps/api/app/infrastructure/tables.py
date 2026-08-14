@@ -2237,6 +2237,44 @@ class AssessmentTarget(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class AssessmentTargetRankIdentityDecision(Base):
+    """Append-only authorization for attributing legacy evidence to a rank node.
+
+    The source assessment identity and its historical observations never change.
+    The latest decision for one frozen contract/target pair only controls which
+    rank-settleable target supplies the concept identity and node-local rubric.
+    """
+
+    __tablename__ = "assessment_target_rank_identity_decisions"
+    __table_args__ = (
+        UniqueConstraint("decision_hash", name="uq_rank_identity_decision_hash"),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    source_contract_version_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), index=True
+    )
+    source_assessment_target_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_targets.id"), index=True
+    )
+    destination_assessment_target_id: Mapped[str | None] = mapped_column(
+        ForeignKey("assessment_targets.id"), nullable=True, index=True
+    )
+    decision: Mapped[str] = mapped_column(String(24), index=True)
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("assessment_target_rank_identity_decisions.id"),
+        nullable=True,
+        index=True,
+    )
+    basis_json: Mapped[str] = mapped_column(Text, default="{}")
+    rule_version: Mapped[str] = mapped_column(String(48), index=True)
+    decision_hash: Mapped[str] = mapped_column(String(64))
+    actor_kind: Mapped[str] = mapped_column(String(32))
+    actor_id: Mapped[str] = mapped_column(String(160), default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
 class SectionAssessmentTarget(Base):
     """Contract-local gate attributes for a reusable measurement identity."""
 

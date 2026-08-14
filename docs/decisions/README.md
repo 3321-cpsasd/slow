@@ -46,8 +46,9 @@
 | [ADR-0012](0012-on-demand-knowledge-universe-and-learner-memory.md) | Accepted，第一阶段实现中 | 按需知识宇宙、个人知识子网、三层学习记忆与可信知识段位 |
 | [ADR-0013](0013-evidence-guided-reinforcement-agent.md) | Accepted，MVP 已实现 | 到期唤醒失败后的有界诊断、补强、重组与独立验证 |
 | [ADR-0014](0014-purpose-aware-ai-gateway.md) | Accepted，第一阶段已实现 | 用途感知 AI 网关、模型池路由、评估独立性与准确性反馈复核边界 |
-| [ADR-0015](0015-rank-settleable-learning-contracts.md) | Accepted，已实现 | 新小节段位可结算身份、系列内稳定复用与发布失败关闭 |
+| [ADR-0015](0015-rank-settleable-learning-contracts.md) | Accepted，已实现；历史迁移边界由 ADR-0020 补充取代 | 新小节段位可结算身份、系列内稳定复用与发布失败关闭 |
 | [ADR-0016](0016-trusted-assessment-model-roles.md) | Accepted，已实现 | 全部正式选择题的出题、独立审题和答案盲判职责分离 |
 | [ADR-0017](0017-independent-chapter-scope-review.md) | Accepted，已实现 | 独立模型通读整章，以最小编辑消除小节知识增量重复 |
 | [ADR-0018](0018-m4-trustworthy-adaptive-learning.md) | Accepted，实现完成，等待真实模型验收 | M4 可信测评、口试职责、跨书适配和生产失败关闭的统一验收合同 |
 | [ADR-0019](0019-learning-start-and-chapter-route-choices.md) | Accepted，MVP 已实现 | 系列启动兴趣选择、章级挑战与显式略过的路线/掌握分离 |
+| [ADR-0020](0020-audited-historical-rank-identity.md) | Accepted，已实现 | 历史学习证据的追加式段位身份决定、确定性画像重放与在线空结算防护 |

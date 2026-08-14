@@ -361,6 +361,7 @@ class SubmitQuiz:
             self.db,
             user_id=self.user_id,
             target_ids=target_ids,
+            learning_contract_version_id=binding.learning_contract_version_id,
         )
         grade = grade_choice_quiz(questions, body.answers)
         attempt = QuizAttempt(

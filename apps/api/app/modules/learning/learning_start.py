@@ -530,6 +530,7 @@ class ChapterChoiceService:
                 self.db,
                 user_id=self.user_id,
                 target_ids=target_ids,
+                learning_contract_version_id=binding.learning_contract_version_id,
             )
             record_scoring_facts(
                 self.db,

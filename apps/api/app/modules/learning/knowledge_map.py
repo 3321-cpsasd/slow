@@ -27,8 +27,8 @@ from ...infrastructure.tables import (
 from .knowledge_profile import learner_knowledge_profile_view
 from .knowledge_ranks import (
     KNOWLEDGE_RANK_RULE_VERSION,
-    RANK_SETTLEABLE_IDENTITY_STATUSES,
     knowledge_node_views_for_concepts,
+    resolve_effective_rank_target,
 )
 
 
@@ -160,14 +160,14 @@ class KnowledgeMapService:
             if latest_contract_by_section.get(row[3].id, (0, ""))[1] == row[0].id
         ]
 
-        target_paths: dict[str, list[dict]] = defaultdict(list)
+        route_paths: dict[tuple[str, str], dict] = {}
         targets: dict[str, AssessmentTarget] = {}
         required_target_ids: set[str] = set()
         for contract, binding, target, section, chapter, book, series in current_rows:
             targets[target.id] = target
             if binding.required:
                 required_target_ids.add(target.id)
-            target_paths[target.id].append({
+            path = {
                 "seriesId": series.id,
                 "seriesTitle": series.title,
                 "bookId": book.id,
@@ -178,20 +178,29 @@ class KnowledgeMapService:
                 "sectionTitle": section.title,
                 "required": binding.required,
                 "contractVersionId": contract.id,
-            })
+            }
+            route_paths[(contract.id, target.id)] = path
         if not required_target_ids:
             required_target_ids = set(targets)
 
-        formal_targets = {
-            target_id: target
-            for target_id, target in targets.items()
-            if target.identity_status in RANK_SETTLEABLE_IDENTITY_STATUSES
-            and target.concept_revision_id
-        }
-        concept_ids = {
-            target.concept_revision_id for target in formal_targets.values()
-            if target.concept_revision_id
-        }
+        formal_target_ids: set[str] = set()
+        targets_by_concept: dict[str, set[str]] = defaultdict(set)
+        paths_by_concept: dict[str, list[dict]] = defaultdict(list)
+        for contract, _binding, target, *_rest in current_rows:
+            effective = resolve_effective_rank_target(
+                self.db,
+                source_target=target,
+                learning_contract_version_id=contract.id,
+            )
+            if effective is None or not effective.concept_revision_id:
+                continue
+            concept_id = effective.concept_revision_id
+            formal_target_ids.add(target.id)
+            targets_by_concept[concept_id].add(target.id)
+            paths_by_concept[concept_id].append(
+                route_paths[(contract.id, target.id)]
+            )
+        concept_ids = set(targets_by_concept)
         # The all-goals view is the user's durable subgraph, not merely the
         # union of today's active routes. Keep previously evidenced published
         # nodes visible across books and shelves; a series-filtered view stays
@@ -219,11 +228,6 @@ class KnowledgeMapService:
                 )
             ).all()
         } if targets else {}
-        targets_by_concept: dict[str, set[str]] = defaultdict(set)
-        for target_id, target in formal_targets.items():
-            if target.concept_revision_id in node_views:
-                targets_by_concept[target.concept_revision_id].add(target_id)
-
         # A node can represent several assessment targets. Reinforcement is only
         # authorized by a submitted failed wake, so an arbitrary target id can
         # make an otherwise actionable node return 409. Keep the query ordered
@@ -236,7 +240,7 @@ class KnowledgeMapService:
             )
             .where(
                 ReviewAssignment.user_id == self.user_id,
-                ReviewAssignment.assessment_target_id.in_(set(formal_targets)),
+                ReviewAssignment.assessment_target_id.in_(formal_target_ids),
                 ReviewAssignment.status == "submitted",
                 QuizAttempt.passed.is_(False),
             )
@@ -244,7 +248,7 @@ class KnowledgeMapService:
                 ReviewAssignment.updated_at.desc(),
                 ReviewAssignment.id.desc(),
             )
-        )) if formal_targets else []
+        )) if formal_target_ids else []
 
         nodes = []
         for concept_id, node in sorted(
@@ -260,12 +264,11 @@ class KnowledgeMapService:
             }
             paths = []
             seen_paths = set()
-            for target_id in sorted(concept_target_ids):
-                for path in target_paths[target_id]:
-                    key = (path["seriesId"], path["sectionId"])
-                    if key not in seen_paths:
-                        seen_paths.add(key)
-                        paths.append(path)
+            for path in paths_by_concept[concept_id]:
+                key = (path["seriesId"], path["sectionId"])
+                if key not in seen_paths:
+                    seen_paths.add(key)
+                    paths.append(path)
             nodes.append({
                 **node,
                 "recommendedTargetId": _recommended_target_id(
@@ -308,7 +311,7 @@ class KnowledgeMapService:
             for item in relation_rows
         ]
 
-        route_target_ids = required_target_ids & set(formal_targets)
+        route_target_ids = required_target_ids & formal_target_ids
         verified_target_ids = {
             target_id
             for target_id in route_target_ids
@@ -353,7 +356,7 @@ class KnowledgeMapService:
             "nodes": nodes,
             "edges": edges,
             "excluded": {
-                "provisionalTargetCount": len(targets) - len(formal_targets),
+                "provisionalTargetCount": len(targets) - len(formal_target_ids),
                 "missingRubricNodeCount": len(concept_ids) - len(included_ids),
             },
             "message": (

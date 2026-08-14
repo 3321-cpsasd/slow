@@ -1,13 +1,16 @@
 import json
 from datetime import timedelta
 
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from app.core.errors import AppError
 from app.infrastructure.tables import (
     AssessmentGateState,
     AssessmentObservation,
     AssessmentTarget,
+    AssessmentTargetRankIdentityDecision,
     Base,
     Concept,
     ConceptRevision,
@@ -25,6 +28,7 @@ from app.modules.learning.assessment import (
 from app.modules.learning.knowledge_ranks import (
     knowledge_node_views_for_targets,
     knowledge_settlement,
+    require_effective_rank_targets,
 )
 
 
@@ -42,6 +46,7 @@ def _add_target(
     published_concept: bool = False,
     rank_policy: bool = True,
     rank_ceiling: str = "gold",
+    bind_section: bool = True,
 ) -> None:
     concept_revision_id = None
     identity_status = "legacy_provisional"
@@ -93,16 +98,17 @@ def _add_target(
             status="active",
         )
     )
-    db.add(
-        SectionAssessmentTarget(
-            id=f"binding_{target_id}",
-            section_id="section_replay",
-            assessment_target_id=target_id,
-            position=1,
-            required=True,
-            verification_policy="choice_quiz_v1",
+    if bind_section:
+        db.add(
+            SectionAssessmentTarget(
+                id=f"binding_{target_id}",
+                section_id="section_replay",
+                assessment_target_id=target_id,
+                position=1,
+                required=True,
+                verification_policy="choice_quiz_v1",
+            )
         )
-    )
 
 
 def _add_observation(
@@ -118,6 +124,7 @@ def _add_observation(
     rank_status: str = "eligible_grouped",
     target_id: str = "target_replay",
     episode_id: str | None = None,
+    learning_contract_version_id: str | None = None,
 ) -> AssessmentObservation:
     observation = AssessmentObservation(
         id=f"observation_{suffix}",
@@ -126,6 +133,7 @@ def _add_observation(
         section_id="section_replay",
         attempt_id=f"attempt_{suffix}",
         scoring_result_id=f"scoring_{suffix}",
+        learning_contract_version_id=learning_contract_version_id,
         assessment_target_id=target_id,
         question_index=0,
         correct=correct,
@@ -395,3 +403,77 @@ def test_repeat_cannot_farm_rank_and_fresh_failure_preserves_highest_rank() -> N
         assert state.current_stars == 1
         assert state.activation_state == "reassessment"
         assert state.source_observation_watermark == failed.sequence
+
+
+def test_legacy_evidence_keeps_its_target_and_receives_audited_node_rank() -> None:
+    with _session() as db:
+        _add_target(db, target_id="target_legacy")
+        _add_target(
+            db,
+            target_id="target_rank_destination",
+            published_concept=True,
+            rank_ceiling="bronze",
+            bind_section=False,
+        )
+        db.add(
+            AssessmentTargetRankIdentityDecision(
+                id="rank_identity_decision_legacy",
+                source_contract_version_id="contract_legacy",
+                source_assessment_target_id="target_legacy",
+                destination_assessment_target_id="target_rank_destination",
+                decision="approved",
+                basis_json="{}",
+                rule_version="historical_rank_identity_v1",
+                decision_hash="a" * 64,
+                actor_kind="system_maintenance",
+                actor_id="test",
+            )
+        )
+        _add_observation(
+            db,
+            suffix="legacy",
+            created_at=now(),
+            correct=True,
+            assistance_mode="unassisted_initial",
+            target_id="target_legacy",
+            learning_contract_version_id="contract_legacy",
+        )
+        db.flush()
+
+        report = rebuild_assessment_projections(db, user_id="user_replay")
+        target_state = db.scalar(select(KnowledgeStateProjection))
+        node_state = db.scalar(select(KnowledgeNodeStateProjection))
+        profile = db.scalar(select(LearnerKnowledgeProfileProjection))
+        views = knowledge_node_views_for_targets(
+            db,
+            user_id="user_replay",
+            target_ids={"target_legacy"},
+            learning_contract_version_id="contract_legacy",
+        )
+
+        assert report["knowledgeStates"] == 1
+        assert report["knowledgeNodeStates"] == 1
+        assert target_state.assessment_target_id == "target_legacy"
+        assert node_state.concept_revision_id == (
+            "concept_revision_target_rank_destination"
+        )
+        assert node_state.current_rank == "bronze"
+        assert next(iter(views.values()))["rank"] == "bronze"
+        summary = json.loads(profile.summary_json)
+        assert summary["nodeCount"] == 1
+        assert summary["rankedNodeCount"] == 1
+
+
+def test_legacy_target_without_audited_identity_cannot_settle() -> None:
+    with _session() as db:
+        _add_target(db, target_id="target_unmapped")
+        db.flush()
+
+        with pytest.raises(AppError) as error:
+            require_effective_rank_targets(
+                db,
+                learning_contract_version_id="contract_unmapped",
+                target_ids={"target_unmapped"},
+            )
+
+        assert error.value.code == "KNOWLEDGE_SETTLEMENT_IDENTITY_UNAVAILABLE"

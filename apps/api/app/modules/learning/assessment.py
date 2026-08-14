@@ -31,7 +31,10 @@ from .bkt_parameters import (
     DEFAULT_BKT_PARAMETERS,
     resolve_bkt_parameters,
 )
-from .knowledge_ranks import rebuild_knowledge_node_projections
+from .knowledge_ranks import (
+    rebuild_knowledge_node_projections,
+    resolve_effective_rank_target,
+)
 from .knowledge_profile import rebuild_learner_knowledge_profile
 
 
@@ -627,11 +630,46 @@ def rebuild_assessment_projections(
         db.delete(stale)
     for stale in existing_reviews.values():
         db.delete(stale)
+    source_targets = {
+        item.id: item
+        for item in db.scalars(
+            select(AssessmentTarget).where(
+                AssessmentTarget.id.in_(
+                    {item.assessment_target_id for item in observations}
+                )
+            )
+        ).all()
+    }
+    effective_target_cache: dict[tuple[str | None, str], AssessmentTarget | None] = {}
+    effective_rank_targets_by_observation_id: dict[str, AssessmentTarget] = {}
+    for observation in observations:
+        source_target = source_targets.get(observation.assessment_target_id)
+        if source_target is None:
+            continue
+        cache_key = (
+            observation.learning_contract_version_id,
+            observation.assessment_target_id,
+        )
+        if cache_key not in effective_target_cache:
+            effective_target_cache[cache_key] = resolve_effective_rank_target(
+                db,
+                source_target=source_target,
+                learning_contract_version_id=(
+                    observation.learning_contract_version_id
+                ),
+            )
+        effective_target = effective_target_cache[cache_key]
+        if effective_target is not None:
+            effective_rank_targets_by_observation_id[observation.id] = effective_target
+
     knowledge_node_states = rebuild_knowledge_node_projections(
         db,
         user_id=user_id,
         observations=observations,
         rank_observation_ids=rank_observation_ids,
+        effective_rank_targets_by_observation_id=(
+            effective_rank_targets_by_observation_id
+        ),
     )
     learner_profile = rebuild_learner_knowledge_profile(db, user_id=user_id)
     db.flush()

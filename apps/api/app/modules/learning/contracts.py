@@ -181,7 +181,7 @@ def _route_rank_policy(statement: str) -> dict:
     }
 
 
-def _materialize_route_target(
+def materialize_route_target(
     db: Session,
     *,
     series_id: str,
@@ -365,7 +365,7 @@ def _ensure_section_targets(
         key = _objective_key(statement)
         pair = by_key.get(key)
         if pair is None:
-            target = _materialize_route_target(
+            target = materialize_route_target(
                 db,
                 series_id=series_id,
                 statement=statement,
@@ -741,6 +741,19 @@ def open_run_section(
             code="SECTION_CANDIDATE_MISSION_MISMATCH",
             status=409,
         )
+    from .knowledge_ranks import require_effective_rank_targets
+
+    quiz_target_ids = {
+        str(question.get("assessmentTargetId") or "").strip()
+        for question in _load(quiz.questions_json, [])
+        if isinstance(question, dict)
+        and str(question.get("assessmentTargetId") or "").strip()
+    }
+    require_effective_rank_targets(
+        db,
+        learning_contract_version_id=contract.id,
+        target_ids=quiz_target_ids,
+    )
     binding = LearningRunSectionBinding(
         id=uid("run_section_binding"),
         learning_run_id=run.id,
