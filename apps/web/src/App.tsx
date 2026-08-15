@@ -1002,6 +1002,45 @@ export default function App() {
     return completedFallback;
   };
 
+  const waitForInitialSectionReady = async (value: Series) => {
+    let task = value.initializationTask;
+    if (!task) {
+      throw new Error('学习路线没有返回第一节准备任务，请重新创建。');
+    }
+    for (let poll = 0; poll < 360; poll += 1) {
+      if (!['succeeded', 'failed'].includes(task.status)) {
+        task = await api.learningTask(task.taskId);
+      }
+      if (task.status === 'failed') {
+        throw new Error(generationFailureMessage(task, '第一节内容'));
+      }
+      if (task.status === 'succeeded') {
+        const refreshed = await api.series(value.id);
+        const targetSectionId = typeof task.result?.targetSectionId === 'string'
+          ? task.result.targetSectionId
+          : null;
+        const targetBook = targetSectionId
+          ? refreshed.books.find((book) => bookContainsSection(book, targetSectionId))
+          : null;
+        if (!targetSectionId || !targetBook) {
+          throw new Error('第一节已经准备完成，但学习路线尚未同步，请重新进入书架。');
+        }
+        const readySection = await openAndTrackSection(targetSectionId);
+        if (
+          !readySection.content
+          || readySection.content.publicationStatus !== 'published'
+          || !readySection.quiz
+          || readySection.quiz.publicationStatus !== 'published'
+        ) {
+          throw new Error('第一节正文和验证题尚未完整发布，请稍后重试。');
+        }
+        return { series: refreshed, section: readySection, bookId: targetBook.id };
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    }
+    throw new Error('第一节仍在准备，可以稍后从书架重新进入本系列。');
+  };
+
   const monitorInitialSection = async (value: Series) => {
     const initialTask = value.initializationTask;
     if (!initialTask || initialTask.status === 'failed') return false;
@@ -1973,12 +2012,23 @@ export default function App() {
               setNotice('书架及其中的学习系列已删除');
             }}
             onCreate={async (body, idempotencyKey) => {
-              const value = await run('AI 正在规划系列…', () => api.createPlan({ ...body, shelfId: shelf.id }, idempotencyKey));
-              updateBrowserLocation(seriesPath(value.id), 'push');
-              setSeries(value);
-              setSection(null);
+              const navigationVersion = routeRequestVersion.current;
+              const ready = await run('正在准备目录和第一节…', async () => {
+                const value = await api.createPlan(
+                  { ...body, shelfId: shelf.id },
+                  idempotencyKey,
+                );
+                return waitForInitialSectionReady(value);
+              });
+              if (navigationVersion !== routeRequestVersion.current) return;
+              setDirectoryBookId(ready.bookId);
+              setSeries(ready.series);
+              setSection(ready.section);
               setView('learn');
-              void monitorInitialSection(value);
+              updateBrowserLocation(
+                seriesPath(ready.series.id, ready.section.id),
+                'push',
+              );
             }}
             onOpen={(seriesId, sectionId, bookId) => {
               void openSeries(seriesId, sectionId, 'push', bookId);

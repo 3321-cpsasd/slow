@@ -1334,6 +1334,44 @@ def test_new_plan_preloads_first_lesson_in_durable_background_task(client):
     assert completed["result"]["targetSectionId"] == first_section["id"]
 
 
+def test_learning_task_worker_recovers_after_queue_scan_failure(
+    tmp_path,
+    monkeypatch,
+):
+    import app.main as main_module
+
+    real_recoverable_task_ids = main_module.recoverable_task_ids
+    scan_count = 0
+
+    def flaky_recoverable_task_ids(db, *, limit=20):
+        nonlocal scan_count
+        scan_count += 1
+        if scan_count == 1:
+            raise RuntimeError("simulated queue scan failure")
+        return real_recoverable_task_ids(db, limit=limit)
+
+    monkeypatch.setattr(
+        main_module,
+        "recoverable_task_ids",
+        flaky_recoverable_task_ids,
+    )
+    with TestClient(create_app(
+        f"sqlite+pysqlite:///{tmp_path / 'recovering-worker.db'}",
+        FakeAi(),
+        AcceptingSourceVerifier(),
+        LocalAttachmentStorage(tmp_path / "recovering-worker-attachments"),
+    )) as recovering:
+        series = create_series(recovering)
+        completed = wait_for_task(
+            recovering,
+            series["initializationTask"]["taskId"],
+            timeout=5,
+        )
+
+    assert scan_count >= 2
+    assert completed["status"] == "succeeded"
+
+
 def test_quiz_exposes_selection_mode_without_leaking_answers(tmp_path):
     class MixedChoiceAi(FakeAi):
         async def lesson(self, request, memory, prior_questions=None):

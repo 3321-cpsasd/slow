@@ -1061,6 +1061,43 @@ def test_expired_worker_cannot_commit_after_new_lease():
     engine.dispose()
 
 
+def test_expired_persisted_worker_lease_can_be_reclaimed(tmp_path):
+    engine, sessions = build_database(
+        f"sqlite+pysqlite:///{tmp_path / 'persisted-worker.db'}"
+    )
+    Base.metadata.create_all(engine)
+    with sessions() as db:
+        run, sections = build_task_graph(db)
+        task = LearningTask(
+            id="task_persisted_lease",
+            learning_run_id=run.id,
+            user_id="user_a",
+            section_id=sections["user_a"].id,
+            task_type="note_generation",
+            idempotency_key="persisted-lease",
+            trigger_id="trigger",
+            status="pending",
+        )
+        db.add(task)
+        db.commit()
+        first = claim_task(db, task.id, lease_owner="worker_one")
+        claimed = db.get(LearningTask, task.id)
+        claimed.lease_expires_at = now() - timedelta(seconds=1)
+        db.commit()
+
+    with sessions() as db:
+        persisted = db.get(LearningTask, "task_persisted_lease")
+        assert persisted.lease_expires_at.tzinfo is None
+        second = claim_task(
+            db,
+            "task_persisted_lease",
+            lease_owner="worker_two",
+        )
+        assert second is not None
+        assert second.lease_token != first.lease_token
+    engine.dispose()
+
+
 def test_expired_worker_cannot_persist_domain_rows_after_takeover():
     engine, sessions = build_database("sqlite+pysqlite:///:memory:")
     Base.metadata.create_all(engine)

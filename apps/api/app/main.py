@@ -519,37 +519,53 @@ def create_app(
     async def learning_task_worker(app: FastAPI):
         next_lookahead_maintenance_at = 0.0
         while not app.state.learning_task_stop.is_set():
-            app.state.learning_task_wakeup.clear()
-            loop_time = asyncio.get_running_loop().time()
-            if loop_time >= next_lookahead_maintenance_at:
-                with sessions() as db:
-                    maintained_lookaheads = backfill_missing_lookahead_tasks(db)
-                if maintained_lookaheads:
-                    logger.info(
-                        "Queued or rearmed %s section lookahead task(s)",
-                        maintained_lookaheads,
-                    )
-                next_lookahead_maintenance_at = (
-                    loop_time + LOOKAHEAD_MAINTENANCE_INTERVAL_SECONDS
-                )
-            while not app.state.learning_task_stop.is_set():
-                with sessions() as db:
-                    task_ids = recoverable_task_ids(db)
-                if not task_ids:
-                    break
-                await asyncio.gather(*(
-                    execute_learning_task(task_id, app)
-                    for task_id in task_ids[:LEARNING_TASK_CONCURRENCY]
-                ))
-            if app.state.learning_task_stop.is_set():
-                break
             try:
-                await asyncio.wait_for(
-                    app.state.learning_task_wakeup.wait(),
-                    timeout=1,
+                app.state.learning_task_wakeup.clear()
+                loop_time = asyncio.get_running_loop().time()
+                if loop_time >= next_lookahead_maintenance_at:
+                    with sessions() as db:
+                        maintained_lookaheads = backfill_missing_lookahead_tasks(db)
+                    if maintained_lookaheads:
+                        logger.info(
+                            "Queued or rearmed %s section lookahead task(s)",
+                            maintained_lookaheads,
+                        )
+                    next_lookahead_maintenance_at = (
+                        loop_time + LOOKAHEAD_MAINTENANCE_INTERVAL_SECONDS
+                    )
+                while not app.state.learning_task_stop.is_set():
+                    with sessions() as db:
+                        task_ids = recoverable_task_ids(db)
+                    if not task_ids:
+                        break
+                    await asyncio.gather(*(
+                        execute_learning_task(task_id, app)
+                        for task_id in task_ids[:LEARNING_TASK_CONCURRENCY]
+                    ))
+                if app.state.learning_task_stop.is_set():
+                    break
+                try:
+                    await asyncio.wait_for(
+                        app.state.learning_task_wakeup.wait(),
+                        timeout=1,
+                    )
+                except TimeoutError:
+                    pass
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Learning task worker loop recovered after an unexpected failure"
                 )
-            except TimeoutError:
-                pass
+                if app.state.learning_task_stop.is_set():
+                    break
+                try:
+                    await asyncio.wait_for(
+                        app.state.learning_task_stop.wait(),
+                        timeout=1,
+                    )
+                except TimeoutError:
+                    pass
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

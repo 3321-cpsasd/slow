@@ -133,6 +133,18 @@ def backfill_missing_book_start_preloads(db: Session) -> int:
 
     created = 0
     for learning_run_id, user_id, book_id, outline_version, chapter_id in candidates:
+        active_initial_tasks = db.scalars(
+            select(LearningTask).where(
+                LearningTask.learning_run_id == learning_run_id,
+                LearningTask.task_type == "initial_book_preload",
+                LearningTask.status.in_({"pending", "running"}),
+            )
+        ).all()
+        if any(
+            (_load(task.payload_json, {}) or {}).get("chapterId") == chapter_id
+            for task in active_initial_tasks
+        ):
+            continue
         idempotency_key = (
             f"book-start:{book_id}:outline:{outline_version}"
         )
@@ -363,6 +375,7 @@ def recoverable_task_ids(db: Session, *, limit: int = 20) -> list[str]:
             heartbeat_at=None,
             updated_at=now(),
         )
+        .execution_options(synchronize_session=False)
     )
     if exhausted.rowcount:
         for task in exhausted_tasks:
@@ -444,6 +457,7 @@ def claim_task(
             heartbeat_at=current,
             updated_at=current,
         )
+        .execution_options(synchronize_session=False)
     )
     if claimed.rowcount != 1:
         db.rollback()
