@@ -113,6 +113,20 @@ type FeedbackTarget =
     };
 const AI_RUNTIME_SETTINGS_ENABLED = import.meta.env.VITE_INTERNAL_AI_SETTINGS === 'true';
 type AuthPanel = 'login' | 'register' | 'recover';
+type ProgressNotice = { title: string; message: string };
+
+function generationProgressNotice(reason: ApiError): ProgressNotice {
+  if (reason.message.includes('本章')) {
+    return {
+      title: '本章正在生成',
+      message: '通常需要 1–3 分钟，请耐心等待。完成后会自动刷新目录。',
+    };
+  }
+  return {
+    title: '本节正在准备',
+    message: '通常需要 1–2 分钟。完成后会自动更新，无需重复点击。',
+  };
+}
 
 function RecoveryCodePanel({
   code,
@@ -412,6 +426,7 @@ export default function App() {
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [progressNotice, setProgressNotice] = useState<ProgressNotice | null>(null);
   const [showAiSettings, setShowAiSettings] = useState(false);
   const [feedbackTarget, setFeedbackTarget] = useState<FeedbackTarget | null>(null);
   const [bookReplan, setBookReplan] = useState<BookReplanState | null>(null);
@@ -636,10 +651,15 @@ export default function App() {
   const run = async <T,>(label: string, action: () => Promise<T>) => {
     setBusy(label);
     setError('');
+    setProgressNotice(null);
     try {
       return await action();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '操作失败');
+      if (reason instanceof ApiError && reason.code === 'GENERATION_IN_PROGRESS') {
+        setProgressNotice(generationProgressNotice(reason));
+      } else {
+        setError(reason instanceof Error ? reason.message : '操作失败');
+      }
       throw reason;
     } finally {
       setBusy('');
@@ -1160,6 +1180,33 @@ export default function App() {
         (item) => !['locked', 'completed', 'skipped'].includes(item.status),
       ) || updated.sections.find((item) => item.status === 'completed');
       if (first) await loadSection(first.id);
+    } catch (reason) {
+      if (!(reason instanceof ApiError) || reason.code !== 'GENERATION_IN_PROGRESS' || !series) {
+        throw reason;
+      }
+      setError('');
+      setProgressNotice(generationProgressNotice(reason));
+      for (let poll = 0; poll < 120; poll += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        try {
+          const refreshed = await api.series(series.id);
+          const refreshedChapter = refreshed.books
+            .flatMap((book) => book.chapters)
+            .find((item) => item.id === chapter.id);
+          setSeries(refreshed);
+          if (refreshedChapter?.sections.length) {
+            setProgressNotice(null);
+            setNotice('本章已准备好，可以从目录进入第一节。');
+            return;
+          }
+        } catch {
+          // A transient refresh failure should not turn active generation red.
+        }
+      }
+      setProgressNotice({
+        title: '本章仍在生成',
+        message: '这次比平时稍久，请耐心等待。稍后重新打开本章即可继续。',
+      });
     } finally {
       chapterGenerationRequests.current.delete(chapter.id);
       setGeneratingChapterId('');
@@ -1872,8 +1919,10 @@ export default function App() {
       <AppStatusRegion
         error={error}
         notice={notice}
+        progress={progressNotice}
         onDismissError={() => setError('')}
         onDismissNotice={() => setNotice('')}
+        onDismissProgress={() => setProgressNotice(null)}
       />
       <main className={view === 'learn' ? 'learn-main' : view === 'profile' ? 'profile-main' : view === 'knowledge' ? 'knowledge-main' : view === 'review' ? 'review-main' : 'marketing-main'}>
         {view === 'home' && (
@@ -5014,6 +5063,18 @@ type WorkspaceLayoutRatios = {
   qaOnly: number;
 };
 type WorkspaceLayoutRatioKey = keyof WorkspaceLayoutRatios;
+type ReaderTypographyPreset = {
+  label: string;
+  bodySize: number;
+  lineHeight: number;
+  toolbarTitleSize: number;
+  questionSize: number;
+  blockTitleSize: number;
+  markdownH1Size: number;
+  markdownH2Size: number;
+  markdownH3Size: number;
+  paragraphGap: number;
+};
 
 const workspacePanelSizing = {
   directory: { defaultWidth: 240, minWidth: 220, maxWidth: 360 },
@@ -5024,6 +5085,17 @@ const workspacePanelSizing = {
 // on one fixed-pixel breakpoint.
 const workspaceReaderMinRatio = 0.48;
 const workspaceRatioMigrationReferenceWidth = 1440;
+const workspaceFocusMediaQuery = '(max-width: 1280px), (max-height: 760px)';
+const defaultReaderTypographyStep = 3;
+const readerTypographyPresets: ReaderTypographyPreset[] = [
+  { label: '极小', bodySize: 15.5, lineHeight: 2.05, toolbarTitleSize: 22, questionSize: 20, blockTitleSize: 25, markdownH1Size: 23, markdownH2Size: 21, markdownH3Size: 18, paragraphGap: 20 },
+  { label: '较小', bodySize: 16.5, lineHeight: 2.02, toolbarTitleSize: 23, questionSize: 21, blockTitleSize: 27, markdownH1Size: 24, markdownH2Size: 22, markdownH3Size: 19, paragraphGap: 21 },
+  { label: '稍小', bodySize: 17.25, lineHeight: 2, toolbarTitleSize: 24, questionSize: 22, blockTitleSize: 28, markdownH1Size: 25, markdownH2Size: 23, markdownH3Size: 20, paragraphGap: 22 },
+  { label: '标准', bodySize: 18, lineHeight: 1.96, toolbarTitleSize: 25, questionSize: 24, blockTitleSize: 30, markdownH1Size: 27, markdownH2Size: 25, markdownH3Size: 22, paragraphGap: 23 },
+  { label: '稍大', bodySize: 19, lineHeight: 1.92, toolbarTitleSize: 26, questionSize: 25, blockTitleSize: 32, markdownH1Size: 29, markdownH2Size: 27, markdownH3Size: 24, paragraphGap: 24 },
+  { label: '较大', bodySize: 20.5, lineHeight: 1.88, toolbarTitleSize: 28, questionSize: 27, blockTitleSize: 34, markdownH1Size: 31, markdownH2Size: 29, markdownH3Size: 26, paragraphGap: 25 },
+  { label: '特大', bodySize: 22, lineHeight: 1.84, toolbarTitleSize: 30, questionSize: 29, blockTitleSize: 37, markdownH1Size: 34, markdownH2Size: 31, markdownH3Size: 28, paragraphGap: 26 },
+];
 const defaultWorkspaceLayoutRatios: WorkspaceLayoutRatios = {
   threeDirectory: workspacePanelSizing.directory.defaultWidth / workspaceRatioMigrationReferenceWidth,
   threeQa: workspacePanelSizing.qa.defaultWidth / workspaceRatioMigrationReferenceWidth,
@@ -5041,6 +5113,31 @@ function legacyUserWorkspacePanelStorageKey(userId: string, panel: WorkspacePane
 
 function workspaceLayoutRatiosStorageKey(userId: string) {
   return `slow.learning-workspace.${userId}.layout-ratios`;
+}
+
+function readerTypographyStorageKey(userId: string) {
+  return `slow.reader.${userId}.typography-step`;
+}
+
+function readReaderTypographyStep(userId: string) {
+  try {
+    const storedValue = window.localStorage.getItem(readerTypographyStorageKey(userId));
+    if (storedValue === null) return defaultReaderTypographyStep;
+    const stored = Number(storedValue);
+    return Number.isInteger(stored) && stored >= 0 && stored < readerTypographyPresets.length
+      ? stored
+      : defaultReaderTypographyStep;
+  } catch {
+    return defaultReaderTypographyStep;
+  }
+}
+
+function persistReaderTypographyStep(userId: string, step: number) {
+  try {
+    window.localStorage.setItem(readerTypographyStorageKey(userId), String(step));
+  } catch {
+    // The current reading session can still change size when storage is unavailable.
+  }
 }
 
 function clampWorkspacePanelWidth(panel: WorkspacePanel, width: number, availableWidth = Number.POSITIVE_INFINITY) {
@@ -5235,11 +5332,11 @@ function LearningWorkspace({
   const [chapterLaunchAction, setChapterLaunchAction] = useState<ChapterLaunchAction | null>(null);
   const [selectedQuote, setSelectedQuote] = useState<TextQuote | null>(null);
   const [explanationRequest, setExplanationRequest] = useState<ExplanationRequest | null>(null);
-  const [compactLayout, setCompactLayout] = useState(() => window.matchMedia('(max-width: 900px)').matches);
-  const [auxiliaryExclusive, setAuxiliaryExclusive] = useState(() => window.matchMedia('(max-width: 1180px)').matches);
-  const [directoryHidden, setDirectoryHidden] = useState(() => window.matchMedia('(max-width: 900px)').matches);
+  const [focusLayout, setFocusLayout] = useState(() => window.matchMedia(workspaceFocusMediaQuery).matches);
+  const [directoryHidden, setDirectoryHidden] = useState(() => window.matchMedia(workspaceFocusMediaQuery).matches);
   const [qaHidden, setQaHidden] = useState(true);
   const [readerTab, setReaderTab] = useState<ReaderTab>('content');
+  const [readerTypographyStep, setReaderTypographyStep] = useState(() => readReaderTypographyStep(userId));
   const [askAiStreaming, setAskAiStreaming] = useState(false);
   const [layoutRatios, setLayoutRatios] = useState(() => readWorkspaceLayoutRatios(userId));
   const [directoryWidth, setDirectoryWidth] = useState(() => clampWorkspacePanelWidth(
@@ -5284,25 +5381,23 @@ function LearningWorkspace({
   useEffect(() => () => onQaVisibilityChange(false), [onQaVisibilityChange]);
 
   useEffect(() => {
-    const compactMedia = window.matchMedia('(max-width: 900px)');
-    const exclusiveMedia = window.matchMedia('(max-width: 1180px)');
+    setReaderTypographyStep(readReaderTypographyStep(userId));
+  }, [userId]);
+
+  useEffect(() => {
+    const focusMedia = window.matchMedia(workspaceFocusMediaQuery);
     const adaptPanels = () => {
-      const compact = compactMedia.matches;
-      const exclusive = exclusiveMedia.matches;
-      setCompactLayout(compact);
-      setAuxiliaryExclusive(exclusive);
-      if (compact) {
+      const focus = focusMedia.matches;
+      setFocusLayout(focus);
+      if (focus) {
         setDirectoryHidden(true);
         setQaHidden(true);
-      } else if (exclusive) {
-        setDirectoryHidden(true);
       }
     };
-    compactMedia.addEventListener('change', adaptPanels);
-    exclusiveMedia.addEventListener('change', adaptPanels);
+    adaptPanels();
+    focusMedia.addEventListener('change', adaptPanels);
     return () => {
-      compactMedia.removeEventListener('change', adaptPanels);
-      exclusiveMedia.removeEventListener('change', adaptPanels);
+      focusMedia.removeEventListener('change', adaptPanels);
     };
   }, []);
 
@@ -5371,7 +5466,7 @@ function LearningWorkspace({
     if (chapter.status === 'locked') return;
     setSelectedChapterId(chapter.id);
     setChapterLaunchAction(null);
-    if (compactLayout) setDirectoryHidden(true);
+    if (focusLayout) setDirectoryHidden(true);
     if (chapter.status === 'skipped') {
       await api.resumeChapter(chapter.id, `resume-${crypto.randomUUID()}`);
       await onRefreshSeries();
@@ -5391,7 +5486,7 @@ function LearningWorkspace({
     setChapterLaunchAction(action);
     onSectionChange(null);
     updateBrowserLocation(seriesPath(series.id), 'push');
-    if (compactLayout) setDirectoryHidden(true);
+    if (focusLayout) setDirectoryHidden(true);
   };
   const activeBlockId = selectedBlockId || section?.content?.blocks[0]?.id || '';
   const selectBlock = (blockId: string) => {
@@ -5399,12 +5494,12 @@ function LearningWorkspace({
     setSelectedQuote(null);
   };
   const toggleDirectory = () => {
-    if ((compactLayout || auxiliaryExclusive) && directoryHidden) setQaHidden(true);
+    if (focusLayout && directoryHidden) setQaHidden(true);
     setDirectoryHidden((hidden) => !hidden);
   };
   const toggleQa = () => {
     if (!qaAvailable) return;
-    if ((compactLayout || auxiliaryExclusive) && qaHidden) setDirectoryHidden(true);
+    if (focusLayout && qaHidden) setDirectoryHidden(true);
     setQaHidden((hidden) => !hidden);
   };
 
@@ -5414,16 +5509,16 @@ function LearningWorkspace({
   };
   const openPanel = (panel: WorkspacePanel) => {
     if (panel === 'directory') {
-      if (compactLayout || auxiliaryExclusive) setQaHidden(true);
+      if (focusLayout) setQaHidden(true);
       setDirectoryHidden(false);
     } else {
-      if (compactLayout || auxiliaryExclusive) setDirectoryHidden(true);
+      if (focusLayout) setDirectoryHidden(true);
       setQaHidden(false);
     }
   };
   const panelAvailableWidth = (panel: WorkspacePanel, startedCollapsed = false) => {
     const workspaceWidth = workspaceRef.current?.clientWidth || window.innerWidth;
-    const otherPanelWillClose = startedCollapsed && auxiliaryExclusive;
+    const otherPanelWillClose = startedCollapsed && focusLayout;
     const otherWidth = panel === 'directory'
       ? (!qaHidden && !otherPanelWillClose ? qaWidth : 0)
       : (!directoryHidden && !otherPanelWillClose ? directoryWidth : 0);
@@ -5453,7 +5548,7 @@ function LearningWorkspace({
     persistPanelRatio(panel, width / workspaceWidth, currentDirectoryHidden, currentQaHidden);
   };
   const beginPanelResize = (panel: WorkspacePanel, event: ReactPointerEvent<HTMLDivElement>) => {
-    if (compactLayout || (event.pointerType === 'mouse' && event.button !== 0)) return;
+    if (focusLayout || (event.pointerType === 'mouse' && event.button !== 0)) return;
     const startedCollapsed = panel === 'directory' ? directoryHidden : qaHidden;
     const startWidth = panel === 'directory' ? directoryWidth : qaWidth;
     event.preventDefault();
@@ -5546,15 +5641,29 @@ function LearningWorkspace({
   const workspaceStyle = {
     '--directory-width': `${directoryWidth}px`,
     '--qa-width': `${qaWidth}px`,
+    '--reader-body-size': `${readerTypographyPresets[readerTypographyStep].bodySize}px`,
+    '--reader-body-line-height': readerTypographyPresets[readerTypographyStep].lineHeight,
+    '--reader-toolbar-title-size': `${readerTypographyPresets[readerTypographyStep].toolbarTitleSize}px`,
+    '--reader-question-size': `${readerTypographyPresets[readerTypographyStep].questionSize}px`,
+    '--reader-block-title-size': `${readerTypographyPresets[readerTypographyStep].blockTitleSize}px`,
+    '--reader-markdown-h1-size': `${readerTypographyPresets[readerTypographyStep].markdownH1Size}px`,
+    '--reader-markdown-h2-size': `${readerTypographyPresets[readerTypographyStep].markdownH2Size}px`,
+    '--reader-markdown-h3-size': `${readerTypographyPresets[readerTypographyStep].markdownH3Size}px`,
+    '--reader-paragraph-gap': `${readerTypographyPresets[readerTypographyStep].paragraphGap}px`,
   } as CSSProperties;
+  const changeReaderTypographyStep = (step: number) => {
+    const nextStep = Math.min(Math.max(0, step), readerTypographyPresets.length - 1);
+    setReaderTypographyStep(nextStep);
+    persistReaderTypographyStep(userId, nextStep);
+  };
 
   return (
     <div
       ref={workspaceRef}
       style={workspaceStyle}
-      className={`learning-workspace mode-${dailyMode} ${directoryHidden ? 'directory-collapsed' : ''} ${effectiveQaHidden ? 'qa-collapsed' : ''} ${qaAvailable ? '' : 'assessment-focus'} ${resizingPanel ? 'is-resizing' : ''}`}
+      className={`learning-workspace mode-${dailyMode} ${focusLayout ? 'focus-layout' : ''} ${directoryHidden ? 'directory-collapsed' : ''} ${effectiveQaHidden ? 'qa-collapsed' : ''} ${qaAvailable ? '' : 'assessment-focus'} ${resizingPanel ? 'is-resizing' : ''}`}
     >
-      {compactLayout && (!directoryHidden || !effectiveQaHidden) && (
+      {focusLayout && (!directoryHidden || !effectiveQaHidden) && (
         <button
           className="panel-backdrop"
           aria-label="关闭侧栏"
@@ -5594,6 +5703,11 @@ function LearningWorkspace({
         directoryHidden={directoryHidden}
         qaHidden={effectiveQaHidden}
         qaAvailable={qaAvailable}
+        readerTypographyStep={readerTypographyStep}
+        readerTypographyLabel={readerTypographyPresets[readerTypographyStep].label}
+        readerTypographyBodySize={readerTypographyPresets[readerTypographyStep].bodySize}
+        readerTypographyStepCount={readerTypographyPresets.length}
+        onReaderTypographyStepChange={changeReaderTypographyStep}
         onToggleDirectory={toggleDirectory}
         onToggleQa={toggleQa}
         onTabChange={(nextTab) => {
@@ -5606,7 +5720,7 @@ function LearningWorkspace({
         onQuote={(quote) => {
           setSelectedBlockId(quote.blockId);
           setSelectedQuote(quote);
-          if (compactLayout || auxiliaryExclusive) setDirectoryHidden(true);
+          if (focusLayout) setDirectoryHidden(true);
           setQaHidden(false);
         }}
         onGenerate={() => section && onGenerateSection(section.id)}
@@ -5674,7 +5788,7 @@ function LearningWorkspace({
             preferenceStatus,
             customInstruction: style === 'custom' ? instruction : undefined,
           });
-          if (compactLayout || auxiliaryExclusive) setDirectoryHidden(true);
+          if (focusLayout) setDirectoryHidden(true);
           setQaHidden(false);
           telemetry.track('explanation_style_requested', {
             view: 'learn',
@@ -6494,6 +6608,11 @@ function ReaderPanel({
   directoryHidden,
   qaHidden,
   qaAvailable,
+  readerTypographyStep,
+  readerTypographyLabel,
+  readerTypographyBodySize,
+  readerTypographyStepCount,
+  onReaderTypographyStepChange,
   onToggleDirectory,
   onToggleQa,
   onTabChange,
@@ -6524,6 +6643,11 @@ function ReaderPanel({
   directoryHidden: boolean;
   qaHidden: boolean;
   qaAvailable: boolean;
+  readerTypographyStep: number;
+  readerTypographyLabel: string;
+  readerTypographyBodySize: number;
+  readerTypographyStepCount: number;
+  onReaderTypographyStepChange: (step: number) => void;
   onToggleDirectory: () => void;
   onToggleQa: () => void;
   onTabChange: (tab: ReaderTab) => void;
@@ -6738,6 +6862,11 @@ function ReaderPanel({
         }
         canRegenerate={Boolean(section.content && section.bestScore === 0 && section.totalScore === 0)}
         regenerating={regenerating}
+        readerTypographyStep={readerTypographyStep}
+        readerTypographyLabel={readerTypographyLabel}
+        readerTypographyBodySize={readerTypographyBodySize}
+        readerTypographyStepCount={readerTypographyStepCount}
+        onReaderTypographyStepChange={onReaderTypographyStepChange}
         onRequestRegenerate={() => setRegenerationConfirmOpen(true)}
         onFeedback={onGlobalFeedback}
       />
@@ -6777,12 +6906,14 @@ function ReaderPanel({
           {tab === 'quiz' && section.quiz && (
             <Quiz
               key={section.quiz.id}
+              series={series}
               section={section}
               onUpgrade={() => setRegenerationConfirmOpen(true)}
               onSectionChange={onSectionChange}
               onRefreshSeries={onRefreshSeries}
               onSelectSection={onSelectSection}
               onReviewContent={reviewContent}
+              onFeedback={onGlobalFeedback}
               onSubmissionComplete={() => {
                 tabScrollPositionsRef.current.quiz = 0;
                 if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
@@ -7192,20 +7323,24 @@ function LessonContent({
 }
 
 function Quiz({
+  series,
   section,
   onUpgrade,
   onSectionChange,
   onRefreshSeries,
   onSelectSection,
   onReviewContent,
+  onFeedback,
   onSubmissionComplete,
 }: {
+  series: Series;
   section: Section;
   onUpgrade: () => void;
   onSectionChange: (section: Section) => void;
   onRefreshSeries: () => Promise<void>;
   onSelectSection: (id: string) => Promise<Section>;
   onReviewContent: (blockId?: string) => void;
+  onFeedback: () => void;
   onSubmissionComplete: () => void;
 }) {
   const quizDraftKey = `slow:quiz-draft:${section.id}:${section.quiz?.id || 'none'}`;
@@ -7300,6 +7435,7 @@ function Quiz({
   const nextSectionId = typeof nextSectionTask?.result?.targetSectionId === 'string'
     ? nextSectionTask.result.targetSectionId
     : null;
+  const nextSectionLocation = findSectionLocation(series, nextSectionId || undefined);
   const eligibleUnderCurrentPolicy = Boolean(
     result && !result.passed && result.reassessmentEligible,
   );
@@ -7608,6 +7744,10 @@ function Quiz({
           reassessing={reassessing}
           nextSectionTask={nextSectionTask || null}
           nextSectionId={nextSectionId}
+          nextSectionNumber={nextSectionLocation
+            ? `${nextSectionLocation.chapter.position}.${nextSectionLocation.section.position}`
+            : ''}
+          nextSectionTitle={nextSectionLocation?.section.title || ''}
           openingNextSection={openingNextSection}
           workflowRunning={workflowRunning}
           workflowTasks={workflowTasks}
@@ -7617,6 +7757,7 @@ function Quiz({
           onReassess={reassessAttempt}
           onOpenNextSection={openNextSection}
           onRetryTasks={retryFailedTasks}
+          onFeedback={onFeedback}
         />
       ) : (
         <>
@@ -7824,6 +7965,8 @@ function QuizReview({
   reassessing,
   nextSectionTask,
   nextSectionId,
+  nextSectionNumber,
+  nextSectionTitle,
   openingNextSection,
   workflowRunning,
   workflowTasks,
@@ -7833,6 +7976,7 @@ function QuizReview({
   onReassess,
   onOpenNextSection,
   onRetryTasks,
+  onFeedback,
 }: {
   section: Section;
   result: QuizResult;
@@ -7842,6 +7986,8 @@ function QuizReview({
   reassessing: boolean;
   nextSectionTask: LearningTask | null;
   nextSectionId: string | null;
+  nextSectionNumber: string;
+  nextSectionTitle: string;
   openingNextSection: boolean;
   workflowRunning: boolean;
   workflowTasks: LearningTask[];
@@ -7851,6 +7997,7 @@ function QuizReview({
   onReassess: () => Promise<void>;
   onOpenNextSection: () => Promise<void>;
   onRetryTasks: () => Promise<void>;
+  onFeedback: () => void;
 }) {
   const questions = result.questions || section.quiz?.questions || [];
   const wrongIndexes = result.results
@@ -8014,36 +8161,48 @@ function QuizReview({
       )}
 
       <div
-        className={`remediation-readiness ${hasBlockingWorkflowFailure ? 'failed' : followupReady ? 'ready' : ''}`}
+        className={`remediation-readiness ${nextSectionReady ? 'next-section-ready' : hasBlockingWorkflowFailure ? 'failed' : followupReady ? 'ready' : ''}`}
         aria-live="polite"
         aria-atomic="true"
       >
         {result.passed ? (
           nextSectionReady ? (
             <>
-              <span>下一节已准备好</span>
               {noteTask?.status === 'failed' && (
-                <small>{generationFailureMessage(noteTask, '个人笔记')}</small>
+                <aside className="quiz-next-note-warning">
+                  <small>{generationFailureMessage(noteTask, '个人笔记')}</small>
+                  {noteTask.retryable && (
+                    <button
+                      type="button"
+                      className="quiet-button"
+                      disabled={retryingTasks || workflowRunning}
+                      onClick={onRetryTasks}
+                    >
+                      {retryingTasks ? '正在重新准备…' : '重新准备笔记'}
+                    </button>
+                  )}
+                </aside>
               )}
-              <div className="remediation-readiness-actions">
-                {noteTask?.status === 'failed' && noteTask.retryable && (
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    disabled={retryingTasks || workflowRunning}
-                    onClick={onRetryTasks}
-                  >
-                    {retryingTasks ? '正在重新准备…' : '重新准备笔记'}
-                  </button>
-                )}
+              <nav className="quiz-next-navigation" aria-label="继续学习">
                 <button
-                  className="primary-button"
+                  className="quiz-next-section-card"
                   disabled={openingNextSection}
                   onClick={onOpenNextSection}
                 >
-                  {openingNextSection ? '正在进入…' : '进入下一节'}
+                  <small>{openingNextSection ? '正在进入' : '下一节'}</small>
+                  <strong>
+                    {nextSectionNumber && <span>{nextSectionNumber}</span>}
+                    {nextSectionTitle || '继续下一节'}
+                    <i aria-hidden="true">→</i>
+                  </strong>
                 </button>
-              </div>
+              </nav>
+              <footer className="quiz-review-feedback">
+                <p>这节内容帮你解决问题了吗？</p>
+                <button type="button" onClick={onFeedback}>
+                  告诉我们哪里还不清楚 <span aria-hidden="true">→</span>
+                </button>
+              </footer>
             </>
           ) : failedWorkflowTasks.length > 0 ? (
             <>
@@ -8076,13 +8235,14 @@ function QuizReview({
           )
         ) : eligibleUnderCurrentPolicy ? (
           <>
-            <span>可以继续学习</span>
+            <span>当前成绩已达到本节通过标准</span>
+            <small>确认后会记录本节通过，并开始准备下一节。</small>
             <button
               className="primary-button"
               disabled={reassessing}
               onClick={onReassess}
             >
-              {reassessing ? '正在更新进度…' : '按当前规则继续'}
+              {reassessing ? '正在确认并准备…' : '确认通过并准备下一节'}
             </button>
           </>
         ) : remediationReady ? (

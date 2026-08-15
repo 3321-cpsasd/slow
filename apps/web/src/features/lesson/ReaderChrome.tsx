@@ -12,6 +12,11 @@ type LessonReaderHeaderProps = {
   sessionSeconds: number;
   canRegenerate: boolean;
   regenerating: boolean;
+  readerTypographyStep: number;
+  readerTypographyLabel: string;
+  readerTypographyBodySize: number;
+  readerTypographyStepCount: number;
+  onReaderTypographyStepChange: (step: number) => void;
   onRequestRegenerate: () => void;
   onFeedback: () => void;
 };
@@ -34,6 +39,11 @@ export function LessonReaderHeader({
   sessionSeconds,
   canRegenerate,
   regenerating,
+  readerTypographyStep,
+  readerTypographyLabel,
+  readerTypographyBodySize,
+  readerTypographyStepCount,
+  onReaderTypographyStepChange,
   onRequestRegenerate,
   onFeedback,
 }: LessonReaderHeaderProps) {
@@ -80,17 +90,72 @@ export function LessonReaderHeader({
             <button
               type="button"
               className="quiet-button reader-options-trigger"
-              aria-haspopup="menu"
+              aria-haspopup="dialog"
               aria-expanded={menuOpen}
               onClick={() => setMenuOpen((open) => !open)}
             >
               小节选项 <span aria-hidden="true">···</span>
             </button>
             {menuOpen && (
-              <div className="reader-options-menu" role="menu" aria-label="小节选项">
+              <div className="reader-options-menu" role="dialog" aria-label="小节选项">
+                <section className="reader-typography-control" aria-labelledby="reader-typography-title">
+                  <header>
+                    <div>
+                      <b id="reader-typography-title">阅读字号</b>
+                      <small>正文与标题同步调整</small>
+                    </div>
+                    <output htmlFor="reader-typography-range">
+                      {readerTypographyLabel} · {readerTypographyBodySize}px
+                    </output>
+                  </header>
+                  <div className="reader-typography-stepper">
+                    <button
+                      type="button"
+                      aria-label="减小阅读字号"
+                      disabled={readerTypographyStep === 0}
+                      onClick={() => onReaderTypographyStepChange(readerTypographyStep - 1)}
+                    >
+                      <span aria-hidden="true">A</span>
+                    </button>
+                    <div>
+                      <input
+                        id="reader-typography-range"
+                        type="range"
+                        min="0"
+                        max={readerTypographyStepCount - 1}
+                        step="1"
+                        value={readerTypographyStep}
+                        aria-label="阅读字号"
+                        aria-valuetext={`${readerTypographyLabel}，正文 ${readerTypographyBodySize}px`}
+                        onChange={(event) => onReaderTypographyStepChange(Number(event.currentTarget.value))}
+                      />
+                      <span className="reader-typography-ticks" aria-hidden="true">
+                        {Array.from({ length: readerTypographyStepCount }, (_, index) => (
+                          <i key={index} className={index <= readerTypographyStep ? 'active' : ''} />
+                        ))}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      aria-label="增大阅读字号"
+                      disabled={readerTypographyStep === readerTypographyStepCount - 1}
+                      onClick={() => onReaderTypographyStepChange(readerTypographyStep + 1)}
+                    >
+                      <span aria-hidden="true">A</span>
+                    </button>
+                  </div>
+                  <footer>
+                    <span>共 {readerTypographyStepCount} 档</span>
+                    {readerTypographyStep !== 3 && (
+                      <button type="button" onClick={() => onReaderTypographyStepChange(3)}>
+                        恢复标准
+                      </button>
+                    )}
+                  </footer>
+                </section>
                 <button
                   type="button"
-                  role="menuitem"
+                  className="reader-option-action"
                   onClick={() => {
                     setMenuOpen(false);
                     onFeedback();
@@ -102,7 +167,7 @@ export function LessonReaderHeader({
                 {canRegenerate && (
                   <button
                     type="button"
-                    role="menuitem"
+                    className="reader-option-action"
                     disabled={regenerating}
                     onClick={() => {
                       setMenuOpen(false);
