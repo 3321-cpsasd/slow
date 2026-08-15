@@ -18,7 +18,6 @@ from ...domain.learning import grade_choice_quiz
 from ...infrastructure.tables import (
     AssessmentObservation,
     AssessmentTarget,
-    ContentBlockVersion,
     ContentVersion,
     GenerationRun,
     QuizAttempt,
@@ -34,12 +33,13 @@ from ...infrastructure.tables import (
 from .assessment import record_scoring_facts
 from .assessment_items import (
     immutable_questions_for_quiz,
-    publish_assessment_item_versions,
 )
-from .content_governance_store import (
-    bind_remediation_questions_to_source_claims,
-    governance_view_for_quiz,
-    reevaluate_generated_governance,
+from .content_governance_store import governance_view_for_quiz
+from .derived_quizzes import (
+    load_derived_quiz_source,
+    publish_derived_quiz_candidate,
+    public_question_view,
+    with_alignment_gated_answer,
 )
 from .reviews import (
     _content_for_review_generation,
@@ -77,17 +77,7 @@ def _hash(value) -> str:
 
 
 def _public_question(question: dict) -> dict:
-    return {
-        **{
-            key: value
-            for key, value in question.items()
-            if key not in {
-                "correct", "explanation", "claim_block_indexes",
-                "distractor_diagnostics", "distractorDiagnostics",
-            }
-        },
-        "selectionMode": "multiple" if len(set(question.get("correct", []))) > 1 else "single",
-    }
+    return public_question_view(question)
 
 
 class ReinforcementService:
@@ -314,18 +304,38 @@ class ReinforcementService:
             failed_quiz = self.db.get(QuizSet, assignment.review_quiz_set_id)
             if not target or not section or not content or not failed_quiz:
                 raise AppError("补强来源链不完整", code="REINFORCEMENT_SOURCE_MISSING", status=409)
-            failed_questions = _load(failed_quiz.questions_json, [])
-            failed_question = next((item for item in failed_questions if item.get("assessmentTargetId") == target.id), None)
-            if not failed_question:
-                raise AppError("补强目标缺少原始题目", code="REINFORCEMENT_SOURCE_MISSING", status=409)
-            failed_results = _load(failed_attempt.results_json, [])
-            failed_result = next(
-                (
-                    item for item in failed_results
-                    if item.get("assessmentTargetId") == target.id
-                ),
-                failed_results[0] if failed_results else {},
+            failed_questions = immutable_questions_for_quiz(
+                self.db,
+                failed_quiz,
+                require_versions=True,
+                require_evidence=True,
+                require_answer_versions=True,
             )
+            failed_results = _load(failed_attempt.results_json, [])
+            failed_position = next(
+                (
+                    position
+                    for position, (question, result) in enumerate(
+                        zip(failed_questions, failed_results, strict=True)
+                    )
+                    if question.get("assessmentTargetId") == target.id
+                    and result.get("correct") is False
+                ),
+                None,
+            )
+            if failed_position is None:
+                raise AppError("补强目标缺少失败原题", code="REINFORCEMENT_SOURCE_MISSING", status=409)
+            source = load_derived_quiz_source(
+                self.db,
+                quiz=failed_quiz,
+                assessment_target_id=target.id,
+                question_position=failed_position,
+                expected_section_id=assignment.source_section_id,
+                expected_content_version_id=assignment.content_version_id,
+                expected_contract_version_id=assignment.learning_contract_version_id,
+            )
+            failed_question = source.question
+            failed_result = failed_results[failed_position]
             selected_indexes = failed_result.get("selectedOptions", [])
             selected_labels = [
                 failed_question.get("options", [])[index]
@@ -384,59 +394,27 @@ class ReinforcementService:
             )
             if not alignment.allowed:
                 raise AppError("补强验证题与原正文未对齐", code="REINFORCEMENT_ALIGNMENT_FAILED", status=502, retryable=True)
-            verify_question = candidate.model_dump()
+            verify_question = with_alignment_gated_answer(candidate.model_dump())
             verify_question["assessmentTargetId"] = target.id
             verify_question["equivalenceGroupId"] = f"{target.id}:reinforcement:{run.id}"
             if not _questions_are_substantively_different(failed_question, verify_question):
                 raise AppError("独立验证题与失败题实质重复", code="REINFORCEMENT_ITEM_NOT_NOVEL", status=502)
-            verify_question = bind_remediation_questions_to_source_claims(
-                self.db,
-                content=content,
-                questions=[verify_question],
-                prior_questions=[failed_question],
-            )[0]
             generation_index = self.db.scalar(
                 select(func.max(QuizSet.generation)).where(QuizSet.section_id == section.id)
             ) or 0
-            quiz = QuizSet(
-                id=_uid("reinforcement_quiz"),
-                section_id=section.id,
-                content_version_id=content.id,
-                learning_contract_version_id=assignment.learning_contract_version_id,
-                generation=generation_index + 1,
-                questions_json=_dump([verify_question]),
-                schema_version=REINFORCEMENT_SCHEMA_VERSION,
-            )
-            self.db.add(quiz)
-            self.db.flush()
-            block_ids_by_position = {
-                item.position: item.id
-                for item in self.db.scalars(
-                    select(ContentBlockVersion)
-                    .where(ContentBlockVersion.content_version_id == content.id)
-                    .order_by(ContentBlockVersion.position)
-                ).all()
-            }
-            evidence_block_ids = [
-                block_ids_by_position[index]
-                for index in verify_question.get("claim_block_indexes", [])
-                if index in block_ids_by_position
-            ]
-            verify_question = publish_assessment_item_versions(
+            publication = publish_derived_quiz_candidate(
                 self.db,
-                quiz=quiz,
-                questions=[verify_question],
-                evidence_block_ids_by_position=[evidence_block_ids],
                 uid=_uid,
-            )[0]
-            governance = reevaluate_generated_governance(
-                self.db,
-                quiz_id=quiz.id,
-                actor_id=run.id,
+                source=source,
+                candidate_question=verify_question,
+                kind="reinforcement",
+                quiz_generation=generation_index + 1,
                 actor_kind="reinforcement_run",
+                actor_id=run.id,
+                equivalence_group_id=f"{target.id}:reinforcement:{run.id}",
             )
-            if not governance["allowed"] or not governance["assessmentEligible"]:
-                raise AppError("补强验证题缺少可信正文绑定", code="REINFORCEMENT_GOVERNANCE_FAILED", status=409)
+            quiz = publication.quiz
+            verify_question = publication.question
 
             package = ReinforcementPackageVersion(
                 id=_uid("reinforcement_package"),
@@ -680,11 +658,19 @@ class ReinforcementService:
                     quiz,
                     require_versions=True,
                     require_evidence=True,
+                    require_answer_versions=True,
                 )
                 if quiz else []
             )
             governance = governance_view_for_quiz(self.db, quiz.id) if quiz else None
-            if not quiz or not governance or not governance["allowed"] or not governance["assessmentEligible"]:
+            if (
+                not quiz
+                or quiz.publication_status != "published"
+                or not governance
+                or not governance["allowed"]
+                or not governance["assessmentEligible"]
+                or governance["mode"] != "contract_boundary"
+            ):
                 raise AppError("独立验证题的可信状态已失效", code="REINFORCEMENT_GOVERNANCE_REQUIRED", status=409)
             try:
                 grade = grade_choice_quiz(questions, [body.selected_options])

@@ -1,9 +1,11 @@
 from datetime import timedelta
 import json
+import logging
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from app.ai.contracts import (
     ChoiceQuestion,
@@ -14,6 +16,11 @@ from app.ai.contracts import (
 from app.core.errors import AppError
 from app.infrastructure.tables import (
     AssessmentObservation,
+    AssessmentAnswerVersion,
+    AssessmentItemEvidenceBlock,
+    AssessmentItemVersion,
+    ContentBlockAssessmentTarget,
+    ContentBlockVersion,
     ContentVersion,
     EvidenceQualificationEvent,
     GovernanceDecisionSnapshot,
@@ -42,6 +49,7 @@ class ReviewCapableAi(FakeAi):
             core=prior.get("core", False),
             objective=prior["objective"],
             explanation="延迟复习需要把机制迁移到新的边界判断。",
+            answer_authority="demo_fixture_v1",
         )])
 
     async def review_lesson_alignment(self, request, content, quiz):
@@ -61,6 +69,7 @@ class ReusingReviewAi(ReviewCapableAi):
             core=prior.get("core", False),
             objective=prior["objective"],
             explanation=prior["explanation"],
+            answer_authority="demo_fixture_v1",
         )])
 
 
@@ -82,6 +91,13 @@ class RejectingAlignmentReviewAi(ReviewCapableAi):
             )],
             covered_objectives=[],
         )
+
+
+class LegacyAnswerReviewAi(ReviewCapableAi):
+    async def lesson_quiz(self, request, content, prior_questions=None):
+        generated = await super().lesson_quiz(request, content, prior_questions)
+        generated.questions[0].answer_authority = "legacy_author_declared"
+        return generated
 
 
 def _review_client(tmp_path, ai=None):
@@ -113,6 +129,35 @@ def _complete_initial_quiz_and_make_due(client):
     for task in response.json().get("workflowTasks", []):
         assert wait_for_task(client, task["taskId"])["status"] == "succeeded"
     with client.app.state.sessions() as db:
+        item_rows = db.scalars(
+            select(AssessmentItemVersion).where(
+                AssessmentItemVersion.quiz_set_id == section["quiz"]["id"]
+            )
+        ).all()
+        item_by_id = {item.id: item for item in item_rows}
+        evidence_rows = db.scalars(
+            select(AssessmentItemEvidenceBlock).where(
+                AssessmentItemEvidenceBlock.assessment_item_version_id.in_(
+                    list(item_by_id)
+                )
+            )
+        ).all()
+        seen_block_targets = set()
+        for evidence in evidence_rows:
+            item = item_by_id[evidence.assessment_item_version_id]
+            identity = (
+                evidence.content_block_version_id,
+                item.assessment_target_id,
+            )
+            if identity in seen_block_targets:
+                continue
+            seen_block_targets.add(identity)
+            db.add(ContentBlockAssessmentTarget(
+                id=f"test_block_target_{uuid4().hex}",
+                content_block_version_id=evidence.content_block_version_id,
+                assessment_target_id=item.assessment_target_id,
+                binding_role="teaches",
+            ))
         review = db.scalar(select(ReviewState).where(ReviewState.user_id == "user_demo"))
         review.status = "scheduled"
         review.next_due_at = now() - timedelta(hours=1)
@@ -145,6 +190,19 @@ def test_review_assignment_materializes_once_and_submits_candidate(tmp_path):
         assert "explanation" not in started_body["quiz"]["questions"][0]
         assert "claim_block_indexes" not in started_body["quiz"]["questions"][0]
         assert started_body["quiz"]["questions"][0]["selectionMode"] == "single"
+        assert not {
+            "id",
+            "itemKey",
+            "optionIds",
+            "answerAuthority",
+            "optionVerdicts",
+            "evidenceBlockIds",
+            "sourceQuizSetId",
+            "sourceAssessmentItemVersionId",
+            "publicationRuleVersion",
+            "equivalenceGroupId",
+            "assessmentTargetId",
+        }.intersection(started_body["quiz"]["questions"][0])
         with client.app.state.sessions() as db:
             assignment = db.get(ReviewAssignment, assignment_id)
             governance = db.scalar(
@@ -158,9 +216,44 @@ def test_review_assignment_materializes_once_and_submits_candidate(tmp_path):
             assert governance is not None
             assert governance.allowed is True
             assert governance.assessment_eligible is True
+            assert governance.mode == "contract_boundary"
             assert governance.actor_kind == "review_assignment"
             assert governance.actor_id == assignment.id
-            assert stored_question["claim_block_indexes"] == [0]
+            assert "claim_block_indexes" not in stored_question
+            assert stored_question["evidenceBlockIds"]
+            source_item_id = stored_question["sourceAssessmentItemVersionId"]
+            derived_item = db.scalar(
+                select(AssessmentItemVersion).where(
+                    AssessmentItemVersion.quiz_set_id == stored_quiz.id
+                )
+            )
+            assert db.scalar(
+                select(AssessmentAnswerVersion).where(
+                    AssessmentAnswerVersion.assessment_item_version_id
+                    == derived_item.id
+                )
+            ) is not None
+            source_evidence = set(db.scalars(
+                select(AssessmentItemEvidenceBlock.content_block_version_id).where(
+                    AssessmentItemEvidenceBlock.assessment_item_version_id
+                    == source_item_id
+                )
+            ))
+            derived_evidence = set(db.scalars(
+                select(AssessmentItemEvidenceBlock.content_block_version_id).where(
+                    AssessmentItemEvidenceBlock.assessment_item_version_id
+                    == derived_item.id
+                )
+            ))
+            assert derived_evidence == source_evidence
+
+        repeated_start = client.post(f"/api/reviews/{assignment_id}/start")
+        assert repeated_start.status_code == 200
+        assert repeated_start.json() == started_body
+        with client.app.state.sessions() as db:
+            assert db.scalar(select(func.count(QuizSet.id)).where(
+                QuizSet.id == started_body["quiz"]["id"]
+            )) == 1
 
         submitted = client.post(
             f"/api/reviews/{assignment_id}/submit",
@@ -339,6 +432,77 @@ def test_review_start_rejects_semantically_invalid_answer_without_state_change(t
             assert db.scalar(select(func.count(QuizSet.id))) == before_quizzes
 
 
+def test_review_start_persists_alignment_gated_legacy_answer(tmp_path):
+    with _review_client(tmp_path, LegacyAnswerReviewAi()) as client:
+        _complete_initial_quiz_and_make_due(client)
+        assignment_id = client.get(
+            "/api/reviews/due?daily_budget=1"
+        ).json()["items"][0]["assignmentId"]
+
+        response = client.post(f"/api/reviews/{assignment_id}/start")
+        assert response.status_code == 200, response.json()
+        with client.app.state.sessions() as db:
+            assignment = db.get(ReviewAssignment, assignment_id)
+            item = db.scalar(select(AssessmentItemVersion).where(
+                AssessmentItemVersion.quiz_set_id == assignment.review_quiz_set_id
+            ))
+            answer = db.scalar(select(AssessmentAnswerVersion).where(
+                AssessmentAnswerVersion.assessment_item_version_id == item.id
+            ))
+            assert assignment.status == "started"
+            assert answer.authority_kind == "alignment_gated_model_v1"
+            assert answer.rule_version == "answer_after_semantic_alignment_v1"
+
+
+def test_review_accepts_legacy_source_answer_but_publishes_new_answer_version(tmp_path):
+    with _review_client(tmp_path) as client:
+        _complete_initial_quiz_and_make_due(client)
+        with client.app.state.sessions() as db:
+            review = db.scalar(select(ReviewState).where(
+                ReviewState.user_id == "user_demo"
+            ))
+            observation = db.scalar(
+                select(AssessmentObservation)
+                .where(
+                    AssessmentObservation.assessment_target_id
+                    == review.assessment_target_id,
+                )
+                .order_by(AssessmentObservation.sequence.desc())
+            )
+            source_quiz = db.get(QuizSet, observation.quiz_set_id)
+            source_questions = json.loads(source_quiz.questions_json)
+            source_items = db.scalars(
+                select(AssessmentItemVersion)
+                .where(AssessmentItemVersion.quiz_set_id == source_quiz.id)
+                .order_by(AssessmentItemVersion.position)
+            ).all()
+            for item, question in zip(source_items, source_questions, strict=True):
+                item.payload_json = json.dumps(question, ensure_ascii=False)
+            db.execute(delete(AssessmentAnswerVersion).where(
+                AssessmentAnswerVersion.assessment_item_version_id.in_(
+                    [item.id for item in source_items]
+                )
+            ))
+            db.commit()
+
+        due = client.get("/api/reviews/due?daily_budget=1")
+        assert due.status_code == 200, due.json()
+        assignment_id = due.json()["items"][0]["assignmentId"]
+        started = client.post(f"/api/reviews/{assignment_id}/start")
+        assert started.status_code == 200, started.json()
+
+        with client.app.state.sessions() as db:
+            assignment = db.get(ReviewAssignment, assignment_id)
+            derived_item = db.scalar(select(AssessmentItemVersion).where(
+                AssessmentItemVersion.quiz_set_id == assignment.review_quiz_set_id
+            ))
+            answer = db.scalar(select(AssessmentAnswerVersion).where(
+                AssessmentAnswerVersion.assessment_item_version_id == derived_item.id
+            ))
+            assert answer is not None
+            assert answer.publication_status == "published"
+
+
 def test_review_submit_requires_current_eligible_governance_snapshot(tmp_path):
     with _review_client(tmp_path) as client:
         _complete_initial_quiz_and_make_due(client)
@@ -373,6 +537,224 @@ def test_review_submit_requires_current_eligible_governance_snapshot(tmp_path):
             assignment = db.get(ReviewAssignment, assignment_id)
             assert assignment.status == "started"
             assert assignment.submitted_attempt_id is None
+
+
+def test_review_source_uses_the_exact_observed_item_when_targets_repeat(tmp_path):
+    with _review_client(tmp_path) as client:
+        _complete_initial_quiz_and_make_due(client)
+        due = client.get("/api/reviews/due?daily_budget=1").json()
+        assignment_id = due["items"][0]["assignmentId"]
+        with client.app.state.sessions() as db:
+            assignment = db.get(ReviewAssignment, assignment_id)
+            observation = db.scalar(
+                select(AssessmentObservation)
+                .where(
+                    AssessmentObservation.quiz_set_id
+                    == assignment.prior_quiz_set_id,
+                    AssessmentObservation.assessment_target_id
+                    == assignment.assessment_target_id,
+                )
+                .order_by(AssessmentObservation.sequence.desc())
+            )
+            expected_item = db.scalar(select(AssessmentItemVersion).where(
+                AssessmentItemVersion.quiz_set_id == assignment.prior_quiz_set_id,
+                AssessmentItemVersion.position == observation.question_index,
+            ))
+
+        started = client.post(f"/api/reviews/{assignment_id}/start")
+        assert started.status_code == 200, started.json()
+        with client.app.state.sessions() as db:
+            assignment = db.get(ReviewAssignment, assignment_id)
+            quiz = db.get(QuizSet, assignment.review_quiz_set_id)
+            question = json.loads(quiz.questions_json)[0]
+            assert question["sourceAssessmentItemVersionId"] == expected_item.id
+
+
+def test_review_selection_skips_source_without_immutable_evidence(tmp_path, caplog):
+    with _review_client(tmp_path) as client:
+        _complete_initial_quiz_and_make_due(client)
+        with client.app.state.sessions() as db:
+            review = db.scalar(select(ReviewState).where(
+                ReviewState.user_id == "user_demo"
+            ))
+            observation = db.scalar(
+                select(AssessmentObservation)
+                .where(
+                    AssessmentObservation.assessment_target_id
+                    == review.assessment_target_id,
+                )
+                .order_by(AssessmentObservation.sequence.desc())
+            )
+            item = db.scalar(select(AssessmentItemVersion).where(
+                AssessmentItemVersion.quiz_set_id == observation.quiz_set_id,
+                AssessmentItemVersion.position == observation.question_index,
+            ))
+            db.execute(delete(AssessmentItemEvidenceBlock).where(
+                AssessmentItemEvidenceBlock.assessment_item_version_id == item.id
+            ))
+            db.commit()
+
+        with caplog.at_level("INFO", logger="app.modules.learning.reviews"):
+            due = client.get("/api/reviews/due?daily_budget=1")
+        assert due.status_code == 200
+        assert due.json()["selectedCount"] == 0
+        skipped = next(
+            record
+            for record in caplog.records
+            if record.getMessage().startswith(
+                "review source selection skipped incompatible observations"
+            )
+        )
+        assert skipped.rejection_codes[
+            "ASSESSMENT_ITEM_EVIDENCE_INCOMPLETE"
+        ] >= 1
+        with client.app.state.sessions() as db:
+            assert db.scalar(select(func.count(ReviewAssignment.id))) == 0
+
+
+def test_review_start_rejects_cross_content_source_evidence_without_partial_quiz(tmp_path):
+    with _review_client(tmp_path) as client:
+        _complete_initial_quiz_and_make_due(client)
+        assignment_id = client.get(
+            "/api/reviews/due?daily_budget=1"
+        ).json()["items"][0]["assignmentId"]
+        with client.app.state.sessions() as db:
+            assignment = db.get(ReviewAssignment, assignment_id)
+            observation = db.scalar(
+                select(AssessmentObservation)
+                .where(
+                    AssessmentObservation.quiz_set_id
+                    == assignment.prior_quiz_set_id,
+                    AssessmentObservation.assessment_target_id
+                    == assignment.assessment_target_id,
+                )
+                .order_by(AssessmentObservation.sequence.desc())
+            )
+            item = db.scalar(select(AssessmentItemVersion).where(
+                AssessmentItemVersion.quiz_set_id == assignment.prior_quiz_set_id,
+                AssessmentItemVersion.position == observation.question_index,
+            ))
+            binding = db.scalar(select(AssessmentItemEvidenceBlock).where(
+                AssessmentItemEvidenceBlock.assessment_item_version_id == item.id
+            ))
+            foreign_block = db.scalar(select(ContentBlockVersion).where(
+                ContentBlockVersion.content_version_id
+                != assignment.content_version_id
+            ))
+            payload = json.loads(item.payload_json)
+            payload["evidenceBlockIds"] = [foreign_block.id]
+            item.payload_json = json.dumps(payload, ensure_ascii=False)
+            binding.content_block_version_id = foreign_block.id
+            before_quizzes = db.scalar(select(func.count(QuizSet.id)))
+            db.commit()
+
+        response = client.post(f"/api/reviews/{assignment_id}/start")
+        assert response.status_code == 409
+        assert response.json()["code"] == "DERIVED_QUIZ_SOURCE_EVIDENCE_CROSS_CONTENT"
+        with client.app.state.sessions() as db:
+            assignment = db.get(ReviewAssignment, assignment_id)
+            assert assignment.status == "presented"
+            assert assignment.review_quiz_set_id is None
+            assert db.scalar(select(func.count(QuizSet.id))) == before_quizzes
+
+
+def test_review_start_rejects_source_evidence_that_no_longer_teaches_target(tmp_path):
+    with _review_client(tmp_path) as client:
+        _complete_initial_quiz_and_make_due(client)
+        assignment_id = client.get(
+            "/api/reviews/due?daily_budget=1"
+        ).json()["items"][0]["assignmentId"]
+        with client.app.state.sessions() as db:
+            assignment = db.get(ReviewAssignment, assignment_id)
+            observation = db.scalar(
+                select(AssessmentObservation)
+                .where(
+                    AssessmentObservation.quiz_set_id
+                    == assignment.prior_quiz_set_id,
+                    AssessmentObservation.assessment_target_id
+                    == assignment.assessment_target_id,
+                )
+                .order_by(AssessmentObservation.sequence.desc())
+            )
+            item = db.scalar(select(AssessmentItemVersion).where(
+                AssessmentItemVersion.quiz_set_id == assignment.prior_quiz_set_id,
+                AssessmentItemVersion.position == observation.question_index,
+            ))
+            evidence_ids = list(db.scalars(
+                select(AssessmentItemEvidenceBlock.content_block_version_id).where(
+                    AssessmentItemEvidenceBlock.assessment_item_version_id == item.id
+                )
+            ))
+            db.execute(delete(ContentBlockAssessmentTarget).where(
+                ContentBlockAssessmentTarget.content_block_version_id.in_(evidence_ids),
+                ContentBlockAssessmentTarget.assessment_target_id
+                == assignment.assessment_target_id,
+            ))
+            before_quizzes = db.scalar(select(func.count(QuizSet.id)))
+            db.commit()
+
+        response = client.post(f"/api/reviews/{assignment_id}/start")
+        assert response.status_code == 409
+        assert response.json()["code"] == "DERIVED_QUIZ_SOURCE_EVIDENCE_TARGET_MISMATCH"
+        with client.app.state.sessions() as db:
+            assignment = db.get(ReviewAssignment, assignment_id)
+            assert assignment.status == "presented"
+            assert assignment.review_quiz_set_id is None
+            assert db.scalar(select(func.count(QuizSet.id))) == before_quizzes
+
+
+def test_review_selection_skips_source_with_invalid_governance(tmp_path):
+    with _review_client(tmp_path) as client:
+        _complete_initial_quiz_and_make_due(client)
+        with client.app.state.sessions() as db:
+            review = db.scalar(select(ReviewState).where(
+                ReviewState.user_id == "user_demo"
+            ))
+            observation = db.scalar(
+                select(AssessmentObservation)
+                .where(
+                    AssessmentObservation.assessment_target_id
+                    == review.assessment_target_id,
+                )
+                .order_by(AssessmentObservation.sequence.desc())
+            )
+            snapshots = db.scalars(select(GovernanceDecisionSnapshot).where(
+                GovernanceDecisionSnapshot.quiz_set_id == observation.quiz_set_id
+            )).all()
+            assert snapshots
+            for snapshot in snapshots:
+                snapshot.allowed = False
+                snapshot.assessment_eligible = False
+            db.commit()
+
+        due = client.get("/api/reviews/due?daily_budget=1")
+        assert due.status_code == 200
+        assert due.json()["selectedCount"] == 0
+
+
+def test_review_submit_ignores_tampered_quiz_compatibility_projection(tmp_path):
+    with _review_client(tmp_path) as client:
+        _complete_initial_quiz_and_make_due(client)
+        assignment_id = client.get(
+            "/api/reviews/due?daily_budget=1"
+        ).json()["items"][0]["assignmentId"]
+        assert client.post(f"/api/reviews/{assignment_id}/start").status_code == 200
+        with client.app.state.sessions() as db:
+            assignment = db.get(ReviewAssignment, assignment_id)
+            quiz = db.get(QuizSet, assignment.review_quiz_set_id)
+            projected = json.loads(quiz.questions_json)
+            projected[0]["correct"] = [0]
+            projected[0]["prompt"] = "被篡改的兼容投影"
+            quiz.questions_json = json.dumps(projected, ensure_ascii=False)
+            db.commit()
+
+        submitted = client.post(
+            f"/api/reviews/{assignment_id}/submit",
+            headers={"Idempotency-Key": "review-submit-authority-only"},
+            json={"answers": [[1]]},
+        )
+        assert submitted.status_code == 200, submitted.json()
+        assert submitted.json()["passed"] is True
 
 
 def test_review_assignment_is_hidden_from_other_user(tmp_path):
