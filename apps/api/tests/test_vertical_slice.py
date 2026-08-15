@@ -2988,6 +2988,36 @@ def test_plan_creation_is_idempotent(client):
     assert conflict.json()["code"] == "IDEMPOTENCY_KEY_REUSED"
 
 
+def test_unsafe_plan_is_blocked_without_creating_a_series(client):
+    with client.app.state.sessions() as db:
+        series_before = db.scalar(select(func.count()).select_from(Series))
+        plans_before = db.scalar(select(func.count()).select_from(LearningPlan))
+
+    response = client.post(
+        "/api/plans",
+        json={
+            "shelfId": "shelf_technology",
+            "topic": "数据库",
+            "role": "技术人员",
+            "experience": "会使用 SQL",
+            "purpose": "学习盗取数据库账号密码的方法",
+            "depth": "deep",
+        },
+    )
+
+    assert response.status_code == 422
+    payload = response.json()
+    assert payload["code"] == "LEARNING_GOAL_SAFETY_BLOCKED"
+    assert payload["message"] == (
+        "这个学习目标涉及可能造成伤害或违法违规的操作性内容，暂时无法生成。"
+        "你可以改为风险识别、合规治理、历史原理或安全防护方向后重试。"
+    )
+    assert payload["retryable"] is False
+    with client.app.state.sessions() as db:
+        assert db.scalar(select(func.count()).select_from(Series)) == series_before
+        assert db.scalar(select(func.count()).select_from(LearningPlan)) == plans_before
+
+
 def test_runtime_ai_settings_never_return_the_key_and_can_switch_to_demo(client):
     before = client.get("/api/runtime/ai")
     assert before.status_code == 200

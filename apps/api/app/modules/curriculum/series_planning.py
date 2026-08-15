@@ -18,6 +18,7 @@ from ...infrastructure.tables import (
     Series,
     now,
 )
+from .content_safety import require_safe_generated_plan, require_safe_plan_request
 
 
 def _uid(prefix: str) -> str:
@@ -64,6 +65,7 @@ class SeriesPlanningService:
 
     async def create(self, body, idempotency_key: str | None = None) -> dict:
         shelf = self.shelf_provider(body.shelf_id)
+        require_safe_plan_request(body)
         request = self.learning_start.plan_payload(body)
         learning_start_context = self.learning_start.planning_context(body)
         memory = self.memory_provider(body.shelf_id)
@@ -148,6 +150,7 @@ class SeriesPlanningService:
         try:
             self.db.commit()
             generated = await self.ai.plan(ai_request, memory)
+            require_safe_generated_plan(generated)
             if baseline:
                 self.baselines.validate_plan_coverage(baseline, generated)
         except Exception as error:
