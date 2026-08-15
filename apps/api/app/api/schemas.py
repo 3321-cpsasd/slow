@@ -479,7 +479,7 @@ class ResumeUpdate(ApiModel):
 
 
 class FeedbackCreate(ApiModel):
-    scope: Literal["global", "content_block"]
+    scope: Literal["global", "content_block", "quiz_question"]
     feedback_type: Literal[
         "inaccurate",
         "unclear",
@@ -497,21 +497,43 @@ class FeedbackCreate(ApiModel):
     section_id: str | None = Field(default=None, max_length=160)
     content_version_id: str | None = Field(default=None, max_length=160)
     block_id: str | None = Field(default=None, max_length=160)
+    attempt_id: str | None = Field(default=None, max_length=160)
+    question_index: int | None = Field(default=None, ge=0, le=11)
 
     @model_validator(mode="after")
     def validate_scope(self):
         paragraph_types = {
             "inaccurate", "unclear", "poor_example", "typo", "layout", "other"
         }
+        question_types = {"inaccurate", "unclear"}
         global_types = {"bug", "feature", "experience", "other"}
-        allowed = paragraph_types if self.scope == "content_block" else global_types
+        allowed = (
+            paragraph_types
+            if self.scope == "content_block"
+            else question_types
+            if self.scope == "quiz_question"
+            else global_types
+        )
         if self.feedback_type not in allowed:
             raise ValueError("反馈类型与反馈范围不匹配")
         if self.scope == "content_block":
             if not self.section_id or not self.content_version_id or not self.block_id:
                 raise ValueError("按段反馈必须绑定小节、内容版本和段落")
-        elif self.section_id or self.content_version_id or self.block_id:
-            raise ValueError("全局反馈不能绑定正文段落")
+            if self.attempt_id is not None or self.question_index is not None:
+                raise ValueError("按段反馈不能绑定作答题目")
+        elif self.scope == "quiz_question":
+            if not self.section_id or not self.attempt_id or self.question_index is None:
+                raise ValueError("错题反馈必须绑定小节、作答记录和题号")
+            if self.content_version_id or self.block_id:
+                raise ValueError("错题反馈不能绑定正文段落")
+        elif (
+            self.section_id
+            or self.content_version_id
+            or self.block_id
+            or self.attempt_id
+            or self.question_index is not None
+        ):
+            raise ValueError("全局反馈不能绑定学习内容")
         self.message = self.message.strip()
         if self.scope == "global" and len(self.message) < 2:
             raise ValueError("请补充至少两个字的反馈说明")

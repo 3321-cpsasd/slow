@@ -41,6 +41,7 @@ import type {
   Bootstrap,
   AccountExitReceipt,
   PrivacyState,
+  Question,
   RegistrationResult,
   Chapter,
   ChapterChallenge,
@@ -7680,6 +7681,140 @@ function Quiz({
   );
 }
 
+function QuizQuestionFeedback({
+  sectionId,
+  attemptId,
+  questionIndex,
+  question,
+}: {
+  sectionId: string;
+  attemptId: string;
+  questionIndex: number;
+  question: Question;
+}) {
+  const [open, setOpen] = useState(false);
+  const [feedbackType, setFeedbackType] = useState<'unclear' | 'inaccurate'>('unclear');
+  const [message, setMessage] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const [status, setStatus] = useState('');
+  const submissionRef = useRef({ payload: '', key: '' });
+
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (next) {
+      telemetry.track('feedback_opened', {
+        view: 'learn',
+        entityType: 'section',
+        entityId: sectionId,
+        properties: {
+          scope: 'quiz_question',
+          questionIndex,
+          questionId: question.id || `${attemptId}:${questionIndex}`,
+        },
+      });
+    }
+  };
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setStatus('');
+    const payload = {
+      scope: 'quiz_question',
+      feedbackType,
+      message,
+      pagePath: window.location.pathname,
+      view: 'learn',
+      sectionId,
+      attemptId,
+      questionIndex,
+    };
+    const serializedPayload = JSON.stringify(payload);
+    if (submissionRef.current.payload !== serializedPayload) {
+      submissionRef.current = { payload: serializedPayload, key: crypto.randomUUID() };
+    }
+    try {
+      await api.submitFeedback(payload, submissionRef.current.key);
+      setSubmitted(true);
+      setStatus(feedbackType === 'inaccurate'
+        ? '已记录为待复核问题。确认前本次成绩保持不变；若确认有误，会更正受影响的学习记录。'
+        : '已记录你没理解的地方，供后续改进这道题的解析和讲解。');
+    } catch (reason) {
+      setStatus(reason instanceof Error ? reason.message : '反馈没有提交成功，请稍后重试。');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <section className={`question-feedback ${open ? 'is-open' : ''} ${submitted ? 'is-received' : ''}`}>
+      <button
+        type="button"
+        className="question-feedback-toggle"
+        aria-expanded={open}
+        onClick={toggle}
+      >
+        <span aria-hidden="true">?</span>
+        <b>{submitted ? '反馈已收到' : '对这道题有疑问？'}</b>
+        <small>{submitted ? '查看处理说明' : '告诉我们是没理解，还是题目可能有误'}</small>
+        <i aria-hidden="true">⌄</i>
+      </button>
+      {open && (
+        submitted ? (
+          <p className="question-feedback-receipt" role="status">{status}</p>
+        ) : (
+          <form onSubmit={submit}>
+            <fieldset>
+              <legend>你的疑问更接近哪一种？</legend>
+              <label className={feedbackType === 'unclear' ? 'selected' : ''}>
+                <input
+                  type="radio"
+                  name={`question-feedback-${attemptId}-${questionIndex}`}
+                  checked={feedbackType === 'unclear'}
+                  onChange={() => setFeedbackType('unclear')}
+                />
+                <span><b>我没理解解析</b><small>答案可能没错，但解释没有帮我想明白</small></span>
+              </label>
+              <label className={feedbackType === 'inaccurate' ? 'selected' : ''}>
+                <input
+                  type="radio"
+                  name={`question-feedback-${attemptId}-${questionIndex}`}
+                  checked={feedbackType === 'inaccurate'}
+                  onChange={() => setFeedbackType('inaccurate')}
+                />
+                <span><b>题目或答案可能有误</b><small>题干有歧义、选项不成立，或标准答案值得复核</small></span>
+              </label>
+            </fieldset>
+            <label className="question-feedback-note">
+              补充说明（可选）
+              <textarea
+                value={message}
+                maxLength={4000}
+                placeholder={feedbackType === 'inaccurate'
+                  ? '例如：题干没有说明从银行还是模型公司的角度看收入…'
+                  : '例如：我不明白为什么我的选项不成立…'}
+                onChange={(event) => setMessage(event.target.value)}
+                disabled={submitting}
+              />
+            </label>
+            {status && <p className="question-feedback-error" role="alert">{status}</p>}
+            <footer>
+              <small>{feedbackType === 'inaccurate'
+                ? '提交后标记为待复核，不会由模型直接改题或立即改分。'
+                : '这条反馈只改进讲解，不会改变本次作答记录。'}</small>
+              <button className="secondary-button" disabled={submitting}>
+                {submitting ? '正在发送…' : '发送反馈'}
+              </button>
+            </footer>
+          </form>
+        )
+      )}
+    </section>
+  );
+}
+
 function QuizReview({
   section,
   result,
@@ -7849,6 +7984,12 @@ function QuizReview({
               ) : (
                 <button className="quiet-button" onClick={() => onReviewContent()}>回看本节正文</button>
               )}
+              <QuizQuestionFeedback
+                sectionId={section.id}
+                attemptId={result.attemptId}
+                questionIndex={questionIndex}
+                question={question}
+              />
             </article>
           );
         })}
