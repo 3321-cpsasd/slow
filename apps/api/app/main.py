@@ -35,7 +35,7 @@ from .ai.gateway import (
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, BookReplanCreate, ChapterChallengeSubmit, ChapterCreate, ChapterOrder, ChapterSkipCreate, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, LearningStartPreviewCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ReinforcementRespond, ResumeUpdate, ReviewSubmit, ShelfCreate, StudyActivityHeartbeat
+from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, BookReplanCreate, ChapterChallengeSubmit, ChapterCreate, ChapterOrder, ChapterSkipCreate, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, LearningStartPreviewCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ReinforcementRespond, ResumeUpdate, ReviewSubmit, ShelfCreate, ShelfRename, StudyActivityHeartbeat
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -1790,6 +1790,18 @@ def create_app(
 
     @app.post("/api/shelves", status_code=201)
     def create_shelf(body: ShelfCreate, s: SlowService = Depends(service)): return s.create_shelf(body)
+
+    @app.patch("/api/shelves/{shelf_id}")
+    def rename_shelf(
+        shelf_id: str,
+        body: ShelfRename,
+        s: SlowService = Depends(service),
+    ):
+        return s.rename_shelf(shelf_id, body)
+
+    @app.delete("/api/shelves/{shelf_id}", status_code=204)
+    def delete_shelf(shelf_id: str, s: SlowService = Depends(service)):
+        s.delete_shelf(shelf_id)
 
     @app.post("/api/learning-start/preview", status_code=201)
     def learning_start_preview(

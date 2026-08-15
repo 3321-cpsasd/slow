@@ -97,6 +97,9 @@ class FeedbackService:
                     ContentVersion.id == body.content_version_id,
                     ContentVersion.section_id == body.section_id,
                     Shelf.user_id == self.scope.user_id,
+                    Shelf.deleted_at.is_(None),
+                    Series.deleted_at.is_(None),
+                    Book.deleted_at.is_(None),
                 )
             )
             if not content:

@@ -83,6 +83,7 @@ class KnowledgeMapService:
             .join(Shelf, Shelf.id == Series.shelf_id)
             .where(
                 Shelf.user_id == self.user_id,
+                Shelf.deleted_at.is_(None),
                 Series.deleted_at.is_(None),
             )
             .order_by(Shelf.name, Series.title, Series.id)

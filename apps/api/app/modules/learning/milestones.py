@@ -65,6 +65,7 @@ class MilestoneService:
                 Series.id == series_id,
                 Series.deleted_at.is_(None),
                 Shelf.user_id == self.user_id,
+                Shelf.deleted_at.is_(None),
             )
         )
         if not series:

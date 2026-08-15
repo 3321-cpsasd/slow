@@ -29,6 +29,10 @@ class ShelfCreate(ApiModel):
         return normalized
 
 
+class ShelfRename(ShelfCreate):
+    """The only mutable user-facing shelf field is its display name."""
+
+
 LearningStartPreferenceKey = Literal[
     "practical_application",
     "understand_principles",

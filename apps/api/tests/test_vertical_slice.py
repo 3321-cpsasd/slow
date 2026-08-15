@@ -82,6 +82,7 @@ from app.infrastructure.tables import (
     SectionProgress,
     Series,
     SeriesLearningStartPreference,
+    Shelf,
     SourceClaimBinding,
     SourceClaimVersion,
     SourceVersion,
@@ -2436,6 +2437,65 @@ def test_series_soft_delete_hides_it_without_destroying_history(client):
     repeated = client.delete(f"/api/series/{series['id']}")
     assert repeated.status_code == 404
     assert repeated.json()["code"] == "SERIES_NOT_FOUND"
+
+
+def test_shelf_soft_delete_hides_all_series_without_destroying_history(client):
+    create_series(client)
+    create_series(client)
+    before = client.get("/api/bootstrap").json()
+    shelf = next(item for item in before["shelves"] if item["id"] == "shelf_technology")
+    affected_series_ids = {item["id"] for item in shelf["series"]}
+    assert len(affected_series_ids) >= 2
+
+    with client.app.state.sessions() as db:
+        run_count_before = db.scalar(
+            select(func.count()).select_from(LearningRun).where(
+                LearningRun.series_id.in_(affected_series_ids)
+            )
+        )
+
+    deleted = client.delete("/api/shelves/shelf_technology")
+    assert deleted.status_code == 204
+    assert all(
+        item["id"] != "shelf_technology"
+        for item in client.get("/api/bootstrap").json()["shelves"]
+    )
+    for series_id in affected_series_ids:
+        assert client.get(f"/api/series/{series_id}").status_code == 404
+
+    assert client.patch(
+        "/api/shelves/shelf_technology",
+        json={"name": "不能重命名已删除书架"},
+    ).status_code == 404
+    assert client.post(
+        "/api/plans",
+        json={
+            "shelfId": "shelf_technology",
+            "topic": "不可新增",
+            "role": "学习者",
+            "experience": "已有基础",
+            "depth": "overview",
+        },
+    ).status_code == 404
+    repeated = client.delete("/api/shelves/shelf_technology")
+    assert repeated.status_code == 404
+    assert repeated.json()["code"] == "SHELF_NOT_FOUND"
+
+    with client.app.state.sessions() as db:
+        stored_shelf = db.get(Shelf, "shelf_technology")
+        stored_series = db.scalars(
+            select(Series).where(Series.id.in_(affected_series_ids))
+        ).all()
+        plans = [db.get(LearningPlan, item.plan_id) for item in stored_series]
+        run_count_after = db.scalar(
+            select(func.count()).select_from(LearningRun).where(
+                LearningRun.series_id.in_(affected_series_ids)
+            )
+        )
+        assert stored_shelf.deleted_at is not None
+        assert all(item.deleted_at is not None for item in stored_series)
+        assert all(plan.status == "deleted" for plan in plans)
+        assert run_count_after == run_count_before
 
 
 def test_deleted_ancestor_invalidates_all_descendant_routes(client):
