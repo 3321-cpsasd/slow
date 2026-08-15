@@ -7,7 +7,7 @@ or a repeated section quiz can never manufacture retention evidence.
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
-import re
+import logging
 from typing import ClassVar
 from uuid import uuid4
 
@@ -20,7 +20,6 @@ from ...domain.learning import grade_choice_quiz
 from ...infrastructure.tables import (
     AssessmentObservation,
     AssessmentTarget,
-    ContentBlockVersion,
     ContentVersion,
     LearningContractVersion,
     LearningMissionVersion,
@@ -34,16 +33,20 @@ from ...infrastructure.tables import (
     now,
 )
 from .assessment import record_scoring_facts
-from .assessment_items import publish_assessment_item_versions
+from .assessment_items import immutable_questions_for_quiz
+from .derived_quizzes import (
+    load_derived_quiz_source,
+    publish_derived_quiz_candidate,
+    public_question_view,
+    question_signature as _question_signature,
+    questions_are_substantively_different as _questions_are_substantively_different,
+    with_alignment_gated_answer,
+)
 from .knowledge_ranks import (
     knowledge_node_views_for_targets,
     resolve_effective_rank_target,
 )
-from .content_governance_store import (
-    bind_remediation_questions_to_source_claims,
-    governance_view_for_quiz,
-    reevaluate_generated_governance,
-)
+from .content_governance_store import governance_view_for_quiz
 from .review_assignments import (
     RETENTION_QUALIFICATION_RULE_VERSION,
     REVIEW_ASSIGNMENT_RULE_VERSION,
@@ -56,6 +59,9 @@ from .review_assignments import (
     select_daily_reviews,
     transition_assignment,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class _ReviewGenerationContent(GeneratedContent):
@@ -124,36 +130,6 @@ def _load(value: str, default):
 
 def _utc(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-
-
-def _normalized(value: str) -> str:
-    return re.sub(r"[\W_]+", "", value, flags=re.UNICODE).casefold()
-
-
-def _question_signature(question: dict) -> str:
-    return hashlib.sha256(_dump({
-        "prompt": question.get("prompt", ""),
-        "options": question.get("options", []),
-        "correct": sorted(question.get("correct", [])),
-    }).encode()).hexdigest()
-
-
-def _questions_are_substantively_different(previous: dict, candidate: dict) -> bool:
-    previous_prompt = _normalized(str(previous.get("prompt", "")))
-    candidate_prompt = _normalized(str(candidate.get("prompt", "")))
-    previous_options = frozenset(
-        _normalized(str(item)) for item in previous.get("options", [])
-    )
-    candidate_options = frozenset(
-        _normalized(str(item)) for item in candidate.get("options", [])
-    )
-    return bool(
-        candidate_prompt
-        and candidate_options
-        and candidate_prompt != previous_prompt
-        and candidate_options != previous_options
-        and _question_signature(candidate) != _question_signature(previous)
-    )
 
 
 class ReviewAssignmentService:
@@ -239,17 +215,58 @@ class ReviewAssignmentService:
             )
             .order_by(AssessmentObservation.sequence.desc())
         ).all()
+        rejection_codes: dict[str, int] = {}
         for observation in observations:
             quiz = self.db.get(QuizSet, observation.quiz_set_id)
-            if quiz and any(
-                item.get("assessmentTargetId") == target_id
-                for item in _load(quiz.questions_json, [])
-            ):
+            if not quiz or observation.question_index is None:
+                continue
+            try:
+                load_derived_quiz_source(
+                    self.db,
+                    quiz=quiz,
+                    assessment_target_id=target_id,
+                    question_position=observation.question_index,
+                    expected_section_id=observation.section_id,
+                    expected_content_version_id=observation.content_version_id,
+                    expected_contract_version_id=(
+                        observation.learning_contract_version_id
+                    ),
+                )
+                if rejection_codes:
+                    logger.info(
+                        "review source selection used an older compatible "
+                        "observation user_id=%s assessment_target_id=%s "
+                        "rejection_codes=%s",
+                        self.user_id,
+                        target_id,
+                        rejection_codes,
+                        extra={
+                            "review_user_id": self.user_id,
+                            "assessment_target_id": target_id,
+                            "rejection_codes": rejection_codes,
+                        },
+                    )
                 return observation
+            except AppError as error:
+                rejection_codes[error.code] = rejection_codes.get(error.code, 0) + 1
+                continue
+        logger.info(
+            "review source selection skipped incompatible observations "
+            "user_id=%s assessment_target_id=%s rejection_codes=%s",
+            self.user_id,
+            target_id,
+            rejection_codes,
+            extra={
+                "review_user_id": self.user_id,
+                "assessment_target_id": target_id,
+                "rejection_codes": rejection_codes,
+            },
+        )
         raise AppError(
             "复习目标缺少可追溯的原始内容与题目",
             code="REVIEW_SOURCE_MISSING",
             status=409,
+            details={"rejectionCodes": rejection_codes},
         )
 
     def _prior_signatures(self, target_id: str) -> set[str]:
@@ -296,17 +313,25 @@ class ReviewAssignmentService:
                     ReviewState.next_due_at.is_not(None),
                 )
             ).all()
-            candidates = [
-                ReviewCandidate(
+            source_by_target: dict[str, AssessmentObservation] = {}
+            candidates = []
+            for item in states:
+                if item.assessment_target_id in active_target_ids:
+                    continue
+                try:
+                    source = self._source_for_target(item.assessment_target_id)
+                except AppError as error:
+                    if error.code != "REVIEW_SOURCE_MISSING":
+                        raise
+                    continue
+                source_by_target[item.assessment_target_id] = source
+                candidates.append(ReviewCandidate(
                     review_state_id=item.id,
                     assessment_target_id=item.assessment_target_id,
                     due_at=_utc(item.next_due_at),
                     priority=item.priority,
                     status=item.status,
-                )
-                for item in states
-                if item.assessment_target_id not in active_target_ids
-            ]
+                ))
             try:
                 selection = select_daily_reviews(
                     candidates,
@@ -338,7 +363,7 @@ class ReviewAssignmentService:
             self.db.add(selection_run)
             self.db.flush()
             for item in selection.items:
-                source = self._source_for_target(item.assessment_target_id)
+                source = source_by_target[item.assessment_target_id]
                 scheduled = scheduled_assignment(
                     assignment_id=_uid("review_assignment"),
                     user_id=self.user_id,
@@ -449,18 +474,78 @@ class ReviewAssignmentService:
             ],
         }
 
-    def _question_for_target(self, quiz: QuizSet, target_id: str) -> dict:
-        question = next((
-            item for item in _load(quiz.questions_json, [])
-            if item.get("assessmentTargetId") == target_id
-        ), None)
-        if not question:
+    def _question_for_target(
+        self,
+        quiz: QuizSet,
+        target_id: str,
+        *,
+        question_position: int,
+    ) -> dict:
+        questions = immutable_questions_for_quiz(
+            self.db,
+            quiz,
+            require_versions=True,
+            require_evidence=True,
+            require_answer_versions=True,
+        )
+        if (
+            question_position < 0
+            or question_position >= len(questions)
+            or questions[question_position].get("assessmentTargetId") != target_id
+        ):
             raise AppError("原题缺少测量目标绑定", code="REVIEW_PRIOR_QUESTION_MISSING", status=409)
-        return question
+        return questions[question_position]
+
+    def _source_for_assignment(self, assignment: ReviewAssignment):
+        observation = self.db.scalar(
+            select(AssessmentObservation)
+            .where(
+                AssessmentObservation.user_id == self.user_id,
+                AssessmentObservation.learning_run_id
+                == assignment.source_learning_run_id,
+                AssessmentObservation.section_id == assignment.source_section_id,
+                AssessmentObservation.quiz_set_id == assignment.prior_quiz_set_id,
+                AssessmentObservation.content_version_id
+                == assignment.content_version_id,
+                AssessmentObservation.learning_contract_version_id
+                == assignment.learning_contract_version_id,
+                AssessmentObservation.assessment_target_id
+                == assignment.assessment_target_id,
+                AssessmentObservation.question_index.is_not(None),
+            )
+            .order_by(AssessmentObservation.sequence.desc())
+        )
+        if not observation or observation.question_index is None:
+            raise AppError(
+                "复习任务缺少精确的原始题目观察",
+                code="REVIEW_SOURCE_MISSING",
+                status=409,
+            )
+        quiz = self.db.get(QuizSet, assignment.prior_quiz_set_id)
+        if not quiz:
+            raise AppError("复习来源题集不存在", code="REVIEW_SOURCE_MISSING", status=409)
+        return load_derived_quiz_source(
+            self.db,
+            quiz=quiz,
+            assessment_target_id=assignment.assessment_target_id,
+            question_position=observation.question_index,
+            expected_section_id=assignment.source_section_id,
+            expected_content_version_id=assignment.content_version_id,
+            expected_contract_version_id=assignment.learning_contract_version_id,
+        )
 
     def _assignment_view(self, assignment: ReviewAssignment) -> dict:
         quiz = self.db.get(QuizSet, assignment.review_quiz_set_id) if assignment.review_quiz_set_id else None
-        questions = _load(quiz.questions_json, []) if quiz else []
+        questions = (
+            immutable_questions_for_quiz(
+                self.db,
+                quiz,
+                require_versions=True,
+                require_evidence=True,
+                require_answer_versions=True,
+            )
+            if quiz else []
+        )
         return {
             "assignmentId": assignment.id,
             "status": assignment.status,
@@ -470,24 +555,7 @@ class ReviewAssignmentService:
             "quiz": {
                 "id": quiz.id,
                 "questions": [
-                    {
-                        **{
-                            key: value
-                            for key, value in item.items()
-                            if key not in {
-                                "correct",
-                                "explanation",
-                                "claim_block_indexes",
-                                "distractor_diagnostics",
-                                "distractorDiagnostics",
-                            }
-                        },
-                        "selectionMode": (
-                            "multiple"
-                            if len(set(item.get("correct", []))) > 1
-                            else "single"
-                        ),
-                    }
+                    public_question_view(item)
                     for item in questions
                 ],
             } if quiz else None,
@@ -501,13 +569,11 @@ class ReviewAssignmentService:
             return self._assignment_view(assignment)
         if assignment.status != "presented":
             raise AppError("复习任务当前不可开始", code="REVIEW_ASSIGNMENT_TRANSITION_INVALID", status=409)
-        prior_quiz = self.db.get(QuizSet, assignment.prior_quiz_set_id)
-        content = self.db.get(ContentVersion, assignment.content_version_id)
-        section = self.db.get(Section, assignment.source_section_id)
-        target = self.db.get(AssessmentTarget, assignment.assessment_target_id)
-        if not prior_quiz or not content or not section or not target:
-            raise AppError("复习来源链不完整", code="REVIEW_SOURCE_MISSING", status=409)
-        prior = self._question_for_target(prior_quiz, target.id)
+        source = self._source_for_assignment(assignment)
+        content = source.content
+        section = source.section
+        target = source.target
+        prior = source.question
         generated_content = _content_for_review_generation(content)
         request = {
                 "id": section.id,
@@ -578,7 +644,7 @@ class ReviewAssignmentService:
                 status=502,
                 retryable=True,
             )
-        question = review_question.model_dump()
+        question = with_alignment_gated_answer(review_question.model_dump())
         question["assessmentTargetId"] = target.id
         question["equivalenceGroupId"] = f"{target.id}:review:{assignment.id}"
         if not _questions_are_substantively_different(prior, question):
@@ -587,60 +653,37 @@ class ReviewAssignmentService:
         prior_signatures = set(_load(assignment.prior_item_signatures_json, []))
         if signature in prior_signatures:
             raise AppError("模型复用了历史题目", code="REVIEW_QUIZ_NOT_NOVEL", status=502)
-        question = bind_remediation_questions_to_source_claims(
-            self.db,
-            content=content,
-            questions=[question],
-            prior_questions=[prior],
-        )[0]
+        locked_assignment = self.db.scalar(
+            select(ReviewAssignment)
+            .where(
+                ReviewAssignment.id == assignment.id,
+                ReviewAssignment.user_id == self.user_id,
+            )
+            .with_for_update()
+        )
+        if not locked_assignment:
+            raise AppError("复习任务不存在", code="REVIEW_ASSIGNMENT_NOT_FOUND", status=404)
+        if locked_assignment.status == "started":
+            return self._assignment_view(locked_assignment)
+        if locked_assignment.status != "presented":
+            raise AppError("复习任务当前不可开始", code="REVIEW_ASSIGNMENT_TRANSITION_INVALID", status=409)
+        assignment = locked_assignment
         generation = self.db.scalar(
             select(func.max(QuizSet.generation)).where(QuizSet.section_id == section.id)
         ) or 0
-        quiz = QuizSet(
-            id=_uid("review_quiz"),
-            section_id=section.id,
-            content_version_id=content.id,
-            learning_contract_version_id=assignment.learning_contract_version_id,
-            generation=generation + 1,
-            questions_json=_dump([question]),
-        )
-        self.db.add(quiz)
-        self.db.flush()
-        block_ids_by_position = {
-            item.position: item.id
-            for item in self.db.scalars(
-                select(ContentBlockVersion)
-                .where(ContentBlockVersion.content_version_id == content.id)
-                .order_by(ContentBlockVersion.position)
-            ).all()
-        }
-        evidence_block_ids = [
-            block_ids_by_position[index]
-            for index in question.get("claim_block_indexes", [])
-            if index in block_ids_by_position
-        ]
-        published_questions = publish_assessment_item_versions(
+        publication = publish_derived_quiz_candidate(
             self.db,
-            quiz=quiz,
-            questions=[question],
-            evidence_block_ids_by_position=[evidence_block_ids],
             uid=_uid,
-        )
-        question = published_questions[0]
-        governance = reevaluate_generated_governance(
-            self.db,
-            quiz_id=quiz.id,
-            actor_id=assignment.id,
+            source=source,
+            candidate_question=question,
+            kind="review",
+            quiz_generation=generation + 1,
             actor_kind="review_assignment",
+            actor_id=assignment.id,
+            equivalence_group_id=f"{target.id}:review:{assignment.id}",
         )
-        if not (
-            governance["allowed"] and governance["assessmentEligible"]
-        ):
-            raise AppError(
-                "复习题缺少已核验的正文与主张绑定",
-                code="REVIEW_QUIZ_GOVERNANCE_FAILED",
-                status=409,
-            )
+        quiz = publication.quiz
+        question = publication.question
         assignment.review_quiz_set_id = quiz.id
         assignment.item_signatures_json = _dump([signature])
         self._apply_transition(
@@ -684,13 +727,26 @@ class ReviewAssignmentService:
         if assignment.status != "started" or not assignment.review_quiz_set_id:
             raise AppError("复习任务尚未开始", code="REVIEW_ASSIGNMENT_NOT_STARTED", status=409)
         quiz = self.db.get(QuizSet, assignment.review_quiz_set_id)
-        questions = _load(quiz.questions_json, []) if quiz else []
-        if not quiz or not questions:
+        questions = (
+            immutable_questions_for_quiz(
+                self.db,
+                quiz,
+                require_versions=True,
+                require_evidence=True,
+                require_answer_versions=True,
+            )
+            if quiz else []
+        )
+        if (
+            not quiz
+            or quiz.publication_status != "published"
+            or not questions
+        ):
             raise AppError("复习题不存在", code="REVIEW_QUIZ_MISSING", status=409)
         governance = governance_view_for_quiz(self.db, quiz.id)
         if not governance or not (
             governance["allowed"] and governance["assessmentEligible"]
-        ):
+        ) or governance["mode"] != "contract_boundary":
             raise AppError(
                 "复习题的可信治理决策缺失或已失效",
                 code="REVIEW_QUIZ_GOVERNANCE_REQUIRED",

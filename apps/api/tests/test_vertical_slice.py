@@ -48,6 +48,7 @@ from app.infrastructure.tables import (
     ChapterChallengeAttempt,
     ChapterRouteDecisionEvent,
     ContentBlockClaimAnchor,
+    ContentBlockAssessmentTarget,
     ContentBlockVersion,
     ContentVersion,
     EvidenceQualificationEvent,
@@ -223,6 +224,7 @@ class FakeAi:
                     core=i == 0,
                     objective=objectives[i % len(objectives)],
                     explanation=f"因为 B{generation}",
+                    answer_authority="demo_fixture_v1",
                     claim_block_indexes=[0],
                 )
                 for i in range(question_count)
@@ -1817,6 +1819,11 @@ def test_due_review_api_enforces_daily_budget_without_creating_task_debt(client)
             .order_by(ContentVersion.version.desc())
         )
         contract_id = content.learning_contract_version_id
+        source_block = db.scalar(
+            select(ContentBlockVersion)
+            .where(ContentBlockVersion.content_version_id == content.id)
+            .order_by(ContentBlockVersion.position)
+        )
         run = db.scalar(
             select(LearningRun).where(LearningRun.series_id == series["id"])
         )
@@ -1852,6 +1859,9 @@ def test_due_review_api_enforces_daily_budget_without_creating_task_debt(client)
                 "explanation": "B 与原教材机制一致。",
                 "difficulty": "standard",
                 "assessmentTargetId": target.id,
+                "itemKey": "q1",
+                "evidenceBlockIds": [source_block.id],
+                "answerAuthority": "demo_fixture_v1",
                 "equivalenceGroupId": f"{target.id}:initial",
             }
             quiz = QuizSet(
@@ -1861,6 +1871,7 @@ def test_due_review_api_enforces_daily_budget_without_creating_task_debt(client)
                 learning_contract_version_id=contract_id,
                 generation=100 + index,
                 questions_json=json.dumps([question], ensure_ascii=False),
+                schema_version="test_immutable_quiz_v1",
             )
             attempt = QuizAttempt(
                 id=f"attempt_budget_{index}",
@@ -1895,6 +1906,37 @@ def test_due_review_api_enforces_daily_budget_without_creating_task_debt(client)
             # These models deliberately expose no ORM relationships; flush the
             # immutable fact chain in foreign-key order.
             db.add(quiz)
+            db.flush()
+            db.add(ContentBlockAssessmentTarget(
+                id=f"block_target_budget_{index}",
+                content_block_version_id=source_block.id,
+                assessment_target_id=target.id,
+                binding_role="teaches",
+            ))
+            publish_assessment_item_versions(
+                db,
+                quiz=quiz,
+                questions=[question],
+                evidence_block_ids_by_position=[[source_block.id]],
+                uid=lambda prefix, position=index: f"{prefix}_budget_{position}",
+            )
+            db.add(GovernanceDecisionSnapshot(
+                id=f"governance_budget_{index}",
+                decision_scope="quiz_publication",
+                content_version_id=content.id,
+                quiz_set_id=quiz.id,
+                learning_contract_version_id=contract_id,
+                requested_mode="deterministic",
+                mode="contract_boundary",
+                allowed=True,
+                assessment_eligible=True,
+                reasons_json="[]",
+                rule_version="test_budget_v1",
+                input_hash=hashlib.sha256(quiz.id.encode()).hexdigest(),
+                actor_kind="test_fixture",
+                actor_id=quiz.id,
+                idempotency_key=f"budget:{quiz.id}",
+            ))
             db.flush()
             db.add(attempt)
             db.flush()

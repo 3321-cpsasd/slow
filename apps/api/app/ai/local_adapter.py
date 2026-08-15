@@ -306,6 +306,7 @@ class LocalDemoAdapter:
                     else objectives[index % len(objectives)]
                 ),
                 explanation="正确项与本地演示正文中的机制描述一致。",
+                answer_authority="demo_fixture_v1",
                 claim_block_indexes=[] if prior_questions else [0],
                 distractor_diagnostics=[
                     DistractorDiagnostic(

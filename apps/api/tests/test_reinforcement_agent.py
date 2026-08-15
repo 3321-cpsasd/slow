@@ -5,11 +5,12 @@ from sqlalchemy import delete, select
 
 from app.ai.contracts import ChoiceQuestion, DistractorDiagnostic, GeneratedQuiz, LessonAlignmentReview
 from app.infrastructure.tables import (
-    AssessmentDistractorDiagnostic,
+    AssessmentAnswerVersion,
     AssessmentItemEvidenceBlock,
     AssessmentItemVersion,
     AssessmentObservation,
     EvidenceQualificationEvent,
+    GovernanceDecisionSnapshot,
     ReinforcementEventRecord,
     ReinforcementPackageVersion,
     ReinforcementRun,
@@ -50,6 +51,7 @@ class ReinforcementCapableAi(ReviewCapableAi):
             core=prior.get("core", False),
             objective=prior["objective"],
             explanation="新的情境仍需要依据机制与边界独立判断。",
+            answer_authority="demo_fixture_v1",
         )])
 
     async def review_lesson_alignment(self, request, content, quiz):
@@ -154,9 +156,31 @@ def test_failed_wake_enters_bounded_reinforcement_and_only_verify_is_evidence(tm
                 AssessmentItemVersion.quiz_set_id == package.verification_quiz_set_id,
             )).all()
             assert len(verification_items) == 1
-            assert db.scalars(select(AssessmentItemEvidenceBlock).where(
+            verification_evidence = db.scalars(select(AssessmentItemEvidenceBlock).where(
                 AssessmentItemEvidenceBlock.assessment_item_version_id == verification_items[0].id,
             )).all()
+            assert verification_evidence
+            source_item_id = json.loads(verification_items[0].payload_json)[
+                "sourceAssessmentItemVersionId"
+            ]
+            source_evidence = set(db.scalars(
+                select(AssessmentItemEvidenceBlock.content_block_version_id).where(
+                    AssessmentItemEvidenceBlock.assessment_item_version_id
+                    == source_item_id
+                )
+            ))
+            assert {
+                item.content_block_version_id for item in verification_evidence
+            } == source_evidence
+            assert db.scalar(select(AssessmentAnswerVersion).where(
+                AssessmentAnswerVersion.assessment_item_version_id
+                == verification_items[0].id
+            )) is not None
+            governance = db.scalar(select(GovernanceDecisionSnapshot).where(
+                GovernanceDecisionSnapshot.quiz_set_id
+                == package.verification_quiz_set_id
+            ))
+            assert governance.mode == "contract_boundary"
             assert len(events) == 4
             assert len(observations) == 1
             assert observations[0].assistance_mode == "unassisted_reinforcement"
@@ -174,7 +198,7 @@ def test_failed_wake_enters_bounded_reinforcement_and_only_verify_is_evidence(tm
             }
 
 
-def test_legacy_review_without_immutable_items_abstains_instead_of_guessing(tmp_path):
+def test_reinforcement_rejects_review_without_immutable_answer_authority(tmp_path):
     with _client(tmp_path) as client:
         assignment_id = _failed_review(client)
         with client.app.state.sessions() as db:
@@ -182,23 +206,18 @@ def test_legacy_review_without_immutable_items_abstains_instead_of_guessing(tmp_
             item_ids = list(db.scalars(select(AssessmentItemVersion.id).where(
                 AssessmentItemVersion.quiz_set_id == assignment.review_quiz_set_id,
             )))
-            db.execute(delete(AssessmentDistractorDiagnostic).where(
-                AssessmentDistractorDiagnostic.assessment_item_version_id.in_(item_ids),
-            ))
-            db.execute(delete(AssessmentItemEvidenceBlock).where(
-                AssessmentItemEvidenceBlock.assessment_item_version_id.in_(item_ids),
-            ))
-            db.execute(delete(AssessmentItemVersion).where(
-                AssessmentItemVersion.id.in_(item_ids),
+            db.execute(delete(AssessmentAnswerVersion).where(
+                AssessmentAnswerVersion.assessment_item_version_id.in_(item_ids),
             ))
             db.commit()
 
         started = client.post(f"/api/reviews/{assignment_id}/reinforcement")
-        assert started.status_code == 200, started.json()
-        hypothesis = started.json()["currentActivity"]["payload"]["hypothesis"]
-        assert hypothesis["status"] == "abstained"
-        assert hypothesis["causeCode"] == "insufficient_evidence"
-        assert "不先给你贴上薄弱类型" in hypothesis["message"]
+        assert started.status_code == 409, started.json()
+        assert started.json()["code"] == "ASSESSMENT_ANSWER_VERSION_MISSING"
+        with client.app.state.sessions() as db:
+            assert db.scalar(select(ReinforcementRun).where(
+                ReinforcementRun.source_review_assignment_id == assignment_id,
+            )) is None
 
 
 def test_failed_recomposition_uses_second_repair_and_failed_verify_stops(tmp_path):

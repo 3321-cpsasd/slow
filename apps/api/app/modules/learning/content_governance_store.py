@@ -199,80 +199,6 @@ def generated_claim_verification_candidates(
     return result
 
 
-def bind_remediation_questions_to_source_claims(
-    db: Session,
-    *,
-    content: ContentVersion,
-    questions: list[dict],
-    prior_questions: list[dict],
-) -> list[dict]:
-    """Bind replacement questions to claims in the frozen source content.
-
-    A remediation model sees temporary remediation blocks, so its block
-    indexes cannot be interpreted as positions in ``content.blocks_json``.
-    A replacement question inherits only the explicit dependencies of the
-    prior question it replaces. The server verifies that those indexes still
-    point to anchored source blocks which explicitly teach the same objective.
-    Missing or inconsistent mappings remain empty and fail governance closed.
-    """
-
-    blocks = _load(content.blocks_json, [])
-    block_rows = db.scalars(
-        select(ContentBlockVersion)
-        .where(ContentBlockVersion.content_version_id == content.id)
-        .order_by(ContentBlockVersion.position)
-    ).all()
-    anchored_block_ids = set(db.scalars(
-        select(ContentBlockClaimAnchor.content_block_version_id).where(
-            ContentBlockClaimAnchor.content_block_version_id.in_(
-                [item.id for item in block_rows]
-            )
-        )
-    ).all()) if block_rows else set()
-    anchored_positions = {
-        item.position
-        for item in block_rows
-        if item.id in anchored_block_ids
-    }
-
-    result = []
-    for position, question in enumerate(questions):
-        payload = dict(question)
-        objective = _normalized_objective(payload.get("objective", ""))
-        target_id = str(payload.get("assessmentTargetId", ""))
-        prior = prior_questions[position] if position < len(prior_questions) else {}
-        prior_objective = _normalized_objective(prior.get("objective", ""))
-        prior_indexes = prior.get("claim_block_indexes", [])
-        if not isinstance(prior_indexes, list):
-            prior_indexes = []
-        valid_indexes = [
-            index
-            for index in prior_indexes
-            if (
-                isinstance(index, int)
-                and not isinstance(index, bool)
-                and index in anchored_positions
-                and index < len(blocks)
-                and isinstance(blocks[index], dict)
-                and objective
-                and objective == prior_objective
-                and target_id
-                and target_id == str(prior.get("assessmentTargetId", ""))
-                and objective in {
-                    _normalized_objective(item)
-                    for item in blocks[index].get("assessment_objectives", [])
-                }
-            )
-        ]
-        payload["claim_block_indexes"] = (
-            valid_indexes
-            if len(valid_indexes) == len(prior_indexes) and valid_indexes
-            else []
-        )
-        result.append(payload)
-    return result
-
-
 def persist_generated_governance(
     db: Session,
     *,
@@ -635,7 +561,10 @@ def governance_view_for_quiz(db: Session, quiz_id: str | None) -> dict | None:
             GovernanceDecisionSnapshot.decision_scope == "quiz_publication",
             GovernanceDecisionSnapshot.quiz_set_id == quiz_id,
         )
-        .order_by(GovernanceDecisionSnapshot.created_at.desc())
+        .order_by(
+            GovernanceDecisionSnapshot.created_at.desc(),
+            GovernanceDecisionSnapshot.id.desc(),
+        )
     )
     return _decision_view(snapshot) if snapshot else None
 

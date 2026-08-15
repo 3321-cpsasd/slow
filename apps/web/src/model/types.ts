@@ -266,7 +266,7 @@ export type LearningPreferenceProjection = {
 export type FeedbackReceipt = {
   id:string;
   status:'received';
-  scope:'global'|'content_block';
+  scope:'global'|'content_block'|'quiz_question';
   createdAt:string;
   regeneration:{
     status:'stream_ready'|'recorded_only'|'queued'|'blocked'|'needs_review'|'not_applicable';
@@ -282,6 +282,7 @@ export type FeedbackRepairResult = {
   replayed:boolean;
 };
 export type Question = {
+  id?:string;
   prompt:string;
   options:string[];
   core:boolean;

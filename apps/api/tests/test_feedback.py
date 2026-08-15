@@ -10,8 +10,11 @@ from app.infrastructure.tables import (
     Book,
     Chapter,
     ContentVersion,
+    LearningRun,
     LearningPlan,
     LearningTask,
+    QuizAttempt,
+    QuizSet,
     Section,
     Series,
     Shelf,
@@ -108,6 +111,58 @@ def visible_content(client: TestClient):
             db.flush()
         db.commit()
         return section.id, content.id, block
+
+
+def visible_wrong_question(client: TestClient):
+    section_id, content_version_id, _block = visible_content(client)
+    question = {
+        "prompt": "哪一种收入特征与题干描述一致？",
+        "options": ["固定订阅费", "按调用量付费", "一次性买断"],
+        "correct": [1],
+        "core": True,
+        "objective": "区分收入模式",
+        "explanation": "题干描述的是按使用量结算。",
+    }
+    result = {
+        "correct": False,
+        "objective": question["objective"],
+        "explanation": question["explanation"],
+        "selectedOptions": [0],
+        "correctOptions": [1],
+        "missedOptions": [1],
+        "incorrectOptions": [0],
+    }
+    with client.app.state.sessions() as db:
+        run = LearningRun(
+            id="feedback_learning_run",
+            user_id=DEMO_USER_ID,
+            series_id="feedback_series",
+        )
+        quiz = QuizSet(
+            id="feedback_quiz",
+            section_id=section_id,
+            content_version_id=content_version_id,
+            generation=1,
+            questions_json=json.dumps([question], ensure_ascii=False),
+            schema_version="legacy",
+        )
+        attempt = QuizAttempt(
+            id="feedback_attempt",
+            quiz_set_id=quiz.id,
+            content_version_id=content_version_id,
+            learning_run_id=run.id,
+            user_id=DEMO_USER_ID,
+            answers_json="[[0]]",
+            results_json=json.dumps([result], ensure_ascii=False),
+            passed=False,
+        )
+        db.add(run)
+        db.flush()
+        db.add(quiz)
+        db.flush()
+        db.add(attempt)
+        db.commit()
+    return section_id, attempt.id, question
 
 
 def test_global_feedback_is_an_immutable_user_scoped_fact():
@@ -311,6 +366,81 @@ def test_content_feedback_rejects_a_block_outside_the_bound_version():
 
         assert response.status_code == 404
         assert response.json()["code"] == "FEEDBACK_BLOCK_NOT_FOUND"
+
+
+def test_quiz_question_feedback_binds_the_exact_attempt_and_question():
+    with feedback_client() as client:
+        section_id, attempt_id, question = visible_wrong_question(client)
+
+        response = client.post(
+            "/api/feedback",
+            headers=feedback_headers("quiz-question-feedback"),
+            json={
+                "scope": "quiz_question",
+                "feedbackType": "inaccurate",
+                "message": "题干没有说明收入是从哪一方观察",
+                "pagePath": "/learn/feedback_series/feedback_section",
+                "view": "learn",
+                "sectionId": section_id,
+                "attemptId": attempt_id,
+                "questionIndex": 0,
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json()["regeneration"] == {
+            "status": "needs_review",
+            "reasonCode": "QUIZ_ANSWER_REVIEW_REQUIRED",
+            "task": None,
+        }
+        with client.app.state.sessions() as db:
+            feedback = db.scalar(select(UserFeedback))
+            context = json.loads(feedback.context_json)
+            assert feedback.scope == "quiz_question"
+            assert feedback.section_id == section_id
+            assert feedback.feedback_type == "inaccurate"
+            assert feedback.schema_version == "feedback_v2"
+            assert context["quizQuestion"] == {
+                "sectionId": section_id,
+                "quizSetId": "feedback_quiz",
+                "attemptId": attempt_id,
+                "questionIndex": 0,
+                "assessmentItemVersionId": None,
+                "assessmentAnswerVersionId": None,
+                "questionSnapshot": {
+                    "prompt": question["prompt"],
+                    "options": question["options"],
+                    "objective": question["objective"],
+                    "core": True,
+                },
+                "questionSnapshotHash": context["quizQuestion"]["questionSnapshotHash"],
+                "selectedOptions": [0],
+                "markedCorrect": False,
+                "quizSchemaVersion": "legacy",
+            }
+            assert len(context["quizQuestion"]["questionSnapshotHash"]) == 64
+
+
+def test_quiz_question_feedback_rejects_a_question_outside_the_attempt():
+    with feedback_client() as client:
+        section_id, attempt_id, _question = visible_wrong_question(client)
+
+        response = client.post(
+            "/api/feedback",
+            headers=feedback_headers("quiz-question-outside-attempt"),
+            json={
+                "scope": "quiz_question",
+                "feedbackType": "unclear",
+                "sectionId": section_id,
+                "attemptId": attempt_id,
+                "questionIndex": 1,
+            },
+        )
+
+        assert response.status_code == 404
+        assert response.json()["code"] == "FEEDBACK_QUIZ_QUESTION_NOT_FOUND"
+        with client.app.state.sessions() as db:
+            assert db.scalar(select(func.count()).select_from(UserFeedback)) == 0
 
 
 def test_feedback_scope_and_type_are_validated():

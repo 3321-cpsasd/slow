@@ -27,6 +27,8 @@ from ...infrastructure.tables import (
 VERSIONED_LEGACY_QUIZ_SCHEMA = "versioned_legacy_quiz_v1"
 BLIND_ANSWER_SCHEMA_VERSION = "assessment_answer_v1"
 BLIND_ANSWER_RULE_VERSION = "answer_from_option_verdicts_v1"
+ALIGNMENT_GATED_ANSWER_AUTHORITY = "alignment_gated_model_v1"
+ALIGNMENT_GATED_ANSWER_RULE_VERSION = "answer_after_semantic_alignment_v1"
 BLIND_LESSON_SCHEMA_VERSION = "generated_lesson_composition_candidate_v8"
 TRUSTED_ASSESSMENT_SCHEMA_VERSIONS = {
     "generated_lesson_composition_candidate_v7",
@@ -164,7 +166,13 @@ def publish_assessment_item_versions(
             "deterministic_rule_v1",
             "reviewed_package_v1",
             "demo_fixture_v1",
+            ALIGNMENT_GATED_ANSWER_AUTHORITY,
         }
+        answer_rule_version = (
+            ALIGNMENT_GATED_ANSWER_RULE_VERSION
+            if authority_kind == ALIGNMENT_GATED_ANSWER_AUTHORITY
+            else BLIND_ANSWER_RULE_VERSION
+        )
         correct_option_ids = [option_ids[index] for index in correct_indexes]
         raw_option_verdicts = (
             payload.get("optionVerdicts")
@@ -196,7 +204,7 @@ def publish_assessment_item_versions(
             "optionVerdicts": option_verdicts,
             "explanation": explanation,
             "schemaVersion": BLIND_ANSWER_SCHEMA_VERSION,
-            "ruleVersion": BLIND_ANSWER_RULE_VERSION,
+            "ruleVersion": answer_rule_version,
         }
         diagnostics = payload.get("distractorDiagnostics")
         if diagnostics is None:
@@ -273,7 +281,7 @@ def publish_assessment_item_versions(
                 option_verdicts_json=_dump(option_verdicts),
                 explanation_payload_json=_dump({"text": explanation}),
                 schema_version=BLIND_ANSWER_SCHEMA_VERSION,
-                rule_version=BLIND_ANSWER_RULE_VERSION,
+                rule_version=answer_rule_version,
                 verdict_hash=sha256(_dump(answer_material).encode("utf-8")).hexdigest(),
                 publication_status="published",
             ))
@@ -308,6 +316,7 @@ def immutable_questions_for_quiz(
     *,
     require_versions: bool = False,
     require_evidence: bool = False,
+    require_answer_versions: bool = False,
 ) -> list[dict]:
     """Load the immutable scoring payload, with an explicit legacy fallback."""
 
@@ -350,7 +359,10 @@ def immutable_questions_for_quiz(
             )
         )
     ).all()
-    if not answer_rows and any("correct" not in question for question in questions):
+    if not answer_rows and (
+        require_answer_versions
+        or any("correct" not in question for question in questions)
+    ):
         raise AppError(
             "题集缺少独立答案版本，不能作为正式学习证据",
             code="ASSESSMENT_ANSWER_VERSION_MISSING",

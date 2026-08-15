@@ -72,6 +72,7 @@ DEFAULT_PROVIDER_CAPABILITIES = ProviderCapabilities(
 
 logger = logging.getLogger(__name__)
 LEARNING_TASK_CONCURRENCY = 2
+LOOKAHEAD_MAINTENANCE_INTERVAL_SECONDS = 30
 
 
 def provider_capabilities(config: dict) -> ProviderCapabilities:
@@ -516,8 +517,21 @@ def create_app(
                     await heartbeat
 
     async def learning_task_worker(app: FastAPI):
+        next_lookahead_maintenance_at = 0.0
         while not app.state.learning_task_stop.is_set():
             app.state.learning_task_wakeup.clear()
+            loop_time = asyncio.get_running_loop().time()
+            if loop_time >= next_lookahead_maintenance_at:
+                with sessions() as db:
+                    maintained_lookaheads = backfill_missing_lookahead_tasks(db)
+                if maintained_lookaheads:
+                    logger.info(
+                        "Queued or rearmed %s section lookahead task(s)",
+                        maintained_lookaheads,
+                    )
+                next_lookahead_maintenance_at = (
+                    loop_time + LOOKAHEAD_MAINTENANCE_INTERVAL_SECONDS
+                )
             while not app.state.learning_task_stop.is_set():
                 with sessions() as db:
                     task_ids = recoverable_task_ids(db)

@@ -12,10 +12,14 @@ from ...api.schemas import FeedbackCreate
 from ...auth.context import UserScope
 from ...core.errors import AppError
 from ...infrastructure.tables import (
+    AssessmentAnswerVersion,
+    AssessmentItemVersion,
     Book,
     Chapter,
     ContentVersion,
     LearningTask,
+    QuizAttempt,
+    QuizSet,
     Section,
     Series,
     Shelf,
@@ -29,7 +33,7 @@ FEEDBACK_PER_DAY_LIMIT = 100
 
 
 class FeedbackService:
-    """Append-only writer for global and version-bound content feedback."""
+    """Append-only writer for global, content, and quiz-question feedback."""
 
     def __init__(self, db: Session, scope: UserScope, *, source_mode: str):
         self.db = db
@@ -56,6 +60,14 @@ class FeedbackService:
                     "sectionId": body.section_id,
                     "contentVersionId": body.content_version_id,
                     "blockId": body.block_id,
+                    **(
+                        {
+                            "attemptId": body.attempt_id,
+                            "questionIndex": body.question_index,
+                        }
+                        if body.scope == "quiz_question"
+                        else {}
+                    ),
                 },
                 ensure_ascii=False,
                 separators=(",", ":"),
@@ -67,6 +79,7 @@ class FeedbackService:
             return self._replay(replay, request_hash)
 
         block_snapshot_hash = ""
+        quiz_question_context = None
         regeneration = {
             "status": "not_applicable",
             "reasonCode": None,
@@ -119,6 +132,17 @@ class FeedbackService:
             ).hexdigest()
 
             regeneration = self._regeneration_decision(body, content)
+        elif body.scope == "quiz_question":
+            quiz_question_context = self._quiz_question_context(body)
+            regeneration = {
+                "status": "needs_review",
+                "reasonCode": (
+                    "QUIZ_ANSWER_REVIEW_REQUIRED"
+                    if body.feedback_type == "inaccurate"
+                    else "QUIZ_EXPLANATION_REVIEW_REQUIRED"
+                ),
+                "taskId": None,
+            }
 
         self._enforce_rate_limit()
         feedback_id = f"feedback_{uuid4().hex}"
@@ -135,7 +159,11 @@ class FeedbackService:
             block_id=body.block_id,
             block_snapshot_hash=block_snapshot_hash,
             source_mode=self.source_mode,
-            schema_version="feedback_v1",
+            schema_version=(
+                "feedback_v2"
+                if body.scope == "quiz_question"
+                else "feedback_v1"
+            ),
             idempotency_key=request_key,
             request_hash=request_hash,
             context_json=json.dumps(
@@ -143,6 +171,11 @@ class FeedbackService:
                     "pagePath": page_path,
                     "view": body.view,
                     "regeneration": regeneration,
+                    **(
+                        {"quizQuestion": quiz_question_context}
+                        if quiz_question_context
+                        else {}
+                    ),
                 },
                 ensure_ascii=False,
                 separators=(",", ":"),
@@ -159,6 +192,97 @@ class FeedbackService:
                 return self._replay(replay, request_hash)
             raise
         return self._receipt(item)
+
+    def _quiz_question_context(self, body: FeedbackCreate) -> dict:
+        row = self.db.execute(
+            select(QuizAttempt, QuizSet)
+            .join(QuizSet, QuizSet.id == QuizAttempt.quiz_set_id)
+            .where(
+                QuizAttempt.id == body.attempt_id,
+                QuizAttempt.user_id == self.scope.user_id,
+                QuizSet.section_id == body.section_id,
+            )
+        ).one_or_none()
+        if row is None:
+            raise AppError(
+                "找不到可反馈的作答题目",
+                code="FEEDBACK_QUIZ_ATTEMPT_NOT_FOUND",
+                status=404,
+            )
+        attempt, quiz = row
+        position = int(body.question_index)
+        item = self.db.scalar(
+            select(AssessmentItemVersion).where(
+                AssessmentItemVersion.quiz_set_id == quiz.id,
+                AssessmentItemVersion.position == position,
+            )
+        )
+        try:
+            questions = json.loads(quiz.questions_json or "[]")
+        except (TypeError, ValueError):
+            questions = []
+        try:
+            question = json.loads(item.payload_json) if item else questions[position]
+        except (IndexError, TypeError, ValueError):
+            question = None
+        try:
+            answers = json.loads(attempt.answers_json or "[]")
+            results = json.loads(attempt.results_json or "[]")
+            selected_options = answers[position]
+            result = results[position]
+        except (IndexError, TypeError, ValueError):
+            selected_options = None
+            result = None
+        if (
+            not isinstance(question, dict)
+            or not isinstance(selected_options, list)
+            or not isinstance(result, dict)
+        ):
+            raise AppError(
+                "这道题的作答记录不完整，暂时无法提交反馈",
+                code="FEEDBACK_QUIZ_QUESTION_NOT_FOUND",
+                status=404,
+            )
+        answer = (
+            self.db.scalar(
+                select(AssessmentAnswerVersion).where(
+                    AssessmentAnswerVersion.assessment_item_version_id == item.id
+                )
+            )
+            if item
+            else None
+        )
+        public_snapshot = {
+            "prompt": str(question.get("prompt") or ""),
+            "options": (
+                question.get("options")
+                if isinstance(question.get("options"), list)
+                else []
+            ),
+            "objective": str(question.get("objective") or ""),
+            "core": bool(question.get("core")),
+        }
+        snapshot_hash = hashlib.sha256(
+            json.dumps(
+                public_snapshot,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        return {
+            "sectionId": quiz.section_id,
+            "quizSetId": quiz.id,
+            "attemptId": attempt.id,
+            "questionIndex": position,
+            "assessmentItemVersionId": item.id if item else None,
+            "assessmentAnswerVersionId": answer.id if answer else None,
+            "questionSnapshot": public_snapshot,
+            "questionSnapshotHash": snapshot_hash,
+            "selectedOptions": selected_options,
+            "markedCorrect": bool(result.get("correct")),
+            "quizSchemaVersion": quiz.schema_version,
+        }
 
     def _regeneration_decision(
         self,
