@@ -307,6 +307,8 @@ export const api = {
   }),
   streamFeedbackRepair:(feedbackId:string,onDelta:(delta:string)=>void)=>streamFeedbackRepair(feedbackId,onDelta),
   createShelf:(body:import('../model/types').ShelfCreateInput)=>call<import('../model/types').Shelf>('/api/shelves',{method:'POST',body:JSON.stringify(body)}),
+  renameShelf:(id:string,body:import('../model/types').ShelfRenameInput)=>call<import('../model/types').Shelf>(`/api/shelves/${id}`,{method:'PATCH',body:JSON.stringify(body)}),
+  deleteShelf:(id:string)=>call<void>(`/api/shelves/${id}`,{method:'DELETE'}),
   updateResume:(sectionId:string,blockId='')=>call<import('../model/types').ResumePosition>(`/api/sections/${sectionId}/resume`,{method:'PUT',body:JSON.stringify({blockId})}),
   aiRuntime:()=>call<import('../model/types').AiRuntime>('/api/runtime/ai'),
   updateAiRuntime:(body:object)=>call<import('../model/types').AiRuntime>('/api/runtime/ai',{method:'PUT',body:JSON.stringify(body)}),

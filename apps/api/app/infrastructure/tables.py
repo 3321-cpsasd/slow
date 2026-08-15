@@ -522,6 +522,9 @@ class Shelf(Base):
     specialty: Mapped[str] = mapped_column(String(120), default="")
     tags_json: Mapped[str] = mapped_column(Text, default="[]")
     origin: Mapped[str] = mapped_column(String(32), default="user_created", index=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
 
 
 class LearningPlan(Base):

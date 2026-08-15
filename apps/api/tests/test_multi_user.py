@@ -390,6 +390,21 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
         foreign_series = add_foreign_series(db, user_id=user_b.id)
         db.commit()
         foreign_series_id = foreign_series.id
+        foreign_shelf_id = foreign_series.shelf_id
+
+    hidden_shelf_rename = client.patch(
+        f"/api/shelves/{foreign_shelf_id}",
+        json={"name": "试图改名"},
+        headers={"X-CSRF-Token": me["csrfToken"]},
+    )
+    assert hidden_shelf_rename.status_code == 404
+    assert hidden_shelf_rename.json()["code"] == "SHELF_NOT_FOUND"
+    hidden_shelf_delete = client.delete(
+        f"/api/shelves/{foreign_shelf_id}",
+        headers={"X-CSRF-Token": me["csrfToken"]},
+    )
+    assert hidden_shelf_delete.status_code == 404
+    assert hidden_shelf_delete.json()["code"] == "SHELF_NOT_FOUND"
 
     hidden = client.get(f"/api/series/{foreign_series_id}")
     assert hidden.status_code == 404

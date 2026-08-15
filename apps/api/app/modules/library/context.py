@@ -62,6 +62,7 @@ class ActiveLearningContextResolver:
                 Series.id == series_id,
                 Series.deleted_at.is_(None),
                 Shelf.user_id == user_id,
+                Shelf.deleted_at.is_(None),
             )
         ).one_or_none()
         if not row:
@@ -80,6 +81,7 @@ class ActiveLearningContextResolver:
                 Book.deleted_at.is_(None),
                 Series.deleted_at.is_(None),
                 Shelf.user_id == user_id,
+                Shelf.deleted_at.is_(None),
             )
         ).one_or_none()
         if not row:
@@ -99,6 +101,7 @@ class ActiveLearningContextResolver:
                 Book.deleted_at.is_(None),
                 Series.deleted_at.is_(None),
                 Shelf.user_id == user_id,
+                Shelf.deleted_at.is_(None),
             )
         ).one_or_none()
         if not row:
@@ -119,6 +122,7 @@ class ActiveLearningContextResolver:
                 Book.deleted_at.is_(None),
                 Series.deleted_at.is_(None),
                 Shelf.user_id == user_id,
+                Shelf.deleted_at.is_(None),
             )
         ).one_or_none()
         if not row:
@@ -164,6 +168,7 @@ class ActiveLearningContextResolver:
                 LearningRun.series_id == Series.id,
                 Book.shelf_id == Series.shelf_id,
                 Shelf.user_id == user_id,
+                Shelf.deleted_at.is_(None),
                 Book.deleted_at.is_(None),
                 Series.deleted_at.is_(None),
             )
@@ -218,6 +223,7 @@ class ActiveLearningContextResolver:
                 LearningRun.series_id == Series.id,
                 Book.shelf_id == Series.shelf_id,
                 Shelf.user_id == user_id,
+                Shelf.deleted_at.is_(None),
                 Book.deleted_at.is_(None),
                 Series.deleted_at.is_(None),
             )

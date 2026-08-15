@@ -348,7 +348,13 @@ class SlowService:
         self.db.commit()
 
     def shelf(self, shelf_id):
-        row = self.db.scalar(select(Shelf).where(Shelf.id == shelf_id, Shelf.user_id == self.user_id))
+        row = self.db.scalar(
+            select(Shelf).where(
+                Shelf.id == shelf_id,
+                Shelf.user_id == self.user_id,
+                Shelf.deleted_at.is_(None),
+            )
+        )
         if not row:
             raise AppError("书架不存在", code="SHELF_NOT_FOUND", status=404)
         return row
@@ -470,6 +476,12 @@ class SlowService:
 
     def create_shelf(self, body):
         return self.catalog_commands.create_shelf(body)
+
+    def rename_shelf(self, shelf_id, body):
+        return self.catalog_commands.rename_shelf(shelf_id, body)
+
+    def delete_shelf(self, shelf_id):
+        return self.catalog_commands.delete_shelf(shelf_id)
 
     def learning_start_preview(self, body):
         return self.learning_start.preview(body)
@@ -1751,7 +1763,12 @@ class SlowService:
         if shelf_id:
             self.shelf(shelf_id)
             return self._memory(shelf_id, 200, include_legacy=True)
-        shelves = self.db.scalars(select(Shelf).where(Shelf.user_id == self.user_id)).all()
+        shelves = self.db.scalars(
+            select(Shelf).where(
+                Shelf.user_id == self.user_id,
+                Shelf.deleted_at.is_(None),
+            )
+        ).all()
         return {
             item.id: self._memory(item.id, 200, include_legacy=True)
             for item in shelves

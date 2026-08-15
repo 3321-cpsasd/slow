@@ -49,7 +49,10 @@ class LibraryReadModel:
         user = self.db.get(User, self.user_id)
         shelf_rows = self.db.execute(
             select(Shelf)
-            .where(Shelf.user_id == self.user_id)
+            .where(
+                Shelf.user_id == self.user_id,
+                Shelf.deleted_at.is_(None),
+            )
             .order_by(Shelf.name, Shelf.id)
         ).scalars().all()
         shelves = list(shelf_rows)
@@ -66,6 +69,7 @@ class LibraryReadModel:
             )
             .where(
                 Shelf.user_id == self.user_id,
+                Shelf.deleted_at.is_(None),
                 Series.deleted_at.is_(None),
             )
             .order_by(Series.id)
@@ -87,6 +91,7 @@ class LibraryReadModel:
             .join(Shelf, Shelf.id == Series.shelf_id)
             .where(
                 Shelf.user_id == self.user_id,
+                Shelf.deleted_at.is_(None),
                 Series.deleted_at.is_(None),
                 Book.deleted_at.is_(None),
                 Book.outline_status == "confirmed",
@@ -132,6 +137,7 @@ class LibraryReadModel:
                 Series.id == series_id,
                 Series.deleted_at.is_(None),
                 Shelf.user_id == self.user_id,
+                Shelf.deleted_at.is_(None),
             )
         ).all()
         if not rows:
@@ -157,6 +163,7 @@ class LibraryReadModel:
                 Series.deleted_at.is_(None),
                 Book.shelf_id == Series.shelf_id,
                 Shelf.user_id == self.user_id,
+                Shelf.deleted_at.is_(None),
             )
         ).one_or_none()
         if not row:

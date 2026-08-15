@@ -71,6 +71,7 @@ import type {
   Series,
   Shelf,
   ShelfCreateInput,
+  ShelfRenameInput,
   StudyActivitySummary,
 } from './model/types';
 
@@ -1949,6 +1950,28 @@ export default function App() {
             shelf={shelf}
             profile={data!.profile}
             onBack={goHome}
+            onRename={async (body) => {
+              const value = await run('正在重命名书架…', () => api.renameShelf(shelf.id, body));
+              setData((current) => current
+                ? {
+                    ...current,
+                    shelves: current.shelves.map((item) => item.id === value.id ? value : item),
+                  }
+                : current);
+              setShelf(value);
+              setNotice('书架已重命名');
+            }}
+            onDeleteShelf={async () => {
+              await run('正在删除书架…', () => api.deleteShelf(shelf.id));
+              const refreshed = await api.bootstrap();
+              setData(refreshed);
+              setShelf(null);
+              setSeries(null);
+              setSection(null);
+              updateBrowserLocation('/', 'replace');
+              setView('home');
+              setNotice('书架及其中的学习系列已删除');
+            }}
             onCreate={async (body, idempotencyKey) => {
               const value = await run('AI 正在规划系列…', () => api.createPlan({ ...body, shelfId: shelf.id }, idempotencyKey));
               updateBrowserLocation(seriesPath(value.id), 'push');
@@ -4539,10 +4562,179 @@ function ShelfCreateDialog({
   );
 }
 
+function ShelfRenameDialog({
+  shelf,
+  onClose,
+  onRename,
+}: {
+  shelf: Shelf;
+  onClose: () => void;
+  onRename: (body: ShelfRenameInput) => Promise<void>;
+}) {
+  const [name, setName] = useState(shelf.name);
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState('');
+  const normalizedName = name.trim().replace(/\s+/g, ' ');
+  const dialogRef = useModalFocus<HTMLElement>({
+    open: true,
+    canClose: !submitting,
+    onRequestClose: onClose,
+  });
+
+  const send = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!normalizedName || normalizedName === shelf.name) return;
+    setSubmitting(true);
+    setFormError('');
+    try {
+      await onRename({ name: normalizedName });
+      onClose();
+    } catch (reason) {
+      setFormError(reason instanceof Error ? reason.message : '书架重命名失败，请稍后重试');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      className="confirm-backdrop shelf-create-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !submitting) onClose();
+      }}
+    >
+      <section
+        ref={dialogRef}
+        className="shelf-create-dialog shelf-rename-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="shelf-rename-title"
+        tabIndex={-1}
+      >
+        <div className="shelf-create-heading">
+          <div>
+            <p className="eyebrow">整理书架</p>
+            <h2 id="shelf-rename-title">重命名书架</h2>
+            <p>只会改变书架名称，已有系列、教材和学习记录保持不变。</p>
+          </div>
+          <button className="dialog-close" aria-label="关闭重命名书架" disabled={submitting} onClick={onClose}>×</button>
+        </div>
+        <form className="shelf-create-form" onSubmit={send}>
+          <label>
+            新名称
+            <input
+              data-dialog-initial-focus
+              required
+              maxLength={100}
+              disabled={submitting}
+              value={name}
+              onFocus={(event) => event.currentTarget.select()}
+              onChange={(event) => {
+                setName(event.target.value);
+                setFormError('');
+              }}
+            />
+          </label>
+          {formError && <p className="shelf-create-error" role="alert">{formError}</p>}
+          <div className="dialog-actions">
+            <button type="button" className="quiet-button" disabled={submitting} onClick={onClose}>取消</button>
+            <button
+              className="primary-button"
+              disabled={submitting || !normalizedName || normalizedName === shelf.name}
+            >
+              {submitting ? '正在保存…' : '保存名称'}
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function ShelfDeleteDialog({
+  shelf,
+  onClose,
+  onDelete,
+}: {
+  shelf: Shelf;
+  onClose: () => void;
+  onDelete: () => Promise<void>;
+}) {
+  const [deleting, setDeleting] = useState(false);
+  const dialogRef = useModalFocus<HTMLElement>({
+    open: true,
+    canClose: !deleting,
+    onRequestClose: onClose,
+  });
+  const seriesCount = shelf.series.length;
+
+  return (
+    <div
+      className="confirm-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !deleting) onClose();
+      }}
+    >
+      <section
+        ref={dialogRef}
+        className="delete-confirm shelf-delete-confirm"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="delete-shelf-title"
+        aria-describedby="delete-shelf-description"
+        tabIndex={-1}
+      >
+        <span className="delete-confirm-icon"><TrashIcon size={20} /></span>
+        <p className="eyebrow">删除书架</p>
+        <h2 id="delete-shelf-title">删除“{shelf.name}”？</h2>
+        <p id="delete-shelf-description">
+          {seriesCount > 0
+            ? `以下 ${seriesCount} 个学习系列及其中教材将从书架和学习入口移除：`
+            : '这个书架目前没有学习系列，删除后将从你的书架列表移除。'}
+        </p>
+        {seriesCount > 0 && (
+          <ul className="shelf-delete-series-list" aria-label="将删除的学习系列">
+            {shelf.series.map((item) => (
+              <li key={item.id}>
+                <span>{item.title}</span>
+                <small>{item.books.length} 本教材</small>
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="shelf-delete-history-note">已有学习记录会保留，但当前界面暂不支持恢复。</p>
+        <div>
+          <button data-dialog-initial-focus className="quiet-button" disabled={deleting} onClick={onClose}>取消</button>
+          <button
+            className="danger-button"
+            disabled={deleting}
+            onClick={async () => {
+              setDeleting(true);
+              try {
+                await onDelete();
+              } catch {
+                setDeleting(false);
+              }
+            }}
+          >
+            {deleting
+              ? '正在删除…'
+              : seriesCount > 0
+                ? `删除书架和 ${seriesCount} 个系列`
+                : '确认删除书架'}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function ShelfPage({
   shelf,
   profile,
   onBack,
+  onRename,
+  onDeleteShelf,
   onCreate,
   onOpen,
   onActivateBook,
@@ -4551,12 +4743,16 @@ function ShelfPage({
   shelf: Shelf;
   profile: LearningProfile;
   onBack: () => void;
+  onRename: (body: ShelfRenameInput) => Promise<void>;
+  onDeleteShelf: () => Promise<void>;
   onCreate: (body: object, idempotencyKey: string) => Promise<void>;
   onOpen: (id: string, sectionId?: string | null, bookId?: string | null) => void;
   onActivateBook: (book: Book) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
 }) {
   const [showPlan, setShowPlan] = useState(false);
+  const [showRename, setShowRename] = useState(false);
+  const [showDeleteShelf, setShowDeleteShelf] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Series | null>(null);
   const [deleting, setDeleting] = useState(false);
   const deleteDialogRef = useModalFocus<HTMLElement>({
@@ -4572,8 +4768,27 @@ function ShelfPage({
       </button>
       {shelfDescriptor(shelf) && <p className="eyebrow">{shelfDescriptor(shelf)}</p>}
       <div className="title-row">
-        <div>
+        <div className="shelf-title-copy">
           <h1>{shelf.name}</h1>
+          <div className="shelf-title-actions">
+            <button
+              type="button"
+              className="shelf-rename-button"
+              aria-label={`重命名书架：${shelf.name}`}
+              onClick={() => setShowRename(true)}
+            >
+              <PencilIcon /> 重命名
+            </button>
+            <span aria-hidden="true" />
+            <button
+              type="button"
+              className="shelf-delete-button"
+              aria-label={`删除书架：${shelf.name}`}
+              onClick={() => setShowDeleteShelf(true)}
+            >
+              <TrashIcon size={13} /> 删除书架
+            </button>
+          </div>
         </div>
         <button
           className={showPlan ? 'secondary-button' : 'primary-button'}
@@ -4584,6 +4799,20 @@ function ShelfPage({
           {showPlan ? '取消创建' : '＋ 创建学习系列'}
         </button>
       </div>
+      {showRename && (
+        <ShelfRenameDialog
+          shelf={shelf}
+          onClose={() => setShowRename(false)}
+          onRename={onRename}
+        />
+      )}
+      {showDeleteShelf && (
+        <ShelfDeleteDialog
+          shelf={shelf}
+          onClose={() => setShowDeleteShelf(false)}
+          onDelete={onDeleteShelf}
+        />
+      )}
       {showPlan && <PlanForm shelfId={shelf.id} profile={profile} submit={onCreate} onCancel={() => setShowPlan(false)} />}
       <div className="series-shelf-heading">
         <span>书架上的学习系列</span>
@@ -4734,6 +4963,15 @@ function TrashIcon({ size = 16 }: { size?: number }) {
     <svg aria-hidden="true" width={size} height={size} viewBox="0 0 24 24" fill="none">
       <path d="M4 7h16M9 3h6l1 4H8l1-4Z" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
       <path d="m7 7 1 13h8l1-13M10 11v5M14 11v5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function PencilIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M4 20h4.2L19 9.2a2.15 2.15 0 0 0 0-3L17.8 5a2.15 2.15 0 0 0-3 0L4 15.8V20Z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="m13.5 6.3 4.2 4.2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
     </svg>
   );
 }

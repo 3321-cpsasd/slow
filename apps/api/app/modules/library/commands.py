@@ -67,6 +67,46 @@ class CatalogCommandService:
         self.db.commit()
         return self.shelf_view(row)
 
+    def rename_shelf(self, shelf_id: str, body) -> dict:
+        row = self.db.scalar(
+            select(Shelf).where(
+                Shelf.id == shelf_id,
+                Shelf.user_id == self.user_id,
+                Shelf.deleted_at.is_(None),
+            )
+        )
+        if not row:
+            raise AppError("书架不存在", code="SHELF_NOT_FOUND", status=404)
+        row.name = body.name
+        self.db.commit()
+        return self.shelf_view(row)
+
+    def delete_shelf(self, shelf_id: str) -> None:
+        shelf = self.db.scalar(
+            select(Shelf).where(
+                Shelf.id == shelf_id,
+                Shelf.user_id == self.user_id,
+                Shelf.deleted_at.is_(None),
+            )
+        )
+        if not shelf:
+            raise AppError("书架不存在", code="SHELF_NOT_FOUND", status=404)
+
+        deleted_at = now()
+        series_rows = self.db.scalars(
+            select(Series).where(
+                Series.shelf_id == shelf.id,
+                Series.deleted_at.is_(None),
+            )
+        ).all()
+        for series in series_rows:
+            series.deleted_at = deleted_at
+            plan = self.db.get(LearningPlan, series.plan_id)
+            if plan:
+                plan.status = "deleted"
+        shelf.deleted_at = deleted_at
+        self.db.commit()
+
     def delete_series(self, series_id: str) -> None:
         series = self.contexts.resolve_series(
             user_id=self.user_id,

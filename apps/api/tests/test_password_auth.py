@@ -298,6 +298,34 @@ def test_disable_and_password_reset_revoke_all_user_sessions(tmp_path):
         assert created.json()["tags"] == []
         shelf_id = created.json()["id"]
 
+        missing_rename_csrf = client.patch(
+            f"/api/shelves/{shelf_id}",
+            json={"name": "未授权改名"},
+        )
+        assert missing_rename_csrf.status_code == 403
+        rejected_rename_metadata = client.patch(
+            f"/api/shelves/{shelf_id}",
+            headers={"X-CSRF-Token": logged_in.json()["csrfToken"]},
+            json={"name": "新名称", "domain": "不允许同时修改"},
+        )
+        assert rejected_rename_metadata.status_code == 400
+        rejected_blank_rename = client.patch(
+            f"/api/shelves/{shelf_id}",
+            headers={"X-CSRF-Token": logged_in.json()["csrfToken"]},
+            json={"name": "   "},
+        )
+        assert rejected_blank_rename.status_code == 400
+        renamed = client.patch(
+            f"/api/shelves/{shelf_id}",
+            headers={"X-CSRF-Token": logged_in.json()["csrfToken"]},
+            json={"name": "  我的   新书架  "},
+        )
+        assert renamed.status_code == 200
+        assert renamed.json()["name"] == "我的 新书架"
+        assert client.get("/api/bootstrap").json()["shelves"][0]["name"] == "我的 新书架"
+        missing_delete_csrf = client.delete(f"/api/shelves/{shelf_id}")
+        assert missing_delete_csrf.status_code == 403
+
         new_password = "A-New-Beta-Password-2026"
         with client.app.state.sessions() as db:
             PasswordCredentialService(db).reset_password(

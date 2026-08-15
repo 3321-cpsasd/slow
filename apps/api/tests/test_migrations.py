@@ -12,7 +12,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0063_historical_rank_identity"
+HEAD_REVISION = "0064_shelf_soft_delete"
 
 pytestmark = pytest.mark.migration
 

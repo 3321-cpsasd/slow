@@ -892,6 +892,30 @@ button:disabled { cursor: not-allowed; }
 }
 .lead { max-width: 720px; color: #646b64; line-height: 1.75; }
 .title-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }
+.shelf-title-copy { min-width: 0; }
+.shelf-title-copy h1 { overflow-wrap: anywhere; }
+.shelf-title-actions { margin-top: 12px; display: flex; align-items: center; gap: 10px; }
+.shelf-title-actions > span { width: 1px; height: 13px; background: #d9ded9; }
+.shelf-rename-button,
+.shelf-delete-button {
+  padding: 5px 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-bottom: 1px solid #cdd8d0;
+  background: transparent;
+  color: #68736c;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: color .16s ease, border-color .16s ease;
+}
+.shelf-rename-button:hover { border-color: #75917e; color: var(--green); }
+.shelf-delete-button { border-bottom-color: transparent; color: #8b5c53; }
+.shelf-delete-button:hover { border-color: #bd8b81; color: var(--danger); }
+.shelf-rename-button:focus-visible,
+.shelf-delete-button:focus-visible { outline: 3px solid rgba(85, 129, 105, .2); outline-offset: 4px; border-radius: 3px; }
 .shelf-back-button {
   margin: 0 0 30px;
   padding: 7px 0;
@@ -2303,6 +2327,26 @@ button:disabled { cursor: not-allowed; }
 }
 .delete-confirm .eyebrow { color: var(--danger); }
 .delete-confirm h2 { margin: 5px 0 12px; font: 700 27px/1.25 var(--font-display); letter-spacing: -.025em; }
+.shelf-delete-confirm { width: min(540px, 100%); }
+.shelf-delete-series-list {
+  max-height: min(260px, 34vh);
+  margin: 20px 0 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  border-top: 1px solid #e0e4df;
+}
+.shelf-delete-series-list li {
+  padding: 13px 2px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 20px;
+  border-bottom: 1px solid #e7eae6;
+}
+.shelf-delete-series-list span { color: #29372f; font-size: 13px; font-weight: 700; }
+.shelf-delete-series-list small { flex: 0 0 auto; color: #7d857e; font-size: 10px; }
+.shelf-delete-history-note { margin: 16px 0 0; color: #707871; font-size: 11px; line-height: 1.65; }
 .delete-confirm > p:not(.eyebrow) { margin: 0; color: var(--muted); line-height: 1.7; font-size: 13px; }
 .delete-confirm > div {
   display: flex;
