@@ -1,6 +1,6 @@
 # ADR-0022：基于知识子网的稳定能力、累计阶段与三轴用户画像
 
-- **状态**：Accepted，第一阶段影子投影已实现
+- **状态**：Accepted，白银口试纵向链路已实现
 - **决策日期**：2026-08-15
 - **适用范围**：知识图谱、稳定能力身份、课程规划、Learning Contract、正式测评、复习、能力画像、段位结算、知识地图与正文个性化
 - **继承边界**：[ADR-0001](0001-lesson-generation-v2.md)、[ADR-0012](0012-on-demand-knowledge-universe-and-learner-memory.md)、[ADR-0015](0015-rank-settleable-learning-contracts.md)、[ADR-0020](0020-audited-historical-rank-identity.md)、[ADR-0021](0021-series-local-knowledge-identity-resolution.md)
@@ -382,9 +382,11 @@ ADR-0021 的系列内知识候选、追加式身份裁决、跨书 Concept Revis
 本 ADR 的第一阶段影子链路已经实现：
 
 - 新增 route-scoped `Capability` / `CapabilityRevision`、显式 Concept Revision 绑定和四级 Stage Criterion；
-- 新增 `CapabilityRouteBinding`，当前路线只承诺已有正式选择题能够验证的青铜入口，自然上限保守冻结为青铜；
+- 新增 `CapabilityRouteBinding`；能力自然上限为白银，路线在只存在选择题时仅承诺青铜，冻结两项正式口试目标后才把路线承诺提升到白银；
 - 新 Assessment Target 显式绑定 Capability Revision 和青铜 Stage Criterion；
-- 正式证据新增独立的 `capability` 资格事件，Ask Me 在没有独立白银目标和协议前不产生白银证据；
+- 正式证据新增独立的 `capability` 资格事件；Ask Me 机制解释和边界辨析分别绑定两个独立白银标准，只有两者都取得强证据且青铜已满足时才能升白银；
+- Learning Contract 将选择题门禁目标与 `diagnostic_only` 口试目标分开冻结；选择题生成、内容治理和派生题链路确定性排除诊断目标；
+- 迁移口试只使用显式诊断协议，不等同于正式陌生迁移任务，即使强通过也不能形成钻石证据；
 - `CapabilityStateProjection v1` 从不可变事实重建能力阶段、证据成熟度和激活状态；
 - 累计投影要求逐级满足，选择题即使沿用旧体系的 `transfer` 维度，也只能满足所绑定的青铜标准；
 - 旧六级知识节点段位继续只读兼容，新画像并行生成，正文生成上下文优先消费新能力状态；
@@ -392,11 +394,10 @@ ADR-0021 的系列内知识候选、追加式身份裁决、跨书 Concept Revis
 
 仍未完成的范围：
 
-- 独立白银 Ask Me 目标和口试协议；
 - 黄金标准应用任务、钻石迁移任务及其真实晋级入口门禁；
 - 基于三轴画像重做复习选择器；
 - 历史旧证据的显式解析与 unresolved 队列；
 - 节末结算、知识地图和系列能力进度切换到新画像；
 - 旧六级段位停止写入。
 
-因此当前状态只能称为“第一阶段影子投影已实现”，不能称为整份 ADR 已实现；任何现有六级段位结果仍只是旧规则输出。
+因此当前状态只能称为“白银口试纵向链路已实现”，不能称为整份 ADR 已实现；任何现有六级段位结果仍只是旧规则输出。

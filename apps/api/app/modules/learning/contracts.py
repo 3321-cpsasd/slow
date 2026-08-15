@@ -26,7 +26,7 @@ from ...infrastructure.tables import (
     Series,
     now,
 )
-from .capabilities import ensure_route_capability
+from .capabilities import ensure_ask_me_stage_targets, ensure_route_capability
 
 
 M1_NAMESPACE = "m1_provisional"
@@ -36,7 +36,7 @@ RANK_SETTLEABLE_IDENTITY_STATUSES = {
     "published_knowledge_graph",
     ROUTE_KNOWLEDGE_IDENTITY_STATUS,
 }
-M1_CONTRACT_SCHEMA_VERSION = "learning_contract_v1"
+M1_CONTRACT_SCHEMA_VERSION = "learning_contract_v2_capability_stages"
 
 
 def _dump(value) -> str:
@@ -496,6 +496,38 @@ def ensure_learning_contract(
     if delivery_depth not in {"overview", "deep", "mastery"}:
         delivery_depth = "deep"
     target_rows = _ensure_section_targets(db, section)
+    diagnostic_targets: list[tuple[AssessmentTarget, str]] = []
+    primary_capability_target = next(
+        (
+            target
+            for binding, target in target_rows
+            if binding.required
+            and target.capability_revision_id
+            and target.concept_revision_id
+        ),
+        next(
+            (
+                target
+                for _binding, target in target_rows
+                if target.capability_revision_id and target.concept_revision_id
+            ),
+            None,
+        ),
+    )
+    if primary_capability_target is not None:
+        ask_me_targets = ensure_ask_me_stage_targets(
+            db,
+            series_id=_series_id_for_section(db, section),
+            capability_revision_id=(
+                primary_capability_target.capability_revision_id
+            ),
+            concept_revision_id=primary_capability_target.concept_revision_id,
+        )
+        diagnostic_targets = [
+            (ask_me_targets["mechanism"], "oral_explanation_v1"),
+            (ask_me_targets["boundary"], "oral_boundary_v1"),
+            (ask_me_targets["transfer"], "oral_transfer_probe_v1"),
+        ]
     uses_rank_settleable_knowledge = bool(target_rows) and all(
         target.identity_status in RANK_SETTLEABLE_IDENTITY_STATUSES
         for _, target in target_rows
@@ -524,6 +556,22 @@ def ensure_learning_contract(
                 "verificationPolicy": binding.verification_policy,
             }
             for binding, target in target_rows
+        ],
+        "diagnosticTargets": [
+            {
+                "assessmentTargetId": target.id,
+                "conceptRevisionId": target.concept_revision_id,
+                "learningObjectiveId": target.learning_objective_id,
+                "capabilityRevisionId": target.capability_revision_id,
+                "capabilityStageCriterionId": (
+                    target.capability_stage_criterion_id
+                ),
+                "position": len(target_rows) + position,
+                "verificationPolicy": verification_policy,
+            }
+            for position, (target, verification_policy) in enumerate(
+                diagnostic_targets, 1
+            )
         ],
         "provenanceMode": contract_provenance,
     }
@@ -616,6 +664,39 @@ def ensure_learning_contract(
                 verification_policy=binding.verification_policy,
                 evidence_policy="assessment_evidence_v1",
                 diagnostic_only=False,
+            )
+        )
+    for position, (target, verification_policy) in enumerate(
+        diagnostic_targets,
+        len(target_rows) + 1,
+    ):
+        if target.learning_objective_id not in seen_objectives:
+            seen_objectives.add(target.learning_objective_id)
+            db.add(
+                LearningContractObjective(
+                    id=_stable_id(
+                        "contract_objective_capability",
+                        contract.id,
+                        target.learning_objective_id,
+                    ),
+                    contract_version_id=contract.id,
+                    learning_objective_id=target.learning_objective_id,
+                    position=len(seen_objectives),
+                    role="diagnostic",
+                )
+            )
+        db.add(
+            LearningContractAssessmentTarget(
+                id=_stable_id(
+                    "contract_target_capability", contract.id, target.id
+                ),
+                contract_version_id=contract.id,
+                assessment_target_id=target.id,
+                position=position,
+                required=False,
+                verification_policy=verification_policy,
+                evidence_policy="capability_evidence_v1",
+                diagnostic_only=True,
             )
         )
     db.flush()

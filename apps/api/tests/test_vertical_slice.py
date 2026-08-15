@@ -286,6 +286,19 @@ class ParallelWorkflowAi(FakeAi):
         return await super().note(request)
 
 
+class StrongDiscussionAi(FakeAi):
+    async def ask_me_discussion(self, request):
+        return AskMeDiscussionTurn(
+            evaluation="strong",
+            correct_points=["机制、边界和证据表达完整。"],
+            issues=[],
+            suggestions=["继续保持独立解释。"],
+            follow_up_prompt="请继续说明你的判断依据。",
+            follow_up_purpose="确认解释可以稳定调用。",
+            topic_sufficiency="sufficient",
+        )
+
+
 class MissingLineageAi(FakeAi):
     async def lesson(self, request, memory, prior_questions=None):
         lesson = await super().lesson(request, memory, prior_questions)
@@ -722,6 +735,20 @@ def test_claim_verification_failure_publishes_no_content_or_quiz(tmp_path):
 def client(tmp_path):
     storage = LocalAttachmentStorage(tmp_path / "attachments")
     with TestClient(create_app("sqlite+pysqlite:///:memory:", FakeAi(), AcceptingSourceVerifier(), storage)) as value:
+        yield value
+
+
+@pytest.fixture
+def strong_discussion_client(tmp_path):
+    storage = LocalAttachmentStorage(tmp_path / "strong-discussion-attachments")
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            StrongDiscussionAi(),
+            AcceptingSourceVerifier(),
+            storage,
+        )
+    ) as value:
         yield value
 
 
@@ -3580,6 +3607,125 @@ def test_ask_me_discussion_rejects_multi_target_topic_evidence(client):
         assert topic.status in {"active", "sufficient"}
         assert not topic.evidence_recorded
         assert oral_count == 0
+
+
+def test_ask_me_requires_two_silver_criteria_and_transfer_stays_diagnostic(
+    strong_discussion_client,
+):
+    client = strong_discussion_client
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    section = generate_and_pass(client, chapter["sections"][0]["id"])
+    path = f"/api/sections/{section['id']}/ask-me/discussion"
+    started = client.post(path).json()
+
+    mechanism_turn = client.post(
+        f"{path}/turns",
+        json={
+            "sessionId": started["id"],
+            "topicId": started["activeTopicId"],
+            "expectedRevision": 0,
+            "answer": "我会解释机制、因果关系和可观察依据。",
+        },
+        headers={"Idempotency-Key": "ask-me-silver-mechanism-turn"},
+    ).json()
+    after_mechanism = client.post(
+        f"{path}/actions",
+        json={
+            "sessionId": started["id"],
+            "expectedRevision": mechanism_turn["revision"],
+            "action": "next_topic",
+        },
+        headers={"Idempotency-Key": "ask-me-silver-mechanism-next"},
+    ).json()
+
+    mechanism_target_id = started["topics"][0]["assessmentTargetIds"][0]
+    with client.app.state.sessions() as db:
+        mechanism_target = db.get(AssessmentTarget, mechanism_target_id)
+        capability_state = db.scalar(
+            select(CapabilityStateProjection).where(
+                CapabilityStateProjection.capability_revision_id
+                == mechanism_target.capability_revision_id
+            )
+        )
+        assert capability_state.current_stage == "bronze"
+        assert len(json.loads(capability_state.missing_criterion_ids_json)) == 1
+
+    boundary_turn = client.post(
+        f"{path}/turns",
+        json={
+            "sessionId": started["id"],
+            "topicId": after_mechanism["activeTopicId"],
+            "expectedRevision": after_mechanism["revision"],
+            "answer": "我会说明适用边界、反例和最容易混淆的情况。",
+        },
+        headers={"Idempotency-Key": "ask-me-silver-boundary-turn"},
+    ).json()
+    after_boundary = client.post(
+        f"{path}/actions",
+        json={
+            "sessionId": started["id"],
+            "expectedRevision": boundary_turn["revision"],
+            "action": "next_topic",
+        },
+        headers={"Idempotency-Key": "ask-me-silver-boundary-next"},
+    ).json()
+    with client.app.state.sessions() as db:
+        capability_state = db.scalar(
+            select(CapabilityStateProjection).where(
+                CapabilityStateProjection.capability_revision_id
+                == mechanism_target.capability_revision_id
+            )
+        )
+        assert capability_state.current_stage == "silver"
+        assert json.loads(capability_state.missing_criterion_ids_json) == []
+
+    transfer_turn = client.post(
+        f"{path}/turns",
+        json={
+            "sessionId": started["id"],
+            "topicId": after_boundary["activeTopicId"],
+            "expectedRevision": after_boundary["revision"],
+            "answer": "我会迁移到正文没有直接出现的新场景。",
+        },
+        headers={"Idempotency-Key": "ask-me-silver-transfer-turn"},
+    ).json()
+    finished = client.post(
+        f"{path}/actions",
+        json={
+            "sessionId": started["id"],
+            "expectedRevision": transfer_turn["revision"],
+            "action": "finish",
+        },
+        headers={"Idempotency-Key": "ask-me-silver-transfer-finish"},
+    )
+    assert finished.status_code == 200, finished.json()
+
+    transfer_target_id = started["topics"][2]["assessmentTargetIds"][0]
+    with client.app.state.sessions() as db:
+        capability_state = db.scalar(
+            select(CapabilityStateProjection).where(
+                CapabilityStateProjection.capability_revision_id
+                == mechanism_target.capability_revision_id
+            )
+        )
+        transfer_observation = db.scalar(
+            select(AssessmentObservation).where(
+                AssessmentObservation.assessment_target_id == transfer_target_id,
+                AssessmentObservation.source_type == "ask_me_topic",
+            )
+        )
+        transfer_qualification = db.scalar(
+            select(EvidenceQualificationEvent).where(
+                EvidenceQualificationEvent.observation_id
+                == transfer_observation.id,
+                EvidenceQualificationEvent.projection_family == "capability",
+            )
+        )
+        assert capability_state.current_stage == "silver"
+        assert transfer_qualification.status == "ineligible"
 
 
 def test_future_chapter_edits_and_started_boundary(client):

@@ -21,6 +21,7 @@ from app.infrastructure.tables import (
     KnowledgeGraphRelease,
     KnowledgeSourceVersion,
     LearningContractConcept,
+    LearningContractAssessmentTarget,
     LearningContractObjective,
     LearningMissionVersion,
     LearningObjective,
@@ -548,16 +549,48 @@ def test_explicit_section_keys_materialize_verified_contract_without_provisional
         for section in sections
     ]
     targets = db.scalars(select(AssessmentTarget)).all()
+    gate_target_ids = set(
+        db.scalars(
+            select(LearningContractAssessmentTarget.assessment_target_id).where(
+                LearningContractAssessmentTarget.diagnostic_only.is_(False)
+            )
+        )
+    )
+    diagnostic_target_ids = set(
+        db.scalars(
+            select(LearningContractAssessmentTarget.assessment_target_id).where(
+                LearningContractAssessmentTarget.diagnostic_only.is_(True)
+            )
+        )
+    )
     assert all(item.provenance_mode == "published_knowledge_graph" for item in contracts)
     assert all(item.lineage_status == "verified" for item in contracts)
-    assert all(item.identity_status == "published_knowledge_graph" for item in targets)
+    assert all(
+        item.identity_status == "published_knowledge_graph"
+        for item in targets
+        if item.id in gate_target_ids
+    )
+    assert all(
+        item.identity_status == "route_scoped_capability"
+        for item in targets
+        if item.id in diagnostic_target_ids
+    )
     assert all(
         db.get(ConceptRevision, item.concept_revision_id).verification_status
         == "reviewed"
         for item in targets
     )
     assert db.scalar(select(func.count()).select_from(LearningContractConcept)) == 2
-    assert db.scalar(select(func.count()).select_from(LearningContractObjective)) == 2
+    assert db.scalar(
+        select(func.count()).select_from(LearningContractObjective).where(
+            LearningContractObjective.role == "primary"
+        )
+    ) == 2
+    assert db.scalar(
+        select(func.count()).select_from(LearningContractObjective).where(
+            LearningContractObjective.role == "diagnostic"
+        )
+    ) == 6
     assert db.scalar(
         select(func.count()).select_from(ConceptRevision).where(
             ConceptRevision.provenance_mode == "m1_provisional"

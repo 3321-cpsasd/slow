@@ -6,12 +6,14 @@ from sqlalchemy.orm import Session
 
 from ...core.errors import AppError
 from ...infrastructure.tables import (
+    AssessmentTarget,
     Capability,
     CapabilityConceptBinding,
     CapabilityRevision,
     CapabilityRouteBinding,
     CapabilityStageCriterion,
     ConceptRevision,
+    LearningObjective,
 )
 
 
@@ -38,9 +40,9 @@ def ensure_route_capability(
 ) -> tuple[CapabilityRevision, CapabilityStageCriterion]:
     """Create the conservative route-local capability behind a concept target.
 
-    The first rollout only promises bronze because the current route has a
-    governed choice-quiz task. Higher criteria are explicit model objects, but
-    remain outside the immutable route ceiling until real tasks are planned.
+    A capability can naturally reach silver, while a route initially promises
+    only its governed bronze choice task. Contract publication raises the route
+    promise to silver only after both oral targets are frozen.
     """
 
     concept_revision = db.get(ConceptRevision, concept_revision_id)
@@ -91,7 +93,7 @@ def ensure_route_capability(
                 }
             ),
             context_constraints_json=_dump({"routeScoped": True}),
-            natural_stage_ceiling="bronze",
+            natural_stage_ceiling="silver",
             provenance_mode="route_scoped",
             verification_status="route_scoped",
         )
@@ -115,6 +117,7 @@ def ensure_route_capability(
     criterion_specs = (
         (
             "bronze",
+            1,
             f"能够辨认并说明{concept_revision.label}的核心含义",
             "choice_quiz",
             "initial_or_novel",
@@ -124,7 +127,8 @@ def ensure_route_capability(
         ),
         (
             "silver",
-            f"能够解释{concept_revision.label}的机制、关系和常见混淆",
+            1,
+            f"能够解释{concept_revision.label}的关键机制与关系",
             "oral_explanation",
             "independent",
             "unassisted_oral",
@@ -132,7 +136,18 @@ def ensure_route_capability(
             "oral_explanation_v1",
         ),
         (
+            "silver",
+            2,
+            f"能够说明{concept_revision.label}的适用边界和常见混淆",
+            "oral_boundary",
+            "independent",
+            "unassisted_oral",
+            "boundary_or_confusion",
+            "oral_boundary_v1",
+        ),
+        (
             "gold",
+            1,
             f"能够在未见过的标准任务中运用{concept_revision.label}",
             "standard_application",
             "unseen",
@@ -142,6 +157,7 @@ def ensure_route_capability(
         ),
         (
             "diamond",
+            1,
             f"能够在陌生或综合情境中迁移运用{concept_revision.label}",
             "transfer_task",
             "unseen",
@@ -151,16 +167,27 @@ def ensure_route_capability(
         ),
     )
     criteria: dict[str, CapabilityStageCriterion] = {}
-    for position, spec in enumerate(criterion_specs, 1):
-        stage, statement, task_type, novelty, assistance, context, protocol = spec
-        criterion_id = _stable_id("capability_criterion", revision_id, stage, 1)
+    for spec in criterion_specs:
+        (
+            stage,
+            position,
+            statement,
+            task_type,
+            novelty,
+            assistance,
+            context,
+            protocol,
+        ) = spec
+        criterion_id = _stable_id(
+            "capability_criterion", revision_id, stage, position
+        )
         criterion = db.get(CapabilityStageCriterion, criterion_id)
         if criterion is None:
             criterion = CapabilityStageCriterion(
                 id=criterion_id,
                 capability_revision_id=revision_id,
                 stage=stage,
-                position=1,
+                position=position,
                 statement=statement,
                 task_type=task_type,
                 novelty_requirement=novelty,
@@ -182,8 +209,9 @@ def ensure_route_capability(
                 target_stage="bronze",
                 route_json=_dump(
                     {
-                        "naturalStageCeiling": "bronze",
-                        "reason": "choice_quiz_is_the_only_formal_task_in_v1",
+                        "naturalStageCeiling": "silver",
+                        "formalStageCeiling": "bronze",
+                        "reason": "silver_requires_a_frozen_ask_me_contract",
                     }
                 ),
                 opportunities_json=_dump(
@@ -215,3 +243,131 @@ def ensure_route_capability(
             status=500,
         )
     return revision, bronze
+
+
+def ensure_ask_me_stage_targets(
+    db: Session,
+    *,
+    series_id: str,
+    capability_revision_id: str,
+    concept_revision_id: str,
+) -> dict[str, AssessmentTarget]:
+    """Materialize non-gate oral targets with exact stage-criterion bindings."""
+
+    capability_revision = db.get(CapabilityRevision, capability_revision_id)
+    concept_revision = db.get(ConceptRevision, concept_revision_id)
+    if capability_revision is None or concept_revision is None:
+        raise AppError(
+            "口试能力目标缺少稳定身份",
+            code="ASK_ME_CAPABILITY_IDENTITY_MISSING",
+            status=500,
+        )
+    criterion_rows = db.scalars(
+        select(CapabilityStageCriterion).where(
+            CapabilityStageCriterion.capability_revision_id
+            == capability_revision_id
+        )
+    ).all()
+    criteria = {(item.stage, item.position): item for item in criterion_rows}
+    specs = {
+        "mechanism": ("silver", 1, "oral_explanation_v1"),
+        "boundary": ("silver", 2, "oral_boundary_v1"),
+        # The transfer topic remains diagnostic. Its oral protocol is not the
+        # criterion's formal transfer-task protocol and cannot grant diamond.
+        "transfer": ("diamond", 1, "oral_transfer_probe_v1"),
+    }
+    namespace = f"route_capability_target:{series_id}"
+    targets: dict[str, AssessmentTarget] = {}
+    for dimension, (stage, position, _protocol) in specs.items():
+        criterion = criteria.get((stage, position))
+        if criterion is None:
+            raise AppError(
+                "口试能力目标缺少阶段量规",
+                code="ASK_ME_CAPABILITY_CRITERION_MISSING",
+                status=500,
+            )
+        objective_id = _stable_id(
+            "learning_objective_capability", capability_revision_id, criterion.id
+        )
+        if db.get(LearningObjective, objective_id) is None:
+            db.add(
+                LearningObjective(
+                    id=objective_id,
+                    namespace=namespace,
+                    objective_key=f"{capability_revision_id}:{criterion.id}",
+                    statement=criterion.statement,
+                    cognitive_verb=(
+                        "explain" if dimension != "transfer" else "transfer"
+                    ),
+                    outcome_type="capability",
+                    provenance_mode="route_scoped",
+                    verification_status="route_scoped",
+                    status="active",
+                )
+            )
+        target_id = _stable_id(
+            "target_capability_stage",
+            capability_revision_id,
+            criterion.id,
+            dimension,
+        )
+        target = db.get(AssessmentTarget, target_id)
+        if target is None:
+            target = AssessmentTarget(
+                id=target_id,
+                concept_revision_id=concept_revision_id,
+                learning_objective_id=objective_id,
+                capability_revision_id=capability_revision_id,
+                capability_stage_criterion_id=criterion.id,
+                objective_key=f"capability:{capability_revision_id}:{criterion.id}",
+                objective_statement=criterion.statement,
+                dimension=dimension,
+                target_depth="standard",
+                identity_status="route_scoped_capability",
+                status="active",
+            )
+            db.add(target)
+        targets[dimension] = target
+
+    route_binding = db.scalar(
+        select(CapabilityRouteBinding).where(
+            CapabilityRouteBinding.series_id == series_id,
+            CapabilityRouteBinding.capability_revision_id
+            == capability_revision_id,
+        )
+    )
+    if route_binding is None:
+        raise AppError(
+            "口试能力目标缺少系列路线绑定",
+            code="ASK_ME_CAPABILITY_ROUTE_MISSING",
+            status=500,
+        )
+    route_binding.target_stage = "silver"
+    route_binding.route_json = _dump(
+        {
+            "naturalStageCeiling": capability_revision.natural_stage_ceiling,
+            "formalStageCeiling": "silver",
+            "reason": "choice_quiz_and_two_independent_oral_criteria",
+        }
+    )
+    route_binding.opportunities_json = _dump(
+        [
+            {
+                "stage": "bronze",
+                "criterionId": criteria[("bronze", 1)].id,
+                "verificationProtocol": "choice_quiz_v1",
+            },
+            {
+                "stage": "silver",
+                "criterionId": criteria[("silver", 1)].id,
+                "verificationProtocol": "oral_explanation_v1",
+            },
+            {
+                "stage": "silver",
+                "criterionId": criteria[("silver", 2)].id,
+                "verificationProtocol": "oral_boundary_v1",
+            },
+        ]
+    )
+    db.flush()
+    return targets

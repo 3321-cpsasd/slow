@@ -13,6 +13,7 @@ from ...infrastructure.tables import (
     AssessmentGateState,
     AssessmentObservation,
     AssessmentTarget,
+    CapabilityStageCriterion,
     EvidenceQualificationEvent,
     GovernanceDecisionSnapshot,
     KnowledgeStateProjection,
@@ -190,7 +191,8 @@ def assessment_contract_view(
             == LearningContractAssessmentTarget.assessment_target_id,
         )
         .where(
-            LearningContractAssessmentTarget.contract_version_id == contract.id
+            LearningContractAssessmentTarget.contract_version_id == contract.id,
+            LearningContractAssessmentTarget.diagnostic_only.is_(False),
         )
         .order_by(LearningContractAssessmentTarget.position)
     ).all()
@@ -228,7 +230,8 @@ def bind_questions_to_targets(
             == LearningContractAssessmentTarget.assessment_target_id,
         )
         .where(
-            LearningContractAssessmentTarget.contract_version_id == contract.id
+            LearningContractAssessmentTarget.contract_version_id == contract.id,
+            LearningContractAssessmentTarget.diagnostic_only.is_(False),
         )
         .order_by(LearningContractAssessmentTarget.position)
     ).all()
@@ -937,10 +940,49 @@ def _record_qualification_events(
             ),
         }
     if qualification_profile == "ask_me":
-        statuses["capability"] = (
-            "ineligible",
-            "the current oral assessment is not bound to a silver stage criterion",
+        target = db.get(AssessmentTarget, observation.assessment_target_id)
+        criterion = (
+            db.get(
+                CapabilityStageCriterion,
+                target.capability_stage_criterion_id,
+            )
+            if target and target.capability_stage_criterion_id
+            else None
         )
+        binding = (
+            db.scalar(
+                select(LearningContractAssessmentTarget).where(
+                    LearningContractAssessmentTarget.contract_version_id
+                    == observation.learning_contract_version_id,
+                    LearningContractAssessmentTarget.assessment_target_id
+                    == observation.assessment_target_id,
+                )
+            )
+            if observation.learning_contract_version_id
+            else None
+        )
+        expected_policy = {
+            "mechanism": "oral_explanation_v1",
+            "boundary": "oral_boundary_v1",
+        }.get(target.dimension if target else "")
+        if (
+            target
+            and criterion
+            and criterion.stage == "silver"
+            and target.dimension in {"mechanism", "boundary"}
+            and binding
+            and binding.diagnostic_only
+            and binding.verification_policy == expected_policy
+        ):
+            statuses["capability"] = (
+                "eligible_grouped",
+                "contract-bound oral result may satisfy its explicit silver criterion",
+            )
+        else:
+            statuses["capability"] = (
+                "ineligible",
+                "oral evidence is not bound to a qualifying silver criterion and protocol",
+            )
     elif governance_ineligible:
         statuses["capability"] = (
             "ineligible",
@@ -1005,21 +1047,49 @@ def record_ask_me_assessment_facts(
             code="ASK_ME_EVIDENCE_LINEAGE_MISSING",
             status=409,
         )
-    contract_target_ids = set(db.scalars(
-        select(LearningContractAssessmentTarget.assessment_target_id).where(
-            LearningContractAssessmentTarget.contract_version_id
-            == learning_contract_version_id
-        )
-    ))
     requested_target_ids = list(dict.fromkeys(assessment_target_ids))
-    if len(requested_target_ids) != 1 or not set(requested_target_ids).issubset(
-        contract_target_ids
-    ):
+    target_row = (
+        db.execute(
+            select(LearningContractAssessmentTarget, AssessmentTarget)
+            .join(
+                AssessmentTarget,
+                AssessmentTarget.id
+                == LearningContractAssessmentTarget.assessment_target_id,
+            )
+            .where(
+                LearningContractAssessmentTarget.contract_version_id
+                == learning_contract_version_id,
+                LearningContractAssessmentTarget.assessment_target_id
+                == requested_target_ids[0],
+            )
+        ).first()
+        if len(requested_target_ids) == 1
+        else None
+    )
+    if target_row is None:
         raise AppError(
             "每条口试证据必须且只能绑定一个契约目标",
             code="ASK_ME_EVIDENCE_TARGET_BOUNDARY_INVALID",
             status=409,
         )
+    target_binding, target = target_row
+    if target.capability_revision_id:
+        expected_policy = {
+            "mechanism": "oral_explanation_v1",
+            "boundary": "oral_boundary_v1",
+            "transfer": "oral_transfer_probe_v1",
+        }.get(dimension)
+        if (
+            not target_binding.diagnostic_only
+            or target.dimension != dimension
+            or target_binding.verification_policy != expected_policy
+            or not target.capability_stage_criterion_id
+        ):
+            raise AppError(
+                "口试证据与冻结的能力阶段协议不一致",
+                code="ASK_ME_CAPABILITY_PROTOCOL_INVALID",
+                status=409,
+            )
 
     observations: list[AssessmentObservation] = []
     episode_id = f"{source_type}:{source_id}"
@@ -1112,7 +1182,8 @@ def record_scoring_facts(
         binding_rows = db.scalars(
             select(LearningContractAssessmentTarget).where(
                 LearningContractAssessmentTarget.contract_version_id
-                == attempt.learning_contract_version_id
+                == attempt.learning_contract_version_id,
+                LearningContractAssessmentTarget.diagnostic_only.is_(False),
             )
         ).all()
     else:

@@ -1,8 +1,10 @@
 import json
 
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from app.core.errors import AppError
 from app.infrastructure.tables import (
     AssessmentObservation,
     AssessmentTarget,
@@ -14,14 +16,20 @@ from app.infrastructure.tables import (
     ConceptRevision,
     EvidenceQualificationEvent,
     KnowledgeNodeStateProjection,
+    LearningContractAssessmentTarget,
+    LearningContractVersion,
     SectionAssessmentTarget,
     now,
 )
 from app.modules.learning.assessment import (
     QUALIFICATION_RULE_VERSION,
+    record_ask_me_assessment_facts,
     rebuild_assessment_projections,
 )
-from app.modules.learning.capabilities import ensure_route_capability
+from app.modules.learning.capabilities import (
+    ensure_ask_me_stage_targets,
+    ensure_route_capability,
+)
 
 
 def _session() -> Session:
@@ -190,12 +198,13 @@ def test_cumulative_projection_cannot_skip_missing_bronze_criterion() -> None:
             concept_revision_id="revision_recursion",
         )
         capability.natural_stage_ceiling = "silver"
-        silver = db.scalar(
+        silver_criteria = db.scalars(
             select(CapabilityStageCriterion).where(
                 CapabilityStageCriterion.capability_revision_id == capability.id,
                 CapabilityStageCriterion.stage == "silver",
-            )
-        )
+            ).order_by(CapabilityStageCriterion.position)
+        ).all()
+        silver = silver_criteria[0]
         _add_target(
             db,
             target_id="target_silver",
@@ -211,7 +220,10 @@ def test_cumulative_projection_cannot_skip_missing_bronze_criterion() -> None:
 
         assert state.current_stage == "unranked"
         assert json.loads(state.satisfied_criterion_ids_json) == [silver.id]
-        assert json.loads(state.missing_criterion_ids_json) == [bronze.id]
+        assert set(json.loads(state.missing_criterion_ids_json)) == {
+            bronze.id,
+            silver_criteria[1].id,
+        }
 
         _add_target(
             db,
@@ -227,10 +239,32 @@ def test_cumulative_projection_cannot_skip_missing_bronze_criterion() -> None:
         rebuild_assessment_projections(db, user_id="user_capability")
         db.refresh(state)
 
+        assert state.current_stage == "bronze"
+        assert json.loads(state.missing_criterion_ids_json) == [
+            silver_criteria[1].id
+        ]
+
+        _add_target(
+            db,
+            target_id="target_silver_boundary",
+            capability_revision_id=capability.id,
+            criterion_id=silver_criteria[1].id,
+            dimension="boundary",
+            position=3,
+        )
+        _add_observation(
+            db,
+            suffix="silver_boundary",
+            target_id="target_silver_boundary",
+        )
+        db.flush()
+        rebuild_assessment_projections(db, user_id="user_capability")
+        db.refresh(state)
+
         assert state.current_stage == "silver"
         assert state.current_stage_order == 2
         assert json.loads(state.missing_criterion_ids_json) == []
-        assert state.independent_evidence_count == 2
+        assert state.independent_evidence_count == 3
 
 
 def test_same_concept_reuses_capability_within_series_but_not_across_series() -> None:
@@ -255,3 +289,219 @@ def test_same_concept_reuses_capability_within_series_but_not_across_series() ->
         assert repeated.id == first.id
         assert repeated_bronze.id == first_bronze.id
         assert other_series.id != first.id
+
+
+def _add_ask_me_contract(
+    db: Session,
+    *,
+    capability_revision_id: str,
+) -> tuple[LearningContractVersion, dict[str, AssessmentTarget]]:
+    targets = ensure_ask_me_stage_targets(
+        db,
+        series_id="series_capability",
+        capability_revision_id=capability_revision_id,
+        concept_revision_id="revision_recursion",
+    )
+    contract = LearningContractVersion(
+        id="contract_capability",
+        section_id="section_capability",
+        mission_version_id="mission_capability",
+        version=1,
+        section_question_snapshot="递归如何工作？",
+        target_depth="deep",
+        boundaries_json="[]",
+        generation_context_json="{}",
+        provenance_mode="route_scoped_knowledge",
+        lineage_status="verified",
+        contract_hash="c" * 64,
+    )
+    db.add(contract)
+    for position, (dimension, policy) in enumerate(
+        (
+            ("mechanism", "oral_explanation_v1"),
+            ("boundary", "oral_boundary_v1"),
+            ("transfer", "oral_transfer_probe_v1"),
+        ),
+        1,
+    ):
+        db.add(
+            LearningContractAssessmentTarget(
+                id=f"contract_target_{dimension}",
+                contract_version_id=contract.id,
+                assessment_target_id=targets[dimension].id,
+                position=position,
+                required=False,
+                verification_policy=policy,
+                evidence_policy="capability_evidence_v1",
+                diagnostic_only=True,
+            )
+        )
+    db.flush()
+    return contract, targets
+
+
+def test_two_strong_oral_criteria_promote_silver_but_transfer_probe_cannot_promote() -> None:
+    with _session() as db:
+        _add_concept(db)
+        capability, bronze = ensure_route_capability(
+            db,
+            series_id="series_capability",
+            concept_revision_id="revision_recursion",
+        )
+        _add_target(
+            db,
+            target_id="target_bronze_oral_path",
+            capability_revision_id=capability.id,
+            criterion_id=bronze.id,
+            dimension="recognition",
+        )
+        _add_observation(
+            db,
+            suffix="bronze_oral_path",
+            target_id="target_bronze_oral_path",
+        )
+        contract, targets = _add_ask_me_contract(
+            db,
+            capability_revision_id=capability.id,
+        )
+        db.flush()
+        rebuild_assessment_projections(db, user_id="user_capability")
+
+        record_ask_me_assessment_facts(
+            db,
+            learning_run_id="run_capability",
+            user_id="user_capability",
+            section_id="section_capability",
+            learning_contract_version_id=contract.id,
+            content_version_id=None,
+            assessment_target_ids=[targets["mechanism"].id],
+            source_type="ask_me_topic",
+            source_id="topic_mechanism",
+            evaluation="strong",
+            dimension="mechanism",
+            payload={},
+        )
+        state = db.scalar(select(CapabilityStateProjection))
+        assert state.current_stage == "bronze"
+        assert len(json.loads(state.missing_criterion_ids_json)) == 1
+
+        record_ask_me_assessment_facts(
+            db,
+            learning_run_id="run_capability",
+            user_id="user_capability",
+            section_id="section_capability",
+            learning_contract_version_id=contract.id,
+            content_version_id=None,
+            assessment_target_ids=[targets["boundary"].id],
+            source_type="ask_me_topic",
+            source_id="topic_boundary",
+            evaluation="strong",
+            dimension="boundary",
+            payload={},
+        )
+        db.refresh(state)
+        assert state.current_stage == "silver"
+        assert state.current_stage_order == 2
+
+        transfer_rows = record_ask_me_assessment_facts(
+            db,
+            learning_run_id="run_capability",
+            user_id="user_capability",
+            section_id="section_capability",
+            learning_contract_version_id=contract.id,
+            content_version_id=None,
+            assessment_target_ids=[targets["transfer"].id],
+            source_type="ask_me_topic",
+            source_id="topic_transfer",
+            evaluation="strong",
+            dimension="transfer",
+            payload={},
+        )
+        transfer_qualification = db.scalar(
+            select(EvidenceQualificationEvent).where(
+                EvidenceQualificationEvent.observation_id == transfer_rows[0].id,
+                EvidenceQualificationEvent.projection_family == "capability",
+            )
+        )
+        db.refresh(state)
+        assert transfer_qualification.status == "ineligible"
+        assert state.current_stage == "silver"
+
+
+def test_oral_protocol_mismatch_fails_closed() -> None:
+    with _session() as db:
+        _add_concept(db)
+        capability, _bronze = ensure_route_capability(
+            db,
+            series_id="series_capability",
+            concept_revision_id="revision_recursion",
+        )
+        contract, targets = _add_ask_me_contract(
+            db,
+            capability_revision_id=capability.id,
+        )
+
+        with pytest.raises(AppError) as raised:
+            record_ask_me_assessment_facts(
+                db,
+                learning_run_id="run_capability",
+                user_id="user_capability",
+                section_id="section_capability",
+                learning_contract_version_id=contract.id,
+                content_version_id=None,
+                assessment_target_ids=[targets["mechanism"].id],
+                source_type="ask_me_topic",
+                source_id="topic_mismatched",
+                evaluation="strong",
+                dimension="boundary",
+                payload={},
+            )
+        assert raised.value.code == "ASK_ME_CAPABILITY_PROTOCOL_INVALID"
+
+
+@pytest.mark.parametrize("evaluation", ["partial", "weak"])
+def test_non_strong_oral_results_do_not_satisfy_silver(evaluation: str) -> None:
+    with _session() as db:
+        _add_concept(db)
+        capability, bronze = ensure_route_capability(
+            db,
+            series_id="series_capability",
+            concept_revision_id="revision_recursion",
+        )
+        _add_target(
+            db,
+            target_id="target_bronze_non_strong",
+            capability_revision_id=capability.id,
+            criterion_id=bronze.id,
+            dimension="recognition",
+        )
+        _add_observation(
+            db,
+            suffix="bronze_non_strong",
+            target_id="target_bronze_non_strong",
+        )
+        contract, targets = _add_ask_me_contract(
+            db,
+            capability_revision_id=capability.id,
+        )
+        rebuild_assessment_projections(db, user_id="user_capability")
+
+        for dimension in ("mechanism", "boundary"):
+            record_ask_me_assessment_facts(
+                db,
+                learning_run_id="run_capability",
+                user_id="user_capability",
+                section_id="section_capability",
+                learning_contract_version_id=contract.id,
+                content_version_id=None,
+                assessment_target_ids=[targets[dimension].id],
+                source_type="ask_me_topic",
+                source_id=f"topic_{dimension}_{evaluation}",
+                evaluation=evaluation,
+                dimension=dimension,
+                payload={},
+            )
+
+        state = db.scalar(select(CapabilityStateProjection))
+        assert state.current_stage == "bronze"
+        assert len(json.loads(state.missing_criterion_ids_json)) == 2

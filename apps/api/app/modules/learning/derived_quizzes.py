@@ -298,6 +298,7 @@ def load_derived_quiz_source(
         or item.assessment_target_id != assessment_target_id
         or not target
         or not contract_target
+        or contract_target.diagnostic_only
     ):
         raise _source_error(
             "DERIVED_QUIZ_SOURCE_ITEM_INVALID",
