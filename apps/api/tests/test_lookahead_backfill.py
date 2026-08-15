@@ -1,4 +1,5 @@
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -172,6 +173,60 @@ def test_backfill_queues_one_idempotent_buffer_without_unlocking_target(db):
 
     assert backfill_missing_lookahead_tasks(db) == 0
     assert db.scalar(select(func.count()).select_from(LearningTask)) == 1
+
+
+def test_backfill_rearms_exhausted_lookahead_after_cooldown(db):
+    seed_active_route(db)
+    assert backfill_missing_lookahead_tasks(db) == 1
+    task = db.scalar(select(LearningTask))
+    task.status = "failed"
+    task.attempt_count = 3
+    task.max_attempts = 3
+    task.error_code = "AI_CURRICULUM_REVIEW_REQUIRED"
+    task.error_message = "chapter review unavailable"
+    task.updated_at = datetime.now(timezone.utc) - timedelta(minutes=3)
+    db.commit()
+
+    assert backfill_missing_lookahead_tasks(db) == 1
+    assert db.scalar(select(func.count()).select_from(LearningTask)) == 1
+    db.refresh(task)
+    assert task.status == "pending"
+    assert task.attempt_count == 3
+    assert task.max_attempts == 6
+    assert task.error_code == ""
+    assert task.error_message == ""
+    retry_history = json.loads(task.payload_json)["automaticRetryHistory"]
+    assert len(retry_history) == 1
+    assert retry_history[0]["attemptCount"] == 3
+    assert retry_history[0]["errorCode"] == "AI_CURRICULUM_REVIEW_REQUIRED"
+    assert datetime.fromisoformat(retry_history[0]["rearmedAt"]).tzinfo is not None
+    assert db.get(SectionProgress, "progress_target").status == "locked"
+
+
+def test_backfill_does_not_spin_recent_or_non_exhausted_failures(db):
+    seed_active_route(db)
+    assert backfill_missing_lookahead_tasks(db) == 1
+    task = db.scalar(select(LearningTask))
+    task.status = "failed"
+    task.attempt_count = 3
+    task.max_attempts = 3
+    task.error_code = "AI_CURRICULUM_REVIEW_REQUIRED"
+    task.updated_at = datetime.now(timezone.utc)
+    db.commit()
+
+    assert backfill_missing_lookahead_tasks(db) == 0
+    db.refresh(task)
+    assert task.status == "failed"
+    assert task.max_attempts == 3
+
+    task.attempt_count = 1
+    task.max_attempts = 3
+    task.updated_at = datetime.now(timezone.utc) - timedelta(hours=1)
+    db.commit()
+    assert backfill_missing_lookahead_tasks(db) == 0
+    db.refresh(task)
+    assert task.status == "failed"
+    assert task.max_attempts == 3
 
 
 def test_backfill_queues_book_start_when_available_book_lacks_first_content(db):

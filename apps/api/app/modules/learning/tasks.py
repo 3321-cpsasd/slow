@@ -22,6 +22,9 @@ from ...infrastructure.tables import (
 
 
 RUNNING_LEASE = timedelta(seconds=90)
+LOOKAHEAD_RETRY_BUDGET = 3
+LOOKAHEAD_RETRY_BASE_DELAY = timedelta(minutes=2)
+LOOKAHEAD_RETRY_MAX_DELAY = timedelta(minutes=15)
 TASK_TYPES = {
     "content_feedback_regeneration",
     "initial_book_preload",
@@ -33,6 +36,55 @@ TASK_TYPES = {
 PRELOAD_TASK_TYPES = {"initial_book_preload", "next_section_preload"}
 MANUALLY_EXTENSIBLE_TASK_TYPES = PRELOAD_TASK_TYPES | {"remediation_generation"}
 MANUAL_TASK_RETRY_BUDGET = 3
+
+
+def _aware(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def _lookahead_retry_delay(attempt_count: int) -> timedelta:
+    retry_wave = max(1, attempt_count // LOOKAHEAD_RETRY_BUDGET)
+    multiplier = 2 ** (retry_wave - 1)
+    return min(
+        LOOKAHEAD_RETRY_BASE_DELAY * multiplier,
+        LOOKAHEAD_RETRY_MAX_DELAY,
+    )
+
+
+def _rearm_exhausted_lookahead(
+    task: LearningTask,
+    *,
+    current: datetime,
+) -> bool:
+    """Give a failed speculative buffer another audited, cooled-down retry wave."""
+
+    if (
+        task.status != "failed"
+        or task.attempt_count < task.max_attempts
+        or _aware(task.updated_at) + _lookahead_retry_delay(task.attempt_count)
+        > current
+    ):
+        return False
+
+    payload = _load(task.payload_json, {}) or {}
+    history = list(payload.get("automaticRetryHistory") or [])
+    history.append({
+        "attemptCount": task.attempt_count,
+        "errorCode": task.error_code or "LEARNING_TASK_FAILED",
+        "rearmedAt": current.isoformat(),
+    })
+    payload["automaticRetryHistory"] = history[-20:]
+    task.payload_json = json.dumps(payload, ensure_ascii=False)
+    task.max_attempts = task.attempt_count + LOOKAHEAD_RETRY_BUDGET
+    task.status = "pending"
+    task.error_code = ""
+    task.error_message = ""
+    task.lease_owner = None
+    task.lease_token = None
+    task.lease_expires_at = None
+    task.heartbeat_at = None
+    task.updated_at = current
+    return True
 
 
 def backfill_missing_book_start_preloads(db: Session) -> int:
@@ -128,12 +180,15 @@ def backfill_missing_book_start_preloads(db: Session) -> int:
 
 
 def backfill_missing_lookahead_tasks(db: Session) -> int:
-    """Queue the missing one-section buffer within each active book.
+    """Maintain one ready-ahead section buffer within each active book.
 
     This repairs orchestration only. The target remains locked until normal
     progression unlocks it, and the lookahead worker still has to publish a
     complete content/quiz pair through the standard generation boundary. A
-    chapter boundary does not stop the buffer; a book boundary does.
+    chapter boundary does not stop the buffer; a book boundary does. Exhausted
+    speculative tasks are rearmed after an exponential cooldown so a transient
+    generation or review failure cannot wait indefinitely for the learner to
+    submit the current section.
     """
 
     published_pair_exists = (
@@ -175,7 +230,8 @@ def backfill_missing_lookahead_tasks(db: Session) -> int:
         )
     ).all()
 
-    created = 0
+    queued = 0
+    current = datetime.now(timezone.utc)
     for (
         learning_run_id,
         user_id,
@@ -186,13 +242,15 @@ def backfill_missing_lookahead_tasks(db: Session) -> int:
     ) in candidates:
         idempotency_key = f"lookahead-after:{source_section_id}"
         existing = db.scalar(
-            select(LearningTask.id).where(
+            select(LearningTask).where(
                 LearningTask.learning_run_id == learning_run_id,
                 LearningTask.task_type == "section_lookahead_preload",
                 LearningTask.idempotency_key == idempotency_key,
             )
         )
         if existing:
+            if _rearm_exhausted_lookahead(existing, current=current):
+                queued += 1
             continue
 
         later_section_exists = db.scalar(
@@ -237,11 +295,11 @@ def backfill_missing_lookahead_tasks(db: Session) -> int:
             ),
             status="pending",
         ))
-        created += 1
+        queued += 1
 
-    if created:
+    if queued:
         db.commit()
-    return created
+    return queued
 
 
 def _load(value: str, default=None):
