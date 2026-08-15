@@ -60,18 +60,55 @@ class GeneratedPlan(StrictModel):
         return self
 
 
+KnowledgeCapabilityDimension = Literal[
+    "recognition", "mechanism", "application", "boundary", "transfer"
+]
+
+
+class GeneratedConceptCandidate(StrictModel):
+    """A semantic proposal, never an instruction to merge knowledge identities."""
+
+    candidate_key: str = Field(min_length=1, max_length=160)
+    label: str = Field(min_length=1, max_length=300)
+    definition: str = Field(min_length=4, max_length=2000)
+    scope: str = Field(min_length=2, max_length=1000)
+    boundaries: list[str] = Field(default_factory=list, max_length=12)
+    reuse_concept_revision_id: str = Field(default="", max_length=160)
+
+
 class GeneratedSectionOutline(StrictModel):
     title: str
     question: str
     objectives: list[str] = Field(min_length=1, max_length=4)
     baseline_concept_key: str = Field(default="", max_length=160)
     baseline_objective_key: str = Field(default="", max_length=160)
+    concept_candidate: GeneratedConceptCandidate | None = None
+    objective_dimensions: list[KnowledgeCapabilityDimension] = Field(
+        default_factory=list,
+        max_length=4,
+    )
 
     @model_validator(mode="after")
     def stable_curriculum_identity_is_complete(self):
         if bool(self.baseline_concept_key) != bool(self.baseline_objective_key):
             raise ValueError(
                 "baseline concept and objective keys must be declared together"
+            )
+        if self.concept_candidate and self.baseline_concept_key:
+            raise ValueError(
+                "published curriculum identity and concept candidate are mutually exclusive"
+            )
+        if self.concept_candidate and len(self.objective_dimensions) != len(
+            self.objectives
+        ):
+            raise ValueError(
+                "concept candidate objectives must declare one capability dimension each"
+            )
+        if self.objective_dimensions and len(self.objective_dimensions) != len(
+            self.objectives
+        ):
+            raise ValueError(
+                "objective dimensions must align with objective statements"
             )
         return self
 

@@ -27,17 +27,28 @@ def _dump(value) -> str:
 def section_objectives_payload(item) -> list:
     """Freeze model-selected allowlisted identity keys with each section objective."""
 
-    if not item.baseline_concept_key:
-        return list(item.objectives)
-    return [
-        {
-            "statement": statement,
-            "required": objective_position == 1,
-            "baselineConceptKey": item.baseline_concept_key,
-            "baselineObjectiveKey": item.baseline_objective_key,
-        }
-        for objective_position, statement in enumerate(item.objectives, 1)
-    ]
+    if item.baseline_concept_key:
+        return [
+            {
+                "statement": statement,
+                "required": objective_position == 1,
+                "baselineConceptKey": item.baseline_concept_key,
+                "baselineObjectiveKey": item.baseline_objective_key,
+            }
+            for objective_position, statement in enumerate(item.objectives, 1)
+        ]
+    if item.concept_candidate:
+        candidate = item.concept_candidate.model_dump()
+        return [
+            {
+                "statement": statement,
+                "required": objective_position == 1,
+                "dimension": item.objective_dimensions[objective_position - 1],
+                "conceptCandidate": candidate,
+            }
+            for objective_position, statement in enumerate(item.objectives, 1)
+        ]
+    return list(item.objectives)
 
 
 class ChapterPlanningService:
@@ -166,6 +177,12 @@ class ChapterPlanningService:
         knowledge_identities = KnowledgeFactGraphService(
             self.db
         ).chapter_identity_allowlist(chapter.id)
+        from ..knowledge.identity import candidate_allowlist_for_series
+
+        candidate_identities = candidate_allowlist_for_series(
+            self.db,
+            chapter_context.series.id,
+        )
         context_pack = self.generation_contexts.build(
             "chapter",
             shelf=chapter_context.shelf,
@@ -180,6 +197,7 @@ class ChapterPlanningService:
                 "title": chapter.title,
                 "objective": chapter.objective,
                 "knowledgeIdentityAllowlist": knowledge_identities,
+                "knowledgeIdentityCandidateAllowlist": candidate_identities,
             },
             context_pack,
         )

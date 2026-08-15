@@ -22,6 +22,7 @@ from ..infrastructure.tables import (
     AssessmentTarget,
     Book,
     BookCapstone,
+    CapabilityStateProjection,
     Chapter,
     ChapterPractice,
     ContentVersion,
@@ -1655,6 +1656,26 @@ class SlowService:
             user_id=self.user_id,
             target_ids=set(target_ids),
         )
+        capability_revision_ids = {
+            target.capability_revision_id
+            for _, target in projection_rows
+            if target.capability_revision_id
+        }
+        capability_states = {
+            item.capability_revision_id: item
+            for item in (
+                self.db.scalars(
+                    select(CapabilityStateProjection).where(
+                        CapabilityStateProjection.user_id == self.user_id,
+                        CapabilityStateProjection.capability_revision_id.in_(
+                            capability_revision_ids
+                        ),
+                    )
+                ).all()
+                if capability_revision_ids
+                else []
+            )
+        }
         evidence_counts = dict(
             self.db.execute(
                 select(
@@ -1680,8 +1701,22 @@ class SlowService:
                 if effective_target and effective_target.concept_revision_id
                 else ""
             )
+            capability_state = capability_states.get(
+                target.capability_revision_id or ""
+            )
             teaching_action = (
                 "wake"
+                if capability_state
+                and capability_state.activation_state == "due_for_reactivation"
+                else "compress"
+                if capability_state
+                and capability_state.current_stage_order >= 3
+                else "connect"
+                if capability_state
+                and capability_state.current_stage_order > 0
+                else "teach"
+                if capability_state
+                else "wake"
                 if node and node["activation"] == "due"
                 else "scaffold"
                 if node and node["activation"] == "reassessment"
@@ -1693,6 +1728,9 @@ class SlowService:
             )
             result.append({
                 "concept": target.objective_statement,
+                "conceptLabel": (
+                    node["label"] if node else target.objective_statement
+                ),
                 "mastery": round(state.p_known_ppm / 10_000),
                 "evidenceCount": evidence_counts.get(target.id, 0),
                 "summary": (
@@ -1700,6 +1738,15 @@ class SlowService:
                     f"声明 {state.claim_status}；保持轮次 {state.retention_rounds}"
                 ),
                 "assessmentTargetId": target.id,
+                "assessmentTarget": {
+                    "id": target.id,
+                    "statement": target.objective_statement,
+                    "dimension": target.dimension,
+                    "capabilityRevisionId": target.capability_revision_id or "",
+                    "capabilityStageCriterionId": (
+                        target.capability_stage_criterion_id or ""
+                    ),
+                },
                 "pKnown": round(state.p_known_ppm / 1_000_000, 6),
                 "uncertainty": round(state.uncertainty_ppm / 1_000_000, 6),
                 "claimStatus": state.claim_status,
@@ -1719,6 +1766,30 @@ class SlowService:
                     },
                     "teachingAction": teaching_action,
                 } if node else {"teachingAction": "teach"}),
+                **(
+                    {
+                        "capabilityState": {
+                            "capabilityRevisionId": (
+                                capability_state.capability_revision_id
+                            ),
+                            "stage": capability_state.current_stage,
+                            "stageOrder": capability_state.current_stage_order,
+                            "activation": capability_state.activation_state,
+                            "evidenceMaturity": load(
+                                capability_state.evidence_maturity_json, {}
+                            ),
+                            "missingCriterionIds": load(
+                                capability_state.missing_criterion_ids_json, []
+                            ),
+                            "projectionRuleVersion": (
+                                capability_state.projection_rule_version
+                            ),
+                        },
+                        "teachingAction": teaching_action,
+                    }
+                    if capability_state
+                    else {}
+                ),
             })
 
         # Ask Me and pre-M2 evidence still use the legacy memory projection.

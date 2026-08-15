@@ -195,6 +195,7 @@ def test_failed_wake_enters_bounded_reinforcement_and_only_verify_is_evidence(tm
                 "mastery": "eligible_grouped",
                 "retention": "ineligible",
                 "rank": "eligible_grouped",
+                "capability": "eligible_grouped",
             }
 
 

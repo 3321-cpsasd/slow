@@ -47,6 +47,7 @@ from app.infrastructure.tables import (
     ChapterRevision,
     ChapterChallengeAttempt,
     ChapterRouteDecisionEvent,
+    CapabilityStateProjection,
     ContentBlockClaimAnchor,
     ContentBlockAssessmentTarget,
     ContentBlockVersion,
@@ -1420,6 +1421,11 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
                 )
             )
         ).all()
+        capability_states = db.scalars(
+            select(CapabilityStateProjection).where(
+                CapabilityStateProjection.user_id == attempts[0].user_id
+            )
+        ).all()
         decisions = db.scalars(
             select(LearningDecisionSnapshot)
             .where(LearningDecisionSnapshot.attempt_id == attempts[0].id)
@@ -1429,7 +1435,9 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
         assert len(evidence) == len(section["quiz"]["questions"])
         assert len(scoring) == 1
         assert len(observations) == len(section["quiz"]["questions"])
-        assert len(qualification) == len(observations) * 4
+        assert len(qualification) == len(observations) * 5
+        assert capability_states
+        assert {item.current_stage for item in capability_states} == {"bronze"}
         assert [item.decision_kind for item in decisions] == [
             "assessment_gate",
             "knowledge_settlement",

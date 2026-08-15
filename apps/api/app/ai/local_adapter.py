@@ -13,6 +13,7 @@ from .contracts import (
     ContentBlock,
     DistractorDiagnostic,
     GeneratedChapter,
+    GeneratedConceptCandidate,
     GeneratedContent,
     GeneratedLesson,
     GeneratedLessonBlock,
@@ -128,9 +129,45 @@ class LocalDemoAdapter:
         )
 
     async def chapter(self, request, memory):
+        topic = (
+            request.get("generationContext", {})
+            .get("curriculum", {})
+            .get("book", {})
+            .get("topic", "")
+        ) or request["title"]
+        concept_label = str(topic).split("：", 1)[0].strip()
+        candidate = GeneratedConceptCandidate(
+            candidate_key=concept_label.lower().replace(" ", "-"),
+            label=concept_label,
+            definition=f"{concept_label} 是当前系列反复调用、解释并迁移的核心机制。",
+            scope=f"在当前学习目标中解释 {concept_label} 的运行机制、适用边界与迁移方式。",
+            boundaries=[
+                "不把正文中临时出现的支撑知识自动升级为并列考核目标",
+                "不把只因名称相同但定义或范围不同的概念自动合并",
+            ],
+        )
+        objective = str(request.get("objective") or "").strip()
+        if objective.startswith("把 ") or objective.startswith("迁移"):
+            dimension = "transfer"
+        elif objective.startswith("综合") or objective.startswith("定位"):
+            dimension = "application"
+        elif objective.startswith("识别") or objective.startswith("辨别"):
+            dimension = "boundary"
+        elif objective.startswith("解释"):
+            dimension = "mechanism"
+        elif "适用边界" in objective:
+            dimension = "boundary"
+        else:
+            dimension = "recognition"
         return GeneratedChapter(
             sections=[
-                GeneratedSectionOutline(title=f"{request['title']}：问题 {index}", question=f"本节如何解决递进问题 {index}？", objectives=[f"{request['objective']}（目标 {index}）"])
+                GeneratedSectionOutline(
+                    title=f"{request['title']}：问题 {index}",
+                    question=f"本节如何解决递进问题 {index}？",
+                    objectives=[f"{request['objective']}（目标 {index}）"],
+                    concept_candidate=candidate,
+                    objective_dimensions=[dimension],
+                )
                 for index in range(1, 4)
             ]
         )

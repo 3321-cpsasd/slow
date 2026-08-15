@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from ...infrastructure.tables import (
     AssessmentObservation,
+    CapabilityStateProjection,
     KnowledgeNodeStateProjection,
     LearnerKnowledgeProfileProjection,
     now,
@@ -41,6 +42,11 @@ def rebuild_learner_knowledge_profile(
             KnowledgeNodeStateProjection.user_id == user_id
         )
     ).all()
+    capabilities = db.scalars(
+        select(CapabilityStateProjection).where(
+            CapabilityStateProjection.user_id == user_id
+        )
+    ).all()
     rank_counts = Counter(item.current_rank for item in nodes)
     activation_counts = Counter(item.activation_state for item in nodes)
     evidence_count = sum(item.evidence_count for item in nodes)
@@ -56,6 +62,18 @@ def rebuild_learner_knowledge_profile(
             -item.current_rank_order,
             -item.current_stars,
             item.concept_revision_id,
+        ),
+    )[:8]
+    capability_stage_counts = Counter(item.current_stage for item in capabilities)
+    capability_activation_counts = Counter(
+        item.activation_state for item in capabilities
+    )
+    strongest_capabilities = sorted(
+        capabilities,
+        key=lambda item: (
+            -item.current_stage_order,
+            -item.independent_evidence_count,
+            item.capability_revision_id,
         ),
     )[:8]
     summary = {
@@ -79,6 +97,33 @@ def rebuild_learner_knowledge_profile(
             }
             for item in strongest
         ],
+        "capabilityProfile": {
+            "schemaVersion": "capability_profile_summary_v1",
+            "capabilityCount": len(capabilities),
+            "stagedCapabilityCount": sum(
+                item.current_stage_order > 0 for item in capabilities
+            ),
+            "stageCounts": dict(sorted(capability_stage_counts.items())),
+            "activationCounts": dict(
+                sorted(capability_activation_counts.items())
+            ),
+            "strongestEvidenceBackedCapabilities": [
+                {
+                    "capabilityRevisionId": item.capability_revision_id,
+                    "stage": item.current_stage,
+                    "stageOrder": item.current_stage_order,
+                    "activation": item.activation_state,
+                    "independentEvidenceCount": (
+                        item.independent_evidence_count
+                    ),
+                    "missingCriterionIds": _load(
+                        item.missing_criterion_ids_json, []
+                    ),
+                }
+                for item in strongest_capabilities
+            ],
+            "basis": "qualified_assessment_evidence_only",
+        },
         "basis": "qualified_assessment_evidence_only",
     }
     row = db.scalar(

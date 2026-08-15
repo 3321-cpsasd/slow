@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -21,6 +22,8 @@ from app.infrastructure.tables import (
     LearningMissionVersion,
     LearningObjective,
     LearningPlan,
+    KnowledgeIdentityCandidate,
+    KnowledgeIdentityDecision,
     Section,
     SectionAssessmentTarget,
     Series,
@@ -251,6 +254,49 @@ def test_route_target_reuses_identity_inside_series_without_cross_route_guessing
 
     assert second_binding.assessment_target_id == first_binding.assessment_target_id
     assert db.scalar(select(func.count()).select_from(AssessmentTarget)) == 1
+
+
+def test_structured_candidate_builds_one_concept_with_separate_capability_targets():
+    db = _db()
+    section, _ = _seed_section(db, with_target=False)
+    candidate = {
+        "candidate_key": "recursion",
+        "label": "递归",
+        "definition": "递归通过缩小问题并抵达基本情形完成求解",
+        "scope": "解释终止机制并迁移到搜索",
+        "boundaries": ["循环不是递归"],
+        "reuse_concept_revision_id": "",
+    }
+    section.objectives_json = json.dumps(
+        [
+            {
+                "statement": "解释递归为什么终止",
+                "required": True,
+                "dimension": "mechanism",
+                "conceptCandidate": candidate,
+            },
+            {
+                "statement": "把递归迁移到深度优先搜索",
+                "required": False,
+                "dimension": "transfer",
+                "conceptCandidate": candidate,
+            },
+        ],
+        ensure_ascii=False,
+    )
+
+    contract = ensure_m1_learning_contract(db, section)
+    targets = db.scalars(select(AssessmentTarget).order_by(AssessmentTarget.id)).all()
+
+    assert contract.provenance_mode == "route_scoped_knowledge"
+    assert {target.dimension for target in targets} == {"mechanism", "transfer"}
+    assert {target.identity_status for target in targets} == {
+        "route_scoped_knowledge"
+    }
+    assert len({target.concept_revision_id for target in targets}) == 1
+    assert db.scalar(select(func.count()).select_from(KnowledgeIdentityCandidate)) == 1
+    assert db.scalar(select(func.count()).select_from(KnowledgeIdentityDecision)) == 1
+    require_rank_settleable_contract(db, contract)
 
 
 @pytest.mark.migration

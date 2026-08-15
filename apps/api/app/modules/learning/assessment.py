@@ -36,6 +36,7 @@ from .knowledge_ranks import (
     resolve_effective_rank_target,
 )
 from .knowledge_profile import rebuild_learner_knowledge_profile
+from .capability_profiles import rebuild_capability_state_projections
 
 
 SCORING_RULE_VERSION = "choice_exact_v2"
@@ -49,6 +50,7 @@ QUALIFIED_STATUSES_BY_FAMILY = {
     "mastery": frozenset({"eligible", "eligible_grouped"}),
     "retention": frozenset({"eligible", "candidate"}),
     "rank": frozenset({"eligible", "eligible_grouped"}),
+    "capability": frozenset({"eligible", "eligible_grouped"}),
 }
 
 
@@ -196,6 +198,10 @@ def assessment_contract_view(
         {
             "assessmentTargetId": target.id,
             "conceptRevisionId": target.concept_revision_id or "",
+            "capabilityRevisionId": target.capability_revision_id or "",
+            "capabilityStageCriterionId": (
+                target.capability_stage_criterion_id or ""
+            ),
             "objective": target.objective_statement,
             "dimension": target.dimension,
             "targetDepth": contract.target_depth,
@@ -585,6 +591,7 @@ def rebuild_assessment_projections(
     by_target_mastery: dict[str, list[AssessmentObservation]] = defaultdict(list)
     retention_observation_ids: set[str] = set()
     rank_observation_ids: set[str] = set()
+    capability_observation_ids: set[str] = set()
     for observation in observations:
         if qualified(observation, "gate"):
             by_gate[
@@ -600,6 +607,8 @@ def rebuild_assessment_projections(
             retention_observation_ids.add(observation.id)
         if qualified(observation, "rank"):
             rank_observation_ids.add(observation.id)
+        if qualified(observation, "capability"):
+            capability_observation_ids.add(observation.id)
 
     for key, items in by_gate.items():
         _sync_gate(db, key=key, observations=items, existing=existing_gates.pop(key, None))
@@ -630,6 +639,12 @@ def rebuild_assessment_projections(
         db.delete(stale)
     for stale in existing_reviews.values():
         db.delete(stale)
+    capability_states = rebuild_capability_state_projections(
+        db,
+        user_id=user_id,
+        observations=observations,
+        capability_observation_ids=capability_observation_ids,
+    )
     source_targets = {
         item.id: item
         for item in db.scalars(
@@ -681,11 +696,13 @@ def rebuild_assessment_projections(
         ),
         "qualifiedRetentionObservations": len(retention_observation_ids),
         "qualifiedRankObservations": len(rank_observation_ids),
+        "qualifiedCapabilityObservations": len(capability_observation_ids),
         "qualificationRuleVersion": qualification_rule_version,
         "gates": len(by_gate),
         "knowledgeStates": len(by_target_mastery),
         "reviewStates": len(by_target_mastery),
         "knowledgeNodeStates": knowledge_node_states,
+        "capabilityStates": capability_states,
         "learnerKnowledgeProfileVersion": learner_profile.projection_version,
     }
 
@@ -919,6 +936,29 @@ def _record_qualification_events(
                 else ("ineligible", "rank evidence requires an authorized independent assessment")
             ),
         }
+    if qualification_profile == "ask_me":
+        statuses["capability"] = (
+            "ineligible",
+            "the current oral assessment is not bound to a silver stage criterion",
+        )
+    elif governance_ineligible:
+        statuses["capability"] = (
+            "ineligible",
+            "assessment is not governance-qualified for capability projection",
+        )
+    elif observation.assistance_mode in {
+        "unassisted_initial",
+        "unassisted_review",
+    } or qualification_profile == "reinforcement_verification":
+        statuses["capability"] = (
+            "eligible_grouped",
+            "contract-bound unassisted evidence may satisfy its explicit stage criterion",
+        )
+    else:
+        statuses["capability"] = (
+            "ineligible",
+            "capability evidence requires an authorized unassisted task",
+        )
     for family, (status, reason) in statuses.items():
         db.add(EvidenceQualificationEvent(
             id=_uid("qualification"),

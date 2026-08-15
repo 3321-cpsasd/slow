@@ -26,6 +26,7 @@ from ...infrastructure.tables import (
     Series,
     now,
 )
+from .capabilities import ensure_route_capability
 
 
 M1_NAMESPACE = "m1_provisional"
@@ -62,31 +63,59 @@ def _objective_key(statement: str) -> str:
     return hashlib.sha256(_normalized(statement).encode()).hexdigest()
 
 
-def _section_objectives(section: Section) -> list[tuple[str, bool]]:
-    parsed: list[tuple[str, bool | None]] = []
+def _section_objectives(
+    section: Section,
+) -> list[tuple[str, bool, str | None, dict | None]]:
+    parsed: list[tuple[str, bool | None, str | None, dict | None]] = []
     for item in _load(section.objectives_json, []):
         if isinstance(item, dict):
             statement = str(item.get("statement") or item.get("objective") or "").strip()
             required = item.get("required", item.get("core"))
+            dimension = str(item.get("dimension") or "").strip() or None
+            candidate = item.get("conceptCandidate")
+            if not isinstance(candidate, dict):
+                candidate = None
         else:
             statement = str(item).strip()
             required = None
+            dimension = None
+            candidate = None
         if statement:
-            parsed.append((statement, bool(required) if required is not None else None))
+            parsed.append(
+                (
+                    statement,
+                    bool(required) if required is not None else None,
+                    dimension,
+                    candidate,
+                )
+            )
     if not parsed:
-        parsed = [(section.question.strip(), True)]
+        parsed = [(section.question.strip(), True, None, None)]
 
-    result: list[tuple[str, bool]] = []
+    result: list[tuple[str, bool, str | None, dict | None]] = []
     positions: dict[str, int] = {}
-    for position, (statement, explicit_required) in enumerate(parsed):
+    for position, (statement, explicit_required, dimension, candidate) in enumerate(parsed):
         key = _objective_key(statement)
         required = explicit_required if explicit_required is not None else position == 0
         if key in positions:
-            old_statement, old_required = result[positions[key]]
-            result[positions[key]] = (old_statement, old_required or required)
+            old_statement, old_required, old_dimension, old_candidate = result[
+                positions[key]
+            ]
+            if old_dimension != dimension or old_candidate != candidate:
+                raise AppError(
+                    "同一能力目标声明了冲突的知识身份或维度",
+                    code="SECTION_OBJECTIVE_IDENTITY_CONFLICT",
+                    status=409,
+                )
+            result[positions[key]] = (
+                old_statement,
+                old_required or required,
+                old_dimension,
+                old_candidate,
+            )
         else:
             positions[key] = len(result)
-            result.append((statement, required))
+            result.append((statement, required, dimension, candidate))
     return result
 
 
@@ -246,12 +275,20 @@ def materialize_route_target(
                 status="active",
             )
         )
+    db.flush()
     target = db.get(AssessmentTarget, target_id)
+    capability_revision, bronze_criterion = ensure_route_capability(
+        db,
+        series_id=series_id,
+        concept_revision_id=revision_id,
+    )
     if target is None:
         target = AssessmentTarget(
             id=target_id,
             concept_revision_id=revision_id,
             learning_objective_id=objective_id,
+            capability_revision_id=capability_revision.id,
+            capability_stage_criterion_id=bronze_criterion.id,
             objective_key=semantic_key,
             objective_statement=statement,
             dimension="recognition",
@@ -260,6 +297,12 @@ def materialize_route_target(
             status="active",
         )
         db.add(target)
+    elif (
+        target.capability_revision_id is None
+        and target.capability_stage_criterion_id is None
+    ):
+        target.capability_revision_id = capability_revision.id
+        target.capability_stage_criterion_id = bronze_criterion.id
     db.flush()
     return target
 
@@ -288,6 +331,7 @@ def _ensure_section_targets(
         objectives_json=section.objectives_json,
     )
     if published_identities:
+        series_id = _series_id_for_section(db, section)
         expected_pairs = {
             (item.concept_revision_id, item.learning_objective_id)
             for item in published_identities
@@ -324,6 +368,11 @@ def _ensure_section_targets(
                     AssessmentTarget.target_depth == "standard",
                 )
             )
+            capability_revision, bronze_criterion = ensure_route_capability(
+                db,
+                series_id=series_id,
+                concept_revision_id=identity.concept_revision_id,
+            )
             if target is None:
                 target = AssessmentTarget(
                     id=_stable_id(
@@ -335,6 +384,8 @@ def _ensure_section_targets(
                     ),
                     concept_revision_id=identity.concept_revision_id,
                     learning_objective_id=identity.learning_objective_id,
+                    capability_revision_id=capability_revision.id,
+                    capability_stage_criterion_id=bronze_criterion.id,
                     objective_key=semantic_key,
                     objective_statement=identity.objective_statement,
                     dimension=dimension,
@@ -343,6 +394,13 @@ def _ensure_section_targets(
                     status="active",
                 )
                 db.add(target)
+                db.flush()
+            elif (
+                target.capability_revision_id is None
+                and target.capability_stage_criterion_id is None
+            ):
+                target.capability_revision_id = capability_revision.id
+                target.capability_stage_criterion_id = bronze_criterion.id
                 db.flush()
             binding = SectionAssessmentTarget(
                 id=_stable_id("section_target_knowledge_graph", section.id, target.id),
@@ -361,17 +419,33 @@ def _ensure_section_targets(
     # expand a partially materialized M1 set during migration.
     objectives = [] if rows else _section_objectives(section)
     series_id = _series_id_for_section(db, section) if objectives else None
-    for position, (statement, required) in enumerate(objectives, 1):
+    for position, (statement, required, dimension, candidate) in enumerate(
+        objectives, 1
+    ):
         key = _objective_key(statement)
         pair = by_key.get(key)
         if pair is None:
-            target = materialize_route_target(
-                db,
-                series_id=series_id,
-                statement=statement,
-            )
+            if candidate is not None:
+                from ..knowledge.identity import materialize_candidate_target
+
+                target = materialize_candidate_target(
+                    db,
+                    series_id=series_id,
+                    section_id=section.id,
+                    statement=statement,
+                    dimension=dimension or "recognition",
+                    candidate=candidate,
+                )
+                binding_prefix = "section_target_candidate"
+            else:
+                target = materialize_route_target(
+                    db,
+                    series_id=series_id,
+                    statement=statement,
+                )
+                binding_prefix = "section_target_route"
             binding = SectionAssessmentTarget(
-                id=_stable_id("section_target_route", section.id, target.id),
+                id=_stable_id(binding_prefix, section.id, target.id),
                 section_id=section.id,
                 assessment_target_id=target.id,
                 position=position,
