@@ -88,7 +88,7 @@ button:disabled { cursor: not-allowed; }
   border-bottom: 1px solid var(--line);
   background: rgba(252, 252, 249, .96);
   position: relative;
-  z-index: 20;
+  z-index: 70;
 }
 
 .brand {
