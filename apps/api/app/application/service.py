@@ -529,6 +529,10 @@ class SlowService:
     def delete_series(self, series_id):
         return self.catalog_commands.delete_series(series_id)
 
+    def rename_series(self, series_id, body):
+        self.catalog_commands.rename_series(series_id, body)
+        return self.series(series_id)
+
     def _book_progress(self, book):
         chapters = self.db.scalars(select(Chapter).where(Chapter.book_id == book.id)).all()
         section_units = 0.0

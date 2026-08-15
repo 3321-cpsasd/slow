@@ -1132,6 +1132,10 @@ class Series(Base):
     plan_id: Mapped[str] = mapped_column(ForeignKey("learning_plans.id"), unique=True)
     shelf_id: Mapped[str] = mapped_column(ForeignKey("shelves.id"), index=True)
     title: Mapped[str] = mapped_column(String(240))
+    # User-controlled display label. The generated title remains immutable so
+    # curriculum generation and the confirmed learning mission keep their
+    # original semantic anchor.
+    display_title: Mapped[str | None] = mapped_column(String(240), nullable=True)
     rationale: Mapped[str] = mapped_column(Text)
     # Nullable only during the staged M1 -> M2 rollout. The migration backfills
     # every existing row and all new writes set it in the creation transaction.

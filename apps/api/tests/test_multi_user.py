@@ -406,6 +406,14 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
     assert hidden_shelf_delete.status_code == 404
     assert hidden_shelf_delete.json()["code"] == "SHELF_NOT_FOUND"
 
+    hidden_series_rename = client.patch(
+        f"/api/series/{foreign_series_id}",
+        json={"name": "试图改名"},
+        headers={"X-CSRF-Token": me["csrfToken"]},
+    )
+    assert hidden_series_rename.status_code == 404
+    assert hidden_series_rename.json()["code"] == "SERIES_NOT_FOUND"
+
     hidden = client.get(f"/api/series/{foreign_series_id}")
     assert hidden.status_code == 404
 

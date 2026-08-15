@@ -69,6 +69,7 @@ import type {
   Section,
   SectionSummary,
   Series,
+  SeriesRenameInput,
   Shelf,
   ShelfCreateInput,
   ShelfRenameInput,
@@ -2034,6 +2035,28 @@ export default function App() {
               void openSeries(seriesId, sectionId, 'push', bookId);
             }}
             onActivateBook={activateBook}
+            onRenameSeries={async (seriesId, body) => {
+              const value = await run('正在重命名系列…', () => api.renameSeries(seriesId, body));
+              setData((current) => current
+                ? {
+                    ...current,
+                    shelves: current.shelves.map((item) => item.id === shelf.id
+                      ? {
+                          ...item,
+                          series: item.series.map((candidate) => candidate.id === value.id ? value : candidate),
+                        }
+                      : item),
+                  }
+                : current);
+              setShelf((current) => current
+                ? {
+                    ...current,
+                    series: current.series.map((candidate) => candidate.id === value.id ? value : candidate),
+                  }
+                : current);
+              if (series?.id === value.id) setSeries(value);
+              setNotice('系列已重命名');
+            }}
             onDelete={async (seriesId) => {
               await run('正在从书架移除系列…', async () => {
                 await api.deleteSeries(seriesId);
@@ -4701,6 +4724,93 @@ function ShelfRenameDialog({
   );
 }
 
+function SeriesRenameDialog({
+  series,
+  onClose,
+  onRename,
+}: {
+  series: Series;
+  onClose: () => void;
+  onRename: (body: SeriesRenameInput) => Promise<void>;
+}) {
+  const [name, setName] = useState(series.title);
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState('');
+  const normalizedName = name.trim().replace(/\s+/g, ' ');
+  const dialogRef = useModalFocus<HTMLElement>({
+    open: true,
+    canClose: !submitting,
+    onRequestClose: onClose,
+  });
+
+  const send = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!normalizedName || normalizedName === series.title) return;
+    setSubmitting(true);
+    setFormError('');
+    try {
+      await onRename({ name: normalizedName });
+    } catch (reason) {
+      setFormError(reason instanceof Error ? reason.message : '系列重命名失败，请稍后重试');
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      className="confirm-backdrop shelf-create-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !submitting) onClose();
+      }}
+    >
+      <section
+        ref={dialogRef}
+        className="shelf-create-dialog series-rename-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="series-rename-title"
+        tabIndex={-1}
+      >
+        <div className="shelf-create-heading">
+          <div>
+            <p className="eyebrow">整理学习目标</p>
+            <h2 id="series-rename-title">重命名系列</h2>
+            <p>只会改变书架上的显示名称，学习目标、教材内容和学习记录保持不变。</p>
+          </div>
+          <button className="dialog-close" aria-label="关闭重命名系列" disabled={submitting} onClick={onClose}>×</button>
+        </div>
+        <form className="shelf-create-form" onSubmit={send}>
+          <label>
+            新名称
+            <input
+              data-dialog-initial-focus
+              required
+              maxLength={240}
+              disabled={submitting}
+              value={name}
+              onFocus={(event) => event.currentTarget.select()}
+              onChange={(event) => {
+                setName(event.target.value);
+                setFormError('');
+              }}
+            />
+          </label>
+          {formError && <p className="shelf-create-error" role="alert">{formError}</p>}
+          <div className="dialog-actions">
+            <button type="button" className="quiet-button" disabled={submitting} onClick={onClose}>取消</button>
+            <button
+              className="primary-button"
+              disabled={submitting || !normalizedName || normalizedName === series.title}
+            >
+              {submitting ? '正在保存…' : '保存名称'}
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
+}
+
 function ShelfDeleteDialog({
   shelf,
   onClose,
@@ -4788,6 +4898,7 @@ function ShelfPage({
   onCreate,
   onOpen,
   onActivateBook,
+  onRenameSeries,
   onDelete,
 }: {
   shelf: Shelf;
@@ -4798,11 +4909,13 @@ function ShelfPage({
   onCreate: (body: object, idempotencyKey: string) => Promise<void>;
   onOpen: (id: string, sectionId?: string | null, bookId?: string | null) => void;
   onActivateBook: (book: Book) => Promise<void>;
+  onRenameSeries: (id: string, body: SeriesRenameInput) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
 }) {
   const [showPlan, setShowPlan] = useState(false);
   const [showRename, setShowRename] = useState(false);
   const [showDeleteShelf, setShowDeleteShelf] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<Series | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Series | null>(null);
   const [deleting, setDeleting] = useState(false);
   const deleteDialogRef = useModalFocus<HTMLElement>({
@@ -4885,6 +4998,15 @@ function ShelfPage({
               </div>
               <div className="focused-series-actions">
                 <button
+                  type="button"
+                  className="series-rename-button"
+                  aria-label={`重命名系列：${item.title}`}
+                  title="重命名系列"
+                  onClick={() => setRenameTarget(item)}
+                >
+                  <PencilIcon />
+                </button>
+                <button
                   className="series-delete-button"
                   aria-label={`删除 ${item.title}`}
                   title="删除系列"
@@ -4961,6 +5083,16 @@ function ShelfPage({
           </div>
         )}
       </div>
+      {renameTarget && (
+        <SeriesRenameDialog
+          series={renameTarget}
+          onClose={() => setRenameTarget(null)}
+          onRename={async (body) => {
+            await onRenameSeries(renameTarget.id, body);
+            setRenameTarget(null);
+          }}
+        />
+      )}
       {deleteTarget && (
         <div
           className="confirm-backdrop"
@@ -4970,7 +5102,7 @@ function ShelfPage({
         >
           <section
             ref={deleteDialogRef}
-            className="delete-confirm"
+            className="delete-confirm series-delete-confirm"
             role="dialog"
             aria-modal="true"
             aria-labelledby="delete-series-title"
@@ -4979,8 +5111,23 @@ function ShelfPage({
           >
             <span className="delete-confirm-icon"><TrashIcon size={20} /></span>
             <p className="eyebrow">删除学习系列</p>
-            <h2 id="delete-series-title">{deleteTarget.title}</h2>
-            <p id="delete-series-description">该系列及其书、章节会从书架和学习入口中移除。已有学习记录会保留，但当前界面暂不支持恢复。</p>
+            <h2 id="delete-series-title">删除“{deleteTarget.title}”？</h2>
+            <p id="delete-series-description">
+              {deleteTarget.books.length > 0
+                ? `以下 ${deleteTarget.books.length} 本教材及其章节会从书架和学习入口中移除：`
+                : '这个系列目前没有教材，删除后将从书架移除。'}
+            </p>
+            {deleteTarget.books.length > 0 && (
+              <ol className="series-delete-book-list" aria-label="将移除的教材">
+                {deleteTarget.books.map((book) => (
+                  <li key={book.id}>
+                    <small>第 {book.position} 本</small>
+                    <span>{book.title}</span>
+                  </li>
+                ))}
+              </ol>
+            )}
+            <p className="shelf-delete-history-note">已有学习记录会保留，但当前界面暂不支持恢复。</p>
             <div>
               <button data-dialog-initial-focus className="quiet-button" disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button>
               <button
@@ -4998,7 +5145,11 @@ function ShelfPage({
                   }
                 }}
               >
-                {deleting ? '正在删除…' : '确认删除'}
+                {deleting
+                  ? '正在删除…'
+                  : deleteTarget.books.length > 0
+                    ? `删除系列和 ${deleteTarget.books.length} 本书`
+                    : '确认删除系列'}
               </button>
             </div>
           </section>

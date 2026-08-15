@@ -35,7 +35,7 @@ from .ai.gateway import (
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, BookReplanCreate, ChapterChallengeSubmit, ChapterCreate, ChapterOrder, ChapterSkipCreate, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, LearningStartPreviewCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ReinforcementRespond, ResumeUpdate, ReviewSubmit, ShelfCreate, ShelfRename, StudyActivityHeartbeat
+from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, BookReplanCreate, ChapterChallengeSubmit, ChapterCreate, ChapterOrder, ChapterSkipCreate, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, LearningStartPreviewCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ReinforcementRespond, ResumeUpdate, ReviewSubmit, SeriesRename, ShelfCreate, ShelfRename, StudyActivityHeartbeat
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -1877,6 +1877,14 @@ def create_app(
         s: SlowService = Depends(service),
     ):
         return s.confirm_milestone_path(series_id)
+
+    @app.patch("/api/series/{series_id}")
+    def rename_series(
+        series_id: str,
+        body: SeriesRename,
+        s: SlowService = Depends(service),
+    ):
+        return s.rename_series(series_id, body)
 
     @app.delete("/api/series/{series_id}", status_code=204)
     def delete_series(series_id: str, s: SlowService = Depends(service)): s.delete_series(series_id)

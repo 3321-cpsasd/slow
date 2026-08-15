@@ -34,6 +34,7 @@ export type Series = {
 export type Shelf = { id:string; name:string; domain:string; specialty:string; tags:string[]; series:Series[] };
 export type ShelfCreateInput = { name:string };
 export type ShelfRenameInput = { name:string };
+export type SeriesRenameInput = { name:string };
 export type LearningStartPreference =
   | 'practical_application'
   | 'understand_principles'

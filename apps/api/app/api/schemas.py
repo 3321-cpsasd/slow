@@ -33,6 +33,23 @@ class ShelfRename(ShelfCreate):
     """The only mutable user-facing shelf field is its display name."""
 
 
+class SeriesRename(ApiModel):
+    model_config = ConfigDict(
+        alias_generator=camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+    name: str = Field(min_length=1, max_length=240)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str):
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("系列名称不能为空")
+        return normalized
+
+
 LearningStartPreferenceKey = Literal[
     "practical_application",
     "understand_principles",

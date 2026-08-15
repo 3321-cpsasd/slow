@@ -318,6 +318,7 @@ export const api = {
     body:JSON.stringify(body),
   }),
   series:(id:string)=>call<import('../model/types').Series>(`/api/series/${id}`),
+  renameSeries:(id:string,body:import('../model/types').SeriesRenameInput)=>call<import('../model/types').Series>(`/api/series/${id}`,{method:'PATCH',body:JSON.stringify(body)}),
   confirmMilestonePath:(id:string)=>call<{seriesId:string;status:string;version:number;goalProfileVersion:number}>(`/api/series/${id}/milestone-path/confirm`,{method:'POST'}),
   deleteSeries:(id:string)=>call<void>(`/api/series/${id}`,{method:'DELETE'}),
   deleteBook:(id:string)=>call<void>(`/api/books/${id}`,{method:'DELETE'}),

@@ -2477,6 +2477,46 @@ def test_series_soft_delete_hides_it_without_destroying_history(client):
     assert repeated.json()["code"] == "SERIES_NOT_FOUND"
 
 
+def test_series_rename_changes_only_its_display_name(client):
+    series = create_series(client)
+    original_book_ids = [book["id"] for book in series["books"]]
+
+    renamed = client.patch(
+        f"/api/series/{series['id']}",
+        json={"name": "  面向实践的   Kubernetes 路线  "},
+    )
+
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "面向实践的 Kubernetes 路线"
+    assert [book["id"] for book in renamed.json()["books"]] == original_book_ids
+    assert next(
+        item
+        for item in client.get("/api/bootstrap").json()["shelves"][0]["series"]
+        if item["id"] == series["id"]
+    )["title"] == "面向实践的 Kubernetes 路线"
+
+    with client.app.state.sessions() as db:
+        stored = db.get(Series, series["id"])
+        assert stored.title == series["title"]
+        assert stored.display_title == "面向实践的 Kubernetes 路线"
+
+
+def test_series_rename_rejects_invalid_payload(client):
+    series = create_series(client)
+
+    blank = client.patch(
+        f"/api/series/{series['id']}",
+        json={"name": "   "},
+    )
+    assert blank.status_code == 400
+
+    semantic_mutation = client.patch(
+        f"/api/series/{series['id']}",
+        json={"name": "新名称", "rationale": "不能修改学习目标"},
+    )
+    assert semantic_mutation.status_code == 400
+
+
 def test_shelf_soft_delete_hides_all_series_without_destroying_history(client):
     create_series(client)
     create_series(client)

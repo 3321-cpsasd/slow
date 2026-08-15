@@ -12,7 +12,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0064_shelf_soft_delete"
+HEAD_REVISION = "0065_series_display_title"
 
 pytestmark = pytest.mark.migration
 
@@ -321,6 +321,7 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
     }.issubset(qa_message_columns)
     assert "terminal_request_key" in preference_evidence_columns
     assert "continuity_tier" in series_columns
+    assert "display_title" in series_columns
     assert "standard_package_version_id" in content_columns
     assert "diagnosis_snapshot_json" in remediation_columns
     assert {

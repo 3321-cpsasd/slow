@@ -2114,12 +2114,25 @@ button:disabled { cursor: not-allowed; }
 .focused-series-title > span > i b { height: 100%; display: block; border-radius: inherit; background: #7c9a52; }
 .focused-series-title > span small { color: #7b867e; font-size: 9px; }
 .focused-series-actions { display: flex; align-items: center; gap: 9px; }
+.focused-series-actions .series-rename-button,
 .focused-series-actions .series-delete-button {
+  width: 34px;
+  height: 34px;
   position: static;
   z-index: auto;
-  border-color: #d9dfda;
+  display: grid;
+  place-items: center;
+  border: 1px solid #d9dfda;
+  border-radius: 9px;
   background: #fff;
+  color: #7b877f;
   opacity: 1;
+  transition: color .16s ease, background .16s ease, border-color .16s ease;
+}
+.focused-series-actions .series-rename-button:hover {
+  border-color: #adc0b3;
+  background: #f2f7f3;
+  color: #315d49;
 }
 .focused-series-book-bay {
   padding: 22px 28px 0;
@@ -2328,6 +2341,7 @@ button:disabled { cursor: not-allowed; }
 .delete-confirm .eyebrow { color: var(--danger); }
 .delete-confirm h2 { margin: 5px 0 12px; font: 700 27px/1.25 var(--font-display); letter-spacing: -.025em; }
 .shelf-delete-confirm { width: min(540px, 100%); }
+.series-delete-confirm { width: min(560px, 100%); }
 .shelf-delete-series-list {
   max-height: min(260px, 34vh);
   margin: 20px 0 0;
@@ -2346,6 +2360,25 @@ button:disabled { cursor: not-allowed; }
 }
 .shelf-delete-series-list span { color: #29372f; font-size: 13px; font-weight: 700; }
 .shelf-delete-series-list small { flex: 0 0 auto; color: #7d857e; font-size: 10px; }
+.series-delete-book-list {
+  max-height: min(280px, 34vh);
+  margin: 20px 0 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  border-top: 1px solid #e0e4df;
+}
+.series-delete-book-list li {
+  min-width: 0;
+  padding: 12px 2px;
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  gap: 12px;
+  align-items: baseline;
+  border-bottom: 1px solid #e7eae6;
+}
+.series-delete-book-list small { color: #8a928c; font: 700 9px/1 var(--font-mono); }
+.series-delete-book-list span { overflow-wrap: anywhere; color: #29372f; font-size: 12px; font-weight: 700; line-height: 1.45; }
 .shelf-delete-history-note { margin: 16px 0 0; color: #707871; font-size: 11px; line-height: 1.65; }
 .delete-confirm > p:not(.eyebrow) { margin: 0; color: var(--muted); line-height: 1.7; font-size: 13px; }
 .delete-confirm > div {
@@ -5465,7 +5498,7 @@ button:disabled { cursor: not-allowed; }
   .focused-series-number { height: 62px; }
   .focused-series-title h2 { font-size: 16px; white-space: normal; }
   .focused-series-title > span { grid-template-columns: 1fr; gap: 6px; }
-  .focused-series-actions .series-delete-button { width: 31px; height: 31px; }
+  .focused-series-actions :is(.series-rename-button, .series-delete-button) { width: 31px; height: 31px; }
   .focused-series-book-bay { padding: 18px 14px 0; }
   .focused-series-books { min-height: 256px; padding: 9px 8px 0; gap: 10px; }
   .focused-book-volume { width: 166px; min-width: 166px; }
