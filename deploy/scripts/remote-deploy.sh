@@ -35,10 +35,37 @@ compose() {
     -f "$compose_file" -f "$https_compose_override" "$@"
 }
 
-previous_version=""
-if [ -f "$release_file" ]; then
-  previous_version=$(sed -n '1p' "$release_file")
+log_failed_startup() {
+  echo "Deployment startup diagnostics:" >&2
+  compose ps -a >&2 || true
+  compose logs --no-color --tail=200 db api web >&2 || true
+}
+
+previous_release_env=""
+if [ -f "$release_env" ]; then
+  previous_release_env=$(mktemp "$deploy_root/.release.env.previous.XXXXXX")
+  cp "$release_env" "$previous_release_env"
 fi
+
+cleanup_previous_release_env() {
+  if [ -n "$previous_release_env" ]; then
+    rm -f "$previous_release_env"
+  fi
+}
+trap cleanup_previous_release_env EXIT HUP INT TERM
+
+restore_previous_release() {
+  if [ -z "$previous_release_env" ]; then
+    return 1
+  fi
+  cp "$previous_release_env" "$release_env"
+  (
+    set -a
+    . "$release_env"
+    set +a
+    compose up -d --remove-orphans --force-recreate db api web
+  )
+}
 
 if [ -f "$release_env" ] && compose ps -q db 2>/dev/null | grep -q .; then
   backup_timestamp=$(date -u +%Y%m%dT%H%M%SZ)
@@ -62,8 +89,23 @@ APP_VERSION=$APP_VERSION
 WEB_ORIGIN=$WEB_ORIGIN
 EOF
 
-compose pull
-compose up -d --remove-orphans db api web
+if ! compose pull; then
+  if [ -n "$previous_release_env" ]; then
+    cp "$previous_release_env" "$release_env"
+  fi
+  echo "Deployment image pull failed; restored the previous release metadata." >&2
+  exit 1
+fi
+
+if ! compose up -d --remove-orphans db api web; then
+  log_failed_startup
+  if restore_previous_release; then
+    echo "Deployment failed while starting containers; restored the previous release." >&2
+  else
+    echo "Initial deployment failed while starting containers; no previous release exists." >&2
+  fi
+  exit 1
+fi
 
 healthy=false
 attempt=1
@@ -77,16 +119,9 @@ while [ "$attempt" -le 45 ]; do
 done
 
 if [ "$healthy" != true ]; then
-  compose logs --tail=120
-  if [ -n "$previous_version" ]; then
-    cat > "$release_env" <<EOF
-REGISTRY=$REGISTRY
-IMAGE_NAME=$IMAGE_NAME
-APP_VERSION=$previous_version
-WEB_ORIGIN=$WEB_ORIGIN
-EOF
-    compose up -d --remove-orphans db api web
-    echo "Deployment failed; rolled back to $previous_version." >&2
+  log_failed_startup
+  if restore_previous_release; then
+    echo "Deployment failed health checks; restored the previous release." >&2
   else
     echo "Initial deployment failed; no previous release is available." >&2
   fi

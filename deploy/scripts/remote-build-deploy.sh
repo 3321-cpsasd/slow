@@ -116,6 +116,13 @@ if [ -f "$release_env" ]; then
   cp "$release_env" "$previous_release_env"
 fi
 
+cleanup_previous_release_env() {
+  if [ -n "$previous_release_env" ]; then
+    rm -f "$previous_release_env"
+  fi
+}
+trap cleanup_previous_release_env EXIT HUP INT TERM
+
 compose() {
   if [ "$DEPLOY_MODE" = "demo" ]; then
     docker compose --env-file "$runtime_env" --env-file "$release_env" \
@@ -124,6 +131,12 @@ compose() {
     docker compose --env-file "$runtime_env" --env-file "$release_env" \
       -f "$compose_file" -f "$https_compose_override" "$@"
   fi
+}
+
+log_failed_startup() {
+  echo "Deployment startup diagnostics:" >&2
+  compose ps -a >&2 || true
+  compose logs --no-color --tail=200 db api web >&2 || true
 }
 
 restore_previous_release() {
@@ -211,6 +224,7 @@ if [ "$cutover_required" = true ]; then
 fi
 
 if ! compose up -d --remove-orphans --force-recreate db api web; then
+  log_failed_startup
   if [ "$cutover_completed" = true ]; then
     echo "PostgreSQL is authoritative; refusing to roll back to SQLite after container startup failure." >&2
   elif [ -n "$previous_release_env" ]; then
@@ -232,7 +246,7 @@ while [ "$attempt" -le 45 ]; do
 done
 
 if [ "$healthy" != true ]; then
-  compose logs --tail=120
+  log_failed_startup
   if [ "$cutover_completed" = true ]; then
     echo "PostgreSQL is authoritative; refusing to roll back to SQLite after health-check failure." >&2
   elif [ -n "$previous_release_env" ]; then
@@ -248,9 +262,6 @@ printf '%s\n' "$APP_VERSION-$DEPLOY_MODE" > "$release_file"
 find "$deploy_root/data/backups" -type f -name 'slow-*.dump' -mtime +14 -delete
 docker image prune -f >/dev/null
 
-if [ -n "$previous_release_env" ]; then
-  rm -f "$previous_release_env"
-fi
 rm -f "$source_archive"
 
 echo "$DEPLOY_MODE deployment $APP_VERSION is healthy."
