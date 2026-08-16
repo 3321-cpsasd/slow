@@ -32,12 +32,14 @@ def _service(db: Session) -> LearningStartService:
     return LearningStartService(
         db,
         user_id="user_learning_start",
+        ai=None,
         baselines=PublishedBaselineStub(),
         shelf_provider=lambda _shelf_id: SimpleNamespace(
             id="shelf_learning_start",
             domain="计算机",
             specialty="算法",
         ),
+        profile_provider=lambda: {},
     )
 
 
