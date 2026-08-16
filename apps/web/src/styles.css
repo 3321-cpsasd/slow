@@ -4060,6 +4060,7 @@ button:disabled { cursor: not-allowed; }
 }
 .knowledge-evidence-stars { margin-top: 11px; display: flex; align-items: center; gap: 5px; color: #bfc1bb; }
 .knowledge-evidence-stars > span { margin-right: 3px; color: #858b84; font-size: 9px; font-weight: 700; }
+.knowledge-evidence-stars > b { color: var(--rank-ink); font-family: var(--font-display); font-size: 18px; font-weight: 500; line-height: 1; }
 .knowledge-evidence-stars > i { font-size: 10px; font-style: normal; }
 .knowledge-evidence-stars > i.filled { color: var(--rank-ink); }
 .knowledge-evidence-stars > small { margin-left: 5px; color: #92968f; font-size: 9px; }

@@ -255,9 +255,9 @@ def test_repair_adds_identity_decision_and_replays_without_rewriting_facts() -> 
             db, user_id="user_history"
         ).view(series_id="series_history")
         assert knowledge_map["availability"] == "ready"
-        assert knowledge_map["progress"]["verifiedTargets"] == 1
-        assert knowledge_map["progress"]["requiredTargets"] == 1
-        assert knowledge_map["nodes"][0]["rank"] == "bronze"
+        assert knowledge_map["progress"]["requiredCapabilities"] == 1
+        assert knowledge_map["progress"]["stagedCapabilities"] == 0
+        assert knowledge_map["nodes"][0]["stage"] == "unranked"
 
         repeated = repair_published_historical_rank_identities(db)
         assert repeated["identityDecisionsCreated"] == 0

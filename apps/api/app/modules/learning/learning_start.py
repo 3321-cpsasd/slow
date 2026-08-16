@@ -39,9 +39,9 @@ from .commands import SubmitQuiz
 from .content_governance_store import governance_view_for_quiz
 from .decision_snapshots import (
     append_assessment_gate_snapshot,
-    append_knowledge_settlement_snapshot,
+    append_capability_settlement_snapshot,
 )
-from .knowledge_ranks import knowledge_node_views_for_targets
+from .capability_profiles import capability_state_views_for_targets
 from .progress import best_score_pair
 
 
@@ -526,11 +526,10 @@ class ChapterChoiceService:
                 for item in questions
                 if item.get("assessmentTargetId")
             }
-            knowledge_before = knowledge_node_views_for_targets(
+            capability_before = capability_state_views_for_targets(
                 self.db,
                 user_id=self.user_id,
                 target_ids=target_ids,
-                learning_contract_version_id=binding.learning_contract_version_id,
             )
             record_scoring_facts(
                 self.db,
@@ -549,12 +548,12 @@ class ChapterChoiceService:
                 ),
                 source_type="chapter_challenge",
             )
-            settlement = append_knowledge_settlement_snapshot(
+            settlement = append_capability_settlement_snapshot(
                 self.db,
                 attempt=attempt,
                 section_id=section_id,
                 target_ids=target_ids,
-                before=knowledge_before,
+                before=capability_before,
                 trigger_kind="chapter_challenge",
             )
             gate = section_gate_decision(

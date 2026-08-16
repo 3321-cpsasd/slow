@@ -1,39 +1,42 @@
-"""User-owned, evidence-backed knowledge subgraph read model."""
+"""User-owned capability map projected from stable knowledge subnets."""
 
 from __future__ import annotations
 
+import json
 from collections import Counter, defaultdict
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ...core.errors import AppError
 from ...infrastructure.tables import (
     AssessmentTarget,
     Book,
+    Capability,
+    CapabilityConceptBinding,
+    CapabilityRelationRequirement,
+    CapabilityRevision,
+    CapabilityRouteBinding,
+    CapabilityStageCriterion,
+    CapabilityStateProjection,
     Chapter,
-    ConceptRelationVersion,
-    KnowledgeGraphRelease,
-    KnowledgeNodeStateProjection,
-    KnowledgeStateProjection,
+    ConceptRevision,
+    KnowledgeRelationRevision,
     LearningContractAssessmentTarget,
     LearningContractVersion,
-    QuizAttempt,
-    ReviewAssignment,
     Section,
     Series,
     Shelf,
 )
-from .knowledge_profile import learner_knowledge_profile_view
-from .knowledge_ranks import (
-    KNOWLEDGE_RANK_RULE_VERSION,
-    knowledge_node_views_for_concepts,
-    resolve_effective_rank_target,
+from .capability_profiles import (
+    CAPABILITY_PROJECTION_RULE_VERSION,
+    STAGE_LABELS,
+    STAGE_ORDER,
 )
+from .knowledge_profile import learner_knowledge_profile_view
 
 
-KNOWLEDGE_MAP_RULE_VERSION = "personal_knowledge_subgraph_v1"
-VERIFIED_CLAIMS = frozenset({"verified_immediate", "verified_delayed", "retained"})
+KNOWLEDGE_MAP_RULE_VERSION = "personal_capability_map_v2"
 RELATION_LABELS = {
     "prerequisite_for": "是前置",
     "applies_to": "可用于",
@@ -43,33 +46,11 @@ RELATION_LABELS = {
 }
 
 
-def _recommended_target_id(
-    concept_target_ids: set[str],
-    failed_review_target_ids: list[str],
-) -> str:
-    """Prefer the newest failed wake that can actually authorize reinforcement."""
-
-    return next(
-        (
-            target_id
-            for target_id in failed_review_target_ids
-            if target_id in concept_target_ids
-        ),
-        sorted(concept_target_ids)[0] if concept_target_ids else "",
-    )
-
-
-def _next_action(node: dict) -> dict:
-    activation = node["activation"]
-    if activation == "reassessment":
-        return {"kind": "reinforce", "label": "先补强这项能力"}
-    if activation == "due":
-        return {"kind": "wake", "label": "用一次短复习唤醒"}
-    if node["rank"] == "unranked":
-        return {"kind": "learn", "label": "完成首次正式验证"}
-    if node["atCeiling"]:
-        return {"kind": "maintain", "label": "已到本节点最高段位"}
-    return {"kind": "advance", "label": "在更深情境中继续验证"}
+def _load(value: str, default):
+    try:
+        return json.loads(value) if value else default
+    except (TypeError, ValueError):
+        return default
 
 
 class KnowledgeMapService:
@@ -110,11 +91,112 @@ class KnowledgeMapService:
         if not series_ids:
             return self._empty(series_meta, series_id=series_id)
 
-        rows = self.db.execute(
+        route_rows = self.db.execute(
+            select(CapabilityRouteBinding, CapabilityRevision, Capability)
+            .join(
+                CapabilityRevision,
+                CapabilityRevision.id == CapabilityRouteBinding.capability_revision_id,
+            )
+            .join(Capability, Capability.id == CapabilityRevision.capability_id)
+            .where(
+                CapabilityRouteBinding.series_id.in_(series_ids),
+                CapabilityRouteBinding.status == "active",
+            )
+            .order_by(
+                CapabilityRouteBinding.series_id,
+                CapabilityRevision.label,
+                CapabilityRevision.id,
+            )
+        ).all()
+        if not route_rows:
+            return self._empty(series_meta, series_id=series_id)
+
+        capability_ids = {revision.id for _route, revision, _capability in route_rows}
+        states = {
+            item.capability_revision_id: item
+            for item in self.db.scalars(
+                select(CapabilityStateProjection).where(
+                    CapabilityStateProjection.user_id == self.user_id,
+                    CapabilityStateProjection.capability_revision_id.in_(capability_ids),
+                )
+            ).all()
+        }
+        criteria_by_capability: dict[str, list[CapabilityStageCriterion]] = defaultdict(list)
+        for item in self.db.scalars(
+            select(CapabilityStageCriterion)
+            .where(CapabilityStageCriterion.capability_revision_id.in_(capability_ids))
+            .order_by(
+                CapabilityStageCriterion.capability_revision_id,
+                CapabilityStageCriterion.position,
+                CapabilityStageCriterion.id,
+            )
+        ).all():
+            criteria_by_capability[item.capability_revision_id].append(item)
+        for criteria in criteria_by_capability.values():
+            criteria.sort(key=lambda item: (
+                STAGE_ORDER.get(item.stage, 99), item.position, item.id
+            ))
+
+        concept_rows = self.db.execute(
+            select(CapabilityConceptBinding, ConceptRevision)
+            .join(
+                ConceptRevision,
+                ConceptRevision.id == CapabilityConceptBinding.concept_revision_id,
+            )
+            .where(CapabilityConceptBinding.capability_revision_id.in_(capability_ids))
+            .order_by(
+                CapabilityConceptBinding.capability_revision_id,
+                CapabilityConceptBinding.position,
+                CapabilityConceptBinding.id,
+            )
+        ).all()
+        knowledge_by_capability: dict[str, list[dict]] = defaultdict(list)
+        capabilities_by_concept: dict[str, set[str]] = defaultdict(set)
+        concept_labels: dict[str, str] = {}
+        for binding, concept in concept_rows:
+            knowledge_by_capability[binding.capability_revision_id].append({
+                "conceptRevisionId": concept.id,
+                "label": concept.label,
+                "role": binding.role,
+                "required": binding.required,
+            })
+            capabilities_by_concept[concept.id].add(binding.capability_revision_id)
+            concept_labels[concept.id] = concept.label
+
+        relation_rows = self.db.execute(
+            select(CapabilityRelationRequirement, KnowledgeRelationRevision)
+            .join(
+                KnowledgeRelationRevision,
+                KnowledgeRelationRevision.id
+                == CapabilityRelationRequirement.knowledge_relation_revision_id,
+            )
+            .where(
+                CapabilityRelationRequirement.capability_revision_id.in_(capability_ids)
+            )
+            .order_by(
+                CapabilityRelationRequirement.capability_revision_id,
+                CapabilityRelationRequirement.position,
+                CapabilityRelationRequirement.id,
+            )
+        ).all()
+        relations_by_capability: dict[str, list[dict]] = defaultdict(list)
+        for requirement, relation in relation_rows:
+            relations_by_capability[requirement.capability_revision_id].append({
+                "knowledgeRelationRevisionId": relation.id,
+                "fromConceptRevisionId": relation.from_concept_revision_id,
+                "toConceptRevisionId": relation.to_concept_revision_id,
+                "type": relation.relation_type,
+                "label": RELATION_LABELS.get(relation.relation_type, "相关"),
+                "statement": relation.statement,
+                "required": requirement.required,
+                "minimumStage": requirement.minimum_stage,
+            })
+
+        target_rows = self.db.execute(
             select(
-                LearningContractVersion,
-                LearningContractAssessmentTarget,
                 AssessmentTarget,
+                LearningContractAssessmentTarget,
+                LearningContractVersion,
                 Section,
                 Chapter,
                 Book,
@@ -122,13 +204,12 @@ class KnowledgeMapService:
             )
             .join(
                 LearningContractAssessmentTarget,
-                LearningContractAssessmentTarget.contract_version_id
-                == LearningContractVersion.id,
+                LearningContractAssessmentTarget.assessment_target_id == AssessmentTarget.id,
             )
             .join(
-                AssessmentTarget,
-                AssessmentTarget.id
-                == LearningContractAssessmentTarget.assessment_target_id,
+                LearningContractVersion,
+                LearningContractVersion.id
+                == LearningContractAssessmentTarget.contract_version_id,
             )
             .join(Section, Section.id == LearningContractVersion.section_id)
             .join(Chapter, Chapter.id == Section.chapter_id)
@@ -136,9 +217,8 @@ class KnowledgeMapService:
             .join(Series, Series.id == Book.series_id)
             .where(
                 Series.id.in_(series_ids),
-                Book.deleted_at.is_(None),
                 AssessmentTarget.status == "active",
-                LearningContractAssessmentTarget.diagnostic_only.is_(False),
+                AssessmentTarget.capability_revision_id.in_(capability_ids),
             )
             .order_by(
                 Series.id,
@@ -146,29 +226,21 @@ class KnowledgeMapService:
                 Chapter.position,
                 Section.position,
                 LearningContractVersion.version.desc(),
-                LearningContractAssessmentTarget.position,
             )
         ).all()
-
-        latest_contract_by_section: dict[str, tuple[int, str]] = {}
-        for contract, _binding, _target, section, *_rest in rows:
-            marker = latest_contract_by_section.get(section.id)
-            if marker is None or contract.version > marker[0]:
-                latest_contract_by_section[section.id] = (contract.version, contract.id)
-        current_rows = [
-            row
-            for row in rows
-            if latest_contract_by_section.get(row[3].id, (0, ""))[1] == row[0].id
-        ]
-
-        route_paths: dict[tuple[str, str], dict] = {}
-        targets: dict[str, AssessmentTarget] = {}
-        required_target_ids: set[str] = set()
-        for contract, binding, target, section, chapter, book, series in current_rows:
-            targets[target.id] = target
-            if binding.required:
-                required_target_ids.add(target.id)
-            path = {
+        contexts_by_capability: dict[str, list[dict]] = defaultdict(list)
+        target_ids_by_capability: dict[str, set[str]] = defaultdict(set)
+        seen_contexts: set[tuple[str, str, str]] = set()
+        for target, binding, contract, section, chapter, book, series in target_rows:
+            capability_id = target.capability_revision_id
+            if not capability_id:
+                continue
+            target_ids_by_capability[capability_id].add(target.id)
+            key = (capability_id, series.id, section.id)
+            if key in seen_contexts:
+                continue
+            seen_contexts.add(key)
+            contexts_by_capability[capability_id].append({
                 "seriesId": series.id,
                 "seriesTitle": series.title,
                 "bookId": book.id,
@@ -179,224 +251,186 @@ class KnowledgeMapService:
                 "sectionTitle": section.title,
                 "required": binding.required,
                 "contractVersionId": contract.id,
-            }
-            route_paths[(contract.id, target.id)] = path
-        if not required_target_ids:
-            required_target_ids = set(targets)
-
-        formal_target_ids: set[str] = set()
-        targets_by_concept: dict[str, set[str]] = defaultdict(set)
-        paths_by_concept: dict[str, list[dict]] = defaultdict(list)
-        for contract, _binding, target, *_rest in current_rows:
-            effective = resolve_effective_rank_target(
-                self.db,
-                source_target=target,
-                learning_contract_version_id=contract.id,
-            )
-            if effective is None or not effective.concept_revision_id:
-                continue
-            concept_id = effective.concept_revision_id
-            formal_target_ids.add(target.id)
-            targets_by_concept[concept_id].add(target.id)
-            paths_by_concept[concept_id].append(
-                route_paths[(contract.id, target.id)]
-            )
-        concept_ids = set(targets_by_concept)
-        # The all-goals view is the user's durable subgraph, not merely the
-        # union of today's active routes. Keep previously evidenced published
-        # nodes visible across books and shelves; a series-filtered view stays
-        # bounded to that route.
-        if series_id is None:
-            concept_ids.update(
-                self.db.scalars(
-                    select(KnowledgeNodeStateProjection.concept_revision_id).where(
-                        KnowledgeNodeStateProjection.user_id == self.user_id,
-                        KnowledgeNodeStateProjection.evidence_count > 0,
-                    )
-                ).all()
-            )
-        node_views = knowledge_node_views_for_concepts(
-            self.db,
-            user_id=self.user_id,
-            concept_revision_ids=concept_ids,
-        )
-        state_by_target = {
-            item.assessment_target_id: item
-            for item in self.db.scalars(
-                select(KnowledgeStateProjection).where(
-                    KnowledgeStateProjection.user_id == self.user_id,
-                    KnowledgeStateProjection.assessment_target_id.in_(set(targets)),
-                )
-            ).all()
-        } if targets else {}
-        # A node can represent several assessment targets. Reinforcement is only
-        # authorized by a submitted failed wake, so an arbitrary target id can
-        # make an otherwise actionable node return 409. Keep the query ordered
-        # newest-first and select the first failed target belonging to each node.
-        failed_review_target_ids = list(self.db.scalars(
-            select(ReviewAssignment.assessment_target_id)
-            .join(
-                QuizAttempt,
-                QuizAttempt.id == ReviewAssignment.submitted_attempt_id,
-            )
-            .where(
-                ReviewAssignment.user_id == self.user_id,
-                ReviewAssignment.assessment_target_id.in_(formal_target_ids),
-                ReviewAssignment.status == "submitted",
-                QuizAttempt.passed.is_(False),
-            )
-            .order_by(
-                ReviewAssignment.updated_at.desc(),
-                ReviewAssignment.id.desc(),
-            )
-        )) if formal_target_ids else []
-
-        nodes = []
-        for concept_id, node in sorted(
-            node_views.items(),
-            key=lambda item: (item[1]["rankOrder"], item[1]["label"], item[0]),
-        ):
-            concept_target_ids = targets_by_concept[concept_id]
-            verified_ids = {
-                target_id
-                for target_id in concept_target_ids
-                if target_id in state_by_target
-                and state_by_target[target_id].claim_status in VERIFIED_CLAIMS
-            }
-            paths = []
-            seen_paths = set()
-            for path in paths_by_concept[concept_id]:
-                key = (path["seriesId"], path["sectionId"])
-                if key not in seen_paths:
-                    seen_paths.add(key)
-                    paths.append(path)
-            nodes.append({
-                **node,
-                "recommendedTargetId": _recommended_target_id(
-                    concept_target_ids,
-                    failed_review_target_ids,
-                ),
-                "targetCount": len(concept_target_ids),
-                "verifiedTargetCount": len(verified_ids),
-                "required": bool(concept_target_ids & required_target_ids),
-                "routeContexts": paths,
-                "nextAction": _next_action(node),
             })
 
-        included_ids = set(node_views)
-        relation_rows = self.db.execute(
-            select(ConceptRelationVersion)
-            .join(
-                KnowledgeGraphRelease,
-                KnowledgeGraphRelease.id == ConceptRelationVersion.release_id,
+        nodes_by_id: dict[str, dict] = {}
+        route_stage_by_capability = {
+            capability_id: max(
+                (
+                    candidate.target_stage
+                    for candidate, candidate_revision, _candidate_capability in route_rows
+                    if candidate_revision.id == capability_id
+                ),
+                key=lambda stage: STAGE_ORDER.get(stage, 0),
             )
-            .where(
-                KnowledgeGraphRelease.status == "published",
-                ConceptRelationVersion.status == "reviewed",
-                ConceptRelationVersion.from_concept_revision_id.in_(included_ids),
-                ConceptRelationVersion.to_concept_revision_id.in_(included_ids),
-            )
-            .order_by(
-                ConceptRelationVersion.relation_type,
-                ConceptRelationVersion.id,
-            )
-        ).scalars().all() if included_ids else []
-        edges = [
-            {
-                "id": item.id,
-                "from": item.from_concept_revision_id,
-                "to": item.to_concept_revision_id,
-                "type": item.relation_type,
-                "label": RELATION_LABELS.get(item.relation_type, "相关"),
-            }
-            for item in relation_rows
-        ]
-
-        route_target_ids = required_target_ids & formal_target_ids
-        verified_target_ids = {
-            target_id
-            for target_id in route_target_ids
-            if target_id in state_by_target
-            and state_by_target[target_id].claim_status in VERIFIED_CLAIMS
+            for capability_id in capability_ids
         }
-        activation_counts = Counter(item["activation"] for item in nodes)
-        rank_counts = Counter(item["rank"] for item in nodes)
-        total = len(route_target_ids)
-        availability = (
-            "ready"
-            if total and len(included_ids) == len(concept_ids)
-            else "partial"
-            if total
-            else "not_ready"
+        for route, revision, capability in route_rows:
+            route_stage = route_stage_by_capability[revision.id]
+            state = states.get(revision.id)
+            current_stage = state.current_stage if state else "unranked"
+            satisfied = set(_load(state.satisfied_criterion_ids_json, [])) if state else set()
+            missing = [
+                item for item in criteria_by_capability[revision.id]
+                if item.required
+                and item.id not in satisfied
+                and STAGE_ORDER.get(item.stage, 99) <= STAGE_ORDER.get(route_stage, 0)
+            ]
+            next_criterion = missing[0] if missing else None
+            activation = state.activation_state if state else "learning"
+            if activation == "due_for_reactivation":
+                next_action = {"kind": "wake", "label": "用一次短复习唤醒"}
+            elif current_stage == "unranked":
+                next_action = {"kind": "learn", "label": "完成首次正式验证"}
+            elif STAGE_ORDER.get(current_stage, 0) >= STAGE_ORDER.get(route_stage, 0):
+                next_action = {"kind": "maintain", "label": "本路线阶段已达成"}
+            else:
+                label = STAGE_LABELS.get(next_criterion.stage, "下一阶") if next_criterion else "下一阶"
+                next_action = {"kind": "advance", "label": f"进入{label}任务"}
+            existing = nodes_by_id.get(revision.id)
+            route_contexts = contexts_by_capability[revision.id]
+            if existing:
+                existing["routeContexts"] = [
+                    *existing["routeContexts"],
+                    *[
+                        item for item in route_contexts
+                        if (item["seriesId"], item["sectionId"])
+                        not in {
+                            (seen["seriesId"], seen["sectionId"])
+                            for seen in existing["routeContexts"]
+                        }
+                    ],
+                ]
+                continue
+            nodes_by_id[revision.id] = {
+                "capabilityRevisionId": revision.id,
+                "capabilityId": capability.id,
+                "label": revision.label or capability.canonical_name,
+                "stage": current_stage,
+                "stageOrder": STAGE_ORDER.get(current_stage, 0),
+                "stageLabel": STAGE_LABELS.get(current_stage, STAGE_LABELS["unranked"]),
+                "naturalStageCeiling": revision.natural_stage_ceiling,
+                "naturalStageCeilingLabel": STAGE_LABELS.get(
+                    revision.natural_stage_ceiling, revision.natural_stage_ceiling
+                ),
+                "routeStageCeiling": route_stage,
+                "routeStageCeilingLabel": STAGE_LABELS.get(route_stage, route_stage),
+                "activationState": activation,
+                "stabilityDays": state.stability_days if state else 0,
+                "nextDueAt": state.next_due_at.isoformat() if state and state.next_due_at else None,
+                "evidenceCount": state.evidence_count if state else 0,
+                "independentEvidenceCount": state.independent_evidence_count if state else 0,
+                "targetCount": len(target_ids_by_capability[revision.id]),
+                "knowledge": knowledge_by_capability[revision.id],
+                "relations": relations_by_capability[revision.id],
+                "routeContexts": route_contexts,
+                "nextStage": next_criterion.stage if next_criterion else None,
+                "nextCriterion": next_criterion.statement if next_criterion else None,
+                "nextAction": next_action,
+            }
+
+        edges = []
+        seen_edges: set[tuple[str, str, str]] = set()
+        for concept_id, related_capabilities in sorted(capabilities_by_concept.items()):
+            ordered = sorted(related_capabilities & set(nodes_by_id))
+            for index, left in enumerate(ordered):
+                for right in ordered[index + 1:]:
+                    key = (left, right, concept_id)
+                    if key in seen_edges:
+                        continue
+                    seen_edges.add(key)
+                    edges.append({
+                        "id": f"shared:{concept_id}:{left}:{right}",
+                        "from": left,
+                        "to": right,
+                        "type": "shared_knowledge",
+                        "label": f"共享 · {concept_labels[concept_id]}",
+                    })
+
+        nodes = sorted(
+            nodes_by_id.values(),
+            key=lambda item: (item["stageOrder"], item["label"], item["capabilityRevisionId"]),
         )
+        stage_counts = Counter(item["stage"] for item in nodes)
+        active_count = sum(item["activationState"] == "available" for item in nodes)
+        due_count = sum(item["activationState"] == "due_for_reactivation" for item in nodes)
+        staged_count = sum(item["stageOrder"] > 0 for item in nodes)
+        profile = learner_knowledge_profile_view(self.db, user_id=self.user_id)
         return {
-            "schemaVersion": "personal_knowledge_map_v1",
+            "schemaVersion": "personal_capability_map_v2",
             "ruleVersion": KNOWLEDGE_MAP_RULE_VERSION,
-            "rankRuleVersion": KNOWLEDGE_RANK_RULE_VERSION,
-            "availability": availability,
+            "projectionRuleVersion": CAPABILITY_PROJECTION_RULE_VERSION,
+            "availability": "ready" if nodes else "not_ready",
             "scope": {
                 "seriesId": series_id,
                 "series": list(series_meta.values()),
-                "definition": "当前目标中已发布并可验证的能力节点",
+                "definition": "当前路线中的稳定能力及其正式知识子网",
             },
             "progress": {
-                "verifiedTargets": len(verified_target_ids),
-                "requiredTargets": total,
-                "coveragePpm": round(len(verified_target_ids) / total * 1_000_000)
-                if total else 0,
-                "activeNodes": activation_counts.get("active", 0),
-                "needsWakeNodes": activation_counts.get("due", 0),
-                "reassessmentNodes": activation_counts.get("reassessment", 0),
-                "rankCounts": dict(sorted(rank_counts.items())),
-                "basis": "latest_frozen_contracts_and_qualified_evidence",
+                "stagedCapabilities": staged_count,
+                "requiredCapabilities": len(nodes),
+                "coveragePpm": round(staged_count / len(nodes) * 1_000_000) if nodes else 0,
+                "activeCapabilities": active_count,
+                "needsWakeCapabilities": due_count,
+                "learningCapabilities": len(nodes) - active_count - due_count,
+                "stageCounts": dict(sorted(stage_counts.items())),
+                "basis": "capability_routes_and_qualified_evidence",
             },
-            "learnerProfile": learner_knowledge_profile_view(
-                self.db,
-                user_id=self.user_id,
-            ),
+            "learnerProfile": profile.get("capabilityProfile", {}),
             "nodes": nodes,
             "edges": edges,
             "excluded": {
-                "provisionalTargetCount": len(targets) - len(formal_target_ids),
-                "missingRubricNodeCount": len(concept_ids) - len(included_ids),
+                "targetWithoutCapabilityCount": int(self.db.scalar(
+                    select(func.count(func.distinct(AssessmentTarget.id)))
+                    .join(
+                        LearningContractAssessmentTarget,
+                        LearningContractAssessmentTarget.assessment_target_id
+                        == AssessmentTarget.id,
+                    )
+                    .join(
+                        LearningContractVersion,
+                        LearningContractVersion.id
+                        == LearningContractAssessmentTarget.contract_version_id,
+                    )
+                    .join(Section, Section.id == LearningContractVersion.section_id)
+                    .join(Chapter, Chapter.id == Section.chapter_id)
+                    .join(Book, Book.id == Chapter.book_id)
+                    .join(Series, Series.id == Book.series_id)
+                    .where(
+                        Series.id.in_(series_ids),
+                        AssessmentTarget.capability_revision_id.is_(None),
+                        AssessmentTarget.status == "active",
+                    )
+                ) or 0),
             },
-            "message": (
-                "这里显示的是正式目标与合格证据形成的个人知识子网。"
-                if availability == "ready"
-                else "部分目标仍在建立正式知识坐标，暂不参与段位与能力覆盖计算。"
-                if availability == "partial"
-                else "完成带有正式知识坐标的小节后，知识版图会从这里生长。"
-            ),
+            "message": "这里展示稳定能力，而不是把每个知识点各自做成一枚段位。展开能力即可看到它依赖的知识节点与关系。",
         }
 
     @staticmethod
     def _empty(series_meta: dict[str, dict], *, series_id: str | None) -> dict:
         return {
-            "schemaVersion": "personal_knowledge_map_v1",
+            "schemaVersion": "personal_capability_map_v2",
             "ruleVersion": KNOWLEDGE_MAP_RULE_VERSION,
-            "rankRuleVersion": KNOWLEDGE_RANK_RULE_VERSION,
+            "projectionRuleVersion": CAPABILITY_PROJECTION_RULE_VERSION,
             "availability": "not_ready",
             "scope": {
                 "seriesId": series_id,
                 "series": list(series_meta.values()),
-                "definition": "当前目标中已发布并可验证的能力节点",
+                "definition": "当前路线中的稳定能力及其正式知识子网",
             },
             "progress": {
-                "verifiedTargets": 0,
-                "requiredTargets": 0,
+                "stagedCapabilities": 0,
+                "requiredCapabilities": 0,
                 "coveragePpm": 0,
-                "activeNodes": 0,
-                "needsWakeNodes": 0,
-                "reassessmentNodes": 0,
-                "rankCounts": {},
-                "basis": "latest_frozen_contracts_and_qualified_evidence",
+                "activeCapabilities": 0,
+                "needsWakeCapabilities": 0,
+                "learningCapabilities": 0,
+                "stageCounts": {},
+                "basis": "capability_routes_and_qualified_evidence",
             },
             "learnerProfile": {},
             "nodes": [],
             "edges": [],
-            "excluded": {
-                "provisionalTargetCount": 0,
-                "missingRubricNodeCount": 0,
-            },
-            "message": "完成带有正式知识坐标的小节后，知识版图会从这里生长。",
+            "excluded": {"targetWithoutCapabilityCount": 0},
+            "message": "完成带有稳定能力身份的小节后，能力版图会从这里生长。",
         }

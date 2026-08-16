@@ -4064,9 +4064,8 @@ function parseProfileDomains(value: string) {
   )).slice(0, 6);
 }
 
-const KNOWLEDGE_RANK_SHORT:Record<KnowledgeMapNode['rank'],string> = {
-  unranked: '待验证', bronze: '青铜', silver: '白银', gold: '黄金',
-  platinum: '铂金', diamond: '钻石', master: '大师',
+const CAPABILITY_STAGE_SHORT:Record<KnowledgeMapNode['stage'],string> = {
+  unranked: '待验证', bronze: '青铜', silver: '白银', gold: '黄金', diamond: '钻石',
 };
 
 function KnowledgeMapPage({
@@ -4083,7 +4082,6 @@ function KnowledgeMapPage({
   const [selectedId, setSelectedId] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [actionBusy, setActionBusy] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -4093,9 +4091,9 @@ function KnowledgeMapPage({
       if (!alive) return;
       setMap(value);
       setSelectedId((current) => (
-        value.nodes.some((item) => item.conceptRevisionId === current)
+        value.nodes.some((item) => item.capabilityRevisionId === current)
           ? current
-          : value.nodes[0]?.conceptRevisionId || ''
+          : value.nodes[0]?.capabilityRevisionId || ''
       ));
     }).catch((reason) => {
       if (alive) setError(reason instanceof Error ? reason.message : '知识版图暂时无法加载');
@@ -4105,7 +4103,7 @@ function KnowledgeMapPage({
     return () => { alive = false; };
   }, [scope]);
 
-  const selected = map?.nodes.find((item) => item.conceptRevisionId === selectedId) || null;
+  const selected = map?.nodes.find((item) => item.capabilityRevisionId === selectedId) || null;
   const positioned = useMemo(() => {
     const nodes = map?.nodes || [];
     return nodes.map((node, index) => {
@@ -4118,25 +4116,12 @@ function KnowledgeMapPage({
       };
     });
   }, [map]);
-  const coordinates = new Map(positioned.map((item) => [item.node.conceptRevisionId, item]));
+  const coordinates = new Map(positioned.map((item) => [item.node.capabilityRevisionId, item]));
   const coverage = map ? Math.round(map.progress.coveragePpm / 10_000) : 0;
 
   const startSelectedReinforcement = async () => {
-    if (actionBusy) return;
     if (selected?.nextAction.kind === 'wake') {
       onOpenReview();
-      return;
-    }
-    if (!selected?.recommendedTargetId) return;
-    setActionBusy(true);
-    setError('');
-    try {
-      await api.startTargetReinforcement(selected.recommendedTargetId);
-      onOpenReview();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '暂时无法开始补强');
-    } finally {
-      setActionBusy(false);
     }
   };
 
@@ -4165,12 +4150,12 @@ function KnowledgeMapPage({
           <div className="knowledge-progress-copy">
             <span>能力路线覆盖</span>
             <div><i style={{ width: `${coverage}%` }} /></div>
-            <small>{map?.progress.verifiedTargets || 0} / {map?.progress.requiredTargets || 0} 项正式目标已有合格证据</small>
+            <small>{map?.progress.stagedCapabilities || 0} / {map?.progress.requiredCapabilities || 0} 项稳定能力已取得正式阶段</small>
           </div>
           <dl>
-            <div><dt>{map?.progress.activeNodes || 0}</dt><dd>可随时调用</dd></div>
-            <div><dt>{map?.progress.needsWakeNodes || 0}</dt><dd>待唤醒</dd></div>
-            <div><dt>{map?.progress.reassessmentNodes || 0}</dt><dd>待补强</dd></div>
+            <div><dt>{map?.progress.activeCapabilities || 0}</dt><dd>可随时调用</dd></div>
+            <div><dt>{map?.progress.needsWakeCapabilities || 0}</dt><dd>待唤醒</dd></div>
+            <div><dt>{map?.progress.learningCapabilities || 0}</dt><dd>形成中</dd></div>
           </dl>
         </div>
       </header>
@@ -4184,14 +4169,14 @@ function KnowledgeMapPage({
           <span aria-hidden="true">◎</span>
           <h2>第一颗知识坐标还在形成</h2>
           <p>{map?.message}</p>
-          {Boolean(map?.excluded.provisionalTargetCount) && <small>已有 {map?.excluded.provisionalTargetCount} 项旧目标尚未完成正式知识坐标绑定，因此没有被拿来虚构段位。</small>}
+          {Boolean(map?.excluded.targetWithoutCapabilityCount) && <small>仍有旧目标没有稳定能力身份，因此不会被拿来虚构能力阶段。</small>}
         </div>
       ) : (
         <div className="knowledge-map-workspace">
           <div className="knowledge-constellation" aria-label="知识节点关系图">
             <div className="knowledge-constellation-heading">
               <div><span>个人子网</span><b>{map.nodes.length} 个能力节点</b></div>
-              <small>连线来自已发布知识关系；点击节点查看证据范围</small>
+              <small>连线表示能力间共享正式知识身份；点击查看各自知识子网</small>
             </div>
             <svg viewBox={`0 0 700 ${Math.max(430, Math.ceil(positioned.length / 3) * 150 + 80)}`} role="img" aria-label="能力节点关系">
               <defs>
@@ -4208,20 +4193,19 @@ function KnowledgeMapPage({
               })}
               {positioned.map(({ node, x, y }) => (
                 <g
-                  key={node.conceptRevisionId}
-                  className={`knowledge-node rank-${node.rank} activation-${node.activation}${selectedId === node.conceptRevisionId ? ' is-selected' : ''}`}
+                  key={node.capabilityRevisionId}
+                  className={`knowledge-node rank-${node.stage} activation-${node.activationState === 'available' ? 'active' : node.activationState === 'due_for_reactivation' ? 'due' : 'learning'}${selectedId === node.capabilityRevisionId ? ' is-selected' : ''}`}
                   role="button"
                   tabIndex={0}
-                  aria-label={`${node.label}，${node.rankLabel}，${node.nextAction.label}`}
-                  onClick={() => setSelectedId(node.conceptRevisionId)}
-                  onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') setSelectedId(node.conceptRevisionId); }}
+                  aria-label={`${node.label}，${node.stageLabel}，${node.nextAction.label}`}
+                  onClick={() => setSelectedId(node.capabilityRevisionId)}
+                  onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') setSelectedId(node.capabilityRevisionId); }}
                 >
                   <circle cx={x} cy={y} r="42" className="knowledge-node-halo" />
                   <circle cx={x} cy={y} r="30" className="knowledge-node-core" />
-                  <text x={x} y={y + 4} className="knowledge-node-rank">{KNOWLEDGE_RANK_SHORT[node.rank]}</text>
+                  <text x={x} y={y + 4} className="knowledge-node-rank">{CAPABILITY_STAGE_SHORT[node.stage]}</text>
                   <text x={x} y={y + 61} className="knowledge-node-label">{node.label.length > 11 ? `${node.label.slice(0, 10)}…` : node.label}</text>
-                  {node.activation === 'due' && <text x={x + 31} y={y - 28} className="knowledge-node-signal">唤</text>}
-                  {node.activation === 'reassessment' && <text x={x + 31} y={y - 28} className="knowledge-node-signal">补</text>}
+                  {node.activationState === 'due_for_reactivation' && <text x={x + 31} y={y - 28} className="knowledge-node-signal">唤</text>}
                 </g>
               ))}
             </svg>
@@ -4230,27 +4214,32 @@ function KnowledgeMapPage({
           <aside className="knowledge-node-ledger" aria-live="polite">
             {selected && (
               <>
-                <div className={`knowledge-ledger-seal rank-${selected.rank}`}>
-                  <span>{KNOWLEDGE_RANK_SHORT[selected.rank]}</span>
-                  <small>{'★'.repeat(selected.stars)}{'☆'.repeat(Math.max(0, 3 - selected.stars))}</small>
+                <div className={`knowledge-ledger-seal rank-${selected.stage}`}>
+                  <span>{CAPABILITY_STAGE_SHORT[selected.stage]}</span>
+                  <small>{selected.independentEvidenceCount} 次独立证据</small>
                 </div>
                 <p className="eyebrow">EVIDENCE LEDGER</p>
                 <h2>{selected.label}</h2>
-                <p className="knowledge-capability-scope">本节点只衡量：{selected.capabilityScope}</p>
+                <p className="knowledge-capability-scope">这是一项稳定能力；下方知识节点共同支撑它，不会各自生成段位。</p>
                 <div className="knowledge-ledger-state">
-                  <span>{selected.rankLabel}</span>
+                  <span>{selected.stageLabel}</span>
                   <i>→</i>
-                  <span className={`activation-${selected.activation}`}>{selected.nextAction.label}</span>
+                  <span className={`activation-${selected.activationState === 'available' ? 'active' : selected.activationState === 'due_for_reactivation' ? 'due' : 'learning'}`}>{selected.nextAction.label}</span>
                 </div>
                 <dl>
                   <div><dt>{selected.independentEvidenceCount}</dt><dd>独立证据</dd></div>
-                  <div><dt>{selected.verifiedTargetCount}/{selected.targetCount}</dt><dd>目标验证</dd></div>
+                  <div><dt>{selected.knowledge.filter((item) => item.required).length}</dt><dd>必需知识</dd></div>
                   <div><dt>{selected.stabilityDays} 天</dt><dd>当前稳定期</dd></div>
                 </dl>
                 <div className="knowledge-ceiling-note">
                   <span>这项能力的自然上限</span>
-                  <b>{selected.rankCeilingLabel}</b>
-                  <small>{selected.atCeiling ? '本节点已满阶；更复杂的能力会作为新的知识节点出现。' : '继续学习不会靠重复刷题升级，而要出现更深、独立的新证据。'}</small>
+                  <b>{selected.routeStageCeilingLabel}</b>
+                  <small>{selected.nextCriterion || '当前路线已经没有更高阶的正式验证任务。'}</small>
+                </div>
+                <div className="knowledge-route-origin">
+                  <span>能力知识子网</span>
+                  <b>{selected.knowledge.filter((item) => item.required).map((item) => item.label).join(' · ') || '待冻结必需知识'}</b>
+                  <small>{selected.relations.map((item) => item.statement).join('；') || '单节点最小子网'}</small>
                 </div>
                 {selected.routeContexts[0] && (
                   <div className="knowledge-route-origin">
@@ -4259,9 +4248,9 @@ function KnowledgeMapPage({
                     <small>{selected.routeContexts[0].bookTitle} · {selected.routeContexts[0].sectionTitle}</small>
                   </div>
                 )}
-                {(selected.nextAction.kind === 'reinforce' || selected.nextAction.kind === 'wake') && (
-                  <button className="knowledge-reinforce-entry" disabled={actionBusy} onClick={() => void startSelectedReinforcement()}>
-                    {actionBusy ? '正在准备短路径…' : selected.nextAction.label}
+                {selected.nextAction.kind === 'wake' && (
+                  <button className="knowledge-reinforce-entry" onClick={() => void startSelectedReinforcement()}>
+                    {selected.nextAction.label}
                     <span aria-hidden="true">→</span>
                   </button>
                 )}
@@ -4272,7 +4261,7 @@ function KnowledgeMapPage({
       )}
       <footer className="knowledge-map-footnote">
         <b>这里不显示 AI 猜测。</b>
-        <span>正文互动帮助理解，但只有节末测验、Ask Me 与合格的延迟复习会改变正式段位；后台发现生疏时，会明确显示为“待唤醒”。</span>
+        <span>节末测验、口试、正式应用与迁移任务共同形成能力阶段；延迟复习只更新当前可调用状态，不会凭时间升降历史阶段。</span>
       </footer>
     </section>
   );
@@ -8712,20 +8701,20 @@ function KnowledgeSettlementCard({
 }) {
   if (!settlement?.updates.length) return null;
   const priority = {
-    rank_up: 0,
-    star_up: 1,
+    stage_up: 0,
+    evidence_added: 1,
     reactivated: 2,
-    needs_reinforcement: 3,
+    needs_reactivation: 3,
     confirmed: 4,
   } as const;
   const updates = [...settlement.updates].sort(
     (left, right) => priority[left.change] - priority[right.change],
   );
   const stateLabel = {
-    rank_up: '段位提升',
-    star_up: '证据增加',
+    stage_up: '能力进阶',
+    evidence_added: '证据增加',
     reactivated: '重新唤醒',
-    needs_reinforcement: '需要巩固',
+    needs_reactivation: '等待唤醒',
     confirmed: '能力确认',
   } as const;
 
@@ -8733,28 +8722,28 @@ function KnowledgeSettlementCard({
     <section className="knowledge-settlement" aria-labelledby="knowledge-settlement-title">
       <div className="knowledge-settlement-heading">
         <div>
-          <span>知识印记</span>
-          <h3 id="knowledge-settlement-title">本节留下的成长</h3>
+          <span>能力画像</span>
+          <h3 id="knowledge-settlement-title">本节形成的能力证据</h3>
         </div>
-        <small>只记录正式验证，不把阅读时长算成掌握</small>
+        <small>阶段、证据稳固度与当前可用状态分别计算</small>
       </div>
       <div className="knowledge-settlement-list">
         {updates.map((update) => {
-          const tier = update.after.rankLabel.split(' · ')[0];
-          const rankChanged = update.change === 'rank_up';
+          const tier = update.after.stageLabel.split(' · ')[0];
+          const stageChanged = update.change === 'stage_up';
           return (
             <article
-              className={`knowledge-rank-update ${rankChanged ? 'rank-up' : update.change}`}
-              data-rank={update.after.rank}
-              key={update.conceptRevisionId}
+              className={`knowledge-rank-update ${stageChanged ? 'rank-up' : update.change}`}
+              data-rank={update.after.stage}
+              key={update.capabilityRevisionId}
             >
               <div
                 className="knowledge-rank-seal"
-                aria-label={`当前段位：${update.after.rankLabel}，${update.after.stars} 颗证据星`}
+                aria-label={`当前能力阶段：${update.after.stageLabel}`}
               >
-                <small>{rankChanged ? 'NEW RANK' : 'KNOWLEDGE'}</small>
+                <small>{stageChanged ? 'NEW STAGE' : 'CAPABILITY'}</small>
                 <strong>{tier}</strong>
-                <i aria-hidden="true">知</i>
+                <i aria-hidden="true">能</i>
               </div>
               <div className="knowledge-rank-copy">
                 <div className="knowledge-rank-meta">
@@ -8762,33 +8751,25 @@ function KnowledgeSettlementCard({
                   <em>{update.label}</em>
                 </div>
                 <h4>
-                  {rankChanged && update.before.rank !== 'unranked' && (
-                    <small>{update.before.rankLabel}</small>
+                  {stageChanged && update.before.stage !== 'unranked' && (
+                    <small>{update.before.stageLabel}</small>
                   )}
-                  {rankChanged && update.before.rank !== 'unranked' && <i>→</i>}
-                  {update.after.rankLabel}
+                  {stageChanged && update.before.stage !== 'unranked' && <i>→</i>}
+                  {update.after.stageLabel}
                 </h4>
                 <p>{update.message}</p>
-                {update.after.capabilityScope && (
-                  <div className="knowledge-capability-scope">
-                    <span>这枚段位只对应</span>
-                    <b>{update.after.capabilityScope}</b>
-                    {update.after.atCeiling && <small>本节点已满阶</small>}
-                  </div>
-                )}
+                <div className="knowledge-capability-scope">
+                  <span>稳定能力</span>
+                  <b>{update.after.label}</b>
+                  {update.after.nextCriterion && <small>下一阶要求：{update.after.nextCriterion}</small>}
+                </div>
                 <div
                   className="knowledge-evidence-stars"
-                  aria-label={`当前 ${update.after.stars} 颗证据星，最多 3 颗`}
+                  aria-label={`当前 ${update.after.independentEvidenceCount} 次独立证据`}
                 >
-                  <span>证据星</span>
-                  {[1, 2, 3].map((star) => (
-                    <i className={star <= update.after.stars ? 'filled' : ''} key={star} aria-hidden="true">◆</i>
-                  ))}
-                  <small>
-                    {update.change === 'confirmed'
-                      ? '本次未重复累计'
-                      : `${update.after.independentEvidenceCount} 次独立验证`}
-                  </small>
+                  <span>证据稳固度</span>
+                  <b>{update.after.independentEvidenceCount}</b>
+                  <small>次独立验证 · {update.after.stabilityDays} 天跨度</small>
                 </div>
               </div>
             </article>

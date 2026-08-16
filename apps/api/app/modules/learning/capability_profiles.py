@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from ...infrastructure.tables import (
     AssessmentObservation,
     AssessmentTarget,
+    Capability,
     CapabilityRevision,
     CapabilityRouteBinding,
     CapabilityStageCriterion,
@@ -27,6 +28,13 @@ STAGE_ORDER = {
     "diamond": 4,
 }
 ORDERED_STAGES = ("bronze", "silver", "gold", "diamond")
+STAGE_LABELS = {
+    "unranked": "尚未验证",
+    "bronze": "青铜 · 说得出",
+    "silver": "白银 · 讲得清",
+    "gold": "黄金 · 做得到",
+    "diamond": "钻石 · 能迁移",
+}
 
 
 def _uid(prefix: str) -> str:
@@ -39,6 +47,116 @@ def _dump(value: object) -> str:
 
 def _utc(value: datetime) -> datetime:
     return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def capability_state_views_for_targets(
+    db: Session,
+    *,
+    user_id: str,
+    target_ids: set[str],
+) -> dict[str, dict]:
+    """Return the user-facing capability state for capability-backed targets."""
+
+    if not target_ids:
+        return {}
+    targets = db.scalars(
+        select(AssessmentTarget).where(AssessmentTarget.id.in_(target_ids))
+    ).all()
+    capability_ids = {
+        item.capability_revision_id
+        for item in targets
+        if item.capability_revision_id
+    }
+    if not capability_ids:
+        return {}
+    revisions = {
+        revision.id: (revision, capability)
+        for revision, capability in db.execute(
+            select(CapabilityRevision, Capability)
+            .join(Capability, Capability.id == CapabilityRevision.capability_id)
+            .where(CapabilityRevision.id.in_(capability_ids))
+        ).all()
+    }
+    states = {
+        item.capability_revision_id: item
+        for item in db.scalars(
+            select(CapabilityStateProjection).where(
+                CapabilityStateProjection.user_id == user_id,
+                CapabilityStateProjection.capability_revision_id.in_(capability_ids),
+            )
+        ).all()
+    }
+    criteria_by_capability: dict[str, list[CapabilityStageCriterion]] = defaultdict(list)
+    for criterion in db.scalars(
+        select(CapabilityStageCriterion)
+        .where(CapabilityStageCriterion.capability_revision_id.in_(capability_ids))
+        .order_by(
+            CapabilityStageCriterion.capability_revision_id,
+            CapabilityStageCriterion.position,
+            CapabilityStageCriterion.id,
+        )
+    ).all():
+        criteria_by_capability[criterion.capability_revision_id].append(criterion)
+    for criteria in criteria_by_capability.values():
+        criteria.sort(key=lambda item: (
+            STAGE_ORDER.get(item.stage, 99), item.position, item.id
+        ))
+
+    views: dict[str, dict] = {}
+    for capability_id in sorted(capability_ids):
+        pair = revisions.get(capability_id)
+        if pair is None:
+            continue
+        revision, capability = pair
+        state = states.get(capability_id)
+        current_stage = state.current_stage if state else "unranked"
+        satisfied_ids = set(
+            json.loads(state.satisfied_criterion_ids_json or "[]") if state else []
+        )
+        criteria = [item for item in criteria_by_capability[capability_id] if item.required]
+        missing_ids = set(
+            json.loads(state.missing_criterion_ids_json or "[]")
+            if state
+            else [item.id for item in criteria]
+        )
+        next_criterion = next(
+            (item for item in criteria if item.id in missing_ids),
+            None,
+        )
+        views[capability_id] = {
+            "capabilityRevisionId": capability_id,
+            "capabilityId": capability.id,
+            "label": revision.label or capability.canonical_name,
+            "stage": current_stage,
+            "stageOrder": STAGE_ORDER.get(current_stage, 0),
+            "stageLabel": STAGE_LABELS.get(current_stage, STAGE_LABELS["unranked"]),
+            "highestStage": state.highest_stage if state else "unranked",
+            "naturalStageCeiling": revision.natural_stage_ceiling,
+            "naturalStageCeilingLabel": STAGE_LABELS.get(
+                revision.natural_stage_ceiling,
+                revision.natural_stage_ceiling,
+            ),
+            "activationState": state.activation_state if state else "learning",
+            "stabilityDays": state.stability_days if state else 0,
+            "nextDueAt": state.next_due_at.isoformat() if state and state.next_due_at else None,
+            "evidenceCount": state.evidence_count if state else 0,
+            "independentEvidenceCount": (
+                state.independent_evidence_count if state else 0
+            ),
+            "satisfiedCriterionIds": sorted(satisfied_ids),
+            "missingCriterionIds": sorted(missing_ids),
+            "nextStage": next_criterion.stage if next_criterion else None,
+            "nextCriterion": next_criterion.statement if next_criterion else None,
+            "projectionRuleVersion": (
+                state.projection_rule_version
+                if state
+                else CAPABILITY_PROJECTION_RULE_VERSION
+            ),
+            "sourceObservationWatermark": (
+                state.source_observation_watermark if state else 0
+            ),
+        }
+    return views
 
 
 def rebuild_capability_state_projections(

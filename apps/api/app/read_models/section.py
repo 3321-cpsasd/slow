@@ -173,7 +173,7 @@ class SectionReadModel:
                     QuizAttempt.user_id == self.user_id,
                     QuizAttempt.quiz_set_id == quiz.id,
                 )
-                .order_by(QuizAttempt.created_at.desc())
+                .order_by(QuizAttempt.created_at.desc(), QuizAttempt.id.desc())
             )
             if quiz
             else None

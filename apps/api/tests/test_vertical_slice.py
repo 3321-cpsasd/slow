@@ -1467,9 +1467,10 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
     assert replay.json()["knowledgeSettlement"] == first.json()["knowledgeSettlement"]
     settlement_updates = first.json()["knowledgeSettlement"]["updates"]
     assert len(settlement_updates) == 1
-    assert settlement_updates[0]["change"] == "rank_up"
-    assert settlement_updates[0]["before"]["rank"] == "unranked"
-    assert settlement_updates[0]["after"]["rank"] == "bronze"
+    assert first.json()["knowledgeSettlement"]["schemaVersion"] == "capability_settlement_v1"
+    assert settlement_updates[0]["change"] == "stage_up"
+    assert settlement_updates[0]["before"]["stage"] == "unranked"
+    assert settlement_updates[0]["after"]["stage"] == "bronze"
     assert first.json()["knowledgeSettlement"]["settlementId"]
     with client.app.state.sessions() as db:
         attempts = db.scalars(
@@ -1517,7 +1518,7 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
         assert {item.current_stage for item in capability_states} == {"bronze"}
         assert [item.decision_kind for item in decisions] == [
             "assessment_gate",
-            "knowledge_settlement",
+            "capability_settlement",
             "progression",
         ]
         gate = decisions[0]
@@ -1531,11 +1532,11 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
         assert gate_output["passed"] is True
         assert gate_output["unresolvedRequiredTargetIds"] == []
         settlement = decisions[1]
-        assert settlement.rule_version == "knowledge_rank_v3"
+        assert settlement.rule_version == "capability_stage_v1"
         frozen_updates = json.loads(settlement.output_decision_json)["updates"]
         assert len(frozen_updates) == 1
-        assert frozen_updates[0]["change"] == "rank_up"
-        assert frozen_updates[0]["after"]["rank"] == "bronze"
+        assert frozen_updates[0]["change"] == "stage_up"
+        assert frozen_updates[0]["after"]["stage"] == "bronze"
         progression = decisions[2]
         assert progression.rule_version == "progression_v2_book_outline_gate"
         assert json.loads(progression.input_snapshot_json)["section_id"] == section["id"]
