@@ -1937,7 +1937,7 @@ export default function App() {
   );
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell view-${view}`}>
       <header className="app-header">
         <button
           className="brand"
@@ -1987,7 +1987,7 @@ export default function App() {
           )}
           {view === 'learn' && (
             <button
-              className="quiet-button"
+              className="quiet-button learn-back-button"
               aria-label={shelf ? `返回${shelf.name}书架` : '返回全部书架'}
               onClick={returnToShelf}
             >
@@ -2310,6 +2310,42 @@ export default function App() {
           </>
         )}
       </main>
+      {!['learn', 'series-create'].includes(view) && (
+        <nav className="mobile-primary-nav" aria-label="移动端主导航">
+          <button
+            type="button"
+            className={view === 'home' || view === 'shelf' ? 'is-active' : ''}
+            aria-current={view === 'home' || view === 'shelf' ? 'page' : undefined}
+            onClick={goHome}
+          >
+            <span aria-hidden="true">书</span><b>书架</b>
+          </button>
+          <button
+            type="button"
+            className={view === 'review' ? 'is-active' : ''}
+            aria-current={view === 'review' ? 'page' : undefined}
+            onClick={openReviewCenter}
+          >
+            <span aria-hidden="true">复</span><b>复习</b>
+          </button>
+          <button
+            type="button"
+            className={view === 'knowledge' ? 'is-active' : ''}
+            aria-current={view === 'knowledge' ? 'page' : undefined}
+            onClick={openKnowledgeMap}
+          >
+            <span aria-hidden="true">图</span><b>版图</b>
+          </button>
+          <button
+            type="button"
+            className={view === 'profile' ? 'is-active' : ''}
+            aria-current={view === 'profile' ? 'page' : undefined}
+            onClick={() => openProfileCenter('profile')}
+          >
+            <span aria-hidden="true">我</span><b>我的</b>
+          </button>
+        </nav>
+      )}
       {bookReplan && (
         <BookReplanDialog
           book={bookReplan.book}
@@ -3588,12 +3624,19 @@ function ReviewCenterPage({ onBack }: { onBack: () => void }) {
               )}
               {activity.type === 'repair' && (
                 <div className="review-repair-layout">
-                  <div className="review-quick-pass"><span>30 秒快速过</span><p>{activity.payload.content}</p></div>
+                  <div className="review-quick-pass">
+                    <span>30 秒快速过</span>
+                    <div className="review-markdown review-quick-pass-content">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{activity.payload.content || ''}</ReactMarkdown>
+                    </div>
+                  </div>
                   {activity.payload.case && (
                     <div className="review-targeted-case">
                       <header><span>针对刚才断点的案例</span><small>{activity.payload.case.source}</small></header>
                       <h3>{activity.payload.case.heading}</h3>
-                      <p>{activity.payload.case.content}</p>
+                      <div className="review-markdown review-targeted-case-content">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{activity.payload.case.content}</ReactMarkdown>
+                      </div>
                     </div>
                   )}
                   <label className="reinforcement-recall"><span>{activity.payload.prompt}</span><textarea value={reinforcementText} onChange={(event) => setReinforcementText(event.target.value)} placeholder="用你自己的话写一句…" rows={3} /></label>
@@ -7871,6 +7914,7 @@ function ReaderPanel({
   const [regenerationStartedAt, setRegenerationStartedAt] = useState(0);
   const [regenerationClock, setRegenerationClock] = useState(Date.now());
   const [reviewTargetBlockId, setReviewTargetBlockId] = useState('');
+  const [readerHeaderCondensed, setReaderHeaderCondensed] = useState(false);
   const readerScrollRef = useRef<HTMLDivElement>(null);
   const tabScrollPositionsRef = useRef<Record<ReaderTab, number>>({
     content: 0,
@@ -7901,6 +7945,7 @@ function ReaderPanel({
     setEditingAnnotationBody('');
     setRegenerationConfirmOpen(false);
     setReviewTargetBlockId('');
+    setReaderHeaderCondensed(false);
     tabScrollPositionsRef.current = { content: 0, quiz: 0, note: 0 };
     if (reviewHighlightTimerRef.current !== null) {
       window.clearTimeout(reviewHighlightTimerRef.current);
@@ -8000,7 +8045,9 @@ function ReaderPanel({
     setTab(nextTab);
     requestAnimationFrame(() => {
       if (readerScrollRef.current) {
-        readerScrollRef.current.scrollTop = tabScrollPositionsRef.current[nextTab];
+        const nextScrollTop = tabScrollPositionsRef.current[nextTab];
+        readerScrollRef.current.scrollTop = nextScrollTop;
+        setReaderHeaderCondensed(nextScrollTop > 28);
       }
     });
   };
@@ -8253,6 +8300,9 @@ function ReaderPanel({
         onReaderTypographyStepChange={onReaderTypographyStepChange}
         onRequestRegenerate={() => setRegenerationConfirmOpen(true)}
         onFeedback={onGlobalFeedback}
+        condensed={readerHeaderCondensed}
+        directoryOpen={!directoryHidden}
+        onToggleDirectory={onToggleDirectory}
       />
 
       <LessonReaderTabs
@@ -8272,7 +8322,11 @@ function ReaderPanel({
           ref={readerScrollRef}
           onMouseUp={captureTextSelection}
           onKeyUp={captureTextSelection}
-          onScroll={() => setSelectionPopup(null)}
+          onScroll={(event) => {
+            setSelectionPopup(null);
+            const condensed = event.currentTarget.scrollTop > 28;
+            setReaderHeaderCondensed((current) => current === condensed ? current : condensed);
+          }}
         >
           {tab === 'content' && (
             <LessonContent
@@ -8302,6 +8356,7 @@ function ReaderPanel({
               onFeedback={onGlobalFeedback}
               onSubmissionComplete={() => {
                 tabScrollPositionsRef.current.quiz = 0;
+                setReaderHeaderCondensed(false);
                 if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
               }}
             />
