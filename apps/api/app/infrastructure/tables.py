@@ -111,6 +111,79 @@ class UserFeedback(Base):
     )
 
 
+class ReadingAnnotation(Base):
+    """User-owned reading mark bound to the exact material they saw."""
+
+    __tablename__ = "reading_annotations"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "learning_run_id",
+            "idempotency_key",
+            name="uq_reading_annotations_user_run_idempotency",
+        ),
+        ForeignKeyConstraint(
+            ["learning_run_id", "user_id"],
+            ["learning_runs.id", "learning_runs.user_id"],
+            name="fk_reading_annotations_run_user",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    learning_run_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_runs.id"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    content_version_id: Mapped[str] = mapped_column(
+        ForeignKey("content_versions.id"), index=True
+    )
+    block_id: Mapped[str] = mapped_column(String(200), index=True)
+    kind: Mapped[str] = mapped_column(String(24), index=True)
+    quote_exact: Mapped[str] = mapped_column(Text)
+    quote_prefix: Mapped[str] = mapped_column(Text, default="")
+    quote_suffix: Mapped[str] = mapped_column(Text, default="")
+    start_offset: Mapped[int] = mapped_column(Integer, default=0)
+    end_offset: Mapped[int] = mapped_column(Integer, default=0)
+    block_snapshot_hash: Mapped[str] = mapped_column(String(64))
+    body: Mapped[str] = mapped_column(Text, default="")
+    color: Mapped[str] = mapped_column(String(24), default="amber")
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
+class ReadingAnnotationRevision(Base):
+    """Append-only user edit/delete history for a reading annotation."""
+
+    __tablename__ = "reading_annotation_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "annotation_id",
+            "version",
+            name="uq_reading_annotation_revisions_annotation_version",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    annotation_id: Mapped[str] = mapped_column(
+        ForeignKey("reading_annotations.id"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    body: Mapped[str] = mapped_column(Text, default="")
+    color: Mapped[str] = mapped_column(String(24), default="amber")
+    status: Mapped[str] = mapped_column(String(24), default="active")
+    source: Mapped[str] = mapped_column(String(32), default="user_action")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
 class ProductEvent(Base):
     """Append-only, allowlisted product telemetry from an authenticated web client."""
 
@@ -2975,7 +3048,8 @@ class QaSession(Base):
             "learning_run_id",
             "section_id",
             "user_id",
-            name="uq_qa_sessions_run_section_user",
+            "content_version_id",
+            name="uq_qa_sessions_run_section_user_content",
         ),
         ForeignKeyConstraint(
             ["learning_run_id", "user_id"],
@@ -2995,6 +3069,9 @@ class QaSession(Base):
     )
     daily_mode: Mapped[str] = mapped_column(String(16), default="slow")
     memory_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
 
 
 class QaMessage(Base):

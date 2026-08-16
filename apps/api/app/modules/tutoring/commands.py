@@ -109,6 +109,7 @@ class GenerateLearningNote:
                 QaSession.learning_run_id == self.learning_run_id,
                 QaSession.learning_contract_version_id
                 == binding.learning_contract_version_id,
+                QaSession.content_version_id == binding.content_version_id,
             )
             .order_by(QaMessage.created_at)
         ).all()

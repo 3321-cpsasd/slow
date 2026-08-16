@@ -64,6 +64,8 @@ import type {
   NoteContent,
   NoteVerificationAnnotation,
   QaHistory,
+  ReadingAnnotation,
+  ReadingAnnotationAnchor,
   QuizResult,
   ReviewResult,
   ReviewSession,
@@ -88,7 +90,16 @@ type AppRoute =
   | { view: 'series-create'; shelfId: string }
   | { view: 'learn'; seriesId: string; sectionId: string | null };
 type TextQuote = { text: string; blockId: string };
-type SelectionPopup = TextQuote & { top: number; left: number };
+type SelectionPopup = TextQuote & {
+  contentVersionId: string;
+  anchor: ReadingAnnotationAnchor;
+  top: number;
+  left: number;
+};
+type AnnotationComposerDraft = {
+  selection: SelectionPopup;
+  body: string;
+};
 type BookReplanState = {
   book: Book;
   proposal: BookReplanProposal | null;
@@ -131,6 +142,58 @@ function generationProgressNotice(reason: ApiError): ProgressNotice {
     title: '本节正在准备',
     message: '通常需要 1–2 分钟。完成后会自动更新，无需重复点击。',
   };
+}
+
+function domRangeFromTextOffsets(root: HTMLElement, start: number, end: number): Range | null {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let cursor = 0;
+  let startNode: Text | null = null;
+  let endNode: Text | null = null;
+  let startInNode = 0;
+  let endInNode = 0;
+  while (walker.nextNode()) {
+    const node = walker.currentNode as Text;
+    const next = cursor + node.data.length;
+    if (!startNode && start >= cursor && start <= next) {
+      startNode = node;
+      startInNode = Math.min(start - cursor, node.data.length);
+    }
+    if (endNode === null && end >= cursor && end <= next) {
+      endNode = node;
+      endInNode = Math.min(end - cursor, node.data.length);
+      break;
+    }
+    cursor = next;
+  }
+  if (!startNode || !endNode) return null;
+  const range = document.createRange();
+  range.setStart(startNode, startInNode);
+  range.setEnd(endNode, endInNode);
+  return range.collapsed ? null : range;
+}
+
+function annotationRange(root: HTMLElement, anchor: ReadingAnnotationAnchor): Range | null {
+  const text = root.textContent || '';
+  if (text.slice(anchor.startOffset, anchor.endOffset) === anchor.exact) {
+    return domRangeFromTextOffsets(root, anchor.startOffset, anchor.endOffset);
+  }
+  const candidates: number[] = [];
+  let cursor = text.indexOf(anchor.exact);
+  while (cursor >= 0) {
+    const prefixMatches = !anchor.prefix
+      || text.slice(Math.max(0, cursor - anchor.prefix.length), cursor) === anchor.prefix;
+    const suffixStart = cursor + anchor.exact.length;
+    const suffixMatches = !anchor.suffix
+      || text.slice(suffixStart, suffixStart + anchor.suffix.length) === anchor.suffix;
+    if (prefixMatches && suffixMatches) candidates.push(cursor);
+    cursor = text.indexOf(anchor.exact, cursor + Math.max(anchor.exact.length, 1));
+  }
+  if (candidates.length !== 1) return null;
+  return domRangeFromTextOffsets(
+    root,
+    candidates[0],
+    candidates[0] + anchor.exact.length,
+  );
 }
 
 function RecoveryCodePanel({
@@ -2659,6 +2722,8 @@ function FeedbackDialog({
   const [repairFeedbackId, setRepairFeedbackId] = useState('');
   const [repairFailed, setRepairFailed] = useState(false);
   const [status, setStatus] = useState('');
+  const updatesLesson = target.scope === 'content_block'
+    && ['unclear', 'poor_example', 'typo', 'layout'].includes(feedbackType);
   const dialogRef = useRef<HTMLElement | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const submittingRef = useRef(submitting);
@@ -2732,7 +2797,7 @@ function FeedbackDialog({
     setSubmitted(true);
     setRepairFailed(false);
     setRepairText('');
-    setStatus('反馈已收到，正在更新这段内容。你可以关闭窗口继续学习。');
+    setStatus('反馈已收到，正在准备本节新版本。你可以关闭窗口继续学习。');
     try {
       await api.streamFeedbackRepair(
         feedbackId,
@@ -2742,7 +2807,7 @@ function FeedbackDialog({
         const updated = await api.section(target.sectionId);
         onSectionChange(updated);
         await onRefreshSeries();
-        setStatus('正文已完成更新。');
+        setStatus('本节新版本已完成更新。');
         if (backgroundedRef.current) onRepairSettledRef.current(true);
       }
     } catch (reason) {
@@ -2798,6 +2863,7 @@ function FeedbackDialog({
         SECTION_CONTENT_MISSING: '这段正文已不可用，请刷新页面后重试。',
         FEEDBACK_ACCURACY_REVIEW_REQUIRED: '已记录。为避免未经核实地改写，原正文保持不变。',
         FEEDBACK_CLASSIFICATION_REQUIRED: '已记录。需先确认问题类型，因此原正文保持不变。',
+        FEEDBACK_ASSESSED_VERSION_FROZEN: '已记录。你已经在这份正文上完成过验证，当前学习记录不会被静默替换。',
       };
       setStatus(
         blockedMessages[receipt.regeneration.reasonCode || '']
@@ -2826,8 +2892,8 @@ function FeedbackDialog({
       >
         <header>
           <div>
-            <p className="eyebrow">{target.scope === 'content_block' ? '正文页边批注' : '告诉我们你的感受'}</p>
-            <h2 id="feedback-title">{target.scope === 'content_block' ? '反馈这一段' : '全局反馈'}</h2>
+            <p className="eyebrow">{target.scope === 'content_block' ? '内容反馈' : '告诉我们你的感受'}</p>
+            <h2 id="feedback-title">{target.scope === 'content_block' ? '报告这一段的问题' : '全局反馈'}</h2>
           </div>
           <button className="dialog-close" type="button" aria-label="关闭反馈" disabled={submitting} onClick={closeDialog}>×</button>
         </header>
@@ -2859,12 +2925,15 @@ function FeedbackDialog({
             />
             <small>请勿填写密码、API Key 或其他敏感信息 · {message.length}/4000</small>
           </label>}
+          {!submitted && updatesLesson && (
+            <p className="feedback-update-impact">发送后会生成并切换到本节新版本，正文与验证题会一起更新；已有标注仍保留在原来的正文版本。</p>
+          )}
           {submitted && target.scope === 'content_block' && (
             <div className={`feedback-repair-answer ${repairFailed ? 'failed' : ''}`} aria-live="polite">
               {repairText ? (
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{repairText}</ReactMarkdown>
               ) : repairing ? (
-                <span className="feedback-repair-listening">正在更新正文<span aria-hidden="true">…</span></span>
+                <span className="feedback-repair-listening">正在准备本节新版本<span aria-hidden="true">…</span></span>
               ) : null}
               {repairing && repairText && <i className="stream-caret" aria-hidden="true" />}
             </div>
@@ -2880,7 +2949,7 @@ function FeedbackDialog({
               </button>
             ) : !submitted ? (
               <button className="primary-button" disabled={submitting || ((target.scope === 'global' || feedbackType === 'other') && message.trim().length < 2)}>
-                {submitting ? '正在送出…' : '发送反馈'}
+                {submitting ? '正在送出…' : updatesLesson ? '发送并更新本节' : '发送反馈'}
               </button>
             ) : null}
           </div>
@@ -6920,7 +6989,7 @@ function LearningWorkspace({
         }}
       />
       <QaPanel
-        key={section?.id || 'empty'}
+        key={section?.content ? `${section.id}:${section.content.id}` : section?.id || 'empty'}
         section={section}
         dailyMode={dailyMode}
         hidden={effectiveQaHidden}
@@ -7790,6 +7859,13 @@ function ReaderPanel({
 }) {
   const [tab, setTab] = useState<ReaderTab>('content');
   const [selectionPopup, setSelectionPopup] = useState<SelectionPopup | null>(null);
+  const [annotations, setAnnotations] = useState<ReadingAnnotation[]>([]);
+  const [annotationsOpen, setAnnotationsOpen] = useState(false);
+  const [annotationComposer, setAnnotationComposer] = useState<AnnotationComposerDraft | null>(null);
+  const [annotationBusy, setAnnotationBusy] = useState(false);
+  const [annotationMessage, setAnnotationMessage] = useState('');
+  const [editingAnnotationId, setEditingAnnotationId] = useState('');
+  const [editingAnnotationBody, setEditingAnnotationBody] = useState('');
   const [regenerationConfirmOpen, setRegenerationConfirmOpen] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const [regenerationStartedAt, setRegenerationStartedAt] = useState(0);
@@ -7807,12 +7883,22 @@ function ReaderPanel({
     canClose: !regenerating,
     onRequestClose: () => setRegenerationConfirmOpen(false),
   });
+  const annotationsDialogRef = useModalFocus<HTMLElement>({
+    open: annotationsOpen,
+    canClose: !annotationBusy,
+    onRequestClose: () => setAnnotationsOpen(false),
+  });
 
   useEffect(() => {
     const initialTab = section?.status === 'completed' && section.note ? 'note' : 'content';
     setTab(initialTab);
     onTabChange(initialTab);
     setSelectionPopup(null);
+    setAnnotationsOpen(false);
+    setAnnotationComposer(null);
+    setAnnotationMessage('');
+    setEditingAnnotationId('');
+    setEditingAnnotationBody('');
     setRegenerationConfirmOpen(false);
     setReviewTargetBlockId('');
     tabScrollPositionsRef.current = { content: 0, quiz: 0, note: 0 };
@@ -7822,6 +7908,67 @@ function ReaderPanel({
     }
     if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
   }, [section?.id, section?.content?.id]);
+
+  useEffect(() => {
+    let active = true;
+    if (!section?.content) {
+      setAnnotations([]);
+      return () => { active = false; };
+    }
+    api.annotations(section.id)
+      .then((result) => { if (active) setAnnotations(result.items); })
+      .catch((reason) => {
+        if (active) setAnnotationMessage(
+          reason instanceof Error ? reason.message : '暂时无法读取标注。',
+        );
+      });
+    return () => { active = false; };
+  }, [section?.id, section?.content?.id]);
+
+  useEffect(() => {
+    const registry = (CSS as unknown as {
+      highlights?: { set: (name: string, value: unknown) => void; delete: (name: string) => void };
+    }).highlights;
+    const HighlightConstructor = (window as unknown as {
+      Highlight?: new (...ranges: Range[]) => unknown;
+    }).Highlight;
+    if (!registry || !HighlightConstructor || tab !== 'content') return undefined;
+
+    const paint = () => {
+      const highlightRanges: Range[] = [];
+      const commentRanges: Range[] = [];
+      annotations.forEach((annotation) => {
+        if (!annotation.displayBlockId) return;
+        const block = Array.from(
+          readerScrollRef.current?.querySelectorAll<HTMLElement>('[data-block-id]') || [],
+        ).find((element) => element.dataset.blockId === annotation.displayBlockId);
+        const body = block?.querySelector<HTMLElement>('[data-annotation-body]');
+        if (!body) return;
+        const range = annotationRange(body, annotation.anchor);
+        if (!range) return;
+        (annotation.kind === 'comment' ? commentRanges : highlightRanges).push(range);
+      });
+      registry.delete('slow-reading-highlights');
+      registry.delete('slow-reading-comments');
+      if (highlightRanges.length) {
+        registry.set('slow-reading-highlights', new HighlightConstructor(...highlightRanges));
+      }
+      if (commentRanges.length) {
+        registry.set('slow-reading-comments', new HighlightConstructor(...commentRanges));
+      }
+    };
+    const frame = window.requestAnimationFrame(paint);
+    const observer = new MutationObserver(() => window.requestAnimationFrame(paint));
+    if (readerScrollRef.current) {
+      observer.observe(readerScrollRef.current, { childList: true, subtree: true });
+    }
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+      registry.delete('slow-reading-highlights');
+      registry.delete('slow-reading-comments');
+    };
+  }, [annotations, tab, section?.content?.id]);
 
   useEffect(() => () => {
     if (reviewHighlightTimerRef.current !== null) {
@@ -7905,21 +8052,137 @@ function ReaderPanel({
       selection?.anchorNode instanceof Element
         ? selection.anchorNode
         : selection?.anchorNode?.parentElement;
+    const focusElement =
+      selection?.focusNode instanceof Element
+        ? selection.focusNode
+        : selection?.focusNode?.parentElement;
     const blockElement = anchorElement?.closest<HTMLElement>('[data-block-id]');
-    const text = selection?.toString().replace(/\s+/g, ' ').trim() || '';
+    const focusBlock = focusElement?.closest<HTMLElement>('[data-block-id]');
+    const annotationBody = anchorElement?.closest<HTMLElement>('[data-annotation-body]');
+    const focusBody = focusElement?.closest<HTMLElement>('[data-annotation-body]');
+    const rawText = selection?.toString() || '';
+    const text = rawText.replace(/\s+/g, ' ').trim();
 
-    if (!range || range.collapsed || !blockElement || text.length < 2) {
+    if (
+      !range || range.collapsed || !blockElement || blockElement !== focusBlock
+      || !annotationBody || annotationBody !== focusBody || text.length < 2
+    ) {
       setSelectionPopup(null);
       return;
     }
 
+    const exact = rawText.slice(0, 1200);
+    const before = document.createRange();
+    before.selectNodeContents(annotationBody);
+    before.setEnd(range.startContainer, range.startOffset);
+    const startOffset = before.toString().length;
+    const bodyText = annotationBody.textContent || '';
+    const endOffset = startOffset + exact.length;
     const rect = range.getBoundingClientRect();
     setSelectionPopup({
       text: text.slice(0, 600),
       blockId: blockElement.dataset.blockId || '',
+      contentVersionId: section?.content?.id || '',
+      anchor: {
+        exact,
+        prefix: bodyText.slice(Math.max(0, startOffset - 80), startOffset),
+        suffix: bodyText.slice(endOffset, endOffset + 80),
+        startOffset,
+        endOffset,
+      },
       top: Math.min(rect.bottom + 9, window.innerHeight - 48),
       left: Math.min(Math.max(rect.left + rect.width / 2, 54), window.innerWidth - 54),
     });
+  };
+
+  const clearNativeSelection = () => {
+    const currentSelection = window.getSelection();
+    if (typeof currentSelection?.removeAllRanges === 'function') {
+      currentSelection.removeAllRanges();
+    }
+  };
+
+  const reloadAnnotations = async () => {
+    if (!section?.content) return;
+    const result = await api.annotations(section.id);
+    setAnnotations(result.items);
+  };
+
+  const saveAnnotation = async (
+    kind: 'highlight' | 'comment',
+    selection: SelectionPopup,
+    body = '',
+  ) => {
+    if (!section?.content || annotationBusy) return;
+    setAnnotationBusy(true);
+    setAnnotationMessage('');
+    try {
+      await api.createAnnotation(section.id, {
+        contentVersionId: selection.contentVersionId,
+        blockId: selection.blockId,
+        kind,
+        anchor: selection.anchor,
+        body,
+        color: 'amber',
+      }, crypto.randomUUID());
+      await reloadAnnotations();
+      setAnnotationMessage(kind === 'comment' ? '批注已保存。' : '已高亮。');
+      setSelectionPopup(null);
+      setAnnotationComposer(null);
+      clearNativeSelection();
+    } catch (reason) {
+      setAnnotationMessage(reason instanceof Error ? reason.message : '标注没有保存成功。');
+    } finally {
+      setAnnotationBusy(false);
+    }
+  };
+
+  const updateAnnotation = async (annotationId: string) => {
+    if (!editingAnnotationBody.trim() || annotationBusy) return;
+    setAnnotationBusy(true);
+    setAnnotationMessage('');
+    try {
+      await api.updateAnnotation(annotationId, { body: editingAnnotationBody.trim() });
+      await reloadAnnotations();
+      setEditingAnnotationId('');
+      setEditingAnnotationBody('');
+      setAnnotationMessage('批注已更新。');
+    } catch (reason) {
+      setAnnotationMessage(reason instanceof Error ? reason.message : '批注没有更新成功。');
+    } finally {
+      setAnnotationBusy(false);
+    }
+  };
+
+  const deleteAnnotation = async (annotationId: string) => {
+    if (annotationBusy) return;
+    setAnnotationBusy(true);
+    setAnnotationMessage('');
+    try {
+      await api.deleteAnnotation(annotationId);
+      await reloadAnnotations();
+      setAnnotationMessage('标注已删除。');
+    } catch (reason) {
+      setAnnotationMessage(reason instanceof Error ? reason.message : '标注没有删除成功。');
+    } finally {
+      setAnnotationBusy(false);
+    }
+  };
+
+  const focusAnnotation = (annotation: ReadingAnnotation) => {
+    if (!annotation.displayBlockId) return;
+    switchTab('content');
+    onSelectBlock(annotation.displayBlockId);
+    setAnnotationsOpen(false);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const target = Array.from(
+        readerScrollRef.current?.querySelectorAll<HTMLElement>('[data-block-id]') || [],
+      ).find((element) => element.dataset.blockId === annotation.displayBlockId);
+      target?.scrollIntoView({
+        behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+        block: 'center',
+      });
+    }));
   };
 
   const activeGeneration =
@@ -8015,6 +8278,8 @@ function ReaderPanel({
             <LessonContent
               section={section}
               dailyMode={dailyMode}
+              annotations={annotations}
+              onOpenAnnotations={() => setAnnotationsOpen(true)}
               selectedBlockId={selectedBlockId}
               reviewTargetBlockId={reviewTargetBlockId}
               onGenerate={onGenerate}
@@ -8106,23 +8371,132 @@ function ReaderPanel({
         </div>
       )}
       {selectionPopup && (
-        <button
-          className="selection-qa-button"
+        <div
+          className="selection-actions"
           style={{ top: selectionPopup.top, left: selectionPopup.left }}
           onMouseDown={(event) => event.preventDefault()}
-          onClick={() => {
-            onQuote({ text: selectionPopup.text, blockId: selectionPopup.blockId });
-            setSelectionPopup(null);
-            const currentSelection = window.getSelection();
-            if (typeof currentSelection?.removeAllRanges === 'function') {
-              currentSelection.removeAllRanges();
-            }
-          }}
         >
-          <span>?</span>
-          答疑
-        </button>
+          <button
+            className="selection-qa-button"
+            onClick={() => {
+              onQuote({ text: selectionPopup.text, blockId: selectionPopup.blockId });
+              setSelectionPopup(null);
+              clearNativeSelection();
+            }}
+          >
+            <span>?</span>
+            Ask AI
+          </button>
+          <span className="selection-actions-divider" aria-hidden="true" />
+          <button
+            className="selection-mark-button"
+            disabled={annotationBusy}
+            onClick={() => void saveAnnotation('highlight', selectionPopup)}
+          >
+            <i aria-hidden="true" />高亮
+          </button>
+          <button
+            className="selection-comment-button"
+            onClick={() => {
+              setAnnotationComposer({ selection: selectionPopup, body: '' });
+              setSelectionPopup(null);
+            }}
+          >
+            批注
+          </button>
+        </div>
       )}
+      {annotationComposer && (
+        <section
+          className="annotation-composer-popover"
+          style={{ top: Math.min(annotationComposer.selection.top, window.innerHeight - 230), left: annotationComposer.selection.left }}
+          aria-label="添加批注"
+        >
+          <header><b>写给自己的批注</b><button aria-label="关闭" onClick={() => setAnnotationComposer(null)}>×</button></header>
+          <blockquote>{annotationComposer.selection.text}</blockquote>
+          <textarea
+            autoFocus
+            maxLength={4000}
+            value={annotationComposer.body}
+            placeholder="记录你的理解、联想或提醒…"
+            onChange={(event) => setAnnotationComposer((current) => current ? { ...current, body: event.target.value } : current)}
+          />
+          <div>
+            <small>{annotationComposer.body.length}/4000</small>
+            <button
+              className="primary-button"
+              disabled={!annotationComposer.body.trim() || annotationBusy}
+              onClick={() => void saveAnnotation('comment', annotationComposer.selection, annotationComposer.body)}
+            >
+              {annotationBusy ? '保存中…' : '保存批注'}
+            </button>
+          </div>
+        </section>
+      )}
+      {annotationsOpen && (
+        <div className="annotation-drawer-backdrop" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setAnnotationsOpen(false);
+        }}>
+          <aside
+            ref={annotationsDialogRef}
+            className="annotation-drawer"
+            role="dialog"
+            aria-modal="true"
+            aria-label="我的标注"
+            tabIndex={-1}
+          >
+            <header>
+              <div><span>阅读标注</span><h2>我的标注</h2></div>
+              <button aria-label="关闭标注" onClick={() => setAnnotationsOpen(false)}>×</button>
+            </header>
+            <p className="annotation-drawer-intro">高亮和批注只记录你的阅读，不会发送给 AI，也不会改变掌握情况。</p>
+            {annotations.length === 0 ? (
+              <div className="annotation-empty"><i aria-hidden="true" /><b>还没有标注</b><p>在正文中选择文字，就可以高亮或写下批注。</p></div>
+            ) : (
+              <div className="annotation-list">
+                {annotations.map((annotation) => (
+                  <article className={`annotation-card is-${annotation.kind} is-${annotation.anchorStatus}`} key={annotation.id}>
+                    <header>
+                      <span>{annotation.kind === 'comment' ? '批注' : '高亮'}</span>
+                      <em>{annotation.anchorStatus === 'old_version'
+                        ? `正文旧版${annotation.contentVersion ? ` v${annotation.contentVersion}` : ''}`
+                        : annotation.anchorStatus === 'unchanged_in_current'
+                          ? '原文未变化'
+                          : '当前正文'}</em>
+                    </header>
+                    <button
+                      type="button"
+                      className="annotation-quote"
+                      disabled={!annotation.displayBlockId}
+                      onClick={() => focusAnnotation(annotation)}
+                    >“{annotation.anchor.exact.replace(/\s+/g, ' ').trim()}”</button>
+                    {annotation.kind === 'comment' && (
+                      editingAnnotationId === annotation.id ? (
+                        <div className="annotation-edit">
+                          <textarea value={editingAnnotationBody} maxLength={4000} onChange={(event) => setEditingAnnotationBody(event.target.value)} />
+                          <div><button onClick={() => setEditingAnnotationId('')}>取消</button><button disabled={annotationBusy || !editingAnnotationBody.trim()} onClick={() => void updateAnnotation(annotation.id)}>保存</button></div>
+                        </div>
+                      ) : <p>{annotation.body}</p>
+                    )}
+                    {annotation.anchorStatus === 'old_version' && <small>原文已经更新，这条记录仍保留在你当时阅读的版本。</small>}
+                    <footer>
+                      <time dateTime={annotation.updatedAt}>{new Date(annotation.updatedAt).toLocaleDateString('zh-CN')}</time>
+                      <div>
+                        {annotation.kind === 'comment' && editingAnnotationId !== annotation.id && (
+                          <button onClick={() => { setEditingAnnotationId(annotation.id); setEditingAnnotationBody(annotation.body); }}>编辑</button>
+                        )}
+                        <button disabled={annotationBusy} onClick={() => void deleteAnnotation(annotation.id)}>删除</button>
+                      </div>
+                    </footer>
+                  </article>
+                ))}
+              </div>
+            )}
+            {annotationMessage && <p className="annotation-drawer-message" role="status">{annotationMessage}</p>}
+          </aside>
+        </div>
+      )}
+      {annotationMessage && !annotationsOpen && <p className="annotation-toast" role="status">{annotationMessage}</p>}
     </main>
   );
 }
@@ -8296,6 +8670,8 @@ function selectFastBlocks(blocks: Block[]) {
 function LessonContent({
   section,
   dailyMode,
+  annotations,
+  onOpenAnnotations,
   selectedBlockId,
   reviewTargetBlockId,
   onGenerate,
@@ -8306,6 +8682,8 @@ function LessonContent({
 }: {
   section: Section;
   dailyMode: DailyMode;
+  annotations: ReadingAnnotation[];
+  onOpenAnnotations: () => void;
   selectedBlockId: string;
   reviewTargetBlockId: string;
   onGenerate: () => void;
@@ -8383,6 +8761,11 @@ function LessonContent({
               ? '历史内容 · 尚未按当前标准重新检查 · 关键事实请结合参考来源判断'
               : `${section.content.aiGenerated ? 'AI 生成' : '授权内容'} · 检查状态未确认 · 关键事实请结合参考来源判断`}
       </p>
+      <button type="button" className="annotation-ledger-trigger" onClick={onOpenAnnotations}>
+        <span><i aria-hidden="true" />我的标注</span>
+        <b>{annotations.length}</b>
+        <small>{annotations.some((item) => item.anchorStatus === 'old_version') ? '含旧版正文记录' : '高亮与批注只属于你'}</small>
+      </button>
       {dailyMode === 'fast' && (
         <aside className="fast-view-notice">
           <div>
@@ -8401,6 +8784,8 @@ function LessonContent({
           selected={block.id === selectedBlockId}
           reviewTarget={block.id === reviewTargetBlockId}
           explanationOptions={explanationOptionsForBlock(block.kind)}
+          annotationCount={annotations.filter((item) => item.displayBlockId === block.id).length}
+          onOpenAnnotations={onOpenAnnotations}
           onFeedback={() => onFeedbackBlock(block)}
           onRestorePersonalPresentation={() => onRestorePersonalPresentation(block)}
           onExplain={(style, customQuestion) => onExplainBlock(block, style, customQuestion)}
@@ -10036,6 +10421,7 @@ function QaPanel({
   const [newQuestion, setNewQuestion] = useState(false);
   const [question, setQuestion] = useState('');
   const [messages, setMessages] = useState<QaExchange[]>([]);
+  const [historyView, setHistoryView] = useState<QaHistory | null>(null);
   const [asking, setAsking] = useState(false);
   const [historyStatus, setHistoryStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
   const [historyError, setHistoryError] = useState('');
@@ -10096,15 +10482,22 @@ function QaPanel({
     return () => cancelAnimationFrame(frame);
   }, [messages]);
 
-  const loadHistory = async () => {
+  const loadHistory = async (contentVersionId?: string) => {
     if (!section?.content || historyStatus === 'loading') return;
     setHistoryStatus('loading');
     setHistoryError('');
     try {
-      const history = await api.qaHistory(section.id);
+      const history = await api.qaHistory(section.id, contentVersionId);
+      setHistoryView(history);
       setMessages(qaHistoryExchanges(history));
       setThreadId(history.lastThreadId || undefined);
-      if (!selectedQuote && !explanationRequest && history.lastThreadId) {
+      if (history.readOnly) {
+        setQuestion('');
+        setNewQuestion(false);
+        setDraftExplanation(null);
+        onClearQuote();
+      }
+      if (!history.readOnly && !selectedQuote && !explanationRequest && history.lastThreadId) {
         const lastThread = history.threads.find((item) => item.threadId === history.lastThreadId);
         const lastBlockId = [...(lastThread?.messages || [])]
           .reverse()
@@ -10217,6 +10610,22 @@ function QaPanel({
           <button className="panel-collapse-button" aria-label="收起答疑" onClick={onClose}>收起</button>
         </div>
         <h2>围绕当前小节追问</h2>
+        {historyView && historyView.versions.length > 1 && (
+          <label className="qa-version-select">
+            <span>答疑所属正文</span>
+            <select
+              value={historyView.contentVersionId || historyView.currentContentVersionId || ''}
+              disabled={historyStatus === 'loading' || asking}
+              onChange={(event) => void loadHistory(event.target.value)}
+            >
+              {historyView.versions.map((version) => (
+                <option key={version.contentVersionId} value={version.contentVersionId}>
+                  {version.isCurrent ? '当前正文' : `旧版正文${version.contentVersion ? ` v${version.contentVersion}` : ''}`}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
       {!section?.content ? (
         <div className="qa-empty">
@@ -10225,7 +10634,13 @@ function QaPanel({
         </div>
       ) : (
         <>
-          <div className="qa-context-bar">
+          {historyView?.readOnly && (
+            <div className="qa-version-notice">
+              <b>这是旧版正文上的答疑</b>
+              <p>记录会一直保留，但不能在旧版会话中继续追问。</p>
+            </div>
+          )}
+          {!historyView?.readOnly && <div className="qa-context-bar">
             <span>当前段落</span>
             <select
               aria-label="当前答疑段落"
@@ -10239,8 +10654,8 @@ function QaPanel({
                 <option value={block.id} key={block.id}>{index + 1}. {block.heading}</option>
               ))}
             </select>
-          </div>
-          {selectedQuote && (
+          </div>}
+          {!historyView?.readOnly && selectedQuote && (
             <div className="selected-quote-card">
               <div>
                 <span>已选内容</span>
@@ -10249,7 +10664,7 @@ function QaPanel({
               <blockquote>{selectedQuote.text}</blockquote>
             </div>
           )}
-          {draftExplanation && (
+          {!historyView?.readOnly && draftExplanation && (
             <div className="qa-explanation-request" role="status">
               <span aria-hidden="true">另解</span>
               <div>
@@ -10327,7 +10742,7 @@ function QaPanel({
                 <button type="button" onClick={() => void loadHistory()}>重新读取</button>
               </div>
             )}
-            {historyStatus === 'loaded' && messages.length === 0 && !draftExplanation && !selectedQuote && (
+            {historyStatus === 'loaded' && !historyView?.readOnly && messages.length === 0 && !draftExplanation && !selectedQuote && (
               <div className="qa-suggestion">
                 <span>可以这样问</span>
                 <button onClick={() => { setDraftExplanation(null); setQuestion(dailyMode === 'fast' ? '用一句结论和三个要点解释这段。' : '这个机制最容易被误解的地方是什么？'); }}>{dailyMode === 'fast' ? '用一句结论和三个要点解释这段。' : '这个机制最容易被误解的地方是什么？'}</button>
@@ -10366,7 +10781,7 @@ function QaPanel({
                     {message.status === 'streaming' && message.answer && <span className="stream-caret" />}
                   </div>
                 </div>
-                {message.status === 'error' && (
+                {message.status === 'error' && !historyView?.readOnly && (
                   <div className="qa-error-actions">
                     <span>这次回答没有完成，问题不会重复提交。</span>
                     <button type="button" disabled={asking} onClick={() => {
@@ -10375,7 +10790,7 @@ function QaPanel({
                     }}>重新填写</button>
                   </div>
                 )}
-                {message.status === 'done' && message.explanationStyle && (
+                {message.status === 'done' && message.explanationStyle && !historyView?.readOnly && (
                   <div className="explanation-style-feedback">
                     <span>{message.preferenceRequestEventId ? '这次讲法怎么样？' : '偏好未保存'}</span>
                     {!message.preferenceRequestEventId && <p>本次回答不会计入长期偏好。</p>}
@@ -10504,7 +10919,7 @@ function QaPanel({
               </button>
             )}
           </div>
-          <div className="qa-composer">
+          {!historyView?.readOnly ? <div className="qa-composer">
             <textarea
               ref={composerRef}
               value={question}
@@ -10527,7 +10942,7 @@ function QaPanel({
                 {asking ? '回答中…' : '发送 ↑'}
               </button>
             </div>
-          </div>
+          </div> : <div className="qa-archive-footer">切回“当前正文”后可以继续 Ask AI。</div>}
         </>
       )}
     </aside>

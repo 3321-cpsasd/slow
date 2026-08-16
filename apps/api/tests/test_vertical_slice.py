@@ -4324,6 +4324,233 @@ def test_content_feedback_streams_the_model_repair_and_rebinds_only_content(clie
         ) == 2
 
 
+def test_reading_annotations_remain_user_owned_across_content_versions(client):
+    series = create_series(client)
+    assert wait_for_task(
+        client,
+        series["initializationTask"]["taskId"],
+    )["status"] == "succeeded"
+    refreshed = client.get(f"/api/series/{series['id']}").json()
+    section_id = refreshed["books"][0]["chapters"][0]["sections"][0]["id"]
+    original = client.post(f"/api/sections/{section_id}/open").json()
+    changed_block, stable_block = original["content"]["blocks"][:2]
+
+    def create_mark(block, kind, body, key):
+        quote = block["content"][:12]
+        return client.post(
+            f"/api/sections/{section_id}/annotations",
+            headers={"Idempotency-Key": key},
+            json={
+                "contentVersionId": original["content"]["id"],
+                "blockId": block["id"],
+                "kind": kind,
+                "anchor": {
+                    "exact": quote,
+                    "prefix": "",
+                    "suffix": block["content"][12:24],
+                    "startOffset": 0,
+                    "endOffset": len(quote),
+                },
+                "body": body,
+                "color": "amber",
+            },
+        )
+
+    changed_mark = create_mark(
+        changed_block,
+        "comment",
+        "这里的因果关系需要再想一遍。",
+        "annotation-changed-version-001",
+    )
+    stable_mark = create_mark(
+        stable_block,
+        "highlight",
+        "",
+        "annotation-stable-version-001",
+    )
+    assert changed_mark.status_code == 201, changed_mark.json()
+    assert stable_mark.status_code == 201, stable_mark.json()
+    replay = create_mark(
+        stable_block,
+        "highlight",
+        "",
+        "annotation-stable-version-001",
+    )
+    assert replay.status_code == 201
+    assert replay.json()["id"] == stable_mark.json()["id"]
+
+    updated = client.patch(
+        f"/api/annotations/{changed_mark.json()['id']}",
+        json={"body": "这里的因果关系已经想清楚一半。"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["version"] == 2
+
+    feedback = client.post(
+        "/api/feedback",
+        headers={"Idempotency-Key": "annotation-feedback-repair-001"},
+        json={
+            "scope": "content_block",
+            "feedbackType": "unclear",
+            "message": "把这一段的中间机制补清楚",
+            "sectionId": section_id,
+            "contentVersionId": original["content"]["id"],
+            "blockId": changed_block["id"],
+        },
+    ).json()
+    repair = client.post(f"/api/feedback/{feedback['id']}/repair/stream")
+    assert any(event == "done" for event, _ in sse_events(repair))
+
+    listing = client.get(f"/api/sections/{section_id}/annotations")
+    assert listing.status_code == 200
+    by_id = {item["id"]: item for item in listing.json()["items"]}
+    assert by_id[changed_mark.json()["id"]]["anchorStatus"] == "old_version"
+    assert by_id[changed_mark.json()["id"]]["displayBlockId"] is None
+    assert by_id[stable_mark.json()["id"]]["anchorStatus"] == "unchanged_in_current"
+    assert by_id[stable_mark.json()["id"]]["displayBlockId"]
+
+    invalid = client.post(
+        f"/api/sections/{section_id}/annotations",
+        headers={"Idempotency-Key": "annotation-invalid-version-001"},
+        json={
+            "contentVersionId": "content_from_another_learning_run",
+            "blockId": stable_block["id"],
+            "kind": "highlight",
+            "anchor": {
+                "exact": "不能绑定",
+                "prefix": "",
+                "suffix": "",
+                "startOffset": 0,
+                "endOffset": 4,
+            },
+            "body": "",
+            "color": "amber",
+        },
+    )
+    assert invalid.status_code == 409
+    assert invalid.json()["code"] == "ANNOTATION_CONTENT_VERSION_INVALID"
+
+    deleted = client.delete(f"/api/annotations/{stable_mark.json()['id']}")
+    assert deleted.status_code == 204
+    remaining = client.get(f"/api/sections/{section_id}/annotations").json()
+    assert [item["id"] for item in remaining["items"]] == [
+        changed_mark.json()["id"]
+    ]
+
+
+def test_ask_ai_history_is_separated_and_archived_by_content_version(client):
+    series = create_series(client)
+    assert wait_for_task(
+        client,
+        series["initializationTask"]["taskId"],
+    )["status"] == "succeeded"
+    refreshed = client.get(f"/api/series/{series['id']}").json()
+    section_id = refreshed["books"][0]["chapters"][0]["sections"][0]["id"]
+    original = client.post(f"/api/sections/{section_id}/open").json()
+    old_block = original["content"]["blocks"][0]
+    first = client.post(
+        f"/api/sections/{section_id}/ask",
+        json={"blockId": old_block["id"], "question": "旧版的机制是什么？"},
+    )
+    assert first.status_code == 200
+
+    feedback = client.post(
+        "/api/feedback",
+        headers={"Idempotency-Key": "qa-version-feedback-repair-001"},
+        json={
+            "scope": "content_block",
+            "feedbackType": "unclear",
+            "message": "重新解释机制",
+            "sectionId": section_id,
+            "contentVersionId": original["content"]["id"],
+            "blockId": old_block["id"],
+        },
+    ).json()
+    client.post(f"/api/feedback/{feedback['id']}/repair/stream")
+    current = client.get(f"/api/sections/{section_id}").json()
+    current_history = client.get(
+        f"/api/sections/{section_id}/qa/history"
+    ).json()
+    assert current_history["contentVersionId"] == current["content"]["id"]
+    assert current_history["threads"] == []
+    assert {item["contentVersionId"] for item in current_history["versions"]} == {
+        original["content"]["id"],
+        current["content"]["id"],
+    }
+    explicit_current = client.get(
+        f"/api/sections/{section_id}/qa/history",
+        params={"contentVersionId": current["content"]["id"]},
+    )
+    assert explicit_current.status_code == 200
+    assert explicit_current.json()["threads"] == []
+
+    second = client.post(
+        f"/api/sections/{section_id}/ask",
+        json={
+            "blockId": current["content"]["blocks"][0]["id"],
+            "question": "当前版的机制是什么？",
+        },
+    )
+    assert second.status_code == 200
+    archived = client.get(
+        f"/api/sections/{section_id}/qa/history",
+        params={"contentVersionId": original["content"]["id"]},
+    )
+    assert archived.status_code == 200
+    assert archived.json()["readOnly"] is True
+    assert archived.json()["threads"][0]["messages"][0]["content"] == (
+        "旧版的机制是什么？"
+    )
+    with client.app.state.sessions() as db:
+        assert db.scalar(select(func.count()).select_from(QaSession)) == 2
+
+
+def test_repairable_feedback_after_assessment_is_recorded_without_rebinding(client):
+    series = create_series(client)
+    assert wait_for_task(
+        client,
+        series["initializationTask"]["taskId"],
+    )["status"] == "succeeded"
+    refreshed = client.get(f"/api/series/{series['id']}").json()
+    section_id = refreshed["books"][0]["chapters"][0]["sections"][0]["id"]
+    section = client.post(f"/api/sections/{section_id}/open").json()
+    assessed = client.post(
+        f"/api/sections/{section_id}/quiz",
+        json={
+            "quizSetId": section["quiz"]["id"],
+            "answers": [[1] for _ in section["quiz"]["questions"]],
+        },
+    )
+    assert assessed.status_code == 200
+
+    submitted = client.post(
+        "/api/feedback",
+        headers={"Idempotency-Key": "feedback-repairable-assessed-001"},
+        json={
+            "scope": "content_block",
+            "feedbackType": "unclear",
+            "message": "验证完成后仍然觉得这里不清楚",
+            "sectionId": section_id,
+            "contentVersionId": section["content"]["id"],
+            "blockId": section["content"]["blocks"][0]["id"],
+        },
+    )
+    assert submitted.status_code == 201
+    assert submitted.json()["regeneration"] == {
+        "status": "recorded_only",
+        "reasonCode": "FEEDBACK_ASSESSED_VERSION_FROZEN",
+        "task": None,
+    }
+    repair = client.post(
+        f"/api/feedback/{submitted.json()['id']}/repair/stream"
+    )
+    error = next(data for event, data in sse_events(repair) if event == "error")
+    assert error["code"] == "FEEDBACK_ASSESSED_VERSION_FROZEN"
+    unchanged = client.get(f"/api/sections/{section_id}").json()
+    assert unchanged["content"]["id"] == section["content"]["id"]
+    assert unchanged["quiz"]["id"] == section["quiz"]["id"]
+
+
 def test_content_feedback_repairs_legacy_contract_bound_content(client):
     series = create_series(client)
     assert wait_for_task(

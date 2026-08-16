@@ -533,6 +533,50 @@ class NoteReviewSupplementCreate(ApiModel):
     content: dict
 
 
+class ReadingAnnotationAnchor(ApiModel):
+    exact: str = Field(min_length=1, max_length=1200)
+    prefix: str = Field(default="", max_length=160)
+    suffix: str = Field(default="", max_length=160)
+    start_offset: int = Field(ge=0, le=200_000)
+    end_offset: int = Field(ge=1, le=200_000)
+
+    @model_validator(mode="after")
+    def valid_range(self):
+        if self.end_offset <= self.start_offset:
+            raise ValueError("标注结束位置必须晚于开始位置")
+        return self
+
+
+class ReadingAnnotationCreate(ApiModel):
+    content_version_id: str = Field(min_length=1, max_length=160)
+    block_id: str = Field(min_length=1, max_length=200)
+    kind: Literal["highlight", "comment"]
+    anchor: ReadingAnnotationAnchor
+    body: str = Field(default="", max_length=4000)
+    color: Literal["amber"] = "amber"
+
+    @model_validator(mode="after")
+    def comment_requires_body(self):
+        normalized = self.body.strip()
+        if self.kind == "comment" and not normalized:
+            raise ValueError("批注内容不能为空")
+        if self.kind == "highlight" and normalized:
+            raise ValueError("高亮不能携带批注正文")
+        self.body = normalized
+        return self
+
+
+class ReadingAnnotationUpdate(ApiModel):
+    body: str | None = Field(default=None, max_length=4000)
+    color: Literal["amber"] | None = None
+
+    @model_validator(mode="after")
+    def has_change(self):
+        if self.body is None and self.color is None:
+            raise ValueError("没有可保存的标注修改")
+        return self
+
+
 class ResumeUpdate(ApiModel):
     block_id: str = Field(default="", max_length=200)
 

@@ -726,7 +726,39 @@ export type QaHistoryThread = {
 };
 export type QaHistory = {
   sectionId:string;
+  contentVersionId:string|null;
+  currentContentVersionId:string|null;
+  readOnly:boolean;
+  versions:{contentVersionId:string;contentVersion:number|null;isCurrent:boolean;createdAt:string}[];
   lastThreadId:string|null;
   truncated:boolean;
   threads:QaHistoryThread[];
+};
+export type ReadingAnnotationAnchor = {
+  exact:string;
+  prefix:string;
+  suffix:string;
+  startOffset:number;
+  endOffset:number;
+};
+export type ReadingAnnotation = {
+  id:string;
+  sectionId:string;
+  contentVersionId:string;
+  contentVersion:number|null;
+  blockId:string;
+  displayBlockId:string|null;
+  anchorStatus:'current'|'unchanged_in_current'|'old_version';
+  kind:'highlight'|'comment';
+  anchor:ReadingAnnotationAnchor;
+  body:string;
+  color:'amber';
+  version:number;
+  createdAt:string;
+  updatedAt:string;
+};
+export type ReadingAnnotationList = {
+  sectionId:string;
+  currentContentVersionId:string;
+  items:ReadingAnnotation[];
 };

@@ -388,7 +388,13 @@ export const api = {
     explanationStyle:'worked_example'|'diagram'|'analogy'|'derivation'|'precise'|'concise'|'custom';
     explanationBlockKind:import('../model/types').Block['kind'];
   })=>streamQa(`/api/sections/${id}/ask/stream`,{blockId,question,threadId,forceRelation,...preference},onDelta),
-  qaHistory:(id:string)=>call<import('../model/types').QaHistory>(`/api/sections/${id}/qa/history`),
+  qaHistory:(id:string,contentVersionId?:string)=>call<import('../model/types').QaHistory>(`/api/sections/${id}/qa/history${contentVersionId ? `?contentVersionId=${encodeURIComponent(contentVersionId)}` : ''}`),
+  annotations:(id:string)=>call<import('../model/types').ReadingAnnotationList>(`/api/sections/${id}/annotations`),
+  createAnnotation:(id:string,body:{contentVersionId:string;blockId:string;kind:'highlight'|'comment';anchor:import('../model/types').ReadingAnnotationAnchor;body?:string;color?:'amber'},idempotencyKey:string)=>call<import('../model/types').ReadingAnnotation>(`/api/sections/${id}/annotations`,{
+    method:'POST',headers:{'Idempotency-Key':idempotencyKey},body:JSON.stringify(body),
+  }),
+  updateAnnotation:(id:string,body:{body?:string;color?:'amber'})=>call<import('../model/types').ReadingAnnotation>(`/api/annotations/${id}`,{method:'PATCH',body:JSON.stringify(body)}),
+  deleteAnnotation:(id:string)=>call<void>(`/api/annotations/${id}`,{method:'DELETE'}),
   correctQa:(id:string,threadId:string,targetThreadId:string)=>call<import('../model/types').QaCorrection>(`/api/sections/${id}/qa/threads/${threadId}`,{method:'PATCH',body:JSON.stringify({relation:'follow_up',targetThreadId})}),
   askMe:(id:string,answer='')=>call<import('../model/types').AskMe>(`/api/sections/${id}/ask-me`,{method:'POST',body:JSON.stringify({answer})}),
   askMeDiscussion:(id:string)=>call<import('../model/types').AskMeDiscussion|null>(`/api/sections/${id}/ask-me/discussion`),

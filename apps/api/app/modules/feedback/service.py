@@ -323,6 +323,21 @@ class FeedbackService:
                 "reasonCode": "FEEDBACK_CLASSIFICATION_REQUIRED",
                 "taskId": None,
             }
+        assessed = self.db.scalar(
+            select(func.count())
+            .select_from(QuizAttempt)
+            .join(QuizSet, QuizSet.id == QuizAttempt.quiz_set_id)
+            .where(
+                QuizAttempt.user_id == self.scope.user_id,
+                QuizSet.content_version_id == content.id,
+            )
+        ) or 0
+        if assessed:
+            return {
+                "status": "recorded_only",
+                "reasonCode": "FEEDBACK_ASSESSED_VERSION_FROZEN",
+                "taskId": None,
+            }
         return {
             "status": "stream_ready",
             "reasonCode": None,

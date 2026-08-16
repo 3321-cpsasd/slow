@@ -1032,7 +1032,7 @@ async def generate_legacy_section(
                 claim_reports = await verify_claims(candidates)
                 self._renew_generation_lease(resource_key, owner_id)
 
-        if regenerate and not regeneration_feedback:
+        if regenerate:
             assessed_after_generation = self.db.scalar(
                 select(func.count())
                 .select_from(QuizAttempt)
@@ -1044,8 +1044,16 @@ async def generate_legacy_section(
             ) or 0
             if assessed_after_generation:
                 raise AppError(
-                    "生成期间已产生答题证据，新版本未保存",
-                    code="SECTION_ALREADY_ASSESSED",
+                    (
+                        "反馈对应的正文已经产生答题证据，新版本未保存"
+                        if regeneration_feedback
+                        else "生成期间已产生答题证据，新版本未保存"
+                    ),
+                    code=(
+                        "FEEDBACK_ASSESSED_VERSION_FROZEN"
+                        if regeneration_feedback
+                        else "SECTION_ALREADY_ASSESSED"
+                    ),
                     status=409,
                 )
 

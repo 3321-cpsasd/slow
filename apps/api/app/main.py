@@ -35,7 +35,7 @@ from .ai.gateway import (
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, BookReplanCreate, ChapterChallengeSubmit, ChapterCreate, ChapterOrder, ChapterSkipCreate, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningGoalInterviewCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, LearningStartPreviewCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ReinforcementRespond, ResumeUpdate, ReviewSubmit, SeriesRename, ShelfCreate, ShelfRename, StudyActivityHeartbeat
+from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, BookReplanCreate, ChapterChallengeSubmit, ChapterCreate, ChapterOrder, ChapterSkipCreate, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningGoalInterviewCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, LearningStartPreviewCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ReadingAnnotationCreate, ReadingAnnotationUpdate, RecoveryCodeRotate, ReinforcementRespond, ResumeUpdate, ReviewSubmit, SeriesRename, ShelfCreate, ShelfRename, StudyActivityHeartbeat
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -2085,8 +2085,41 @@ def create_app(
     async def ask(section_id: str, body: AskRequest, s: SlowService = Depends(service)): return await s.ask(section_id, body)
 
     @app.get("/api/sections/{section_id}/qa/history")
-    def qa_history(section_id: str, s: SlowService = Depends(service)):
-        return s.qa_history(section_id)
+    def qa_history(
+        section_id: str,
+        content_version_id: str | None = Query(default=None, alias="contentVersionId"),
+        s: SlowService = Depends(service),
+    ):
+        return s.qa_history(section_id, content_version_id)
+
+    @app.get("/api/sections/{section_id}/annotations")
+    def annotations(section_id: str, s: SlowService = Depends(service)):
+        return s.annotations(section_id)
+
+    @app.post("/api/sections/{section_id}/annotations", status_code=201)
+    def create_annotation(
+        section_id: str,
+        body: ReadingAnnotationCreate,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return s.create_annotation(section_id, body, idempotency_key)
+
+    @app.patch("/api/annotations/{annotation_id}")
+    def update_annotation(
+        annotation_id: str,
+        body: ReadingAnnotationUpdate,
+        s: SlowService = Depends(service),
+    ):
+        return s.update_annotation(annotation_id, body)
+
+    @app.delete("/api/annotations/{annotation_id}", status_code=204)
+    def delete_annotation(
+        annotation_id: str,
+        s: SlowService = Depends(service),
+    ):
+        s.delete_annotation(annotation_id)
+        return Response(status_code=204)
 
     @app.post("/api/sections/{section_id}/ask/stream")
     async def ask_stream(section_id: str, body: AskRequest, s: SlowService = Depends(service)):
