@@ -765,6 +765,7 @@ class SectionGenerationCoordinator:
         composition_policy = resolve_lesson_composition_policy(
             section=section_spec,
             targets=target_payloads,
+            knowledge_context=context_payload["knowledgeContext"],
         )
         spec = LessonGenerationSpec(
             generationMode=(

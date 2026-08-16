@@ -11,7 +11,18 @@ from typing import Any
 
 
 LESSON_COMPOSITION_POLICY_VERSION = "lesson_composition_policy_v1"
-LESSON_COMPOSITION_RESOLVER_VERSION = "contract_epistemic_resolver_v2"
+LESSON_COMPOSITION_RESOLVER_VERSION = "contract_epistemic_resolver_v3"
+
+
+_FACTUAL_CASE_ROLES = {"empirical_case", "primary_source"}
+_FACTUAL_CASE_KINDS = {"empirical_case", "primary_source_case"}
+_FACTUAL_EVIDENCE_FORMS = {
+    "authoritative_rule",
+    "empirical_case",
+    "historical_case",
+    "primary_source",
+    "research_evidence",
+}
 
 
 _PROFILE_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -40,7 +51,7 @@ _PROFILE_POLICY: dict[str, dict[str, Any]] = {
         "evidenceForms": ["logical_derivation", "worked_result"],
         "recommendedRoles": ["derivation", "worked_example", "counterexample", "practice"],
         "recommendedTeachingMoves": ["derive_stepwise", "demonstrate", "diagnose_error", "guided_practice"],
-        "casePolicy": {"minimumDistinctCases": 1, "preferredKinds": ["worked_example"]},
+        "casePolicy": {"minimumDistinctCases": 0, "preferredKinds": ["worked_example"]},
     },
     "technical_procedural": {
         "knowledgeForm": "procedure_or_technical_system",
@@ -48,7 +59,7 @@ _PROFILE_POLICY: dict[str, dict[str, Any]] = {
         "evidenceForms": ["worked_result", "observable_behavior"],
         "recommendedRoles": ["mechanism", "worked_example", "boundary", "practice"],
         "recommendedTeachingMoves": ["explain_mechanism", "demonstrate", "diagnose_error", "guided_practice"],
-        "casePolicy": {"minimumDistinctCases": 1, "preferredKinds": ["worked_example"]},
+        "casePolicy": {"minimumDistinctCases": 0, "preferredKinds": ["worked_example"]},
     },
     "scientific_causal": {
         "knowledgeForm": "causal_process",
@@ -56,7 +67,7 @@ _PROFILE_POLICY: dict[str, dict[str, Any]] = {
         "evidenceForms": ["experimental_observation", "causal_reasoning"],
         "recommendedRoles": ["mechanism", "evidence_analysis", "counterexample", "boundary"],
         "recommendedTeachingMoves": ["trace_causality", "interpret_evidence", "test_generalization", "expose_boundary"],
-        "casePolicy": {"minimumDistinctCases": 1, "preferredKinds": ["empirical_case"]},
+        "casePolicy": {"minimumDistinctCases": 0, "preferredKinds": ["empirical_case"]},
     },
     "historical_evidentiary": {
         "knowledgeForm": "historical_process",
@@ -64,7 +75,7 @@ _PROFILE_POLICY: dict[str, dict[str, Any]] = {
         "evidenceForms": ["primary_source", "historical_case"],
         "recommendedRoles": ["context", "primary_source", "evidence_analysis", "alternative_interpretation", "synthesis"],
         "recommendedTeachingMoves": ["situate_context", "interpret_evidence", "compare_explanations", "synthesize"],
-        "casePolicy": {"minimumDistinctCases": 1, "preferredKinds": ["primary_source_case"]},
+        "casePolicy": {"minimumDistinctCases": 0, "preferredKinds": ["primary_source_case"]},
     },
     "textual_argumentative": {
         "knowledgeForm": "text_or_argument",
@@ -80,7 +91,7 @@ _PROFILE_POLICY: dict[str, dict[str, Any]] = {
         "evidenceForms": ["empirical_case", "research_evidence"],
         "recommendedRoles": ["mechanism", "empirical_case", "comparison", "evidence_analysis", "counterexample", "boundary", "transfer"],
         "recommendedTeachingMoves": ["explain_mechanism", "contrast", "interpret_evidence", "test_generalization", "transfer"],
-        "casePolicy": {"minimumDistinctCases": 2, "preferredKinds": ["empirical_case", "counterexample"]},
+        "casePolicy": {"minimumDistinctCases": 0, "preferredKinds": ["empirical_case", "counterexample"]},
     },
     "normative_case_analysis": {
         "knowledgeForm": "rule_or_norm",
@@ -88,15 +99,22 @@ _PROFILE_POLICY: dict[str, dict[str, Any]] = {
         "evidenceForms": ["authoritative_rule", "case_application"],
         "recommendedRoles": ["primary_source", "worked_example", "boundary", "counterargument", "practice"],
         "recommendedTeachingMoves": ["state_rule", "apply_to_case", "expose_exception", "weigh_competing_reasons"],
-        "casePolicy": {"minimumDistinctCases": 2, "preferredKinds": ["empirical_case", "counterexample"]},
+        "casePolicy": {"minimumDistinctCases": 0, "preferredKinds": ["empirical_case", "counterexample"]},
     },
 }
 
 
 def resolve_lesson_composition_policy(
-    *, section: dict[str, Any], targets: list[dict[str, Any]]
+    *,
+    section: dict[str, Any],
+    targets: list[dict[str, Any]],
+    knowledge_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Return an auditable presentation policy without changing target identity."""
+    """Return an auditable, non-blocking presentation preference.
+
+    Pedagogical forms are advisory. Factual case forms are offered only when
+    the frozen knowledge context contains claims that could support them.
+    """
 
     weighted_fields = [
         (str(section.get("title") or ""), 1),
@@ -136,13 +154,47 @@ def resolve_lesson_composition_policy(
             matched_signals = candidate_hits[:6]
             best_score = score
     target_count = max(1, len(targets))
-    return {
+    policy = {
         "schemaVersion": LESSON_COMPOSITION_POLICY_VERSION,
         "resolverVersion": LESSON_COMPOSITION_RESOLVER_VERSION,
         "profile": profile,
         "basis": "frozen_contract_deterministic_inference",
         "matchedSignals": matched_signals,
-        **_PROFILE_POLICY[profile],
+        **{
+            **_PROFILE_POLICY[profile],
+            "evidenceForms": list(_PROFILE_POLICY[profile]["evidenceForms"]),
+            "recommendedRoles": list(_PROFILE_POLICY[profile]["recommendedRoles"]),
+            "recommendedTeachingMoves": list(
+                _PROFILE_POLICY[profile]["recommendedTeachingMoves"]
+            ),
+            "casePolicy": {
+                **_PROFILE_POLICY[profile]["casePolicy"],
+                # Case quantity is a writing preference, never a publication gate.
+                "minimumDistinctCases": 0,
+                "preferredKinds": list(
+                    _PROFILE_POLICY[profile]["casePolicy"]["preferredKinds"]
+                ),
+            },
+        },
         "minimumBlocks": min(12, max(2, target_count + 1)),
         "maximumBlocks": 12,
     }
+    claims = list((knowledge_context or {}).get("claims") or [])
+    has_bound_claims = any(item.get("claimVersionId") for item in claims)
+    if not has_bound_claims:
+        policy["recommendedRoles"] = [
+            role
+            for role in policy["recommendedRoles"]
+            if role not in _FACTUAL_CASE_ROLES
+        ]
+        policy["casePolicy"]["preferredKinds"] = [
+            kind
+            for kind in policy["casePolicy"]["preferredKinds"]
+            if kind not in _FACTUAL_CASE_KINDS
+        ]
+        policy["evidenceForms"] = [
+            form
+            for form in policy["evidenceForms"]
+            if form not in _FACTUAL_EVIDENCE_FORMS
+        ] or ["conceptual_reasoning"]
+    return policy

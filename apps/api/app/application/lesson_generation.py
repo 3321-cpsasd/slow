@@ -34,8 +34,8 @@ from ..modules.learning.contracts import require_rank_settleable_contract
 
 LESSON_GENERATION_PIPELINE_VERSION = "lesson_generation_v3"
 LESSON_GENERATION_SCHEMA_VERSION = "generated_lesson_composition_candidate_v7"
-LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_composition_prompt_v11"
-LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v13"
+LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_composition_prompt_v12"
+LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v14"
 LESSON_CONTEXT_POLICY_VERSION = "lesson_generation_context_v2"
 AI_CONTENT_LABEL_SCHEMA_VERSION = "ai_content_label_v2"
 
@@ -70,7 +70,9 @@ class LessonCasePolicy(LessonSpecModel):
 class LessonCompositionPolicy(LessonSpecModel):
     schema_version: Literal["lesson_composition_policy_v1"] = Field(alias="schemaVersion")
     resolver_version: Literal[
-        "contract_epistemic_resolver_v1", "contract_epistemic_resolver_v2"
+        "contract_epistemic_resolver_v1",
+        "contract_epistemic_resolver_v2",
+        "contract_epistemic_resolver_v3",
     ] = Field(alias="resolverVersion")
     profile: Literal[
         "generic_conceptual",
@@ -112,7 +114,7 @@ class LessonGenerationSpec(LessonSpecModel):
         default=LESSON_GENERATION_SCHEMA_VERSION,
         alias="schemaVersion",
     )
-    prompt_version: Literal["lesson_generation_composition_prompt_v11"] = Field(
+    prompt_version: Literal["lesson_generation_composition_prompt_v12"] = Field(
         default=LESSON_GENERATION_PROMPT_VERSION,
         alias="promptVersion",
     )
@@ -133,7 +135,7 @@ class LessonGenerationSpec(LessonSpecModel):
         default_factory=lambda: LessonCompositionPolicy.model_validate(
             {
                 "schemaVersion": "lesson_composition_policy_v1",
-                "resolverVersion": "contract_epistemic_resolver_v2",
+                "resolverVersion": "contract_epistemic_resolver_v3",
                 "profile": "generic_conceptual",
                 "basis": "frozen_contract_deterministic_inference",
                 "matchedSignals": [],
@@ -420,17 +422,6 @@ def validate_lesson_candidate(
                 expectedCaseProvenance=existing_provenance,
                 actualCaseProvenance=provenance,
             )
-    case_count = len(case_keys)
-    if case_count < spec.composition_policy.case_policy.minimum_distinct_cases:
-        _reject(
-            "CONTENT_COMPOSITION_CASES_MISSING",
-            "正文案例数量低于编排策略的最低要求",
-            minimumDistinctCases=(
-                spec.composition_policy.case_policy.minimum_distinct_cases
-            ),
-            actualCases=case_count,
-        )
-
     target_by_id = {item.assessment_target_id: item for item in spec.targets}
     contract_target_ids = set(target_by_id)
     knowledge_ready = spec.knowledge_context.get("status") == "ready"

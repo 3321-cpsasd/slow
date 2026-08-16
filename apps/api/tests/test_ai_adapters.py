@@ -18,7 +18,7 @@ from app.ai.contracts import (
 from app.ai.metering import AiUsageRecorder
 from app.ai.context import policy_for
 from app.ai.local_adapter import LocalDemoAdapter
-from app.ai.openai_adapter import OpenAiAdapter
+from app.ai.openai_adapter import OpenAiAdapter, _lesson_slot_plan
 from app.ai.port import ProviderCapabilities
 from app.ai.route_context import (
     InvocationRouteContext,
@@ -450,6 +450,21 @@ def test_openai_chat_lesson_v2_uses_exactly_one_physical_call():
     assert trace[0]["schema"] == "GeneratedLessonSlotCandidate"
     assert trace[0]["attempts"] == 1
     assert trace[0]["repairAttempts"] == 0
+
+
+def test_lesson_slot_plan_removes_unavailable_factual_case_roles():
+    lesson_spec = _lesson_spec()
+    lesson_spec["knowledgeContext"] = {
+        "status": "not_applicable",
+        "claims": [],
+    }
+    plan = _lesson_slot_plan(lesson_spec)
+
+    assert "empirical_case" not in plan["allowedSupportRoles"]
+    assert "primary_source" not in plan["allowedSupportRoles"]
+    assert "empirical_case" not in plan["recommendedSupportRoles"]
+    assert "empirical_case" not in plan["allowedCaseKinds"]
+    assert "primary_source_case" not in plan["allowedCaseKinds"]
 
 
 def test_kimi_k3_lesson_keeps_required_thinking_mode():

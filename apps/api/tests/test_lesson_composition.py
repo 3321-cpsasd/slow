@@ -15,24 +15,40 @@ def _target(objective: str) -> dict:
     }
 
 
-def test_social_explanation_requests_distinct_cases_without_changing_targets():
+def test_social_explanation_treats_case_forms_as_advisory_without_claims():
     policy = resolve_lesson_composition_policy(
         section={"title": "制度与群体行为", "question": "社会制度为什么改变群体选择？"},
         targets=[_target("解释制度影响行为的机制")],
     )
     validated = LessonCompositionPolicy.model_validate(policy)
     assert validated.profile == "social_empirical"
-    assert validated.case_policy.minimum_distinct_cases == 2
+    assert validated.case_policy.minimum_distinct_cases == 0
+    assert "empirical_case" not in validated.recommended_roles
+    assert "empirical_case" not in validated.case_policy.preferred_kinds
+
+
+def test_social_explanation_may_prefer_empirical_cases_when_claims_are_available():
+    policy = resolve_lesson_composition_policy(
+        section={"title": "制度与群体行为", "question": "社会制度为什么改变群体选择？"},
+        targets=[_target("解释制度影响行为的机制")],
+        knowledge_context={
+            "status": "ready",
+            "claims": [{"claimVersionId": "claim_1"}],
+        },
+    )
+    validated = LessonCompositionPolicy.model_validate(policy)
+    assert validated.case_policy.minimum_distinct_cases == 0
     assert "empirical_case" in validated.recommended_roles
+    assert "empirical_case" in validated.case_policy.preferred_kinds
 
 
-def test_textual_interpretation_prefers_evidence_and_alternative_readings():
+def test_textual_interpretation_avoids_unsourced_primary_material():
     policy = resolve_lesson_composition_policy(
         section={"title": "文本细读", "question": "这段修辞如何支持作品主题？"},
         targets=[_target("依据原文解释修辞作用")],
     )
     assert policy["profile"] == "textual_argumentative"
-    assert "primary_source" in policy["recommendedRoles"]
+    assert "primary_source" not in policy["recommendedRoles"]
     assert "alternative_interpretation" in policy["recommendedRoles"]
 
 
@@ -115,18 +131,17 @@ def test_composition_minimum_blocks_is_a_publication_gate():
     assert raised.value.code == "CONTENT_COMPOSITION_MINIMUM_BLOCKS"
 
 
-def test_composition_minimum_cases_is_a_publication_gate():
+def test_composition_case_count_is_advisory_not_a_publication_gate():
     value = candidate()
     lesson_spec = spec()
     lesson_spec.composition_policy.case_policy.minimum_distinct_cases = sum(
         1 for block in value.blocks if block.case_kind
     ) + 1
-    with pytest.raises(CandidateValidationFailure) as raised:
-        validate_lesson_candidate(lesson_spec, value)
-    assert raised.value.code == "CONTENT_COMPOSITION_CASES_MISSING"
+    validated = validate_lesson_candidate(lesson_spec, value)
+    assert validated.candidate is value
 
 
-def test_composition_counts_unique_case_keys_not_case_blocks():
+def test_composition_does_not_require_distinct_case_keys_for_advisory_policy():
     value = candidate()
     value.blocks[2].case_kind = "hypothetical_example"
     value.blocks[2].case_key = "shared_case"
@@ -134,9 +149,8 @@ def test_composition_counts_unique_case_keys_not_case_blocks():
     value.blocks[3].case_key = "shared_case"
     lesson_spec = spec()
     lesson_spec.composition_policy.case_policy.minimum_distinct_cases = 2
-    with pytest.raises(CandidateValidationFailure) as raised:
-        validate_lesson_candidate(lesson_spec, value)
-    assert raised.value.code == "CONTENT_COMPOSITION_CASES_MISSING"
+    validated = validate_lesson_candidate(lesson_spec, value)
+    assert validated.candidate is value
 
 
 def test_case_identity_allows_provenance_and_teaching_use_to_vary_by_block():
