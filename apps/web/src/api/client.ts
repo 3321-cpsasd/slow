@@ -2,7 +2,9 @@ const BASE = import.meta.env.VITE_API_URL ?? '';
 
 const API_UNAVAILABLE_MESSAGE = '无法连接 API 服务。请启动后端，然后刷新页面重试。';
 let csrfToken = '';
+let authenticatedUserId = '';
 let unauthorizedHandler:(()=>void)|undefined;
+let csrfRefreshPromise:Promise<string>|undefined;
 
 export class ApiError extends Error {
   constructor(
@@ -17,7 +19,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request(path:string, init?:RequestInit):Promise<Response>{
+async function fetchApi(path:string, init?:RequestInit):Promise<Response>{
   try {
     return await fetch(`${BASE}${path}`, {
       credentials:'include',
@@ -31,6 +33,66 @@ async function request(path:string, init?:RequestInit):Promise<Response>{
   }
 }
 
+async function refreshCsrfToken():Promise<string>{
+  if(!csrfRefreshPromise) {
+    csrfRefreshPromise = (async()=>{
+      const response = await fetchApi('/api/auth/me');
+      if(response.status === 401) {
+        handleUnauthorized();
+      }
+      if(!response.ok) return '';
+      const payload = parsePayload(await response.text());
+      const refreshedToken = typeof payload?.csrfToken === 'string'
+        ? payload.csrfToken
+        : '';
+      const refreshedUser = payload?.user;
+      const refreshedUserId = (
+        refreshedUser
+        && typeof refreshedUser === 'object'
+        && typeof (refreshedUser as Record<string,unknown>).id === 'string'
+      ) ? String((refreshedUser as Record<string,unknown>).id) : '';
+      if(
+        !refreshedToken
+        || !refreshedUserId
+        || (authenticatedUserId && refreshedUserId !== authenticatedUserId)
+      ) {
+        handleUnauthorized();
+        return '';
+      }
+      csrfToken = refreshedToken;
+      authenticatedUserId = refreshedUserId;
+      return refreshedToken;
+    })().finally(()=>{
+      csrfRefreshPromise = undefined;
+    });
+  }
+  return csrfRefreshPromise;
+}
+
+async function request(
+  path:string,
+  init?:RequestInit,
+  allowCsrfRecovery = true,
+):Promise<Response>{
+  const response = await fetchApi(path, init);
+  const method = (init?.method || 'GET').toUpperCase();
+  if(
+    !allowCsrfRecovery
+    || ['GET','HEAD','OPTIONS'].includes(method)
+    || response.status !== 403
+  ) {
+    return response;
+  }
+  const payload = parsePayload(await response.clone().text());
+  if(payload?.code !== 'CSRF_INVALID') return response;
+
+  const refreshedToken = await refreshCsrfToken();
+  if(!refreshedToken) return response;
+  const headers = new Headers(init?.headers);
+  headers.set('X-CSRF-Token',refreshedToken);
+  return request(path, {...init, headers}, false);
+}
+
 function parsePayload(text:string):Record<string,unknown>|undefined {
   if (!text) return undefined;
   try {
@@ -38,6 +100,31 @@ function parsePayload(text:string):Record<string,unknown>|undefined {
   } catch {
     return undefined;
   }
+}
+
+function apiMessage(
+  payload:Record<string,unknown>|undefined,
+  fallback:string,
+):string {
+  if(payload?.code === 'CSRF_INVALID') {
+    return '登录状态已更新，请刷新页面后重试';
+  }
+  return String(payload?.message || fallback);
+}
+
+function rememberAuthContext(state:import('../model/types').AuthState):void {
+  csrfToken = state.csrfToken;
+  authenticatedUserId = state.user.id;
+}
+
+function clearAuthContext():void {
+  csrfToken = '';
+  authenticatedUserId = '';
+}
+
+function handleUnauthorized():void {
+  clearAuthContext();
+  unauthorizedHandler?.();
 }
 
 async function call<T>(path:string, init?:RequestInit):Promise<T>{
@@ -57,11 +144,11 @@ async function call<T>(path:string, init?:RequestInit):Promise<T>{
   const payload = parsePayload(text);
   if(!response.ok) {
     const apiUnavailable = !payload && response.status >= 500;
-    if(response.status === 401) unauthorizedHandler?.();
+    if(response.status === 401) handleUnauthorized();
     throw new ApiError(
       apiUnavailable
         ? API_UNAVAILABLE_MESSAGE
-        : String(payload?.message || '请求失败'),
+        : apiMessage(payload, '请求失败'),
       response.status,
       apiUnavailable ? 'API_UNREACHABLE' : String(payload?.code || 'UNKNOWN_ERROR'),
       Boolean(payload?.retryable),
@@ -86,13 +173,13 @@ async function streamQa(
     body:JSON.stringify(body),
   });
   if(!response.ok){
-    if(response.status === 401) unauthorizedHandler?.();
+    if(response.status === 401) handleUnauthorized();
     const text = await response.text();
     const payload = parsePayload(text);
     throw new ApiError(
       !payload && response.status >= 500
         ? API_UNAVAILABLE_MESSAGE
-        : String(payload?.message || '答疑发送失败'),
+        : apiMessage(payload, '答疑发送失败'),
       response.status,
       !payload && response.status >= 500
         ? 'API_UNREACHABLE'
@@ -136,11 +223,11 @@ async function streamFeedbackRepair(
     },
   });
   if(!response.ok){
-    if(response.status === 401) unauthorizedHandler?.();
+    if(response.status === 401) handleUnauthorized();
     const text = await response.text();
     const payload = parsePayload(text);
     throw new ApiError(
-      String(payload?.message || '正文更新没有完成'),
+      apiMessage(payload, '正文更新没有完成'),
       response.status,
       String(payload?.code || 'FEEDBACK_REPAIR_FAILED'),
       Boolean(payload?.retryable),
@@ -192,7 +279,7 @@ export const api = {
   authConfig:()=>call<import('../model/types').AuthConfig>('/api/auth/config'),
   authMe:async()=>{
     const state = await call<import('../model/types').AuthState>('/api/auth/me');
-    csrfToken = state.csrfToken;
+    rememberAuthContext(state);
     return state;
   },
   login:(returnTo='/')=>{
@@ -203,7 +290,7 @@ export const api = {
       method:'POST',
       body:JSON.stringify({username,password}),
     });
-    csrfToken = state.csrfToken;
+    rememberAuthContext(state);
     return state;
   },
   registerAccount:async(body:{
@@ -216,7 +303,7 @@ export const api = {
       method:'POST',
       body:JSON.stringify(body),
     });
-    csrfToken = state.csrfToken;
+    rememberAuthContext(state);
     return state;
   },
   resetPasswordWithRecovery:(body:{
@@ -234,7 +321,7 @@ export const api = {
   }),
   logout:async()=>{
     await call<void>('/api/auth/logout',{method:'POST'});
-    csrfToken = '';
+    clearAuthContext();
   },
   privacy:()=>call<import('../model/types').PrivacyState>('/api/privacy'),
   acceptPrivacy:(body:{privacyAccepted:boolean;trialAccepted:boolean})=>call<import('../model/types').PrivacyState>('/api/privacy/consent',{
