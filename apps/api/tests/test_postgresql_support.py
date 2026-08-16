@@ -91,7 +91,7 @@ def test_postgresql_upgrades_existing_schema_from_previous_head():
             with migration_engine.connect() as connection:
                 assert connection.execute(
                     sa.text("SELECT version_num FROM alembic_version")
-                ).scalar_one() == "0066_reading_annotations"
+                ).scalar_one() == "0074_merge_capabilities_annotations"
                 inspector = sa.inspect(connection)
                 assert "reading_annotations" in inspector.get_table_names()
                 assert "display_title" in {
