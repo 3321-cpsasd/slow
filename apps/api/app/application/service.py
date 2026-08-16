@@ -1927,6 +1927,26 @@ class SlowService:
             idempotency_key=idempotency_key,
         )
 
+    async def respond_capability_review(
+        self,
+        assignment_id: str,
+        body,
+        idempotency_key=None,
+    ):
+        return await ReviewAssignmentService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+            context_builder=self.generation_contexts,
+            context_resolver=self.contexts,
+            memory_loader=self._memory,
+        ).respond(
+            assignment_id,
+            response=body.response,
+            assistance_used=body.assistance_used,
+            idempotency_key=idempotency_key,
+        )
+
     async def start_review_reinforcement(self, assignment_id: str):
         return await ReinforcementService(
             self.db,

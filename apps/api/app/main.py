@@ -35,7 +35,7 @@ from .ai.gateway import (
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, BookReplanCreate, CapabilityApplicationSubmit, ChapterChallengeSubmit, ChapterCreate, ChapterOrder, ChapterSkipCreate, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, LearningStartPreviewCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ReinforcementRespond, ResumeUpdate, ReviewSubmit, ShelfCreate, ShelfRename, StudyActivityHeartbeat
+from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, BookReplanCreate, CapabilityApplicationSubmit, CapabilityReviewSubmit, ChapterChallengeSubmit, ChapterCreate, ChapterOrder, ChapterSkipCreate, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, LearningStartPreviewCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ReinforcementRespond, ResumeUpdate, ReviewSubmit, ShelfCreate, ShelfRename, StudyActivityHeartbeat
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -2045,6 +2045,17 @@ def create_app(
         s: SlowService = Depends(service),
     ):
         return s.submit_review(assignment_id, body, idempotency_key)
+
+    @app.post("/api/reviews/{assignment_id}/respond")
+    async def respond_capability_review(
+        assignment_id: str,
+        body: CapabilityReviewSubmit,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return await s.respond_capability_review(
+            assignment_id, body, idempotency_key
+        )
 
     @app.post("/api/reviews/{assignment_id}/reinforcement")
     async def start_review_reinforcement(

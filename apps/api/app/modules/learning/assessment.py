@@ -642,6 +642,49 @@ def rebuild_assessment_projections(
         db.delete(stale)
     for stale in existing_reviews.values():
         db.delete(stale)
+    capability_review_groups: dict[str, list[AssessmentObservation]] = defaultdict(list)
+    for observation in observations:
+        if (
+            observation.source_type == "capability_review"
+            and observation.qualification_at_creation != "ineligible"
+        ):
+            capability_review_groups[observation.assessment_target_id].append(
+                observation
+            )
+    for target_id, items in capability_review_groups.items():
+        review = db.scalar(
+            select(ReviewState).where(
+                ReviewState.user_id == user_id,
+                ReviewState.assessment_target_id == target_id,
+            )
+        )
+        if review is None:
+            review = ReviewState(
+                id=_uid("review_state"),
+                user_id=user_id,
+                assessment_target_id=target_id,
+            )
+            db.add(review)
+        latest = max(items, key=lambda item: item.sequence)
+        successful_rounds = sum(
+            item.correct and item.id in retention_observation_ids for item in items
+        )
+        review.status = "scheduled" if latest.correct else "remediation_due"
+        spacing_days = [1, 3, 7, 14][min(successful_rounds, 3)]
+        review.next_due_at = _utc(latest.created_at) + (
+            timedelta(days=spacing_days) if latest.correct else timedelta()
+        )
+        review.priority = 40 if latest.correct else 100
+        review.reason = (
+            "capability_reactivation_follow_up"
+            if latest.correct
+            else "capability_reactivation_failed"
+        )
+        review.spacing_stage = successful_rounds
+        review.projection_rule_version = REVIEW_RULE_VERSION
+        review.source_observation_watermark = latest.sequence
+        review.updated_at = now()
+    db.flush()
     capability_states = rebuild_capability_state_projections(
         db,
         user_id=user_id,

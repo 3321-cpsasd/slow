@@ -69,6 +69,7 @@ from .review_task_plans import (
     ReviewCriterion,
     plan_review_tasks,
 )
+from .review_stage_tasks import CapabilityReviewTaskService
 
 
 logger = logging.getLogger(__name__)
@@ -782,6 +783,9 @@ class ReviewAssignmentService:
             )
             if quiz else []
         )
+        capability_task = CapabilityReviewTaskService(
+            self.db, user_id=self.user_id, ai=self.ai
+        ).view_for_assignment(assignment.id)
         return {
             "assignmentId": assignment.id,
             "status": assignment.status,
@@ -797,6 +801,7 @@ class ReviewAssignmentService:
             } if quiz else None,
             "attemptId": assignment.submitted_attempt_id,
             "taskPlan": _load(assignment.task_plan_json, {}),
+            "capabilityTask": capability_task,
         }
 
     async def start(self, assignment_id: str, *, as_of: datetime | None = None) -> dict:
@@ -814,12 +819,19 @@ class ReviewAssignmentService:
             else ""
         )
         if task_kind != "choice_reactivation":
-            raise AppError(
-                "该复习需要进入对应能力任务，而不是生成选择题",
-                code="REVIEW_TASK_EXECUTOR_REQUIRED",
-                status=409,
-                details={"taskKind": task_kind},
+            task = await CapabilityReviewTaskService(
+                self.db,
+                user_id=self.user_id,
+                ai=self.ai,
+            ).prepare(assignment)
+            self._apply_transition(
+                assignment,
+                "started",
+                moment,
+                payload={"capabilityReviewTaskId": task.id, "taskKind": task.task_kind},
             )
+            self.db.commit()
+            return self._assignment_view(assignment)
         source = self._source_for_assignment(assignment)
         content = source.content
         section = source.section
@@ -945,6 +957,59 @@ class ReviewAssignmentService:
         )
         self.db.commit()
         return self._assignment_view(assignment)
+
+    async def respond(
+        self,
+        assignment_id: str,
+        *,
+        response: dict,
+        assistance_used: bool,
+        idempotency_key: str | None,
+        as_of: datetime | None = None,
+    ) -> dict:
+        moment = _utc(as_of or now())
+        assignment = self._owned(assignment_id)
+        if assignment.status not in {"started", "submitted"}:
+            raise AppError(
+                "能力复习任务尚未开始",
+                code="CAPABILITY_REVIEW_TASK_NOT_STARTED",
+                status=409,
+            )
+        plan = _load(assignment.task_plan_json, {})
+        reactivation = plan.get("reactivation", {})
+        if not isinstance(reactivation, dict) or reactivation.get(
+            "taskKind"
+        ) == "choice_reactivation":
+            raise AppError(
+                "选择题复习必须通过答案提交入口完成",
+                code="CAPABILITY_REVIEW_ENDPOINT_KIND_MISMATCH",
+                status=409,
+            )
+        result, _submission = await CapabilityReviewTaskService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+        ).submit(
+            assignment,
+            response=response,
+            assistance_used=assistance_used,
+            idempotency_key=idempotency_key or "",
+        )
+        if assignment.status == "started":
+            self._apply_transition(
+                assignment,
+                "submitted",
+                moment,
+                payload={
+                    "submissionId": result["submissionId"],
+                    "reactivationQualified": result["reactivationQualified"],
+                    "evidenceEffect": "activation_only",
+                },
+                idempotency_key=idempotency_key or "",
+            )
+            assignment.response_json = _dump(result)
+        self.db.commit()
+        return result
 
     def submit(
         self,

@@ -8,6 +8,8 @@ from .contracts import (
     AskMeEvaluation,
     AskMeProbe,
     AskMeTurn,
+    CapabilityReviewRubricCriterion,
+    CapabilityReviewTaskCandidate,
     ChoiceQuestion,
     ClaimSupportReview,
     ClassifiedAnswer,
@@ -652,6 +654,61 @@ class LocalDemoAdapter:
         evaluation = await self.evaluate_standard_application_submission(request)
         return evaluation.model_copy(
             update={"rationale": "本地演示评定不具有正式钻石证据资格。"}
+        )
+
+    async def author_capability_review_task(self, request):
+        task_kind = request.get("taskKind", "oral_reactivation")
+        planned = request.get("plannedCriteria", [])
+        labels = [item.get("label", "相关知识") for item in request.get("requiredKnowledge", [])]
+        prompt = (
+            "请重新解释当前能力的关键机制与失效边界，并用一个新例子说明二者如何共同约束判断。"
+            if task_kind == "oral_reactivation"
+            else "请在一个正文未出现的新标准案例中独立给出判断、步骤、验证信号与失效边界。"
+            if task_kind == "application_reactivation"
+            else f"请在陌生综合情境中重组{'、'.join(labels[:2])}，给出方案、选择理由、验证信号与失效边界。"
+        )
+        rubric_sources = list(planned)
+        if len(rubric_sources) == 1:
+            rubric_sources.append(planned[0])
+        return CapabilityReviewTaskCandidate(
+            prompt=prompt,
+            task_context="本地演示生成的延迟能力再激活情境。",
+            deliverables=["判断", "理由", "验证信号", "失效边界"],
+            rubric=[
+                CapabilityReviewRubricCriterion(
+                    criterion_key=f"C{index}",
+                    stage_criterion_id=item["id"],
+                    statement=item["statement"],
+                )
+                for index, item in enumerate(rubric_sources, 1)
+            ],
+            reference_answer_points=[item["statement"] for item in planned],
+            novelty_basis="使用与正文不同的新情境重新观察当前阶段能力。",
+            unfamiliarity_basis=(
+                "情境约束与正文示例不同，需要重新组合知识。"
+                if task_kind == "transfer_reactivation"
+                else ""
+            ),
+            required_knowledge_recombination=(
+                labels[:2] if task_kind == "transfer_reactivation" else []
+            ),
+        )
+
+    async def evaluate_capability_review_submission(self, request):
+        response = json.dumps(request.get("submission", {}), ensure_ascii=False)
+        sufficient = len(response.strip()) >= 40
+        return StandardApplicationEvaluation(
+            verdict="pass" if sufficient else "fail",
+            evidence_sufficiency="sufficient" if sufficient else "insufficient",
+            criterion_results=[
+                StandardApplicationCriterionResult(
+                    criterion_key=item["criterionKey"],
+                    satisfied=sufficient,
+                    rationale="演示提交覆盖该项标准。" if sufficient else "演示提交信息不足。",
+                )
+                for item in request.get("rubric", [])
+            ],
+            rationale="本地演示评定不具有正式再激活证据资格。",
         )
 
     async def replan_book(self, request, memory):

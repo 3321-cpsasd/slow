@@ -1,5 +1,6 @@
 import asyncio
 import json
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -16,6 +17,7 @@ from app.infrastructure.tables import (
     CapabilityApplicationEvaluation,
     CapabilityApplicationSubmission,
     CapabilityApplicationTaskVersion,
+    CapabilityReviewTaskVersion,
     CapabilityStageCriterion,
     CapabilityStateProjection,
     Concept,
@@ -27,10 +29,13 @@ from app.infrastructure.tables import (
     LearningContractAssessmentTarget,
     LearningContractVersion,
     LearningRunSectionBinding,
+    ReviewAssignment,
     SectionAssessmentTarget,
     now,
 )
 from app.ai.contracts import (
+    CapabilityReviewRubricCriterion,
+    CapabilityReviewTaskCandidate,
     StandardApplicationCriterionResult,
     StandardApplicationEvaluation,
     StandardApplicationRubricCriterion,
@@ -50,6 +55,7 @@ from app.modules.learning.capabilities import (
     ensure_route_capability_subnet,
 )
 from app.modules.learning.application_tasks import CapabilityApplicationTaskService
+from app.modules.learning.review_stage_tasks import CapabilityReviewTaskService
 
 
 def _session() -> Session:
@@ -629,6 +635,47 @@ class _ApplicationAi:
     async def evaluate_transfer_submission(self, request):
         return await self.evaluate_standard_application_submission(request)
 
+    async def author_capability_review_task(self, request):
+        self.last_deployment_id = "capability-review-author"
+        self.last_model_family_id = "author-family"
+        self.model = "author-model"
+        labels = [item["label"] for item in request.get("requiredKnowledge", [])]
+        task_kind = request["taskKind"]
+        rubric_sources = list(request["plannedCriteria"])
+        if len(rubric_sources) == 1:
+            rubric_sources.append(request["plannedCriteria"][0])
+        return CapabilityReviewTaskCandidate(
+            prompt=(
+                "请在一个正文未出现的新运行情境中重新完成当前阶段任务，"
+                "说明判断、操作理由、验证信号以及方案失效的边界。"
+            ),
+            task_context="延迟复习生成的新运行情境",
+            deliverables=["判断", "理由", "验证", "边界"],
+            rubric=[
+                CapabilityReviewRubricCriterion(
+                    criterion_key=f"C{index}",
+                    stage_criterion_id=item["id"],
+                    statement=item["statement"],
+                )
+                for index, item in enumerate(rubric_sources, 1)
+            ],
+            reference_answer_points=[
+                item["statement"] for item in request["plannedCriteria"]
+            ],
+            novelty_basis="新运行情境不复用正文案例。",
+            unfamiliarity_basis=(
+                "陌生约束要求重新组合能力子网。"
+                if task_kind == "transfer_reactivation"
+                else ""
+            ),
+            required_knowledge_recombination=(
+                labels[:2] if task_kind == "transfer_reactivation" else []
+            ),
+        )
+
+    async def evaluate_capability_review_submission(self, request):
+        return await self.evaluate_standard_application_submission(request)
+
 
 class _NonNovelApplicationAi(_ApplicationAi):
     async def author_standard_application_task(self, request):
@@ -886,6 +933,131 @@ def test_transfer_submission_cannot_skip_gold() -> None:
         )
         assert raised.value.code == "TRANSFER_TASK_GOLD_REQUIRED"
         assert state.current_stage == "silver"
+
+
+@pytest.mark.parametrize(
+    ("stage", "task_kind", "assistance_used", "expected_qualified"),
+    [
+        ("gold", "application_reactivation", False, True),
+        ("gold", "application_reactivation", True, False),
+        ("diamond", "transfer_reactivation", False, True),
+    ],
+)
+def test_high_stage_review_reactivates_without_regranting_stage(
+    stage: str,
+    task_kind: str,
+    assistance_used: bool,
+    expected_qualified: bool,
+) -> None:
+    with _session() as db:
+        ai = _ApplicationAi()
+        application_service, capability_id = _application_service_fixture(
+            db,
+            ai=ai,
+            diamond_route=True,
+        )
+        gold_task = asyncio.run(application_service.prepare("section_capability"))
+        asyncio.run(application_service.submit(
+            gold_task["id"],
+            response={"answer": "标准应用回答包含判断、步骤、验证和边界" * 4},
+            assistance_used=False,
+            idempotency_key=f"{stage}-review-gold-prerequisite",
+        ))
+        if stage == "diamond":
+            transfer_task = asyncio.run(
+                application_service.prepare("section_capability", "transfer_task")
+            )
+            asyncio.run(application_service.submit(
+                transfer_task["id"],
+                response={"answer": "陌生情境中重组递归、幂等性并说明选择依据" * 4},
+                assistance_used=False,
+                idempotency_key="diamond-review-prerequisite",
+                expected_task_kind="transfer_task",
+            ))
+        criterion_ids = list(
+            db.scalars(
+                select(CapabilityStageCriterion.id).where(
+                    CapabilityStageCriterion.capability_revision_id == capability_id,
+                    CapabilityStageCriterion.stage == stage,
+                )
+            )
+        )
+        moment = now()
+        assignment = ReviewAssignment(
+            id=f"review_assignment_{stage}",
+            selection_run_id=f"selection_{stage}",
+            review_state_id=f"review_state_{stage}",
+            user_id="user_capability",
+            assessment_target_id="target_bronze_application_path",
+            source_learning_run_id="run_capability",
+            source_section_id="section_capability",
+            learning_contract_version_id="contract_capability",
+            content_version_id="content_capability",
+            prior_quiz_set_id=f"prior_quiz_{stage}",
+            due_at=moment - timedelta(days=1),
+            expires_at=moment + timedelta(days=1),
+            status="started",
+            rank=1,
+            base_priority=40,
+            effective_priority=40,
+            selection_rule_version="review_assignment_v2_capability_priority",
+            qualification_rule_version=QUALIFICATION_RULE_VERSION,
+            task_plan_json=json.dumps({
+                "ruleVersion": "review_task_plan_v1",
+                "reactivation": {
+                    "purpose": "retention_reactivation",
+                    "taskKind": task_kind,
+                    "stage": stage,
+                    "criterionIds": criterion_ids,
+                    "verificationProtocols": [],
+                    "evidenceEffect": "activation_only",
+                },
+                "strengthening": None,
+            }),
+            task_plan_rule_version="review_task_plan_v1",
+            prior_item_signatures_json="[]",
+            item_signatures_json="[]",
+            last_event_at=moment,
+        )
+        db.add(assignment)
+        db.flush()
+        review_service = CapabilityReviewTaskService(
+            db,
+            user_id="user_capability",
+            ai=ai,
+        )
+        task = asyncio.run(review_service.prepare(assignment))
+        result, _submission = asyncio.run(review_service.submit(
+            assignment,
+            response={"answer": "重新展示当前阶段能力并说明判断依据与失效边界" * 4},
+            assistance_used=assistance_used,
+            idempotency_key=f"{stage}-reactivation-submit",
+        ))
+
+        state = db.scalar(
+            select(CapabilityStateProjection).where(
+                CapabilityStateProjection.capability_revision_id == capability_id
+            )
+        )
+        capability_qualification = db.scalar(
+            select(EvidenceQualificationEvent)
+            .join(
+                AssessmentObservation,
+                AssessmentObservation.id
+                == EvidenceQualificationEvent.observation_id,
+            )
+            .where(
+                AssessmentObservation.source_type == "capability_review",
+                EvidenceQualificationEvent.projection_family == "capability",
+            )
+        )
+        assert task.task_kind == task_kind
+        assert result["reactivationQualified"] is expected_qualified
+        assert result["stageChanged"] is False
+        assert state.current_stage == stage
+        assert capability_qualification.status == "ineligible"
+        if stage == "diamond":
+            assert len(json.loads(task.required_knowledge_json)) == 2
 
 
 @pytest.mark.parametrize(

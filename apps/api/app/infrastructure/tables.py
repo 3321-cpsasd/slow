@@ -3546,6 +3546,92 @@ class ReviewAssignmentEventRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class CapabilityReviewTaskVersion(Base):
+    """Immutable stage-matched delayed reactivation task."""
+
+    __tablename__ = "capability_review_task_versions"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    review_assignment_id: Mapped[str] = mapped_column(
+        ForeignKey("review_assignments.id"), unique=True, index=True
+    )
+    assessment_target_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_targets.id"), index=True
+    )
+    capability_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_revisions.id"), index=True
+    )
+    task_kind: Mapped[str] = mapped_column(String(32), index=True)
+    stage: Mapped[str] = mapped_column(String(24), index=True)
+    criterion_ids_json: Mapped[str] = mapped_column(Text)
+    prompt: Mapped[str] = mapped_column(Text)
+    task_context_json: Mapped[str] = mapped_column(Text, default="{}")
+    deliverables_json: Mapped[str] = mapped_column(Text, default="[]")
+    rubric_json: Mapped[str] = mapped_column(Text)
+    reference_answer_json: Mapped[str] = mapped_column(Text)
+    novelty_basis_json: Mapped[str] = mapped_column(Text, default="{}")
+    required_knowledge_json: Mapped[str] = mapped_column(Text, default="[]")
+    author_deployment_id: Mapped[str] = mapped_column(String(160), default="")
+    author_model_family_id: Mapped[str] = mapped_column(String(160), default="")
+    author_model: Mapped[str] = mapped_column(String(160), default="")
+    provenance_mode: Mapped[str] = mapped_column(String(40))
+    publication_status: Mapped[str] = mapped_column(String(24), index=True)
+    task_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    rule_version: Mapped[str] = mapped_column(String(48))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
+class CapabilityReviewSubmission(Base):
+    """Immutable learner response to one delayed capability task."""
+
+    __tablename__ = "capability_review_submissions"
+    __table_args__ = (
+        UniqueConstraint(
+            "review_task_version_id",
+            "idempotency_key",
+            name="uq_capability_review_submission_task_idempotency",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    review_task_version_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_review_task_versions.id"), unique=True, index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    response_json: Mapped[str] = mapped_column(Text)
+    assistance_mode: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
+class CapabilityReviewEvaluation(Base):
+    """Independent evaluation fact whose qualification only reactivates ability."""
+
+    __tablename__ = "capability_review_evaluations"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    submission_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_review_submissions.id"), unique=True, index=True
+    )
+    verdict: Mapped[str] = mapped_column(String(24), index=True)
+    evidence_sufficiency: Mapped[str] = mapped_column(String(24))
+    criterion_results_json: Mapped[str] = mapped_column(Text)
+    rationale: Mapped[str] = mapped_column(Text, default="")
+    evaluator_deployment_id: Mapped[str] = mapped_column(String(160), default="")
+    evaluator_model_family_id: Mapped[str] = mapped_column(String(160), default="")
+    evaluator_model: Mapped[str] = mapped_column(String(160), default="")
+    qualification_status: Mapped[str] = mapped_column(String(24), index=True)
+    qualification_reason: Mapped[str] = mapped_column(Text)
+    rule_version: Mapped[str] = mapped_column(String(48))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
 class ReinforcementRun(Base):
     """Server-owned bounded recovery run for one assessment target."""
 

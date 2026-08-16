@@ -469,6 +469,7 @@ def rebuild_knowledge_node_projections(
                 if item.next_due_at is not None
             ),
             default=None,
+            key=_utc,
         )
         latest = max(items, key=lambda item: (_utc(item.created_at), item.sequence))
         activation_state = (

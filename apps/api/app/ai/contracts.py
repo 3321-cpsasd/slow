@@ -1146,6 +1146,30 @@ class TransferTaskCandidate(StandardApplicationTaskCandidate):
         return self
 
 
+class CapabilityReviewRubricCriterion(StandardApplicationRubricCriterion):
+    stage_criterion_id: str = Field(min_length=1, max_length=200)
+
+
+class CapabilityReviewTaskCandidate(StrictModel):
+    prompt: str = Field(min_length=20, max_length=4000)
+    task_context: str = Field(min_length=4, max_length=2000)
+    deliverables: list[str] = Field(min_length=1, max_length=8)
+    rubric: list[CapabilityReviewRubricCriterion] = Field(min_length=2, max_length=8)
+    reference_answer_points: list[str] = Field(min_length=1, max_length=12)
+    novelty_basis: str = Field(min_length=4, max_length=1200)
+    unfamiliarity_basis: str = Field(default="", max_length=1200)
+    required_knowledge_recombination: list[str] = Field(
+        default_factory=list, max_length=12
+    )
+
+    @model_validator(mode="after")
+    def rubric_keys_are_unique(self):
+        keys = [item.criterion_key for item in self.rubric]
+        if len(keys) != len(set(keys)):
+            raise ValueError("capability review rubric keys must be unique")
+        return self
+
+
 class StandardApplicationCriterionResult(StrictModel):
     criterion_key: str = Field(pattern=r"^C[1-9][0-9]*$")
     satisfied: bool
