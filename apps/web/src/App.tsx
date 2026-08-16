@@ -1217,24 +1217,50 @@ export default function App() {
       : ++routeRequestVersion.current;
     const value = await run('正在进入学习空间…', () => api.series(seriesId));
     if (requestVersion !== routeRequestVersion.current) return;
-    const requestedPath = `${seriesPath(seriesId, requestedSectionId)}${shouldFocusAskMe ? '#ask-me' : ''}`;
-    updateBrowserLocation(requestedPath, historyMode);
-    setShelf(data?.shelves.find((item) => (
+    const targetShelf = data?.shelves.find((item) => (
       item.series.some((candidate) => candidate.id === seriesId)
-    )) || null);
+    )) || null;
+    if (
+      value.initializationTask
+      && (
+        value.initializationTask.status !== 'succeeded'
+        || (!requestedSectionId && value.progress === 0)
+      )
+    ) {
+      let ready: Awaited<ReturnType<typeof waitForInitialSectionReady>>;
+      try {
+        ready = await run(
+          '正在准备目录和第一节…',
+          () => waitForInitialSectionReady(value),
+        );
+      } catch {
+        // run() has already translated the failure for the learner. Keep the
+        // current shelf/home mounted and never leak a rejected click promise.
+        return;
+      }
+      if (requestVersion !== routeRequestVersion.current) return;
+      setShelf(targetShelf);
+      setDirectoryBookId(ready.bookId);
+      setSeries(ready.series);
+      setSection(ready.section);
+      setView('learn');
+      updateBrowserLocation(
+        `${seriesPath(ready.series.id, ready.section.id)}${shouldFocusAskMe ? '#ask-me' : ''}`,
+        historyMode,
+      );
+      return;
+    }
+    updateBrowserLocation(
+      `${seriesPath(seriesId, requestedSectionId)}${shouldFocusAskMe ? '#ask-me' : ''}`,
+      historyMode,
+    );
+    setShelf(targetShelf);
     setSeries(value);
     setView('learn');
     const requestedBook = requestedBookId
       ? value.books.find((book) => book.id === requestedBookId) || null
       : null;
     if (requestedBook) setDirectoryBookId(requestedBook.id);
-    if (
-      value.initializationTask
-      && !['failed', 'succeeded'].includes(value.initializationTask.status)
-    ) {
-      void monitorInitialSection(value);
-      return;
-    }
     const resumeSection = data?.resume?.sectionId;
     const resumeBelongsToSeries = resumeSection
       ? value.books.some((book) => book.chapters.some(
@@ -1486,22 +1512,39 @@ export default function App() {
       }
 
       setBusy('正在恢复上次浏览位置…');
-      const restoredSeries = await api.series(route.seriesId);
+      let restoredSeries = await api.series(route.seriesId);
       if (requestVersion !== routeRequestVersion.current) return;
       const restoredShelf = data.shelves.find((item) => (
         item.series.some((candidate) => candidate.id === restoredSeries.id)
       )) || null;
+      if (
+        restoredSeries.initializationTask
+        && (
+          restoredSeries.initializationTask.status !== 'succeeded'
+          || (!route.sectionId && restoredSeries.progress === 0)
+        )
+      ) {
+        const ready = await waitForInitialSectionReady(restoredSeries);
+        if (requestVersion !== routeRequestVersion.current) return;
+        restoredSeries = ready.series;
+        if (!route.sectionId) {
+          updateBrowserLocation(
+            seriesPath(ready.series.id, ready.section.id),
+            'replace',
+          );
+          setShelf(restoredShelf);
+          setDirectoryBookId(ready.bookId);
+          setSeries(ready.series);
+          setSection(ready.section);
+          setView('learn');
+          return;
+        }
+      }
       if (!route.sectionId) {
         setShelf(restoredShelf);
         setSeries(restoredSeries);
         setSection(null);
         setView('learn');
-        if (
-          restoredSeries.initializationTask
-          && !['failed', 'succeeded'].includes(restoredSeries.initializationTask.status)
-        ) {
-          void monitorInitialSection(restoredSeries);
-        }
         return;
       }
       const sectionCanOpen = restoredSeries.books.some((book) => book.chapters.some(
