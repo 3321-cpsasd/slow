@@ -42,6 +42,7 @@ ROUTE_KNOWLEDGE_IDENTITY_STATUS = "route_scoped_knowledge"
 ROUTE_CAPABILITY_IDENTITY_STATUS = "route_scoped_capability"
 RANK_SETTLEABLE_IDENTITY_STATUSES = {
     "published_knowledge_graph",
+    "published_capability",
     ROUTE_KNOWLEDGE_IDENTITY_STATUS,
     ROUTE_CAPABILITY_IDENTITY_STATUS,
 }
@@ -638,7 +639,10 @@ def ensure_learning_contract(
     identity_statuses = {target.identity_status for _, target in target_rows}
     contract_provenance = (
         "published_knowledge_graph"
-        if identity_statuses == {"published_knowledge_graph"}
+        if identity_statuses
+        and identity_statuses.issubset(
+            {"published_knowledge_graph", "published_capability"}
+        )
         else "route_scoped_knowledge"
         if identity_statuses
         and identity_statuses.issubset(

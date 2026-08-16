@@ -11,16 +11,20 @@ from ...infrastructure.tables import (
     CapabilityPlanningCandidate,
     CapabilityPlanningDecision,
     CapabilityRelationRequirement,
+    CapabilityRevision,
     ConceptRevision,
     KnowledgeIdentityCandidate,
     KnowledgeRelationCandidate,
     KnowledgeRelationIdentityDecision,
+    PublishedCapabilityIdentity,
+    PublishedRelationIdentity,
     Section,
 )
 from ..knowledge.identity import candidate_semantic_hash, resolve_candidate_revision
 from ..learning.capabilities import (
     CapabilityConceptSpec,
     CapabilityRelationSpec,
+    ensure_capability_route_binding,
     ensure_route_capability_subnet,
 )
 
@@ -40,6 +44,53 @@ def _hash(value: object) -> str:
 def _stable_id(prefix: str, *parts: object) -> str:
     material = "\x1f".join(str(part) for part in parts)
     return f"{prefix}_{hashlib.sha256(material.encode()).hexdigest()[:32]}"
+
+
+def relation_candidate_semantic_payload(item: dict) -> dict:
+    return {
+        "fromConceptRevisionId": item["fromConceptRevisionId"],
+        "toConceptRevisionId": item["toConceptRevisionId"],
+        "relationType": item["relationType"],
+        "statement": " ".join(str(item["statement"]).split()),
+        "scope": item.get("scope", {}),
+    }
+
+
+def relation_candidate_semantic_hash(item: dict) -> str:
+    return _hash(relation_candidate_semantic_payload(item))
+
+
+def capability_candidate_semantic_payload(
+    *,
+    candidate_key: str,
+    label: str,
+    operation: str,
+    boundary: str,
+    members: list[dict],
+    relations: list[dict],
+    natural_stage_ceiling: str,
+) -> dict:
+    return {
+        "ruleVersion": CAPABILITY_PLANNING_RULE_VERSION,
+        "candidateKey": candidate_key,
+        "label": label,
+        "operation": operation,
+        "boundary": boundary,
+        "members": [
+            {
+                "conceptRevisionId": item["conceptRevisionId"],
+                "role": item["role"],
+                "required": item["required"],
+            }
+            for item in members
+        ],
+        "relations": relations,
+        "naturalStageCeiling": natural_stage_ceiling,
+    }
+
+
+def capability_candidate_semantic_hash(**kwargs) -> str:
+    return _hash(capability_candidate_semantic_payload(**kwargs))
 
 
 def _resolve_section_concepts(
@@ -117,7 +168,7 @@ def _record_relation_decisions(
             f"{semantic['relationType']}:"
             f"{semantic['toConceptRevisionId']}"
         )
-        candidate_hash = _hash(semantic)
+        candidate_hash = relation_candidate_semantic_hash(semantic)
         candidate_id = _stable_id(
             "knowledge_relation_candidate", chapter_id, candidate_hash
         )
@@ -146,7 +197,24 @@ def _record_relation_decisions(
             )
             .limit(1)
         )
-        if semantic_conflict is not None:
+        published_exact = db.scalar(
+            select(PublishedRelationIdentity).where(
+                PublishedRelationIdentity.semantic_hash == candidate_hash,
+                PublishedRelationIdentity.status == "published",
+            )
+        )
+        published_conflict = db.scalar(
+            select(PublishedRelationIdentity)
+            .where(
+                PublishedRelationIdentity.family_key == relation_family_key,
+                PublishedRelationIdentity.semantic_hash != candidate_hash,
+                PublishedRelationIdentity.status == "published",
+            )
+            .limit(1)
+        )
+        if published_exact is None and (
+            semantic_conflict is not None or published_conflict is not None
+        ):
             raise AppError(
                 "同一关系候选键出现不同语义，不能静默创建新关系",
                 code="CAPABILITY_PLAN_RELATION_UNRESOLVED",
@@ -169,7 +237,15 @@ def _record_relation_decisions(
             )
             db.add(candidate)
             db.flush()
-        decision = "reuse_revision" if exact_prior else "create_relation"
+        if published_exact is not None:
+            decision = "reuse_published_relation"
+            basis_mode = "exact_published_semantic_hash"
+        elif exact_prior:
+            decision = "reuse_revision"
+            basis_mode = "exact_semantic_hash"
+        else:
+            decision = "create_relation"
+            basis_mode = "new_route_relation"
         decision_hash = _hash(
             {
                 "candidateId": candidate.id,
@@ -194,20 +270,14 @@ def _record_relation_decisions(
                         requirement.knowledge_relation_revision_id
                     ),
                     compared_revision_ids_json=_dump(
-                        [exact_prior.resolved_relation_revision_id]
+                        [published_exact.knowledge_relation_revision_id]
+                        if published_exact
+                        else [exact_prior.resolved_relation_revision_id]
                         if exact_prior
                         and exact_prior.resolved_relation_revision_id
                         else []
                     ),
-                    basis_json=_dump(
-                        {
-                            "mode": (
-                                "exact_semantic_hash"
-                                if exact_prior
-                                else "new_route_relation"
-                            )
-                        }
-                    ),
+                    basis_json=_dump({"mode": basis_mode}),
                     actor_kind="deterministic_rule",
                     actor_id="",
                     rule_version=RELATION_IDENTITY_RULE_VERSION,
@@ -252,8 +322,29 @@ def freeze_chapter_capability_plans(
             )
             for item in generated.members
         ]
-        relation_specs = [
-            CapabilityRelationSpec(
+        relation_specs: list[CapabilityRelationSpec] = []
+        for item in generated.relations:
+            relation_candidate_payload = {
+                "fromConceptRevisionId": concepts_by_position[
+                    item.from_section_position
+                ].id,
+                "toConceptRevisionId": concepts_by_position[
+                    item.to_section_position
+                ].id,
+                "relationType": item.relation_type,
+                "statement": " ".join(item.statement.split()),
+                "scope": {},
+            }
+            published_relation = db.scalar(
+                select(PublishedRelationIdentity).where(
+                    PublishedRelationIdentity.semantic_hash
+                    == relation_candidate_semantic_hash(
+                        relation_candidate_payload
+                    ),
+                    PublishedRelationIdentity.status == "published",
+                )
+            )
+            relation_specs.append(CapabilityRelationSpec(
                 from_concept_revision_id=concepts_by_position[
                     item.from_section_position
                 ].id,
@@ -267,9 +358,12 @@ def freeze_chapter_capability_plans(
                 required=item.required,
                 scope={},
                 provenance={"mode": "chapter_capability_plan"},
-            )
-            for item in generated.relations
-        ]
+                reuse_relation_revision_id=(
+                    published_relation.knowledge_relation_revision_id
+                    if published_relation
+                    else None
+                ),
+            ))
         target_section = sections[generated.assessment_section_position - 1]
         member_payload = [
             {
@@ -308,24 +402,15 @@ def freeze_chapter_capability_plans(
             ),
             "naturalStageCeiling": generated.natural_stage_ceiling,
         }
-        semantic_payload = {
-            key: value
-            for key, value in planning_payload.items()
-            if key
-            not in {
-                "assessmentSectionId",
-                "assessmentObjectivePosition",
-            }
-        }
-        semantic_payload["members"] = [
-            {
-                "conceptRevisionId": item["conceptRevisionId"],
-                "role": item["role"],
-                "required": item["required"],
-            }
-            for item in member_payload
-        ]
-        candidate_hash = _hash(semantic_payload)
+        candidate_hash = capability_candidate_semantic_hash(
+            candidate_key=generated.candidate_key,
+            label=generated.label,
+            operation=generated.operation,
+            boundary=generated.boundary,
+            members=member_payload,
+            relations=relation_payload,
+            natural_stage_ceiling=generated.natural_stage_ceiling,
+        )
         planning_candidate_id = _stable_id(
             "capability_planning_candidate", chapter_id, candidate_hash
         )
@@ -355,18 +440,17 @@ def freeze_chapter_capability_plans(
             db.add(planning_candidate)
             db.flush()
 
-        for relation_item in relation_payload:
-            relation_hash = _hash(
-                {
-                    "fromConceptRevisionId": relation_item[
-                        "fromConceptRevisionId"
-                    ],
-                    "toConceptRevisionId": relation_item["toConceptRevisionId"],
-                    "relationType": relation_item["relationType"],
-                    "statement": relation_item["statement"],
-                    "scope": relation_item.get("scope", {}),
-                }
+        published_capability = db.scalar(
+            select(PublishedCapabilityIdentity).where(
+                PublishedCapabilityIdentity.semantic_hash == candidate_hash,
+                PublishedCapabilityIdentity.status == "published",
             )
+        )
+
+        for relation_item in relation_payload:
+            if published_capability is not None:
+                break
+            relation_hash = relation_candidate_semantic_hash(relation_item)
             relation_family_key = (
                 f"{relation_item['fromConceptRevisionId']}:"
                 f"{relation_item['relationType']}:"
@@ -382,7 +466,26 @@ def freeze_chapter_capability_plans(
                 )
                 .limit(1)
             )
-            if relation_conflict is not None:
+            published_relation_exact = db.scalar(
+                select(PublishedRelationIdentity).where(
+                    PublishedRelationIdentity.semantic_hash == relation_hash,
+                    PublishedRelationIdentity.status == "published",
+                )
+            )
+            published_relation_conflict = db.scalar(
+                select(PublishedRelationIdentity)
+                .where(
+                    PublishedRelationIdentity.family_key
+                    == relation_family_key,
+                    PublishedRelationIdentity.semantic_hash != relation_hash,
+                    PublishedRelationIdentity.status == "published",
+                )
+                .limit(1)
+            )
+            if published_relation_exact is None and (
+                relation_conflict is not None
+                or published_relation_conflict is not None
+            ):
                 planning_candidate.status = "unresolved"
                 unresolved_candidate_id = _stable_id(
                     "knowledge_relation_candidate", chapter_id, relation_hash
@@ -415,7 +518,14 @@ def freeze_chapter_capability_plans(
                     {
                         "candidateId": unresolved_candidate.id,
                         "decision": "unresolved",
-                        "comparedCandidateId": relation_conflict.id,
+                        "comparedCandidateId": (
+                            relation_conflict.id if relation_conflict else None
+                        ),
+                        "comparedPublicationId": (
+                            published_relation_conflict.id
+                            if published_relation_conflict
+                            else None
+                        ),
                         "ruleVersion": RELATION_IDENTITY_RULE_VERSION,
                     }
                 )
@@ -434,7 +544,7 @@ def freeze_chapter_capability_plans(
                         .order_by(
                             KnowledgeRelationIdentityDecision.created_at.desc()
                         )
-                    )
+                    ) if relation_conflict is not None else None
                     db.add(
                         KnowledgeRelationIdentityDecision(
                             id=_stable_id(
@@ -445,7 +555,11 @@ def freeze_chapter_capability_plans(
                             decision="unresolved",
                             resolved_relation_revision_id=None,
                             compared_revision_ids_json=_dump(
-                                [prior_decision.resolved_relation_revision_id]
+                                [
+                                    published_relation_conflict.knowledge_relation_revision_id
+                                ]
+                                if published_relation_conflict
+                                else [prior_decision.resolved_relation_revision_id]
                                 if prior_decision
                                 and prior_decision.resolved_relation_revision_id
                                 else []
@@ -453,7 +567,16 @@ def freeze_chapter_capability_plans(
                             basis_json=_dump(
                                 {
                                     "mode": "same_relation_family_semantic_conflict",
-                                    "comparedCandidateId": relation_conflict.id,
+                                    "comparedCandidateId": (
+                                        relation_conflict.id
+                                        if relation_conflict
+                                        else None
+                                    ),
+                                    "comparedPublicationId": (
+                                        published_relation_conflict.id
+                                        if published_relation_conflict
+                                        else None
+                                    ),
                                 }
                             ),
                             actor_kind="deterministic_rule",
@@ -481,13 +604,33 @@ def freeze_chapter_capability_plans(
             )
             .limit(1)
         )
-        if semantic_conflict is not None:
+        published_capability_conflict = db.scalar(
+            select(PublishedCapabilityIdentity)
+            .where(
+                PublishedCapabilityIdentity.family_key
+                == generated.candidate_key,
+                PublishedCapabilityIdentity.semantic_hash != candidate_hash,
+                PublishedCapabilityIdentity.status == "published",
+            )
+            .limit(1)
+        )
+        if published_capability is None and (
+            semantic_conflict is not None
+            or published_capability_conflict is not None
+        ):
             planning_candidate.status = "unresolved"
             conflict_hash = _hash(
                 {
                     "candidateId": planning_candidate.id,
                     "decision": "unresolved_capability",
-                    "comparedCandidateId": semantic_conflict.id,
+                    "comparedCandidateId": (
+                        semantic_conflict.id if semantic_conflict else None
+                    ),
+                    "comparedPublicationId": (
+                        published_capability_conflict.id
+                        if published_capability_conflict
+                        else None
+                    ),
                     "ruleVersion": CAPABILITY_PLANNING_RULE_VERSION,
                 }
             )
@@ -507,7 +650,16 @@ def freeze_chapter_capability_plans(
                         basis_json=_dump(
                             {
                                 "mode": "same_candidate_key_semantic_conflict",
-                                "comparedCandidateId": semantic_conflict.id,
+                                "comparedCandidateId": (
+                                    semantic_conflict.id
+                                    if semantic_conflict
+                                    else None
+                                ),
+                                "comparedPublicationId": (
+                                    published_capability_conflict.id
+                                    if published_capability_conflict
+                                    else None
+                                ),
                             }
                         ),
                         actor_kind="deterministic_rule",
@@ -525,27 +677,55 @@ def freeze_chapter_capability_plans(
                 status=409,
             )
 
-        capability, bronze = ensure_route_capability_subnet(
-            db,
-            series_id=series_id,
-            label=generated.label,
-            concepts=concept_specs,
-            relations=relation_specs,
-            boundary={"description": generated.boundary},
-            context={
-                "operation": generated.operation,
-                "candidateKey": generated.candidate_key,
-            },
-            natural_stage_ceiling=generated.natural_stage_ceiling,
-        )
-        prior = db.scalar(
-            select(CapabilityPlanningDecision).where(
-                CapabilityPlanningDecision.resolved_capability_revision_id
-                == capability.id,
-                CapabilityPlanningDecision.candidate_id != planning_candidate.id,
+        if published_capability is not None:
+            capability = db.get(
+                CapabilityRevision,
+                published_capability.capability_revision_id,
             )
-        )
-        decision = "reuse_route_capability" if prior else "create_capability"
+            if capability is None:
+                raise AppError(
+                    "已发布能力版本不存在",
+                    code="PUBLISHED_CAPABILITY_REVISION_MISSING",
+                    status=500,
+                )
+            bronze = ensure_capability_route_binding(
+                db,
+                series_id=series_id,
+                capability_revision_id=capability.id,
+            )
+            prior = True
+            decision = "reuse_published_capability"
+            decision_mode = "exact_published_semantic_hash"
+        else:
+            capability, bronze = ensure_route_capability_subnet(
+                db,
+                series_id=series_id,
+                label=generated.label,
+                concepts=concept_specs,
+                relations=relation_specs,
+                boundary={"description": generated.boundary},
+                context={
+                    "operation": generated.operation,
+                    "candidateKey": generated.candidate_key,
+                },
+                natural_stage_ceiling=generated.natural_stage_ceiling,
+            )
+            prior = db.scalar(
+                select(CapabilityPlanningDecision).where(
+                    CapabilityPlanningDecision.resolved_capability_revision_id
+                    == capability.id,
+                    CapabilityPlanningDecision.candidate_id
+                    != planning_candidate.id,
+                )
+            )
+            decision = (
+                "reuse_route_capability" if prior else "create_capability"
+            )
+            decision_mode = (
+                "exact_route_capability"
+                if prior
+                else "validated_chapter_subnet"
+            )
         decision_hash = _hash(
             {
                 "candidateId": planning_candidate.id,
@@ -565,15 +745,7 @@ def freeze_chapter_capability_plans(
                     candidate_id=planning_candidate.id,
                     decision=decision,
                     resolved_capability_revision_id=capability.id,
-                    basis_json=_dump(
-                        {
-                            "mode": (
-                                "exact_route_capability"
-                                if prior
-                                else "validated_chapter_subnet"
-                            )
-                        }
-                    ),
+                    basis_json=_dump({"mode": decision_mode}),
                     actor_kind="deterministic_rule",
                     actor_id="",
                     rule_version=CAPABILITY_PLANNING_RULE_VERSION,

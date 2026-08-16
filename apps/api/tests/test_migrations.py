@@ -13,7 +13,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0069_chapter_capability_planning"
+HEAD_REVISION = "0070_cross_series_identity_publication"
 
 pytestmark = pytest.mark.migration
 
@@ -151,6 +151,50 @@ def test_chapter_capability_planning_indexes_fit_postgresql_limit() -> None:
                 "candidate_id",
                 "decision",
                 "resolved_capability_revision_id",
+                "rule_version",
+                "supersedes_id",
+                "created_at",
+            ),
+        }.items()
+        for column in columns
+    ]
+    assert len(names) == len(set(names))
+    assert max(map(len, names)) <= 63
+
+
+def test_cross_series_publication_indexes_fit_postgresql_limit() -> None:
+    migration = importlib.import_module(
+        "migrations.versions.0070_cross_series_identity_publication"
+    )
+    names = [
+        f"ix_{migration._ALIASES[table]}_{column}"
+        for table, columns in {
+            "published_concept_identities": (
+                "family_key",
+                "semantic_hash",
+                "concept_revision_id",
+                "status",
+                "supersedes_id",
+            ),
+            "published_relation_identities": (
+                "family_key",
+                "semantic_hash",
+                "knowledge_relation_revision_id",
+                "status",
+                "supersedes_id",
+            ),
+            "published_capability_identities": (
+                "family_key",
+                "semantic_hash",
+                "capability_revision_id",
+                "status",
+                "supersedes_id",
+            ),
+            "identity_publication_decisions": (
+                "subject_kind",
+                "candidate_id",
+                "decision",
+                "resolved_revision_id",
                 "rule_version",
                 "supersedes_id",
                 "created_at",

@@ -1,6 +1,6 @@
 # ADR-0022：基于知识子网的稳定能力、累计阶段与三轴用户画像
 
-- **状态**：Accepted，黄金标准应用纵向链路已实现
+- **状态**：Accepted，跨系列知识与能力发布身份链路已实现
 - **决策日期**：2026-08-15
 - **适用范围**：知识图谱、稳定能力身份、课程规划、Learning Contract、正式测评、复习、能力画像、段位结算、知识地图与正文个性化
 - **继承边界**：[ADR-0001](0001-lesson-generation-v2.md)、[ADR-0012](0012-on-demand-knowledge-universe-and-learner-memory.md)、[ADR-0015](0015-rank-settleable-learning-contracts.md)、[ADR-0020](0020-audited-historical-rank-identity.md)、[ADR-0021](0021-series-local-knowledge-identity-resolution.md)
@@ -401,6 +401,9 @@ ADR-0021 的系列内知识候选、追加式身份裁决、跨书 Concept Revis
 - route-scoped 单概念能力也统一经过知识网络和能力子网创建，只是合法地形成单节点最小子网，不再存在绕过子网的正式新建路径；
 - 章节规划协议新增章级 `capability_subnets` 候选：通过小节位置引用精确知识身份，冻结唯一验证小节、节点角色、必需关系、能力操作、边界和自然上限；规划器只提出候选，服务端在章节发布事务内解析知识身份并创建正式子网；
 - 新增追加式 `CapabilityPlanningCandidate` / `CapabilityPlanningDecision` 和 `KnowledgeRelationCandidate` / `KnowledgeRelationIdentityDecision`；同一系列内相同能力键或关系端点族出现不同语义时进入 `unresolved` 并使章节规划失败，不能静默创建另一项能力；
+- 新增经审核的跨系列 `PublishedConceptIdentity`、`PublishedRelationIdentity` 和 `PublishedCapabilityIdentity` 注册表，以及统一追加式 `IdentityPublicationDecision`；未发布候选仍严格限制在当前系列，只有精确语义已经取得发布身份时，其他系列才能确定性复用；
+- 发布服务以一个能力规划候选为原子审核范围，先解析并发布概念版本，再发布关系版本、冻结发布级知识网络，最后发布稳定能力版本；首次发布形成新身份，精确相同语义形成复用，家族语义变化默认进入 `unresolved`，只有显式指定被取代的发布记录后才能形成新版本；
+- 新版本继续挂在原 `Concept`、`KnowledgeRelation` 或 `Capability` 稳定身份下，并以 `supersedes` 链连接前一不可变 Revision；章节规划命中发布级能力后直接建立当前系列的路线绑定，Learning Contract 与 Assessment Target 使用 `published_capability` 身份，不再克隆 route-scoped 能力；
 - 规划指定的 Assessment Target 直接引用已冻结 Capability Revision 和青铜 Stage Criterion，Learning Contract 同时冻结该目标的全部必需 Concept Revision 与关系范围，不再根据目标句子临时猜测知识组合；
 - 新增 `CapabilityRouteBinding`；能力自然上限可达黄金，但路线在只存在选择题时仅承诺青铜，冻结两项正式口试目标后提升到白银，只有发布真实标准应用任务后才提升到黄金；投影器同时受能力自然上限和路线正式上限约束；
 - 新 Assessment Target 显式绑定 Capability Revision 和青铜 Stage Criterion；
@@ -417,11 +420,10 @@ ADR-0021 的系列内知识候选、追加式身份裁决、跨书 Concept Revis
 
 仍未完成的范围：
 
-- route-scoped 知识关系候选的跨系列发布、复用、新版本和 unresolved 身份裁决；
 - 钻石迁移任务及其真实晋级入口门禁；
 - 按缺失 Stage Criterion 选择口试、标准应用或迁移任务的多题型复习规划；当前到期唤醒仍使用受治理的新选择题，只形成保持证据，不能借复习选择题制造黄金或钻石；
 - 历史旧证据的显式解析与 unresolved 队列；
 - 节末结算、知识地图和系列能力进度切换到新画像；
 - 旧六级段位停止写入。
 
-因此当前状态只能称为“黄金标准应用纵向链路已实现”，不能称为整份 ADR 已实现；任何现有六级段位结果仍只是旧规则输出。
+因此当前状态只能称为“跨系列知识与能力发布身份链路已实现”，不能称为整份 ADR 已实现；任何现有六级段位结果仍只是旧规则输出。

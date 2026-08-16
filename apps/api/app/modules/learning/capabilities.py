@@ -53,6 +53,7 @@ class CapabilityRelationSpec:
     required: bool = True
     scope: dict | None = None
     provenance: dict | None = None
+    reuse_relation_revision_id: str | None = None
 
 
 def _stable_id(prefix: str, *parts: object) -> str:
@@ -327,6 +328,7 @@ def ensure_route_capability_subnet(
                 statement=item.statement,
                 scope=item.scope,
                 provenance=item.provenance,
+                reuse_relation_revision_id=item.reuse_relation_revision_id,
             )
             for item in relation_specs
         ],
@@ -581,6 +583,67 @@ def ensure_route_capability(
     )
 
 
+def ensure_capability_route_binding(
+    db: Session,
+    *,
+    series_id: str,
+    capability_revision_id: str,
+) -> CapabilityStageCriterion:
+    """Attach a reviewed reusable capability to one series without cloning it."""
+
+    revision = db.get(CapabilityRevision, capability_revision_id)
+    subnet = validate_capability_subnet(
+        db, capability_revision_id=capability_revision_id
+    )
+    bronze = db.scalar(
+        select(CapabilityStageCriterion).where(
+            CapabilityStageCriterion.capability_revision_id
+            == capability_revision_id,
+            CapabilityStageCriterion.stage == "bronze",
+            CapabilityStageCriterion.position == 1,
+        )
+    )
+    if revision is None or bronze is None:
+        raise AppError(
+            "已发布能力缺少基础阶段量规",
+            code="PUBLISHED_CAPABILITY_RUBRIC_MISSING",
+            status=500,
+        )
+    route_id = _stable_id(
+        "capability_route_binding", series_id, capability_revision_id
+    )
+    if db.get(CapabilityRouteBinding, route_id) is None:
+        db.add(
+            CapabilityRouteBinding(
+                id=route_id,
+                series_id=series_id,
+                capability_revision_id=capability_revision_id,
+                target_stage="bronze",
+                route_json=_dump(
+                    {
+                        "naturalStageCeiling": revision.natural_stage_ceiling,
+                        "formalStageCeiling": "bronze",
+                        "reason": "silver_requires_a_frozen_ask_me_contract",
+                        "capabilitySubnetId": subnet.id,
+                    }
+                ),
+                opportunities_json=_dump(
+                    [
+                        {
+                            "stage": "bronze",
+                            "criterionId": bronze.id,
+                            "verificationProtocol": "choice_quiz_v1",
+                        }
+                    ]
+                ),
+                status="active",
+                rule_version=CAPABILITY_ROUTE_RULE_VERSION,
+            )
+        )
+    db.flush()
+    return bronze
+
+
 def bind_assessment_target_to_capability_subnet(
     db: Session,
     *,
@@ -759,6 +822,10 @@ def materialize_planned_capability_target(
     )
     target = db.get(AssessmentTarget, target_id)
     if target is None:
+        published_identity = revision.verification_status in {
+            "published",
+            "reviewed",
+        }
         target = AssessmentTarget(
             id=target_id,
             concept_revision_id=anchor_concept_revision_id,
@@ -772,7 +839,11 @@ def materialize_planned_capability_target(
             objective_statement=statement,
             dimension=dimension,
             target_depth="standard",
-            identity_status="route_scoped_capability",
+            identity_status=(
+                "published_capability"
+                if published_identity
+                else "route_scoped_capability"
+            ),
             status="active",
         )
         db.add(target)

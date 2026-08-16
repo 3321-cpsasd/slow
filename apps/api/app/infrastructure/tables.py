@@ -1184,6 +1184,119 @@ class CapabilityPlanningDecision(Base):
     )
 
 
+class PublishedConceptIdentity(Base):
+    """Reviewed cross-series identity for one exact concept meaning."""
+
+    __tablename__ = "published_concept_identities"
+    __table_args__ = (
+        UniqueConstraint(
+            "semantic_hash", name="uq_published_concept_identity_semantic_hash"
+        ),
+        UniqueConstraint(
+            "concept_revision_id", name="uq_published_concept_identity_revision"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    family_key: Mapped[str] = mapped_column(String(160), index=True)
+    semantic_hash: Mapped[str] = mapped_column(String(64), index=True)
+    concept_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("concept_revisions.id"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(24), default="published", index=True)
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("published_concept_identities.id"), nullable=True, index=True
+    )
+    review_json: Mapped[str] = mapped_column(Text, default="{}")
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class PublishedRelationIdentity(Base):
+    """Reviewed cross-series identity for one exact relation meaning."""
+
+    __tablename__ = "published_relation_identities"
+    __table_args__ = (
+        UniqueConstraint(
+            "semantic_hash", name="uq_published_relation_identity_semantic_hash"
+        ),
+        UniqueConstraint(
+            "knowledge_relation_revision_id",
+            name="uq_published_relation_identity_revision",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    family_key: Mapped[str] = mapped_column(String(240), index=True)
+    semantic_hash: Mapped[str] = mapped_column(String(64), index=True)
+    knowledge_relation_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_relation_revisions.id"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(24), default="published", index=True)
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("published_relation_identities.id"), nullable=True, index=True
+    )
+    review_json: Mapped[str] = mapped_column(Text, default="{}")
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class PublishedCapabilityIdentity(Base):
+    """Reviewed cross-series identity for one exact capability subnet."""
+
+    __tablename__ = "published_capability_identities"
+    __table_args__ = (
+        UniqueConstraint(
+            "semantic_hash", name="uq_published_capability_identity_semantic_hash"
+        ),
+        UniqueConstraint(
+            "capability_revision_id",
+            name="uq_published_capability_identity_revision",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    family_key: Mapped[str] = mapped_column(String(160), index=True)
+    semantic_hash: Mapped[str] = mapped_column(String(64), index=True)
+    capability_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_revisions.id"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(24), default="published", index=True)
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("published_capability_identities.id"), nullable=True, index=True
+    )
+    review_json: Mapped[str] = mapped_column(Text, default="{}")
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class IdentityPublicationDecision(Base):
+    """Append-only human-reviewed publication, reuse, revision, or conflict decision."""
+
+    __tablename__ = "identity_publication_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "decision_hash", name="uq_identity_publication_decision_hash"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    subject_kind: Mapped[str] = mapped_column(String(24), index=True)
+    candidate_id: Mapped[str] = mapped_column(String(200), index=True)
+    decision: Mapped[str] = mapped_column(String(32), index=True)
+    resolved_revision_id: Mapped[str | None] = mapped_column(
+        String(200), nullable=True, index=True
+    )
+    compared_revision_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    basis_json: Mapped[str] = mapped_column(Text, default="{}")
+    actor_kind: Mapped[str] = mapped_column(String(32), default="reviewer")
+    actor_id: Mapped[str] = mapped_column(String(160))
+    rule_version: Mapped[str] = mapped_column(String(48), index=True)
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("identity_publication_decisions.id"), nullable=True, index=True
+    )
+    decision_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
 class LearningObjective(Base):
     """Immutable observable outcome used by contracts and assessments."""
 

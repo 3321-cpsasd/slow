@@ -16,6 +16,7 @@ from ...infrastructure.tables import (
     KnowledgeIdentityCandidate,
     KnowledgeIdentityDecision,
     LearningObjective,
+    PublishedConceptIdentity,
 )
 
 
@@ -186,6 +187,26 @@ def _family_revision_ids(
     return result[:20]
 
 
+def _published_family_revision_ids(
+    db: Session,
+    *,
+    candidate_key: str,
+    exclude_hash: str,
+) -> list[str]:
+    return list(
+        db.scalars(
+            select(PublishedConceptIdentity.concept_revision_id)
+            .where(
+                PublishedConceptIdentity.family_key == candidate_key,
+                PublishedConceptIdentity.semantic_hash != exclude_hash,
+                PublishedConceptIdentity.status == "published",
+            )
+            .order_by(PublishedConceptIdentity.created_at.desc())
+            .limit(20)
+        ).all()
+    )
+
+
 def _ensure_candidate_occurrence(
     db: Session,
     *,
@@ -297,6 +318,12 @@ def resolve_candidate_revision(
             KnowledgeIdentityDecision.id.desc(),
         )
     )
+    published_identity = db.scalar(
+        select(PublishedConceptIdentity).where(
+            PublishedConceptIdentity.semantic_hash == semantic_hash,
+            PublishedConceptIdentity.status == "published",
+        )
+    )
     if occurrence_decision and occurrence_decision.resolved_concept_revision_id:
         revision_id = occurrence_decision.resolved_concept_revision_id
         if explicit_revision_id and explicit_revision_id != revision_id:
@@ -310,6 +337,24 @@ def resolve_candidate_revision(
         )
         decision = occurrence_decision.decision
         basis = _load(occurrence_decision.basis_json, {})
+    elif published_identity is not None:
+        revision_id = published_identity.concept_revision_id
+        if explicit_revision_id and explicit_revision_id != revision_id:
+            raise AppError(
+                "知识候选引用与已发布身份冲突",
+                code="KNOWLEDGE_IDENTITY_PUBLISHED_REFERENCE_CONFLICT",
+                status=409,
+            )
+        family_revision_ids = _published_family_revision_ids(
+            db,
+            candidate_key=normalized["candidateKey"],
+            exclude_hash=semantic_hash,
+        )
+        decision = "reuse_published"
+        basis = {
+            "mode": "exact_published_semantic_hash",
+            "publicationId": published_identity.id,
+        }
     elif explicit_revision_id:
         family_revision_ids = _family_revision_ids(
             db,
@@ -339,6 +384,15 @@ def resolve_candidate_revision(
             candidate_key=normalized["candidateKey"],
             label=normalized["label"],
             exclude_hash=semantic_hash,
+        )
+        family_revision_ids.extend(
+            item
+            for item in _published_family_revision_ids(
+                db,
+                candidate_key=normalized["candidateKey"],
+                exclude_hash=semantic_hash,
+            )
+            if item not in family_revision_ids
         )
         revision_id = deterministic_revision_id
         if existing_revision is not None:

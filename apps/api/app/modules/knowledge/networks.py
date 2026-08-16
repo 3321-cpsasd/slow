@@ -45,6 +45,7 @@ class KnowledgeRelationSpec:
     statement: str
     scope: dict | None = None
     provenance: dict | None = None
+    reuse_relation_revision_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -210,6 +211,15 @@ def validate_knowledge_network(
         )
     relation_payloads: list[dict] = []
     for relation in relation_rows:
+        relation_identity = db.get(
+            KnowledgeRelation, relation.knowledge_relation_id
+        )
+        if relation_identity is None:
+            raise AppError(
+                "知识关系身份不存在",
+                code="KNOWLEDGE_RELATION_IDENTITY_MISSING",
+                status=500,
+            )
         payload = {
             "fromConceptRevisionId": relation.from_concept_revision_id,
             "toConceptRevisionId": relation.to_concept_revision_id,
@@ -221,7 +231,7 @@ def validate_knowledge_network(
         expected_relation_hash = _hash(
             {
                 "ruleVersion": KNOWLEDGE_NETWORK_RULE_VERSION,
-                "namespace": network.namespace,
+                "namespace": relation_identity.namespace,
                 **payload,
             }
         )
@@ -280,9 +290,61 @@ def freeze_knowledge_network(
         status=status,
         source_release_ids=release_ids,
     )
-    relation_payloads = tuple(
-        _normalized_relation_payload(item) for item in relation_specs
-    )
+    relation_payloads: list[dict] = []
+    reused_relation_revisions: list[KnowledgeRelationRevision | None] = []
+    for spec in relation_specs:
+        if spec.reuse_relation_revision_id:
+            reused = db.get(
+                KnowledgeRelationRevision, spec.reuse_relation_revision_id
+            )
+            if reused is None or reused.verification_status not in {
+                "published",
+                "reviewed",
+            }:
+                raise AppError(
+                    "知识网络引用了不可复用的关系版本",
+                    code="KNOWLEDGE_RELATION_REUSE_NOT_PUBLISHED",
+                    status=409,
+                )
+            expected = _normalized_relation_payload(spec)
+            actual = {
+                "fromConceptRevisionId": reused.from_concept_revision_id,
+                "toConceptRevisionId": reused.to_concept_revision_id,
+                "relationType": reused.relation_type,
+                "statement": reused.statement,
+                "scope": json.loads(reused.scope_json or "{}"),
+                "provenance": json.loads(reused.provenance_json or "{}"),
+            }
+            if {
+                key: actual[key]
+                for key in (
+                    "fromConceptRevisionId",
+                    "toConceptRevisionId",
+                    "relationType",
+                    "statement",
+                    "scope",
+                )
+            } != {
+                key: expected[key]
+                for key in (
+                    "fromConceptRevisionId",
+                    "toConceptRevisionId",
+                    "relationType",
+                    "statement",
+                    "scope",
+                )
+            }:
+                raise AppError(
+                    "复用的知识关系与候选语义不一致",
+                    code="KNOWLEDGE_RELATION_REUSE_SEMANTIC_MISMATCH",
+                    status=409,
+                )
+            relation_payloads.append(actual)
+            reused_relation_revisions.append(reused)
+        else:
+            relation_payloads.append(_normalized_relation_payload(spec))
+            reused_relation_revisions.append(None)
+    relation_payloads = tuple(relation_payloads)
     payload = {
         "ruleVersion": KNOWLEDGE_NETWORK_RULE_VERSION,
         "namespace": namespace,
@@ -358,9 +420,32 @@ def freeze_knowledge_network(
         )
 
     relation_revisions: list[KnowledgeRelationRevision] = []
-    for position, (spec, relation_payload) in enumerate(
-        zip(relation_specs, relation_payloads, strict=True), start=1
+    for position, (spec, relation_payload, reused_relation) in enumerate(
+        zip(
+            relation_specs,
+            relation_payloads,
+            reused_relation_revisions,
+            strict=True,
+        ),
+        start=1,
     ):
+        if reused_relation is not None:
+            relation_revision = reused_relation
+            relation_revision_id = reused_relation.id
+            db.add(
+                KnowledgeNetworkRelationBinding(
+                    id=_stable_id(
+                        "knowledge_network_relation",
+                        network_revision_id,
+                        relation_revision_id,
+                    ),
+                    knowledge_network_revision_id=network_revision_id,
+                    knowledge_relation_revision_id=relation_revision_id,
+                    position=position,
+                )
+            )
+            relation_revisions.append(relation_revision)
+            continue
         relation_hash = _hash(
             {
                 "ruleVersion": KNOWLEDGE_NETWORK_RULE_VERSION,
