@@ -328,6 +328,22 @@ def test_review_assignment_materializes_once_and_submits_candidate(tmp_path):
         assert result["status"] == "submitted"
         assert result["retentionQualification"]["status"] == "candidate"
 
+        strengthening = client.post(
+            f"/api/reviews/{assignment_id}/strengthening"
+        )
+        assert strengthening.status_code == 200, strengthening.json()
+        launch = strengthening.json()
+        assert launch["status"] == "ready"
+        assert launch["stage"] == "silver"
+        assert launch["taskKind"] == "oral_strengthening"
+        assert launch["evidenceEffect"] == (
+            "may_advance_stage_after_qualified_evidence"
+        )
+        assert launch["entry"]["kind"] == "ask_me"
+        assert launch["entry"]["seriesId"]
+        assert launch["entry"]["sectionId"] == section_id
+        assert launch["entry"]["label"] == "进入口试，讲清机制与边界"
+
         section = client.get(f"/api/sections/{section_id}").json()
         assert section["latestAttemptReview"]["total"] == 5
         assert len(section["latestAttemptReview"]["questions"]) == 5
@@ -378,6 +394,35 @@ def test_review_assignment_materializes_once_and_submits_candidate(tmp_path):
                     ReviewAssignmentEventRecord.assignment_id == assignment_id
                 )
             ) == 3
+
+
+def test_strengthening_requires_successful_reactivation(tmp_path):
+    with _review_client(tmp_path) as client:
+        _complete_initial_quiz_and_make_due(client)
+        assignment_id = client.get(
+            "/api/reviews/due?daily_budget=1"
+        ).json()["items"][0]["assignmentId"]
+
+        before = client.post(f"/api/reviews/{assignment_id}/strengthening")
+        assert before.status_code == 409
+        assert before.json()["code"] == (
+            "REVIEW_STRENGTHENING_REACTIVATION_REQUIRED"
+        )
+
+        assert client.post(f"/api/reviews/{assignment_id}/start").status_code == 200
+        failed = client.post(
+            f"/api/reviews/{assignment_id}/submit",
+            headers={"Idempotency-Key": "review-submit-failed-strengthening"},
+            json={"answers": [[0]]},
+        )
+        assert failed.status_code == 200
+        assert failed.json()["passed"] is False
+
+        after = client.post(f"/api/reviews/{assignment_id}/strengthening")
+        assert after.status_code == 409
+        assert after.json()["code"] == (
+            "REVIEW_STRENGTHENING_REACTIVATION_NOT_QUALIFIED"
+        )
 
 
 def test_silver_review_freezes_oral_reactivation_instead_of_choice_quiz(tmp_path):

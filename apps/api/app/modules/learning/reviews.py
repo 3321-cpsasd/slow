@@ -21,6 +21,7 @@ from ...infrastructure.tables import (
     AssessmentObservation,
     AssessmentTarget,
     CapabilityRevision,
+    CapabilityApplicationTaskVersion,
     CapabilityRouteBinding,
     CapabilityStageCriterion,
     CapabilityStateProjection,
@@ -802,6 +803,159 @@ class ReviewAssignmentService:
             "attemptId": assignment.submitted_attempt_id,
             "taskPlan": _load(assignment.task_plan_json, {}),
             "capabilityTask": capability_task,
+        }
+
+    def strengthening(self, assignment_id: str) -> dict:
+        """Resolve the frozen next-stage action after successful reactivation.
+
+        Reactivation evidence never advances the stage.  This endpoint only
+        exposes the separately published formal opportunity frozen by the
+        assignment plan; it does not create or silently substitute a task.
+        """
+
+        assignment = self._owned(assignment_id)
+        if assignment.status != "submitted":
+            raise AppError(
+                "请先完成本次能力再激活",
+                code="REVIEW_STRENGTHENING_REACTIVATION_REQUIRED",
+                status=409,
+            )
+        result = _load(assignment.response_json, {})
+        reactivated = bool(
+            result.get("reactivationQualified")
+            if "reactivationQualified" in result
+            else result.get("passed")
+        )
+        if not reactivated:
+            raise AppError(
+                "当前能力尚未重新确认，请先完成针对性补强",
+                code="REVIEW_STRENGTHENING_REACTIVATION_NOT_QUALIFIED",
+                status=409,
+            )
+        plan = _load(assignment.task_plan_json, {})
+        strengthening = plan.get("strengthening")
+        if not isinstance(strengthening, dict):
+            return {
+                "schemaVersion": "capability_strengthening_launch_v1",
+                "assignmentId": assignment.id,
+                "status": "unavailable",
+                "reason": "no_published_next_stage_opportunity",
+                "entry": None,
+            }
+        target = self.db.get(AssessmentTarget, assignment.assessment_target_id)
+        run = self.db.get(LearningRun, assignment.source_learning_run_id)
+        capability_id = target.capability_revision_id if target else None
+        if target is None or run is None or not capability_id:
+            raise AppError(
+                "下一阶强化缺少稳定能力路线",
+                code="REVIEW_STRENGTHENING_ROUTE_MISSING",
+                status=409,
+            )
+        state = self.db.scalar(
+            select(CapabilityStateProjection).where(
+                CapabilityStateProjection.user_id == self.user_id,
+                CapabilityStateProjection.capability_revision_id == capability_id,
+            )
+        )
+        stage_order = {"unranked": 0, "bronze": 1, "silver": 2, "gold": 3, "diamond": 4}
+        target_stage = str(strengthening.get("stage") or "")
+        if state and stage_order.get(state.current_stage, 0) >= stage_order.get(target_stage, 99):
+            return {
+                "schemaVersion": "capability_strengthening_launch_v1",
+                "assignmentId": assignment.id,
+                "status": "already_achieved",
+                "stage": target_stage,
+                "currentStage": state.current_stage,
+                "entry": None,
+            }
+        route = self.db.scalar(
+            select(CapabilityRouteBinding).where(
+                CapabilityRouteBinding.series_id == run.series_id,
+                CapabilityRouteBinding.capability_revision_id == capability_id,
+                CapabilityRouteBinding.status == "active",
+            )
+        )
+        if route is None:
+            raise AppError(
+                "下一阶强化路线已经失效",
+                code="REVIEW_STRENGTHENING_ROUTE_MISSING",
+                status=409,
+            )
+        criterion_ids = {
+            str(item) for item in strengthening.get("criterionIds", []) if item
+        }
+        opportunities = [
+            item
+            for item in _load(route.opportunities_json, [])
+            if str(item.get("criterionId") or "") in criterion_ids
+        ]
+        if {str(item.get("criterionId") or "") for item in opportunities} != criterion_ids:
+            raise AppError(
+                "下一阶正式验证机会已经变更，请等待新的复习安排",
+                code="REVIEW_STRENGTHENING_OPPORTUNITY_STALE",
+                status=409,
+            )
+        task_kind = str(strengthening.get("taskKind") or "")
+        base = {
+            "schemaVersion": "capability_strengthening_launch_v1",
+            "assignmentId": assignment.id,
+            "status": "ready",
+            "stage": target_stage,
+            "currentStage": state.current_stage if state else "unranked",
+            "taskKind": task_kind,
+            "criterionIds": sorted(criterion_ids),
+            "evidenceEffect": "may_advance_stage_after_qualified_evidence",
+        }
+        if task_kind == "oral_strengthening":
+            return {
+                **base,
+                "entry": {
+                    "kind": "ask_me",
+                    "seriesId": run.series_id,
+                    "sectionId": assignment.source_section_id,
+                    "label": "进入口试，讲清机制与边界",
+                },
+            }
+        expected_kind = {
+            "application_strengthening": "standard_application",
+            "transfer_strengthening": "transfer_task",
+        }.get(task_kind)
+        if expected_kind is None or len(opportunities) != 1:
+            raise AppError(
+                "下一阶强化任务类型不可执行",
+                code="REVIEW_STRENGTHENING_TASK_KIND_INVALID",
+                status=409,
+            )
+        task_id = str(opportunities[0].get("taskVersionId") or "")
+        task = self.db.get(CapabilityApplicationTaskVersion, task_id)
+        if (
+            task is None
+            or task.task_kind != expected_kind
+            or task.capability_revision_id != capability_id
+            or task.capability_stage_criterion_id not in criterion_ids
+            or task.publication_status not in {"published", "published_demo"}
+        ):
+            raise AppError(
+                "下一阶正式任务已经失效",
+                code="REVIEW_STRENGTHENING_TASK_STALE",
+                status=409,
+            )
+        return {
+            **base,
+            "entry": {
+                "kind": expected_kind,
+                "seriesId": run.series_id,
+                "sectionId": task.section_id,
+                "task": {
+                    "id": task.id,
+                    "taskKind": task.task_kind,
+                    "prompt": task.prompt,
+                    "taskContext": _load(task.task_context_json, {}),
+                    "deliverables": _load(task.deliverables_json, []),
+                    "evidenceEligible": task.publication_status == "published",
+                    "isDemo": task.provenance_mode == "local_demo",
+                },
+            },
         }
 
     async def start(self, assignment_id: str, *, as_of: datetime | None = None) -> dict:

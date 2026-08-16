@@ -366,6 +366,22 @@ export const api = {
     headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},
     body:JSON.stringify({answers}),
   }),
+  respondCapabilityReview:(assignmentId:string,response:Record<string,unknown>,idempotencyKey:string)=>call<import('../model/types').CapabilityReviewResult>(`/api/reviews/${assignmentId}/respond`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},
+    body:JSON.stringify({response,assistanceUsed:false}),
+  }),
+  reviewStrengthening:(assignmentId:string)=>call<import('../model/types').StrengtheningLaunch>(`/api/reviews/${assignmentId}/strengthening`,{method:'POST'}),
+  submitApplicationTask:(taskId:string,response:Record<string,unknown>,idempotencyKey:string)=>call<import('../model/types').StrengtheningResult>(`/api/application-tasks/${taskId}/submit`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},
+    body:JSON.stringify({response,assistanceUsed:false}),
+  }),
+  submitTransferTask:(taskId:string,response:Record<string,unknown>,idempotencyKey:string)=>call<import('../model/types').StrengtheningResult>(`/api/transfer-tasks/${taskId}/submit`,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},
+    body:JSON.stringify({response,assistanceUsed:false}),
+  }),
   startReviewReinforcement:(assignmentId:string)=>call<import('../model/types').ReinforcementRun>(`/api/reviews/${assignmentId}/reinforcement`,{method:'POST'}),
   startTargetReinforcement:(targetId:string)=>call<import('../model/types').ReinforcementRun>(`/api/knowledge-targets/${targetId}/reinforcement`,{method:'POST'}),
   activeReinforcement:()=>call<import('../model/types').ReinforcementRun|null>('/api/reinforcements/active'),

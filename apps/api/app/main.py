@@ -2057,6 +2057,13 @@ def create_app(
             assignment_id, body, idempotency_key
         )
 
+    @app.post("/api/reviews/{assignment_id}/strengthening")
+    def review_strengthening(
+        assignment_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return s.review_strengthening(assignment_id)
+
     @app.post("/api/reviews/{assignment_id}/reinforcement")
     async def start_review_reinforcement(
         assignment_id: str,

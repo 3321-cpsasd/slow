@@ -63,9 +63,12 @@ import type {
   NoteVerificationAnnotation,
   QaHistory,
   QuizResult,
+  CapabilityReviewResult,
   ReviewResult,
   ReviewSession,
   ReinforcementRun,
+  StrengtheningLaunch,
+  StrengtheningResult,
   Section,
   SectionSummary,
   Series,
@@ -1085,13 +1088,16 @@ export default function App() {
     requestedSectionId: string | null = null,
     historyMode: 'push' | 'replace' | 'none' = 'push',
     requestedBookId: string | null = null,
+    focusAskMe = false,
   ) => {
+    const shouldFocusAskMe = focusAskMe;
     const requestVersion = historyMode === 'none'
       ? routeRequestVersion.current
       : ++routeRequestVersion.current;
     const value = await run('正在进入学习空间…', () => api.series(seriesId));
     if (requestVersion !== routeRequestVersion.current) return;
-    updateBrowserLocation(seriesPath(seriesId, requestedSectionId), historyMode);
+    const requestedPath = `${seriesPath(seriesId, requestedSectionId)}${shouldFocusAskMe ? '#ask-me' : ''}`;
+    updateBrowserLocation(requestedPath, historyMode);
     setShelf(data?.shelves.find((item) => (
       item.series.some((candidate) => candidate.id === seriesId)
     )) || null);
@@ -1139,10 +1145,13 @@ export default function App() {
     );
     if (initial) {
       updateBrowserLocation(
-        seriesPath(value.id, initial),
+        `${seriesPath(value.id, initial)}${shouldFocusAskMe ? '#ask-me' : ''}`,
         historyMode === 'none' ? 'none' : 'replace',
       );
       await loadSection(initial, 'none', false);
+      if (shouldFocusAskMe) {
+        updateBrowserLocation(`${seriesPath(value.id, initial)}#ask-me`, 'none');
+      }
     } else setSection(null);
   };
 
@@ -2033,7 +2042,12 @@ export default function App() {
           />
         )}
         {view === 'review' && (
-          <ReviewCenterPage onBack={goHome} />
+          <ReviewCenterPage
+            onBack={goHome}
+            onOpenLearning={(seriesId, sectionId) => (
+              openSeries(seriesId, sectionId, 'push', null, true)
+            )}
+          />
         )}
         {view === 'learn' && series && (
           <>
@@ -3157,7 +3171,11 @@ function StudyTimeSummary({
 function useReviewWorkspace() {
   const [dueReviews, setDueReviews] = useState<DueReviews | null>(null);
   const [reviewSession, setReviewSession] = useState<ReviewSession | null>(null);
-  const [reviewResult, setReviewResult] = useState<ReviewResult | null>(null);
+  const [reviewResult, setReviewResult] = useState<ReviewResult | CapabilityReviewResult | null>(null);
+  const [reviewResponseText, setReviewResponseText] = useState('');
+  const [strengtheningLaunch, setStrengtheningLaunch] = useState<StrengtheningLaunch | null>(null);
+  const [strengtheningResponse, setStrengtheningResponse] = useState('');
+  const [strengtheningResult, setStrengtheningResult] = useState<StrengtheningResult | null>(null);
   const [reinforcement, setReinforcement] = useState<ReinforcementRun | null>(null);
   const [reinforcementAnswer, setReinforcementAnswer] = useState<number[]>([]);
   const [reinforcementText, setReinforcementText] = useState('');
@@ -3167,7 +3185,10 @@ function useReviewWorkspace() {
   const pendingReviews = dueReviews?.items.filter(
     (item) => item.status === 'presented' || item.status === 'started',
   ) || [];
-  const currentReview = pendingReviews[0] || null;
+  const activeReview = reviewSession
+    ? dueReviews?.items.find((item) => item.assignmentId === reviewSession.assignmentId) || null
+    : null;
+  const currentReview = activeReview || pendingReviews[0] || null;
 
   const loadDueReviews = async () => {
     setReviewBusy('正在读取到期复习…');
@@ -3195,13 +3216,14 @@ function useReviewWorkspace() {
     try {
       const value = await api.startReview(currentReview.assignmentId);
       setReviewSession(value);
-      setReviewAnswers(value.quiz.questions.map(() => []));
+      setReviewAnswers(value.quiz?.questions.map(() => []) || []);
+      setReviewResponseText('');
       setReviewResult(null);
       setReinforcement(null);
       setDueReviews((current) => current ? {
         ...current,
         items: current.items.map((item) => item.assignmentId === value.assignmentId
-          ? {...item, status: 'started', quizSetId: value.quiz.id}
+          ? {...item, status: 'started', quizSetId: value.quiz?.id || null}
           : item),
       } : current);
     } catch (reason) {
@@ -3222,15 +3244,23 @@ function useReviewWorkspace() {
   };
 
   const submitDueReview = async () => {
-    if (!reviewSession || reviewAnswers.some((answer) => answer.length === 0)) return;
+    if (!reviewSession) return;
+    if (reviewSession.quiz && reviewAnswers.some((answer) => answer.length === 0)) return;
+    if (reviewSession.capabilityTask && reviewResponseText.trim().length < 12) return;
     setReviewBusy('正在保存复习结果…');
     setReviewError('');
     try {
-      const value = await api.submitReview(
-        reviewSession.assignmentId,
-        reviewAnswers,
-        `review-${reviewSession.assignmentId}`,
-      );
+      const value = reviewSession.quiz
+        ? await api.submitReview(
+          reviewSession.assignmentId,
+          reviewAnswers,
+          `review-${reviewSession.assignmentId}`,
+        )
+        : await api.respondCapabilityReview(
+          reviewSession.assignmentId,
+          {answer: reviewResponseText.trim()},
+          `capability-review-${reviewSession.assignmentId}`,
+        );
       setReviewResult(value);
       setDueReviews((current) => current ? {
         ...current,
@@ -3268,9 +3298,51 @@ function useReviewWorkspace() {
     setReviewSession(null);
     setReviewResult(null);
     setReviewAnswers([]);
+    setReviewResponseText('');
     setReinforcement(null);
     setReinforcementAnswer([]);
     setReinforcementText('');
+    setStrengtheningLaunch(null);
+    setStrengtheningResponse('');
+    setStrengtheningResult(null);
+  };
+
+  const startStrengthening = async () => {
+    if (!reviewResult) return null;
+    setReviewBusy('正在打开下一阶正式任务…');
+    setReviewError('');
+    try {
+      const value = await api.reviewStrengthening(reviewResult.assignmentId);
+      setStrengtheningLaunch(value);
+      setStrengtheningResponse('');
+      setStrengtheningResult(null);
+      return value;
+    } catch (reason) {
+      setReviewError(reason instanceof Error ? reason.message : '下一阶任务暂时无法打开。');
+      return null;
+    } finally {
+      setReviewBusy('');
+    }
+  };
+
+  const submitStrengthening = async () => {
+    const entry = strengtheningLaunch?.entry;
+    const task = entry?.task;
+    if (!entry || !task || strengtheningResponse.trim().length < 12) return;
+    setReviewBusy('正在按阶段标准评定…');
+    setReviewError('');
+    try {
+      const response = {answer: strengtheningResponse.trim()};
+      const key = `strengthening-${task.id}`;
+      const value = entry.kind === 'transfer_task'
+        ? await api.submitTransferTask(task.id, response, key)
+        : await api.submitApplicationTask(task.id, response, key);
+      setStrengtheningResult(value);
+    } catch (reason) {
+      setReviewError(reason instanceof Error ? reason.message : '强化任务评定失败。');
+    } finally {
+      setReviewBusy('');
+    }
   };
 
   const startReinforcement = async () => {
@@ -3317,23 +3389,46 @@ function useReviewWorkspace() {
 
   return {
     dueReviews, pendingReviews, currentReview, reviewSession, reviewResult, reinforcement,
-    reinforcementAnswer, reinforcementText, reviewAnswers, reviewBusy, reviewError,
-    setReinforcementAnswer, setReinforcementText, loadDueReviews, startDueReview,
+    reinforcementAnswer, reinforcementText, reviewAnswers, reviewResponseText,
+    strengtheningLaunch, strengtheningResponse, strengtheningResult,
+    reviewBusy, reviewError,
+    setReinforcementAnswer, setReinforcementText, setReviewResponseText,
+    setStrengtheningResponse, loadDueReviews, startDueReview,
     chooseReviewAnswer, submitDueReview, skipDueReview, continueReviewQueue,
-    startReinforcement, submitReinforcementStep,
+    startReinforcement, submitReinforcementStep, startStrengthening,
+    submitStrengthening,
   };
 }
 
-function ReviewCenterPage({ onBack }: { onBack: () => void }) {
+const capabilityStageCopy = {
+  bronze: '青铜 · 说得出',
+  silver: '白银 · 讲得清',
+  gold: '黄金 · 做得到',
+  diamond: '钻石 · 能迁移',
+} as const;
+
+function ReviewCenterPage({
+  onBack,
+  onOpenLearning,
+}: {
+  onBack: () => void;
+  onOpenLearning: (seriesId:string, sectionId:string) => Promise<void>;
+}) {
   const {
     pendingReviews, currentReview, reviewSession, reviewResult, reinforcement,
-    reinforcementAnswer, reinforcementText, reviewAnswers, reviewBusy, reviewError,
-    setReinforcementAnswer, setReinforcementText, loadDueReviews, startDueReview,
+    reinforcementAnswer, reinforcementText, reviewAnswers, reviewResponseText,
+    strengtheningLaunch, strengtheningResponse, strengtheningResult,
+    reviewBusy, reviewError,
+    setReinforcementAnswer, setReinforcementText, setReviewResponseText,
+    setStrengtheningResponse, loadDueReviews, startDueReview,
     chooseReviewAnswer, submitDueReview, skipDueReview, continueReviewQueue,
-    startReinforcement, submitReinforcementStep,
+    startReinforcement, submitReinforcementStep, startStrengthening,
+    submitStrengthening,
   } = useReviewWorkspace();
   const activity = reinforcement?.currentActivity;
-  const stage = reinforcement?.outcome
+  const stage = strengtheningLaunch || strengtheningResult
+    ? 5
+    : reinforcement?.outcome
     ? 5
     : activity?.type === 'verify'
       ? 5
@@ -3346,6 +3441,16 @@ function ReviewCenterPage({ onBack }: { onBack: () => void }) {
             : reviewSession
               ? 1
               : 0;
+  const reviewPassed = reviewResult
+    ? ('passed' in reviewResult ? reviewResult.passed : reviewResult.reactivationQualified)
+    : false;
+  const nextStage = currentReview?.taskPlan.strengthening?.stage;
+  const openStrengthening = async () => {
+    const launch = await startStrengthening();
+    if (launch?.entry?.kind === 'ask_me') {
+      await onOpenLearning(launch.entry.seriesId, launch.entry.sectionId);
+    }
+  };
 
   return (
     <section className="review-center-page" aria-labelledby="review-center-title">
@@ -3355,12 +3460,12 @@ function ReviewCenterPage({ onBack }: { onBack: () => void }) {
           <div>
             <p className="eyebrow">RECALL STUDIO · 只处理已经学过的知识</p>
             <h1 id="review-center-title">快速找回，<br /><em>只在断点处停留。</em></h1>
-            <p>先用一道新题检查能否调用；答不稳时，再根据这次薄弱点补一个案例，最后独立验证。</p>
+            <p>按当前能力阶段完成一次独立调用检查；答不稳时只修复断点，答稳后可主动进入下一阶正式任务。</p>
           </div>
           <div className="review-center-contract">
             <span>一次 5–10 分钟</span>
             <b>唤醒不是重学，补强不是刷题。</b>
-            <small>只有最后的独立验证会形成新的掌握证据。</small>
+            <small>再激活只更新可调用状态；独立晋级任务才改变能力阶段。</small>
           </div>
         </div>
         <ol className="review-trace" aria-label={`当前位于第 ${stage || 1} 阶段`}>
@@ -3380,7 +3485,7 @@ function ReviewCenterPage({ onBack }: { onBack: () => void }) {
           )}
           {!reinforcement && pendingReviews.map((item, index) => (
             <button type="button" className={`review-queue-item ${index === 0 ? 'is-active' : ''}`} key={item.assignmentId}>
-              <i>{String(index + 1).padStart(2, '0')}</i><span><b>{item.objective}</b><small>{item.status === 'started' ? '已开始' : '等待唤醒'}</small></span>
+              <i>{String(index + 1).padStart(2, '0')}</i><span><b>{item.capability?.label || item.objective}</b><small>{item.capability ? `${capabilityStageCopy[item.capability.currentStage as keyof typeof capabilityStageCopy] || '尚未定段'} · ${item.status === 'started' ? '已开始' : '等待唤醒'}` : item.status === 'started' ? '已开始' : '等待唤醒'}</small></span>
             </button>
           ))}
           {!reviewBusy && !reinforcement && pendingReviews.length === 0 && (
@@ -3394,6 +3499,52 @@ function ReviewCenterPage({ onBack }: { onBack: () => void }) {
             <div className="review-workbench-status"><i /><span>正在衔接</span><h2>{reviewBusy}</h2></div>
           ) : reviewError ? (
             <div className="review-workbench-status is-error" role="alert"><span>暂时中断</span><h2>这一步没有保存</h2><p>{reviewError}</p><button onClick={() => void loadDueReviews()}>重新读取</button></div>
+          ) : strengtheningResult ? (
+            <div className="review-workbench-outcome">
+              <span>{strengtheningResult.evidenceEligible ? '晋级证据成立' : '本次尚未晋级'}</span>
+              <h2>{strengtheningResult.evidenceEligible
+                ? `已达到 ${capabilityStageCopy[strengtheningResult.capabilityStage as keyof typeof capabilityStageCopy] || strengtheningResult.capabilityStage}`
+                : '能力阶段保持不变'}</h2>
+              <p>{strengtheningResult.feedback}</p>
+              <button onClick={continueReviewQueue}>继续今日复习 <i aria-hidden="true">→</i></button>
+            </div>
+          ) : strengtheningLaunch?.status === 'already_achieved' ? (
+            <div className="review-workbench-outcome">
+              <span>下一阶已经取得</span>
+              <h2>这项能力不需要重复晋级。</h2>
+              <p>画像已经包含这一级正式证据，本次复习只负责保持可调用状态。</p>
+              <button onClick={continueReviewQueue}>继续今日复习 <i aria-hidden="true">→</i></button>
+            </div>
+          ) : strengtheningLaunch?.status === 'unavailable' ? (
+            <div className="review-workbench-outcome">
+              <span>本路线暂时到这里</span>
+              <h2>没有虚构下一阶任务。</h2>
+              <p>当前课程没有发布更高阶的正式验证机会，能力保持在已经取得的阶段。</p>
+              <button onClick={continueReviewQueue}>继续今日复习 <i aria-hidden="true">→</i></button>
+            </div>
+          ) : strengtheningLaunch?.entry?.task ? (
+            <div className="review-workbench-capability-task is-strengthening">
+              <header>
+                <span>主动强化 · {strengtheningLaunch.stage ? capabilityStageCopy[strengtheningLaunch.stage] : '下一阶'}</span>
+                <small>独立作答后才可能晋级</small>
+              </header>
+              <p className="review-workbench-objective">正式任务 · <b>{strengtheningLaunch.entry.kind === 'transfer_task' ? '陌生情境迁移' : '未见过的标准应用'}</b></p>
+              <h2>{strengtheningLaunch.entry.task.prompt}</h2>
+              {typeof strengtheningLaunch.entry.task.taskContext.scenario === 'string' && (
+                <div className="review-capability-context"><span>任务情境</span><p>{strengtheningLaunch.entry.task.taskContext.scenario}</p></div>
+              )}
+              {strengtheningLaunch.entry.task.deliverables.length > 0 && (
+                <ul className="review-capability-deliverables">
+                  {strengtheningLaunch.entry.task.deliverables.map((item) => <li key={item}>{item}</li>)}
+                </ul>
+              )}
+              <label className="review-capability-response">
+                <span>写下你的判断、过程和依据</span>
+                <textarea rows={7} value={strengtheningResponse} onChange={(event) => setStrengtheningResponse(event.target.value)} placeholder="完整说明你会怎么做，以及为什么…" />
+              </label>
+              <button className="review-workbench-next" disabled={strengtheningResponse.trim().length < 12} onClick={() => void submitStrengthening()}>提交正式验证 <i aria-hidden="true">→</i></button>
+              <p className="review-evidence-boundary"><i aria-hidden="true">◇</i>本次再激活证据不会被复用；只有这份独立提交满足下一阶全部标准时才会晋级。</p>
+            </div>
           ) : reinforcement?.outcome ? (
             <div className={`review-workbench-outcome is-${reinforcement.outcome.kind}`}>
               <span>{reinforcement.outcome.kind === 'recovered' ? '连接已恢复' : '本轮已停止'}</span>
@@ -3441,22 +3592,42 @@ function ReviewCenterPage({ onBack }: { onBack: () => void }) {
             </div>
           ) : reviewResult ? (
             <div className="review-workbench-result">
-              <span>{reviewResult.passed ? '快速唤醒完成' : '发现一个具体断点'}</span><h2>{reviewResult.score} / {reviewResult.total}</h2>
-              {reviewResult.reinforcement.available ? <><p>不重复刚才那道题。接下来只补这项能力缺失的连接与案例，再换题独立验证。</p><button onClick={() => void startReinforcement()}>开始针对性补强 <i aria-hidden="true">→</i></button></> : <button onClick={continueReviewQueue}>{pendingReviews.length ? '处理下一项' : '完成今日复习'} <i aria-hidden="true">→</i></button>}
+              <span>{reviewPassed ? '当前能力已重新唤醒' : '发现一个具体断点'}</span>
+              <h2>{'score' in reviewResult ? `${reviewResult.score} / ${reviewResult.total}` : reviewPassed ? '可调用' : '待补强'}</h2>
+              {!reviewPassed && 'reinforcement' in reviewResult && reviewResult.reinforcement.available ? <><p>不重复刚才那道题。接下来只补这项能力缺失的连接与案例，再换题独立验证。</p><button onClick={() => void startReinforcement()}>开始针对性补强 <i aria-hidden="true">→</i></button></>
+                : reviewPassed && nextStage ? <><p>再激活已经完成，不会因此升段。你可以现在进入一项独立的下一阶任务，也可以留到课程路线中的正式机会。</p><button onClick={() => void openStrengthening()}>主动提升到 {capabilityStageCopy[nextStage]} <i aria-hidden="true">→</i></button><button className="review-secondary-action" onClick={continueReviewQueue}>暂时保持当前阶段</button></>
+                  : <><p>{'feedback' in reviewResult ? reviewResult.feedback : '当前路线没有发布新的晋级任务，本次只更新保持状态。'}</p><button onClick={continueReviewQueue}>{pendingReviews.length ? '处理下一项' : '完成今日复习'} <i aria-hidden="true">→</i></button></>}
             </div>
-          ) : reviewSession ? (
+          ) : reviewSession?.quiz ? (
             <div className="review-workbench-quiz">
               <header><span>快速唤醒</span><small>先凭记忆作答，不翻正文</small></header>
               <p className="review-workbench-objective">正在检查 · <b>{currentReview?.objective || reviewSession.quiz.questions[0]?.objective}</b></p>
               {reviewSession.quiz.questions.map((question, questionIndex) => (
-                <fieldset key={`${reviewSession.quiz.id}-${questionIndex}`}><legend>{question.prompt}</legend>{question.options.map((option, optionIndex) => (
-                  <label key={optionIndex}><input type={question.selectionMode === 'multiple' ? 'checkbox' : 'radio'} name={`review-${reviewSession.quiz.id}-${questionIndex}`} checked={reviewAnswers[questionIndex]?.includes(optionIndex) || false} onChange={() => chooseReviewAnswer(questionIndex, optionIndex, question.selectionMode)} /><span>{option}</span></label>
+                <fieldset key={`${reviewSession.quiz!.id}-${questionIndex}`}><legend>{question.prompt}</legend>{question.options.map((option, optionIndex) => (
+                  <label key={optionIndex}><input type={question.selectionMode === 'multiple' ? 'checkbox' : 'radio'} name={`review-${reviewSession.quiz!.id}-${questionIndex}`} checked={reviewAnswers[questionIndex]?.includes(optionIndex) || false} onChange={() => chooseReviewAnswer(questionIndex, optionIndex, question.selectionMode)} /><span>{option}</span></label>
                 ))}</fieldset>
               ))}
               <button className="review-workbench-next" disabled={reviewAnswers.some((answer) => answer.length === 0)} onClick={() => void submitDueReview()}>检查能否调用 <i aria-hidden="true">→</i></button>
             </div>
+          ) : reviewSession?.capabilityTask ? (
+            <div className="review-workbench-capability-task">
+              <header><span>{reviewSession.capabilityTask.stage ? capabilityStageCopy[reviewSession.capabilityTask.stage] : '能力再激活'}</span><small>开放作答 · 不翻正文</small></header>
+              <p className="review-workbench-objective">正在重新确认 · <b>{currentReview?.capability?.label || currentReview?.objective}</b></p>
+              <h2>{reviewSession.capabilityTask.prompt}</h2>
+              {typeof reviewSession.capabilityTask.taskContext.scenario === 'string' && (
+                <div className="review-capability-context"><span>新的情境</span><p>{reviewSession.capabilityTask.taskContext.scenario}</p></div>
+              )}
+              {reviewSession.capabilityTask.deliverables.length > 0 && (
+                <ul className="review-capability-deliverables">
+                  {reviewSession.capabilityTask.deliverables.map((item) => <li key={item}>{item}</li>)}
+                </ul>
+              )}
+              <label className="review-capability-response"><span>用自己的话完整回答</span><textarea rows={7} value={reviewResponseText} onChange={(event) => setReviewResponseText(event.target.value)} placeholder="说明你的判断、关键关系和适用边界…" /></label>
+              <button className="review-workbench-next" disabled={reviewResponseText.trim().length < 12} onClick={() => void submitDueReview()}>提交再激活验证 <i aria-hidden="true">→</i></button>
+              <p className="review-evidence-boundary"><i aria-hidden="true">◇</i>这次只重新确认当前阶段是否还能调用，不会直接制造晋级。</p>
+            </div>
           ) : currentReview ? (
-            <div className="review-workbench-ready"><span>下一项 · 预计 3 分钟</span><h2>{currentReview.objective}</h2><p>先快速过一遍关键连接，然后用一道新题检查是否还能独立调用。只有答不稳，才会进入补强。</p><div><button onClick={() => void startDueReview()}>{currentReview.status === 'started' ? '继续快速唤醒' : '开始快速唤醒'} <i aria-hidden="true">→</i></button>{currentReview.status !== 'started' && <button onClick={() => void skipDueReview()}>今天跳过</button>}</div></div>
+            <div className="review-workbench-ready"><span>下一项 · {currentReview.capability ? capabilityStageCopy[currentReview.capability.currentStage as keyof typeof capabilityStageCopy] || '能力再激活' : '预计 3 分钟'}</span><h2>{currentReview.capability?.label || currentReview.objective}</h2><p>{currentReview.reviewReason}。系统会按你已经取得的阶段安排对应任务；答对只恢复可调用状态，不会自动升段。</p><div><button onClick={() => void startDueReview()}>{currentReview.status === 'started' ? '继续能力再激活' : '开始能力再激活'} <i aria-hidden="true">→</i></button>{currentReview.status !== 'started' && <button onClick={() => void skipDueReview()}>今天跳过</button>}</div></div>
           ) : (
             <div className="review-workbench-status is-clear"><span>今日完成</span><h2>需要找回的知识都处理好了。</h2><p>这里不会为了维持连续感制造练习；等新的复习证据到期再回来。</p><button onClick={onBack}>返回书架</button></div>
           )}
@@ -6926,7 +7097,12 @@ function ReaderPanel({
   });
 
   useEffect(() => {
-    const initialTab = section?.status === 'completed' && section.note ? 'note' : 'content';
+    const focusAskMe = window.location.hash === '#ask-me';
+    const initialTab = focusAskMe
+      ? 'quiz'
+      : section?.status === 'completed' && section.note
+        ? 'note'
+        : 'content';
     setTab(initialTab);
     onTabChange(initialTab);
     setSelectionPopup(null);
@@ -6938,6 +7114,14 @@ function ReaderPanel({
       reviewHighlightTimerRef.current = null;
     }
     if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
+    if (focusAskMe) {
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        readerScrollRef.current?.querySelector<HTMLElement>('.askme-view')?.scrollIntoView({
+          behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+          block: 'start',
+        });
+      }));
+    }
   }, [section?.id, section?.content?.id]);
 
   useEffect(() => () => {

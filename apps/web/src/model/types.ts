@@ -353,6 +353,32 @@ export type ReviewAssignmentItem = {
   basePriority:number;
   effectivePriority:number;
   quizSetId:string|null;
+  reviewReason:string;
+  capability:null|{
+    label:string;
+    currentStage:'unranked'|'bronze'|'silver'|'gold'|'diamond';
+    activationState:string;
+  };
+  taskPlan:ReviewTaskPlan;
+};
+export type ReviewTaskPlan = {
+  ruleVersion:string;
+  reactivation:{
+    purpose:'retention_reactivation';
+    taskKind:'choice_reactivation'|'oral_reactivation'|'application_reactivation'|'transfer_reactivation';
+    stage:'bronze'|'silver'|'gold'|'diamond';
+    criterionIds:string[];
+    verificationProtocols:string[];
+    evidenceEffect:'activation_only';
+  };
+  strengthening:null|{
+    purpose:'stage_strengthening';
+    taskKind:'oral_strengthening'|'application_strengthening'|'transfer_strengthening';
+    stage:'silver'|'gold'|'diamond';
+    criterionIds:string[];
+    verificationProtocols:string[];
+    evidenceEffect:'may_advance_stage_after_qualified_evidence';
+  };
 };
 export type DueReviews = {
   selectionRunId:string;
@@ -406,8 +432,22 @@ export type ReviewSession = {
   assessmentTargetId:string;
   dueAt:string;
   expiresAt:string;
-  quiz:{id:string;questions:Question[]};
+  quiz:{id:string;questions:Question[]}|null;
+  taskPlan:ReviewTaskPlan;
+  capabilityTask:CapabilityOpenTask|null;
   attemptId:string|null;
+};
+export type CapabilityOpenTask = {
+  id:string;
+  schemaVersion:string;
+  taskKind:string;
+  stage?:'silver'|'gold'|'diamond';
+  prompt:string;
+  taskContext:Record<string,unknown>;
+  deliverables:string[];
+  status?:'ready';
+  evidenceEligible:boolean;
+  isDemo:boolean;
 };
 export type ReviewResult = {
   assignmentId:string;
@@ -419,6 +459,44 @@ export type ReviewResult = {
   results:QuizResult['results'];
   retentionQualification:{status:string;ruleVersion:string;reasons:string[]};
   reinforcement:{available:boolean;reason:'wake_failed'|'not_needed'};
+};
+export type CapabilityReviewResult = {
+  schemaVersion:'capability_review_result_v1';
+  assignmentId:string;
+  submissionId:string;
+  status:'submitted';
+  verdict:'pass'|'fail';
+  evidenceSufficiency:string;
+  reactivationQualified:boolean;
+  stageChanged:false;
+  feedback:string;
+};
+export type StrengtheningLaunch = {
+  schemaVersion:'capability_strengthening_launch_v1';
+  assignmentId:string;
+  status:'ready'|'unavailable'|'already_achieved';
+  reason?:string;
+  stage?:'silver'|'gold'|'diamond';
+  currentStage?:'unranked'|'bronze'|'silver'|'gold'|'diamond';
+  taskKind?:'oral_strengthening'|'application_strengthening'|'transfer_strengthening';
+  criterionIds?:string[];
+  evidenceEffect?:'may_advance_stage_after_qualified_evidence';
+  entry:null|{
+    kind:'ask_me'|'standard_application'|'transfer_task';
+    seriesId:string;
+    sectionId:string;
+    label?:string;
+    task?:CapabilityOpenTask;
+  };
+};
+export type StrengtheningResult = {
+  schemaVersion:'standard_application_result_v1'|'transfer_task_result_v1';
+  submissionId:string;
+  verdict:'pass'|'fail';
+  evidenceSufficiency:string;
+  evidenceEligible:boolean;
+  capabilityStage:'unranked'|'bronze'|'silver'|'gold'|'diamond';
+  feedback:string;
 };
 export type ReinforcementActivity = {
   activityKey:'diagnose'|'repair'|'recompose'|'verify';
