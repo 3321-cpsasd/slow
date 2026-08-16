@@ -144,8 +144,13 @@ class SlowService:
         self.learning_start = LearningStartService(
             db,
             user_id=self.user_id,
+            ai=self.ai,
             baselines=self.curriculum_baselines,
             shelf_provider=self.shelf,
+            profile_provider=lambda: ProfileService(
+                self.db,
+                self.user_id,
+            ).state()["profile"],
         )
         self.chapter_choices = ChapterChoiceService(
             db,
@@ -485,6 +490,9 @@ class SlowService:
 
     def learning_start_preview(self, body):
         return self.learning_start.preview(body)
+
+    async def learning_goal_interview(self, body):
+        return await self.learning_start.interview(body)
 
     async def create_plan(self, body, idempotency_key: str | None = None):
         return await self.series_planning.create(body, idempotency_key)

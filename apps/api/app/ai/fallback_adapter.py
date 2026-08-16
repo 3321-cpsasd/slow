@@ -173,6 +173,9 @@ class FallbackAiAdapter:
     async def plan(self, request, memory):
         return await self._call("plan", request, memory)
 
+    async def learning_goal_interview(self, request):
+        return await self._call("learning_goal_interview", request)
+
     async def chapter(self, request, memory):
         return await self._call("chapter", request, memory)
 

@@ -13,7 +13,7 @@ import pytest
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, event, func, select
-from app.ai.contracts import AskMeDiscussionTurn, AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedChapter, GeneratedContent, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedQuiz, GeneratedSectionOutline, PlanBook, PlanChapter, PlanMilestone, PlanMilestoneCriterion, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
+from app.ai.contracts import AskMeDiscussionTurn, AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedChapter, GeneratedContent, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedQuiz, GeneratedSectionOutline, LearningGoalBrief, LearningGoalDimension, LearningGoalInterviewResult, LearningGoalQuestion, LearningGoalQuestionOption, PlanBook, PlanChapter, PlanMilestone, PlanMilestoneCriterion, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
 from app.application.service import (
     apply_source_repair_scope,
     source_blacklist_from_generation_traces,
@@ -110,6 +110,71 @@ class FakeAi:
     configured, model = True, "fake-structured"
     allow_legacy_lesson_generation_for_tests = True
     async def close(self): pass
+    async def learning_goal_interview(self, request):
+        answered = bool(request.get("answers"))
+        dimensions = [
+            LearningGoalDimension(
+                key=key,
+                status=(
+                    "confirmed"
+                    if answered or key in {"learning_object", "daily_commitment", "completion_horizon"}
+                    else "missing"
+                ),
+                summary=(
+                    request["topic"]
+                    if key == "learning_object"
+                    else request["dailyCommitment"]
+                    if key == "daily_commitment"
+                    else request["completionHorizon"]
+                    if key == "completion_horizon"
+                    else "已根据回答确认"
+                    if answered
+                    else "还需要确认"
+                ),
+                confidence="high" if answered else "medium",
+            )
+            for key in (
+                "learning_object",
+                "purpose",
+                "success_marker",
+                "starting_point",
+                "daily_commitment",
+                "completion_horizon",
+                "scope",
+            )
+        ]
+        if not answered:
+            return LearningGoalInterviewResult(
+                status="ask",
+                progress_message="还需要确认实际用途。",
+                dimensions=dimensions,
+                question=LearningGoalQuestion(
+                    id="goal_purpose_1",
+                    dimension="purpose",
+                    prompt="这次学习主要准备解决什么问题？",
+                    helper="用途会改变教材采用的视角。",
+                    options=[
+                        LearningGoalQuestionOption(id="work", label="解决工作问题"),
+                        LearningGoalQuestionOption(id="study", label="建立系统认识"),
+                    ],
+                ),
+            )
+        return LearningGoalInterviewResult(
+            status="ready",
+            progress_message="信息已经足以开始规划。",
+            dimensions=dimensions,
+            brief=LearningGoalBrief(
+                topic=request["topic"],
+                purpose="解决一个明确的实际问题",
+                success_marker="能够独立完成任务并说明依据",
+                starting_point=request.get("relatedExperience") or "从基础开始",
+                daily_commitment=request["dailyCommitment"],
+                completion_horizon=request["completionHorizon"],
+                scope="覆盖目标与必要前置",
+                out_of_scope="不扩展无关旁支",
+                recommended_depth="deep",
+            ),
+        )
     async def plan(self, request, memory):
         return GeneratedPlan(
             series_title="K8s 台阶",
@@ -2646,6 +2711,66 @@ def test_deleting_available_book_requires_next_outline_confirmation(client):
 
 def create_series(client):
     return client.post("/api/plans", json={"shelfId":"shelf_technology","topic":"Kubernetes","role":"技术人员","experience":"会 Docker","depth":"deep"}).json()
+
+
+def test_learning_goal_interview_asks_then_returns_a_validated_brief(client):
+    first = client.post(
+        "/api/learning-start/interview",
+        json={
+            "shelfId": "shelf_technology",
+            "topic": "高二英语",
+            "dailyCommitmentHours": 1,
+            "completionHorizonValue": 2,
+            "completionHorizonUnit": "week",
+            "relatedExperience": "阅读长难句容易丢失主干",
+            "answers": [],
+        },
+    )
+    assert first.status_code == 200
+    assert first.json()["status"] == "ask"
+    assert first.json()["question"]["dimension"] == "purpose"
+    assert len(first.json()["dimensions"]) == 7
+    dimensions = {item["key"]: item for item in first.json()["dimensions"]}
+    assert dimensions["daily_commitment"]["status"] == "confirmed"
+    assert dimensions["completion_horizon"]["status"] == "confirmed"
+
+    second = client.post(
+        "/api/learning-start/interview",
+        json={
+            "shelfId": "shelf_technology",
+            "topic": "高二英语",
+            "dailyCommitmentHours": 1,
+            "completionHorizonValue": 2,
+            "completionHorizonUnit": "week",
+            "relatedExperience": "阅读长难句容易丢失主干",
+            "answers": [
+                {
+                    "questionId": first.json()["question"]["id"],
+                    "dimension": first.json()["question"]["dimension"],
+                    "question": first.json()["question"]["prompt"],
+                    "answer": "为校内考试提升阅读理解",
+                }
+            ],
+        },
+    )
+    assert second.status_code == 200
+    assert second.json()["status"] == "ready"
+    assert second.json()["brief"]["topic"] == "高二英语"
+    assert second.json()["brief"]["dailyCommitment"] == "每天1小时"
+    assert second.json()["brief"]["completionHorizon"] == "2周内"
+    assert second.json()["brief"]["recommendedDepth"] == "deep"
+
+    missing_shelf = client.post(
+        "/api/learning-start/interview",
+        json={
+            "shelfId": "missing",
+            "topic": "高二英语",
+            "dailyCommitmentHours": 1,
+            "completionHorizonValue": 2,
+            "completionHorizonUnit": "week",
+        },
+    )
+    assert missing_shelf.status_code == 404
 
 
 def test_learning_start_preview_falls_back_and_direct_choice_is_auditable(client):

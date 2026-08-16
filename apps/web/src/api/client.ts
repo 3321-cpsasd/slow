@@ -317,6 +317,10 @@ export const api = {
     method:'POST',
     body:JSON.stringify(body),
   }),
+  learningGoalInterview:(body:object)=>call<import('../model/types').LearningGoalInterview>('/api/learning-start/interview',{
+    method:'POST',
+    body:JSON.stringify(body),
+  }),
   series:(id:string)=>call<import('../model/types').Series>(`/api/series/${id}`),
   renameSeries:(id:string,body:import('../model/types').SeriesRenameInput)=>call<import('../model/types').Series>(`/api/series/${id}`,{method:'PATCH',body:JSON.stringify(body)}),
   confirmMilestonePath:(id:string)=>call<{seriesId:string;status:string;version:number;goalProfileVersion:number}>(`/api/series/${id}/milestone-path/confirm`,{method:'POST'}),

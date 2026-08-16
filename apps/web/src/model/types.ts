@@ -50,6 +50,52 @@ export type LearningStartPreview = {
   edges:{id:string;from:string;to:string;type:string;label:string}[];
   message:string;
 };
+export type LearningGoalDimensionKey =
+  | 'learning_object'
+  | 'purpose'
+  | 'success_marker'
+  | 'starting_point'
+  | 'daily_commitment'
+  | 'completion_horizon'
+  | 'scope';
+export type LearningGoalInterviewAnswer = {
+  questionId:string;
+  dimension:LearningGoalDimensionKey;
+  question:string;
+  answer:string;
+};
+export type LearningGoalInterview = {
+  schemaVersion:'learning_goal_interview_v1';
+  status:'ask'|'ready';
+  progressMessage:string;
+  dimensions:{
+    key:LearningGoalDimensionKey;
+    status:'confirmed'|'inferred'|'missing'|'conflict'|'immaterial';
+    summary:string;
+    confidence:'high'|'medium'|'low';
+  }[];
+  question:null|{
+    id:string;
+    dimension:LearningGoalDimensionKey;
+    prompt:string;
+    helper:string;
+    options:{id:string;label:string;description:string}[];
+  };
+  brief:null|{
+    topic:string;
+    purpose:string;
+    successMarker:string;
+    startingPoint:string;
+    dailyCommitment:string;
+    completionHorizon:string;
+    scope:string;
+    outOfScope:string;
+    recommendedDepth:'overview'|'deep'|'mastery';
+  };
+  answerCount:number;
+  generationMode:'ai'|'demo';
+  ruleVersion:string;
+};
 export type ResumePosition = {
   learningRunId:string;
   sectionId:string;

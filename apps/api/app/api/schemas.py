@@ -110,6 +110,44 @@ class LearningStartPreviewCreate(ApiModel):
     details: str = Field(default="", max_length=3000)
 
 
+LearningGoalDimensionKey = Literal[
+    "learning_object",
+    "purpose",
+    "success_marker",
+    "starting_point",
+    "daily_commitment",
+    "completion_horizon",
+    "scope",
+]
+
+
+class LearningGoalInterviewAnswer(ApiModel):
+    question_id: str = Field(min_length=1, max_length=120)
+    dimension: LearningGoalDimensionKey
+    question: str = Field(min_length=1, max_length=500)
+    answer: str = Field(min_length=1, max_length=1000)
+
+
+class LearningGoalInterviewCreate(ApiModel):
+    shelf_id: str
+    topic: str = Field(min_length=1, max_length=160)
+    daily_commitment_hours: float = Field(gt=0, le=24)
+    completion_horizon_value: int = Field(ge=1, le=365)
+    completion_horizon_unit: Literal["day", "week", "month"]
+    related_experience: str = Field(default="", max_length=1000)
+    answers: list[LearningGoalInterviewAnswer] = Field(
+        default_factory=list,
+        max_length=8,
+    )
+
+    @model_validator(mode="after")
+    def unique_interview_questions(self):
+        question_ids = [item.question_id for item in self.answers]
+        if len(question_ids) != len(set(question_ids)):
+            raise ValueError("同一个访谈问题不能重复回答")
+        return self
+
+
 class MissionCriterionInput(ApiModel):
     key: str = Field(min_length=1, max_length=160)
     statement: str = Field(min_length=1, max_length=2000)
