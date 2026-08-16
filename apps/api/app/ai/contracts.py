@@ -994,6 +994,45 @@ class AskMeDiscussionProbe(StrictModel):
     follow_up_purpose: str = Field(min_length=4, max_length=1000)
 
 
+class StandardApplicationRubricCriterion(StrictModel):
+    criterion_key: str = Field(pattern=r"^C[1-9][0-9]*$")
+    statement: str = Field(min_length=4, max_length=1000)
+    required: bool = True
+
+
+class StandardApplicationTaskCandidate(StrictModel):
+    prompt: str = Field(min_length=20, max_length=4000)
+    task_context: str = Field(min_length=4, max_length=2000)
+    deliverables: list[str] = Field(min_length=1, max_length=6)
+    rubric: list[StandardApplicationRubricCriterion] = Field(
+        min_length=2, max_length=6
+    )
+    reference_answer_points: list[str] = Field(min_length=2, max_length=10)
+    novelty_basis: str = Field(min_length=4, max_length=1200)
+
+    @model_validator(mode="after")
+    def rubric_keys_are_unique(self):
+        keys = [item.criterion_key for item in self.rubric]
+        if len(keys) != len(set(keys)):
+            raise ValueError("application rubric keys must be unique")
+        return self
+
+
+class StandardApplicationCriterionResult(StrictModel):
+    criterion_key: str = Field(pattern=r"^C[1-9][0-9]*$")
+    satisfied: bool
+    rationale: str = Field(min_length=4, max_length=1200)
+
+
+class StandardApplicationEvaluation(StrictModel):
+    verdict: Literal["pass", "fail"]
+    evidence_sufficiency: Literal["sufficient", "insufficient"]
+    criterion_results: list[StandardApplicationCriterionResult] = Field(
+        min_length=2, max_length=6
+    )
+    rationale: str = Field(min_length=4, max_length=2000)
+
+
 class ReplannedChapter(StrictModel):
     title: str
     objective: str

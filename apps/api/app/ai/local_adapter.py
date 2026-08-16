@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from .contracts import (
     AskMeDiscussionEvaluation,
@@ -34,6 +35,10 @@ from .contracts import (
     ReplannedBook,
     ReplannedChapter,
     Source,
+    StandardApplicationCriterionResult,
+    StandardApplicationEvaluation,
+    StandardApplicationRubricCriterion,
+    StandardApplicationTaskCandidate,
     TeachingBlueprint,
     TeachingBlueprintBlock,
 )
@@ -510,6 +515,58 @@ class LocalDemoAdapter:
         return AskMeDiscussionProbe(
             follow_up_prompt=f"请再为“{topic.get('title', '当前主题')}”补充一个边界反例。",
             follow_up_purpose="继续观察边界条件和证据选择。",
+        )
+
+    async def author_standard_application_task(self, request):
+        label = request.get("capability", {}).get("label", "当前知识")
+        return StandardApplicationTaskCandidate(
+            prompt=(
+                f"请在一个正文未直接给出数值和结论的新案例中运用{label}："
+                "先写出你的判断，再列出执行步骤、可观察验证信号和一个失败边界。"
+            ),
+            task_context="本地演示生成的未见标准案例；只用于验证任务事实链。",
+            deliverables=["判断与依据", "执行步骤", "验证信号", "失败边界"],
+            rubric=[
+                StandardApplicationRubricCriterion(
+                    criterion_key="C1",
+                    statement="判断明确，并正确调用目标能力的核心机制",
+                ),
+                StandardApplicationRubricCriterion(
+                    criterion_key="C2",
+                    statement="步骤可执行，且包含可被第三方观察的验证信号",
+                ),
+                StandardApplicationRubricCriterion(
+                    criterion_key="C3",
+                    statement="指出至少一个会让方案失效的适用边界",
+                ),
+            ],
+            reference_answer_points=[
+                "判断必须与目标能力的机制一致",
+                "步骤、验证信号和边界需要彼此对应",
+            ],
+            novelty_basis="题面使用新的案例参数，未复述正文示例。",
+        )
+
+    async def evaluate_standard_application_submission(self, request):
+        response = json.dumps(request.get("submission", {}), ensure_ascii=False)
+        sufficient = len(response.strip()) >= 80
+        results = [
+            StandardApplicationCriterionResult(
+                criterion_key=item["criterionKey"],
+                satisfied=sufficient,
+                rationale=(
+                    "演示回答包含了足够长度的结构化说明。"
+                    if sufficient
+                    else "演示回答信息不足，无法确认满足该标准。"
+                ),
+            )
+            for item in request.get("rubric", [])
+        ]
+        return StandardApplicationEvaluation(
+            verdict="pass" if sufficient else "fail",
+            evidence_sufficiency="sufficient" if sufficient else "insufficient",
+            criterion_results=results,
+            rationale="本地演示评定不具有正式黄金证据资格。",
         )
 
     async def replan_book(self, request, memory):

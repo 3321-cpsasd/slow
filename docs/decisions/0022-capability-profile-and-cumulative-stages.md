@@ -1,6 +1,6 @@
 # ADR-0022：基于知识子网的稳定能力、累计阶段与三轴用户画像
 
-- **状态**：Accepted，白银口试纵向链路已实现
+- **状态**：Accepted，黄金标准应用纵向链路已实现
 - **决策日期**：2026-08-15
 - **适用范围**：知识图谱、稳定能力身份、课程规划、Learning Contract、正式测评、复习、能力画像、段位结算、知识地图与正文个性化
 - **继承边界**：[ADR-0001](0001-lesson-generation-v2.md)、[ADR-0012](0012-on-demand-knowledge-universe-and-learner-memory.md)、[ADR-0015](0015-rank-settleable-learning-contracts.md)、[ADR-0020](0020-audited-historical-rank-identity.md)、[ADR-0021](0021-series-local-knowledge-identity-resolution.md)
@@ -192,6 +192,20 @@ Assessment Target 回答“本次要验证什么”，不能与 Concept 或 Capa
 | 陌生或综合任务 | 情境迁移与知识重组，主要服务钻石 |
 | 章末或书末实践 | 多项能力的可归因综合验证 |
 
+黄金任务采用独立权威链，不能由“章节实践已提交”或“开放题字数足够”替代：
+
+```text
+CapabilityApplicationTaskVersion
+→ CapabilityApplicationSubmission
+→ CapabilityApplicationEvaluation
+→ AssessmentObservation + EvidenceQualificationEvent
+→ CapabilityStateProjection
+```
+
+任务版本必须绑定已冻结的 Learning Contract、已发布正文版本、唯一 application Assessment Target 与 gold Stage Criterion，并保存题面、交付物、冻结量规、参考判定要点、新颖性比较依据和作者血缘。提交记录原始回答、当前学习实例、幂等键与辅助声明；评定记录逐项结果、证据充分性、评定者血缘与资格结论。任务作者与正式评定者必须来自不同模型家族。量规漏项、总评与逐项结果矛盾、同模型家族、辅助作答、本地 Demo、正文题面复制或缺少白银前置时一律不能形成黄金证据。
+
+“未见过”的首个确定性边界是：任务题面不得复制或高度近似当前冻结正文块，并保存被比较块的稳定 ID。该检查证明任务不是已发布题面的直接重放，不等同于语义事实核验；任务仍需模型作者按标准新实例生成，并由真实学习表现和离线评测持续治理。
+
 每次正式学习事实至少记录：
 
 - 用户、Learning Contract、Assessment Target 和任务版本；
@@ -382,11 +396,13 @@ ADR-0021 的系列内知识候选、追加式身份裁决、跨书 Concept Revis
 本 ADR 的第一阶段影子链路已经实现：
 
 - 新增 route-scoped `Capability` / `CapabilityRevision`、显式 Concept Revision 绑定和四级 Stage Criterion；
-- 新增 `CapabilityRouteBinding`；能力自然上限为白银，路线在只存在选择题时仅承诺青铜，冻结两项正式口试目标后才把路线承诺提升到白银；
+- 新增 `CapabilityRouteBinding`；能力自然上限可达黄金，但路线在只存在选择题时仅承诺青铜，冻结两项正式口试目标后提升到白银，只有发布真实标准应用任务后才提升到黄金；投影器同时受能力自然上限和路线正式上限约束；
 - 新 Assessment Target 显式绑定 Capability Revision 和青铜 Stage Criterion；
 - 正式证据新增独立的 `capability` 资格事件；Ask Me 机制解释和边界辨析分别绑定两个独立白银标准，只有两者都取得强证据且青铜已满足时才能升白银；
 - Learning Contract 将选择题门禁目标与 `diagnostic_only` 口试目标分开冻结；选择题生成、内容治理和派生题链路确定性排除诊断目标；
 - 迁移口试只使用显式诊断协议，不等同于正式陌生迁移任务，即使强通过也不能形成钻石证据；
+- 新增版本化标准应用任务、不可变提交与独立评定事实；黄金任务必须是未见构造任务，任务作者和评定者模型家族分离，完整覆盖冻结量规且无辅助通过后才形成 gold criterion 证据；
+- 本地 Demo 可以演示标准应用任务和评定状态机，但任务与证据机器可识别为 `local_demo` / `published_demo`，永远不能提升正式能力阶段；
 - `CapabilityStateProjection v1` 从不可变事实重建能力阶段、证据成熟度和激活状态；
 - 累计投影要求逐级满足，选择题即使沿用旧体系的 `transfer` 维度，也只能满足所绑定的青铜标准；
 - 旧六级知识节点段位继续只读兼容，新画像并行生成，正文生成上下文优先消费新能力状态；
@@ -394,10 +410,10 @@ ADR-0021 的系列内知识候选、追加式身份裁决、跨书 Concept Revis
 
 仍未完成的范围：
 
-- 黄金标准应用任务、钻石迁移任务及其真实晋级入口门禁；
+- 钻石迁移任务及其真实晋级入口门禁；
 - 基于三轴画像重做复习选择器；
 - 历史旧证据的显式解析与 unresolved 队列；
 - 节末结算、知识地图和系列能力进度切换到新画像；
 - 旧六级段位停止写入。
 
-因此当前状态只能称为“白银口试纵向链路已实现”，不能称为整份 ADR 已实现；任何现有六级段位结果仍只是旧规则输出。
+因此当前状态只能称为“黄金标准应用纵向链路已实现”，不能称为整份 ADR 已实现；任何现有六级段位结果仍只是旧规则输出。

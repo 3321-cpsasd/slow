@@ -40,7 +40,7 @@ def ensure_route_capability(
 ) -> tuple[CapabilityRevision, CapabilityStageCriterion]:
     """Create the conservative route-local capability behind a concept target.
 
-    A capability can naturally reach silver, while a route initially promises
+    A capability can naturally reach gold, while a route initially promises
     only its governed bronze choice task. Contract publication raises the route
     promise to silver only after both oral targets are frozen.
     """
@@ -93,7 +93,7 @@ def ensure_route_capability(
                 }
             ),
             context_constraints_json=_dump({"routeScoped": True}),
-            natural_stage_ceiling="silver",
+            natural_stage_ceiling="gold",
             provenance_mode="route_scoped",
             verification_status="route_scoped",
         )
@@ -209,7 +209,7 @@ def ensure_route_capability(
                 target_stage="bronze",
                 route_json=_dump(
                     {
-                        "naturalStageCeiling": "silver",
+                        "naturalStageCeiling": "gold",
                         "formalStageCeiling": "bronze",
                         "reason": "silver_requires_a_frozen_ask_me_contract",
                     }
@@ -272,6 +272,7 @@ def ensure_ask_me_stage_targets(
     specs = {
         "mechanism": ("silver", 1, "oral_explanation_v1"),
         "boundary": ("silver", 2, "oral_boundary_v1"),
+        "application": ("gold", 1, "standard_application_v1"),
         # The transfer topic remains diagnostic. Its oral protocol is not the
         # criterion's formal transfer-task protocol and cannot grant diamond.
         "transfer": ("diamond", 1, "oral_transfer_probe_v1"),
@@ -297,7 +298,11 @@ def ensure_ask_me_stage_targets(
                     objective_key=f"{capability_revision_id}:{criterion.id}",
                     statement=criterion.statement,
                     cognitive_verb=(
-                        "explain" if dimension != "transfer" else "transfer"
+                        "apply"
+                        if dimension == "application"
+                        else "explain"
+                        if dimension != "transfer"
+                        else "transfer"
                     ),
                     outcome_type="capability",
                     provenance_mode="route_scoped",
@@ -371,3 +376,65 @@ def ensure_ask_me_stage_targets(
     )
     db.flush()
     return targets
+
+
+def publish_standard_application_opportunity(
+    db: Session,
+    *,
+    series_id: str,
+    capability_revision_id: str,
+    task_version_id: str,
+) -> CapabilityRouteBinding:
+    """Raise a route ceiling only after a governed gold task is published."""
+
+    revision = db.get(CapabilityRevision, capability_revision_id)
+    route = db.scalar(
+        select(CapabilityRouteBinding).where(
+            CapabilityRouteBinding.series_id == series_id,
+            CapabilityRouteBinding.capability_revision_id
+            == capability_revision_id,
+        )
+    )
+    criterion = db.scalar(
+        select(CapabilityStageCriterion).where(
+            CapabilityStageCriterion.capability_revision_id
+            == capability_revision_id,
+            CapabilityStageCriterion.stage == "gold",
+            CapabilityStageCriterion.position == 1,
+            CapabilityStageCriterion.verification_protocol
+            == "standard_application_v1",
+        )
+    )
+    if revision is None or route is None or criterion is None:
+        raise AppError(
+            "标准应用任务缺少能力路线绑定",
+            code="CAPABILITY_APPLICATION_ROUTE_MISSING",
+            status=500,
+        )
+    opportunities = json.loads(route.opportunities_json or "[]")
+    opportunity = {
+        "stage": "gold",
+        "criterionId": criterion.id,
+        "verificationProtocol": "standard_application_v1",
+        "taskVersionId": task_version_id,
+    }
+    opportunities = [
+        item
+        for item in opportunities
+        if not (
+            item.get("stage") == "gold"
+            and item.get("criterionId") == criterion.id
+        )
+    ]
+    opportunities.append(opportunity)
+    route.target_stage = "gold"
+    route.route_json = _dump(
+        {
+            "naturalStageCeiling": "gold",
+            "formalStageCeiling": "gold",
+            "reason": "published_unseen_standard_application_task",
+        }
+    )
+    route.opportunities_json = _dump(opportunities)
+    db.flush()
+    return route

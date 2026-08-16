@@ -527,6 +527,7 @@ def ensure_learning_contract(
             (ask_me_targets["mechanism"], "oral_explanation_v1"),
             (ask_me_targets["boundary"], "oral_boundary_v1"),
             (ask_me_targets["transfer"], "oral_transfer_probe_v1"),
+            (ask_me_targets["application"], "standard_application_v1"),
         ]
     uses_rank_settleable_knowledge = bool(target_rows) and all(
         target.identity_status in RANK_SETTLEABLE_IDENTITY_STATUSES

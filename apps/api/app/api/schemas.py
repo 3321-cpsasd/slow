@@ -606,6 +606,17 @@ class ChapterChallengeSubmit(ApiModel):
         return self
 
 
+class CapabilityApplicationSubmit(ApiModel):
+    response: dict
+    assistance_used: bool = False
+
+    @model_validator(mode="after")
+    def response_is_not_empty(self):
+        if not self.response:
+            raise ValueError("标准应用任务提交不能为空")
+        return self
+
+
 class BookReplanCreate(ApiModel):
     feedback: str = Field(default="", max_length=3000)
     previous_proposal_id: str | None = Field(default=None, min_length=1, max_length=160)

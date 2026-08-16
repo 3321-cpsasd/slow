@@ -1,4 +1,6 @@
+import asyncio
 import json
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -10,16 +12,29 @@ from app.infrastructure.tables import (
     AssessmentTarget,
     Base,
     CapabilityRevision,
+    CapabilityRouteBinding,
+    CapabilityApplicationEvaluation,
+    CapabilityApplicationSubmission,
+    CapabilityApplicationTaskVersion,
     CapabilityStageCriterion,
     CapabilityStateProjection,
     Concept,
     ConceptRevision,
+    ContentBlockVersion,
+    ContentVersion,
     EvidenceQualificationEvent,
     KnowledgeNodeStateProjection,
     LearningContractAssessmentTarget,
     LearningContractVersion,
+    LearningRunSectionBinding,
     SectionAssessmentTarget,
     now,
+)
+from app.ai.contracts import (
+    StandardApplicationCriterionResult,
+    StandardApplicationEvaluation,
+    StandardApplicationRubricCriterion,
+    StandardApplicationTaskCandidate,
 )
 from app.modules.learning.assessment import (
     QUALIFICATION_RULE_VERSION,
@@ -30,6 +45,7 @@ from app.modules.learning.capabilities import (
     ensure_ask_me_stage_targets,
     ensure_route_capability,
 )
+from app.modules.learning.application_tasks import CapabilityApplicationTaskService
 
 
 def _session() -> Session:
@@ -198,6 +214,12 @@ def test_cumulative_projection_cannot_skip_missing_bronze_criterion() -> None:
             concept_revision_id="revision_recursion",
         )
         capability.natural_stage_ceiling = "silver"
+        route = db.scalar(
+            select(CapabilityRouteBinding).where(
+                CapabilityRouteBinding.capability_revision_id == capability.id
+            )
+        )
+        route.target_stage = "silver"
         silver_criteria = db.scalars(
             select(CapabilityStageCriterion).where(
                 CapabilityStageCriterion.capability_revision_id == capability.id,
@@ -321,6 +343,7 @@ def _add_ask_me_contract(
             ("mechanism", "oral_explanation_v1"),
             ("boundary", "oral_boundary_v1"),
             ("transfer", "oral_transfer_probe_v1"),
+            ("application", "standard_application_v1"),
         ),
         1,
     ):
@@ -505,3 +528,298 @@ def test_non_strong_oral_results_do_not_satisfy_silver(evaluation: str) -> None:
         state = db.scalar(select(CapabilityStateProjection))
         assert state.current_stage == "bronze"
         assert len(json.loads(state.missing_criterion_ids_json)) == 2
+
+
+class _ApplicationAi:
+    configured = True
+    model = "author-model"
+
+    def __init__(self, *, same_family: bool = False, incomplete_rubric: bool = False):
+        self.same_family = same_family
+        self.incomplete_rubric = incomplete_rubric
+        self.last_deployment_id = ""
+        self.last_model_family_id = ""
+
+    async def author_standard_application_task(self, request):
+        self.last_deployment_id = "application-author"
+        self.last_model_family_id = "author-family"
+        self.model = "author-model"
+        return StandardApplicationTaskCandidate(
+            prompt=(
+                "某服务把一个大问题拆成规模更小的同类问题处理。"
+                "请设计终止条件和处理步骤，并给出可观察验证信号与失败边界。"
+            ),
+            task_context="一个正文未直接出现过的标准服务排障案例",
+            deliverables=["判断", "步骤", "验证信号", "失败边界"],
+            rubric=[
+                StandardApplicationRubricCriterion(
+                    criterion_key="C1",
+                    statement="正确运用递归的缩小问题与终止机制",
+                ),
+                StandardApplicationRubricCriterion(
+                    criterion_key="C2",
+                    statement="给出可执行步骤、验证信号和失败边界",
+                ),
+            ],
+            reference_answer_points=[
+                "每次调用都必须缩小问题规模",
+                "基本情形必须覆盖并可被验证",
+            ],
+            novelty_basis="使用服务排障实例，不复用正文中的树遍历示例",
+        )
+
+    async def evaluate_standard_application_submission(self, request):
+        self.last_deployment_id = "application-evaluator"
+        self.last_model_family_id = (
+            "author-family" if self.same_family else "evaluator-family"
+        )
+        self.model = "evaluator-model"
+        rubric = request["rubric"]
+        if self.incomplete_rubric:
+            rubric = [rubric[0], {**rubric[1], "criterionKey": "C3"}]
+        return StandardApplicationEvaluation(
+            verdict="pass",
+            evidence_sufficiency="sufficient",
+            criterion_results=[
+                StandardApplicationCriterionResult(
+                    criterion_key=item["criterionKey"],
+                    satisfied=True,
+                    rationale="提交明确覆盖了该项冻结标准。",
+                )
+                for item in rubric
+            ],
+            rationale="提交满足全部必需标准。",
+        )
+
+
+class _NonNovelApplicationAi(_ApplicationAi):
+    async def author_standard_application_task(self, request):
+        candidate = await super().author_standard_application_task(request)
+        return candidate.model_copy(
+            update={"prompt": request["publishedContentBlocks"][0]["content"]}
+        )
+
+
+def _application_service_fixture(
+    db: Session,
+    *,
+    ai=None,
+    silver: bool = True,
+) -> tuple[CapabilityApplicationTaskService, str]:
+    _add_concept(db)
+    capability, bronze = ensure_route_capability(
+        db,
+        series_id="series_capability",
+        concept_revision_id="revision_recursion",
+    )
+    _add_target(
+        db,
+        target_id="target_bronze_application_path",
+        capability_revision_id=capability.id,
+        criterion_id=bronze.id,
+        dimension="recognition",
+    )
+    _add_observation(
+        db,
+        suffix="bronze_application_path",
+        target_id="target_bronze_application_path",
+    )
+    contract, targets = _add_ask_me_contract(
+        db,
+        capability_revision_id=capability.id,
+    )
+    if silver:
+        for dimension in ("mechanism", "boundary"):
+            record_ask_me_assessment_facts(
+                db,
+                learning_run_id="run_capability",
+                user_id="user_capability",
+                section_id="section_capability",
+                learning_contract_version_id=contract.id,
+                content_version_id="content_capability",
+                assessment_target_ids=[targets[dimension].id],
+                source_type="ask_me_topic",
+                source_id=f"topic_application_{dimension}",
+                evaluation="strong",
+                dimension=dimension,
+                payload={},
+            )
+    else:
+        rebuild_assessment_projections(db, user_id="user_capability")
+    content = ContentVersion(
+        id="content_capability",
+        section_id="section_capability",
+        learning_contract_version_id=contract.id,
+        version=1,
+        blocks_json="[]",
+        sources_json="[]",
+        confidence="high",
+        publication_status="published",
+    )
+    db.add(content)
+    db.add(
+        ContentBlockVersion(
+            id="block_capability_core",
+            content_version_id=content.id,
+            position=1,
+            format_kind="markdown",
+            semantic_role="core_instruction",
+            heading="递归的终止机制",
+            content=(
+                "递归必须让每一次调用都缩小问题规模，并由明确的基本情形停止。"
+                "正文示例使用树遍历说明调用过程。"
+            ),
+            assessment_eligible=True,
+        )
+    )
+    db.add(
+        LearningRunSectionBinding(
+            id="run_section_capability",
+            learning_run_id="run_capability",
+            user_id="user_capability",
+            section_id="section_capability",
+            learning_contract_version_id=contract.id,
+            content_version_id=content.id,
+            initial_quiz_set_id=None,
+            first_read_at=now(),
+            source="test",
+        )
+    )
+    db.flush()
+
+    class Contexts:
+        def resolve_section(self, *, user_id, section_id):
+            assert user_id == "user_capability"
+            assert section_id == "section_capability"
+            return SimpleNamespace(
+                series=SimpleNamespace(id="series_capability"),
+                section=SimpleNamespace(id=section_id),
+            )
+
+    class Progress:
+        def active_run(self, series_id):
+            assert series_id == "series_capability"
+            return SimpleNamespace(id="run_capability")
+
+    return (
+        CapabilityApplicationTaskService(
+            db,
+            user_id="user_capability",
+            ai=ai or _ApplicationAi(),
+            contexts=Contexts(),
+            progress=Progress(),
+        ),
+        capability.id,
+    )
+
+
+def test_unseen_unassisted_independently_evaluated_task_promotes_gold() -> None:
+    with _session() as db:
+        service, capability_id = _application_service_fixture(db)
+        task = asyncio.run(service.prepare("section_capability"))
+        result = asyncio.run(service.submit(
+            task["id"],
+            response={
+                "judgment": "每次处理都缩小问题，并在空输入时终止",
+                "steps": ["检查基本情形", "拆分子问题", "组合返回值"],
+                "validation": "记录每层输入规模，确认严格递减并最终为零",
+                "boundary": "无法证明规模递减时可能无限调用",
+            },
+            assistance_used=False,
+            idempotency_key="gold-success-001",
+        ))
+
+        state = db.scalar(
+            select(CapabilityStateProjection).where(
+                CapabilityStateProjection.capability_revision_id == capability_id
+            )
+        )
+        task_row = db.get(CapabilityApplicationTaskVersion, task["id"])
+        evaluation = db.scalar(select(CapabilityApplicationEvaluation))
+
+        assert task["evidenceEligible"] is True
+        assert task_row.publication_status == "published"
+        assert result["evidenceEligible"] is True
+        assert result["capabilityStage"] == "gold"
+        assert state.current_stage == "gold"
+        assert evaluation.qualification_status == "eligible"
+
+
+@pytest.mark.parametrize(
+    ("ai", "assistance_used", "reason"),
+    [
+        (_ApplicationAi(same_family=True), False, "evaluation_not_independent"),
+        (_ApplicationAi(), True, "declared_assistance_used"),
+    ],
+)
+def test_non_independent_or_assisted_application_cannot_promote_gold(
+    ai, assistance_used: bool, reason: str
+) -> None:
+    with _session() as db:
+        service, capability_id = _application_service_fixture(db, ai=ai)
+        task = asyncio.run(service.prepare("section_capability"))
+        result = asyncio.run(service.submit(
+            task["id"],
+            response={"answer": "完整但不具备正式资格的应用回答" * 8},
+            assistance_used=assistance_used,
+            idempotency_key=f"gold-ineligible-{reason}",
+        ))
+        evaluation = db.scalar(select(CapabilityApplicationEvaluation))
+        state = db.scalar(
+            select(CapabilityStateProjection).where(
+                CapabilityStateProjection.capability_revision_id == capability_id
+            )
+        )
+
+        assert result["evidenceEligible"] is False
+        assert evaluation.qualification_reason == reason
+        assert state.current_stage == "silver"
+
+
+def test_application_submission_requires_cumulative_silver_stage() -> None:
+    with _session() as db:
+        service, _capability_id = _application_service_fixture(db, silver=False)
+        task = asyncio.run(service.prepare("section_capability"))
+
+        with pytest.raises(AppError) as raised:
+            asyncio.run(service.submit(
+                task["id"],
+                response={"answer": "尝试越过白银直接完成黄金"},
+                assistance_used=False,
+                idempotency_key="gold-before-silver",
+            ))
+
+        assert raised.value.code == "APPLICATION_TASK_SILVER_REQUIRED"
+        assert db.scalar(select(CapabilityApplicationSubmission)) is None
+
+
+def test_application_task_rejects_seen_content_copy() -> None:
+    with _session() as db:
+        service, _capability_id = _application_service_fixture(
+            db, ai=_NonNovelApplicationAi()
+        )
+
+        with pytest.raises(AppError) as raised:
+            asyncio.run(service.prepare("section_capability"))
+
+        assert raised.value.code == "APPLICATION_TASK_NOT_NOVEL"
+        assert db.scalar(select(CapabilityApplicationTaskVersion)) is None
+
+
+def test_application_evaluation_requires_complete_frozen_rubric() -> None:
+    with _session() as db:
+        service, _capability_id = _application_service_fixture(
+            db, ai=_ApplicationAi(incomplete_rubric=True)
+        )
+        task = asyncio.run(service.prepare("section_capability"))
+
+        with pytest.raises(AppError) as raised:
+            asyncio.run(service.submit(
+                task["id"],
+                response={"answer": "覆盖部分标准的回答" * 8},
+                assistance_used=False,
+                idempotency_key="gold-rubric-missing",
+            ))
+
+        assert raised.value.code == "APPLICATION_EVALUATION_RUBRIC_COVERAGE_INVALID"
+        assert db.scalar(select(CapabilityApplicationEvaluation)) is None

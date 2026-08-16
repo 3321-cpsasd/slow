@@ -3711,6 +3711,116 @@ class ArtifactSubmission(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
 
 
+class CapabilityApplicationTaskVersion(Base):
+    """Immutable, published standard-application task bound to one gold criterion."""
+
+    __tablename__ = "capability_application_task_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "learning_contract_version_id",
+            "capability_stage_criterion_id",
+            "version",
+            name="uq_capability_application_task_contract_criterion_version",
+        ),
+        UniqueConstraint("task_hash", name="uq_capability_application_task_hash"),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    learning_contract_version_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), index=True
+    )
+    content_version_id: Mapped[str] = mapped_column(
+        ForeignKey("content_versions.id"), index=True
+    )
+    assessment_target_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_targets.id"), index=True
+    )
+    capability_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_revisions.id"), index=True
+    )
+    capability_stage_criterion_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_stage_criteria.id"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    prompt: Mapped[str] = mapped_column(Text)
+    task_context_json: Mapped[str] = mapped_column(Text, default="{}")
+    deliverables_json: Mapped[str] = mapped_column(Text, default="[]")
+    rubric_json: Mapped[str] = mapped_column(Text)
+    reference_answer_json: Mapped[str] = mapped_column(Text)
+    novelty_basis_json: Mapped[str] = mapped_column(Text, default="{}")
+    author_deployment_id: Mapped[str] = mapped_column(String(160), default="")
+    author_model_family_id: Mapped[str] = mapped_column(String(160), default="")
+    author_model: Mapped[str] = mapped_column(String(160), default="")
+    provenance_mode: Mapped[str] = mapped_column(String(40), default="ai_authored")
+    publication_status: Mapped[str] = mapped_column(
+        String(24), default="published", index=True
+    )
+    task_hash: Mapped[str] = mapped_column(String(64))
+    authoring_rule_version: Mapped[str] = mapped_column(String(48))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
+class CapabilityApplicationSubmission(Base):
+    """Immutable independent response to one published application task."""
+
+    __tablename__ = "capability_application_submissions"
+    __table_args__ = (
+        UniqueConstraint(
+            "learning_run_id",
+            "user_id",
+            "idempotency_key",
+            name="uq_capability_application_submission_run_user_idempotency",
+        ),
+        ForeignKeyConstraint(
+            ["learning_run_id", "user_id"],
+            ["learning_runs.id", "learning_runs.user_id"],
+            name="fk_capability_application_submission_run_user",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    task_version_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_application_task_versions.id"), index=True
+    )
+    learning_run_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_runs.id"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    response_json: Mapped[str] = mapped_column(Text)
+    assistance_mode: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(24), default="processing", index=True)
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
+class CapabilityApplicationEvaluation(Base):
+    """Append-only server evaluation fact; only qualified passes grant gold."""
+
+    __tablename__ = "capability_application_evaluations"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    submission_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_application_submissions.id"), unique=True, index=True
+    )
+    verdict: Mapped[str] = mapped_column(String(24), index=True)
+    evidence_sufficiency: Mapped[str] = mapped_column(String(24))
+    criterion_results_json: Mapped[str] = mapped_column(Text)
+    rationale: Mapped[str] = mapped_column(Text, default="")
+    evaluator_deployment_id: Mapped[str] = mapped_column(String(160), default="")
+    evaluator_model_family_id: Mapped[str] = mapped_column(String(160), default="")
+    evaluator_model: Mapped[str] = mapped_column(String(160), default="")
+    qualification_status: Mapped[str] = mapped_column(String(24), index=True)
+    qualification_reason: Mapped[str] = mapped_column(Text, default="")
+    evaluation_rule_version: Mapped[str] = mapped_column(String(48))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
 class LearningResumePosition(Base):
     __tablename__ = "learning_resume_positions"
     __table_args__ = (

@@ -590,7 +590,7 @@ def test_explicit_section_keys_materialize_verified_contract_without_provisional
         select(func.count()).select_from(LearningContractObjective).where(
             LearningContractObjective.role == "diagnostic"
         )
-    ) == 6
+    ) == 8
     assert db.scalar(
         select(func.count()).select_from(ConceptRevision).where(
             ConceptRevision.provenance_mode == "m1_provisional"

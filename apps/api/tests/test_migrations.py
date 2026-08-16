@@ -12,7 +12,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0066_capability_profiles"
+HEAD_REVISION = "0067_capability_application_tasks"
 
 pytestmark = pytest.mark.migration
 

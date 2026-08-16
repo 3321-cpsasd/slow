@@ -55,6 +55,7 @@ from ..modules.artifacts.progress import ArtifactProgressStore
 from ..modules.artifacts.service import ArtifactService
 from ..modules.learning.commands import SubmitQuiz
 from ..modules.learning.assessment import record_ask_me_assessment_facts
+from ..modules.learning.application_tasks import CapabilityApplicationTaskService
 from ..modules.learning.generation_leases import (
     acquire_generation_lease,
     release_generation_lease,
@@ -151,6 +152,13 @@ class SlowService:
         self.chapter_choices = ChapterChoiceService(
             db,
             user_id=self.user_id,
+            contexts=self.contexts,
+            progress=self.progress,
+        )
+        self.application_tasks = CapabilityApplicationTaskService(
+            db,
+            user_id=self.user_id,
+            ai=self.ai,
             contexts=self.contexts,
             progress=self.progress,
         )
@@ -724,6 +732,25 @@ class SlowService:
             chapter_id,
             body,
             idempotency_key or "",
+        )
+
+    async def prepare_application_task(self, section_id: str):
+        return await self.application_tasks.prepare(section_id)
+
+    def application_task(self, section_id: str):
+        return self.application_tasks.view(section_id)
+
+    async def submit_application_task(
+        self,
+        task_id: str,
+        body,
+        idempotency_key: str | None,
+    ):
+        return await self.application_tasks.submit(
+            task_id,
+            response=body.response,
+            assistance_used=body.assistance_used,
+            idempotency_key=idempotency_key or "",
         )
 
     def skip_chapter(

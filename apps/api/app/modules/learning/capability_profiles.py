@@ -10,6 +10,7 @@ from ...infrastructure.tables import (
     AssessmentObservation,
     AssessmentTarget,
     CapabilityRevision,
+    CapabilityRouteBinding,
     CapabilityStageCriterion,
     CapabilityStateProjection,
     ReviewState,
@@ -112,6 +113,15 @@ def rebuild_capability_state_projections(
             else []
         )
     }
+    route_ceilings = {
+        item.capability_revision_id: item.target_stage
+        for item in db.scalars(
+            select(CapabilityRouteBinding).where(
+                CapabilityRouteBinding.capability_revision_id.in_(capability_ids),
+                CapabilityRouteBinding.status == "active",
+            )
+        ).all()
+    } if capability_ids else {}
     reviews = {
         item.assessment_target_id: item
         for item in db.scalars(
@@ -125,7 +135,13 @@ def rebuild_capability_state_projections(
         revision = revisions.get(capability_id)
         if revision is None:
             continue
-        ceiling_order = STAGE_ORDER.get(revision.natural_stage_ceiling, 0)
+        formal_ceiling = route_ceilings.get(
+            capability_id, revision.natural_stage_ceiling
+        )
+        ceiling_order = min(
+            STAGE_ORDER.get(revision.natural_stage_ceiling, 0),
+            STAGE_ORDER.get(formal_ceiling, 0),
+        )
         criteria = [
             criterion
             for criterion in criteria_by_capability.get(capability_id, [])
