@@ -7560,3 +7560,125 @@ button:disabled { cursor: not-allowed; }
     .review-trace { scroll-behavior: auto; }
   }
 }
+
+/* Mobile immersive reading: once a lesson is open, reading becomes the whole
+   screen. Keep only the current section and essential controls above the text. */
+@media (max-width: 560px) {
+  .app-shell:has(.learn-main) .app-header {
+    display: none;
+  }
+
+  .app-shell:has(.learn-main) .learn-main {
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  .reader-toolbar,
+  .learning-workspace.directory-collapsed .reader-toolbar,
+  .learning-workspace.focus-layout .reader-toolbar,
+  .learning-workspace.focus-layout.directory-collapsed .reader-toolbar {
+    min-height: 44px;
+    padding: 2px 9px 2px 12px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 0;
+    background: rgba(251, 252, 249, .98);
+    box-shadow: none;
+  }
+
+  .reader-title-group {
+    min-width: 0;
+  }
+
+  .reader-toolbar h1,
+  .learning-workspace.focus-layout .reader-toolbar h1 {
+    display: none;
+  }
+
+  .reader-toolbar .breadcrumb {
+    margin: 0;
+    font-size: 9px;
+    line-height: 1;
+  }
+
+  .reader-toolbar .breadcrumb ol {
+    flex-wrap: nowrap;
+  }
+
+  .reader-toolbar .breadcrumb li {
+    display: none;
+  }
+
+  .reader-toolbar .breadcrumb li:last-child {
+    display: flex;
+    color: #315b48;
+    font: 760 9px/1 var(--font-mono);
+    white-space: nowrap;
+  }
+
+  .reader-toolbar .breadcrumb li::after {
+    display: none;
+  }
+
+  .reader-toolbar-actions {
+    margin: 0;
+    gap: 5px;
+  }
+
+  .lesson-session-time,
+  .lesson-status {
+    display: none;
+  }
+
+  .reader-options-trigger {
+    width: 36px;
+    min-width: 36px;
+    min-height: 36px;
+    height: 36px;
+    padding: 0;
+    overflow: hidden;
+    font-size: 0;
+  }
+
+  .reader-options-trigger > span {
+    margin: 0;
+    font-size: 12px;
+  }
+
+  .reader-directory-trigger,
+  .learning-workspace.focus-layout .reader-directory-trigger,
+  .learning-workspace.focus-layout.directory-collapsed .reader-directory-trigger {
+    width: 36px;
+    min-width: 36px;
+    min-height: 36px;
+    height: 36px;
+    top: 4px;
+    right: 50px;
+    left: auto;
+    z-index: 25;
+    padding: 0;
+    border: 0;
+    border-radius: 7px;
+    background: #eef3ef;
+    box-shadow: none;
+    font-size: 9px;
+  }
+
+  .reader-tabs,
+  .learning-workspace.directory-collapsed .reader-tabs,
+  .learning-workspace.focus-layout .reader-tabs,
+  .learning-workspace.focus-layout.directory-collapsed .reader-tabs {
+    min-height: 40px;
+    padding: 0 12px;
+    gap: 19px;
+  }
+
+  .reader-tabs button,
+  .learning-workspace.focus-layout .reader-tabs button {
+    min-height: 39px;
+    padding: 0 5px;
+    font-size: 10px;
+  }
+}
