@@ -14,8 +14,22 @@ branch_labels = None
 depends_on = None
 
 
+_INDEX_TABLE_ALIASES = {
+    "capability_application_task_versions": "cap_app_task",
+    "capability_application_submissions": "cap_app_submission",
+    "capability_application_evaluations": "cap_app_evaluation",
+}
+
+
+def _index_name(table: str, column: str) -> str:
+    return f"ix_{_INDEX_TABLE_ALIASES.get(table, table)}_{column}"
+
+
 def _index(table: str, column: str) -> None:
-    op.create_index(f"ix_{table}_{column}", table, [column])
+    name = _index_name(table, column)
+    if len(name) > 63:
+        raise ValueError(f"PostgreSQL index identifier is too long: {name}")
+    op.create_index(name, table, [column])
 
 
 def upgrade():

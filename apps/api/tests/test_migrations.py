@@ -1,4 +1,5 @@
 import json
+import importlib
 import os
 from pathlib import Path
 import sqlite3
@@ -15,6 +16,43 @@ API_ROOT = Path(__file__).resolve().parents[1]
 HEAD_REVISION = "0067_capability_application_tasks"
 
 pytestmark = pytest.mark.migration
+
+
+def test_application_task_index_names_fit_postgresql_identifier_limit() -> None:
+    migration = importlib.import_module(
+        "migrations.versions.0067_capability_application_tasks"
+    )
+    names = [
+        migration._index_name(table, column)
+        for table, columns in {
+            "capability_application_task_versions": (
+                "section_id",
+                "learning_contract_version_id",
+                "content_version_id",
+                "assessment_target_id",
+                "capability_revision_id",
+                "capability_stage_criterion_id",
+                "publication_status",
+                "created_at",
+            ),
+            "capability_application_submissions": (
+                "task_version_id",
+                "learning_run_id",
+                "user_id",
+                "status",
+                "created_at",
+            ),
+            "capability_application_evaluations": (
+                "submission_id",
+                "verdict",
+                "qualification_status",
+                "created_at",
+            ),
+        }.items()
+        for column in columns
+    ]
+    assert len(names) == len(set(names))
+    assert max(map(len, names)) <= 63
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
