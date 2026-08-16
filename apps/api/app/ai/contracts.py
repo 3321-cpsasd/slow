@@ -1131,6 +1131,21 @@ class StandardApplicationTaskCandidate(StrictModel):
         return self
 
 
+class TransferTaskCandidate(StandardApplicationTaskCandidate):
+    unfamiliarity_basis: str = Field(min_length=8, max_length=1200)
+    required_knowledge_recombination: list[str] = Field(
+        min_length=2, max_length=12
+    )
+    decision_rationale_requirement: str = Field(min_length=8, max_length=1200)
+
+    @model_validator(mode="after")
+    def recombination_items_are_unique(self):
+        normalized = [item.strip().lower() for item in self.required_knowledge_recombination]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("transfer recombination requirements must be unique")
+        return self
+
+
 class StandardApplicationCriterionResult(StrictModel):
     criterion_key: str = Field(pattern=r"^C[1-9][0-9]*$")
     satisfied: bool

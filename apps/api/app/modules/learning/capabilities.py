@@ -901,6 +901,9 @@ def ensure_ask_me_stage_targets(
         # The transfer topic remains diagnostic. Its oral protocol is not the
         # criterion's formal transfer-task protocol and cannot grant diamond.
         "transfer": ("diamond", 1, "oral_transfer_probe_v1"),
+        # A separate target binds the governed transfer-task protocol. The oral
+        # target above remains diagnostic and can never satisfy this criterion.
+        "transfer_task": ("diamond", 1, "transfer_task_v1"),
     }
     namespace = f"route_capability_target:{series_id}"
     targets: dict[str, AssessmentTarget] = {}
@@ -1065,9 +1068,87 @@ def publish_standard_application_opportunity(
     route.target_stage = "gold"
     route.route_json = _dump(
         {
-            "naturalStageCeiling": "gold",
+            "naturalStageCeiling": revision.natural_stage_ceiling,
             "formalStageCeiling": "gold",
             "reason": "published_unseen_standard_application_task",
+        }
+    )
+    route.opportunities_json = _dump(opportunities)
+    db.flush()
+    return route
+
+
+def publish_transfer_opportunity(
+    db: Session,
+    *,
+    series_id: str,
+    capability_revision_id: str,
+    task_version_id: str,
+) -> CapabilityRouteBinding:
+    """Publish diamond only after gold exists and a governed transfer task exists."""
+
+    validate_capability_subnet(db, capability_revision_id=capability_revision_id)
+    revision = db.get(CapabilityRevision, capability_revision_id)
+    route = db.scalar(
+        select(CapabilityRouteBinding).where(
+            CapabilityRouteBinding.series_id == series_id,
+            CapabilityRouteBinding.capability_revision_id == capability_revision_id,
+        )
+    )
+    criterion = db.scalar(
+        select(CapabilityStageCriterion).where(
+            CapabilityStageCriterion.capability_revision_id == capability_revision_id,
+            CapabilityStageCriterion.stage == "diamond",
+            CapabilityStageCriterion.position == 1,
+            CapabilityStageCriterion.verification_protocol == "transfer_task_v1",
+        )
+    )
+    if revision is None or route is None or criterion is None:
+        raise AppError(
+            "迁移任务缺少能力路线绑定",
+            code="CAPABILITY_TRANSFER_ROUTE_MISSING",
+            status=500,
+        )
+    if revision.natural_stage_ceiling != "diamond":
+        raise AppError(
+            "该能力没有真实的钻石迁移上限",
+            code="CAPABILITY_TRANSFER_NATURAL_CEILING_INVALID",
+            status=409,
+        )
+    opportunities = json.loads(route.opportunities_json or "[]")
+    if not any(
+        item.get("stage") == "gold"
+        and item.get("verificationProtocol") == "standard_application_v1"
+        and item.get("taskVersionId")
+        for item in opportunities
+    ):
+        raise AppError(
+            "钻石迁移任务必须建立在已发布的黄金任务之后",
+            code="CAPABILITY_TRANSFER_GOLD_OPPORTUNITY_REQUIRED",
+            status=409,
+        )
+    opportunities = [
+        item
+        for item in opportunities
+        if not (
+            item.get("stage") == "diamond"
+            and item.get("criterionId") == criterion.id
+        )
+    ]
+    opportunities.append(
+        {
+            "stage": "diamond",
+            "criterionId": criterion.id,
+            "verificationProtocol": "transfer_task_v1",
+            "taskVersionId": task_version_id,
+        }
+    )
+    route.target_stage = "diamond"
+    route.route_json = _dump(
+        {
+            "naturalStageCeiling": "diamond",
+            "formalStageCeiling": "diamond",
+            "reason": "published_unfamiliar_recombination_transfer_task",
         }
     )
     route.opportunities_json = _dump(opportunities)

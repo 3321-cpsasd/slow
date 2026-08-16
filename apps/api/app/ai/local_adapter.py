@@ -44,6 +44,7 @@ from .contracts import (
     StandardApplicationTaskCandidate,
     TeachingBlueprint,
     TeachingBlueprintBlock,
+    TransferTaskCandidate,
 )
 from .port import ProviderCapabilities
 
@@ -621,6 +622,36 @@ class LocalDemoAdapter:
             evidence_sufficiency="sufficient" if sufficient else "insufficient",
             criterion_results=results,
             rationale="本地演示评定不具有正式黄金证据资格。",
+        )
+
+    async def author_transfer_task(self, request):
+        required = request.get("requiredKnowledge") or []
+        labels = [item.get("label", "相关知识") for item in required][:3]
+        while len(labels) < 2:
+            labels.append(f"支撑知识{len(labels) + 1}")
+        return TransferTaskCandidate(
+            prompt=(
+                f"面对一个正文没有出现过的综合故障，请同时运用{labels[0]}与{labels[1]}"
+                "提出方案，并说明为什么这样组合、如何验证以及何时失效。"
+            ),
+            task_context="跨系统、约束条件变化的本地演示陌生情境。",
+            deliverables=["综合判断", "知识重组", "选择理由", "验证信号", "失效边界"],
+            rubric=[
+                StandardApplicationRubricCriterion(criterion_key="C1", statement="正确重组至少两项必需知识"),
+                StandardApplicationRubricCriterion(criterion_key="C2", statement="说明方案选择理由和关系机制"),
+                StandardApplicationRubricCriterion(criterion_key="C3", statement="给出验证信号和失效边界"),
+            ],
+            reference_answer_points=["知识必须共同参与方案", "理由、验证与边界必须对应"],
+            novelty_basis="情境约束和目标组合均未在正文出现。",
+            unfamiliarity_basis="需要跨系统适配并处理正文未给出的约束变化。",
+            required_knowledge_recombination=labels[:2],
+            decision_rationale_requirement="说明为何选择这一组合，而不是分别复述两项知识。",
+        )
+
+    async def evaluate_transfer_submission(self, request):
+        evaluation = await self.evaluate_standard_application_submission(request)
+        return evaluation.model_copy(
+            update={"rationale": "本地演示评定不具有正式钻石证据资格。"}
         )
 
     async def replan_book(self, request, memory):

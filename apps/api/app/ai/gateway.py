@@ -1612,3 +1612,26 @@ class PurposeAiGateway:
             "evaluate_standard_application_submission",
             request,
         )
+
+    async def author_transfer_task(self, request):
+        return await self._call(
+            AiTaskEnvelope(
+                AiPurpose.ASSESSMENT_ITEM_AUTHOR,
+                AuthorityLevel.CANDIDATE_ONLY,
+                CapabilityRequirements(structured=True),
+            ),
+            "author_transfer_task",
+            request,
+        )
+
+    async def evaluate_transfer_submission(self, request):
+        return await self._call(
+            AiTaskEnvelope(
+                AiPurpose.ASSESSMENT_EVALUATION,
+                AuthorityLevel.EVIDENCE_CANDIDATE,
+                CapabilityRequirements(structured=True),
+                self._lineage(request, exclude=self.configured),
+            ),
+            "evaluate_transfer_submission",
+            request,
+        )

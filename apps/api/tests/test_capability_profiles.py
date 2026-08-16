@@ -35,6 +35,7 @@ from app.ai.contracts import (
     StandardApplicationEvaluation,
     StandardApplicationRubricCriterion,
     StandardApplicationTaskCandidate,
+    TransferTaskCandidate,
 )
 from app.modules.learning.assessment import (
     QUALIFICATION_RULE_VERSION,
@@ -42,8 +43,11 @@ from app.modules.learning.assessment import (
     rebuild_assessment_projections,
 )
 from app.modules.learning.capabilities import (
+    CapabilityConceptSpec,
+    CapabilityRelationSpec,
     ensure_ask_me_stage_targets,
     ensure_route_capability,
+    ensure_route_capability_subnet,
 )
 from app.modules.learning.application_tasks import CapabilityApplicationTaskService
 
@@ -344,6 +348,7 @@ def _add_ask_me_contract(
             ("boundary", "oral_boundary_v1"),
             ("transfer", "oral_transfer_probe_v1"),
             ("application", "standard_application_v1"),
+            ("transfer_task", "transfer_task_v1"),
         ),
         1,
     ):
@@ -591,6 +596,39 @@ class _ApplicationAi:
             rationale="提交满足全部必需标准。",
         )
 
+    async def author_transfer_task(self, request):
+        self.last_deployment_id = "transfer-author"
+        self.last_model_family_id = "author-family"
+        self.model = "author-model"
+        labels = [item["label"] for item in request["requiredKnowledge"]][:2]
+        return TransferTaskCandidate(
+            prompt=(
+                f"一个陌生的分布式作业同时出现终止判断不可靠和子任务重复执行。"
+                f"请重组{labels[0]}与{labels[1]}设计处理方案，并解释选择理由、验证信号和失效边界。"
+            ),
+            task_context="分布式作业在网络分区和重试并存时的综合故障",
+            deliverables=["综合方案", "知识重组", "选择理由", "验证信号", "失效边界"],
+            rubric=[
+                StandardApplicationRubricCriterion(
+                    criterion_key="C1", statement="正确重组两项必需知识"
+                ),
+                StandardApplicationRubricCriterion(
+                    criterion_key="C2", statement="解释方案选择及关系机制"
+                ),
+                StandardApplicationRubricCriterion(
+                    criterion_key="C3", statement="提供验证信号和失效边界"
+                ),
+            ],
+            reference_answer_points=["两项知识共同参与决策", "理由与验证边界对应"],
+            novelty_basis="分布式网络分区与重试组合未出现在正文示例中",
+            unfamiliarity_basis="需要适配正文未教授的分布式约束并综合决策",
+            required_knowledge_recombination=labels,
+            decision_rationale_requirement="解释为何必须组合两项知识而非独立套用",
+        )
+
+    async def evaluate_transfer_submission(self, request):
+        return await self.evaluate_standard_application_submission(request)
+
 
 class _NonNovelApplicationAi(_ApplicationAi):
     async def author_standard_application_task(self, request):
@@ -605,13 +643,42 @@ def _application_service_fixture(
     *,
     ai=None,
     silver: bool = True,
+    diamond_route: bool = False,
 ) -> tuple[CapabilityApplicationTaskService, str]:
     _add_concept(db)
-    capability, bronze = ensure_route_capability(
-        db,
-        series_id="series_capability",
-        concept_revision_id="revision_recursion",
-    )
+    if diamond_route:
+        db.add(
+            Concept(id="concept_idempotency", namespace="test", concept_key="idempotency", canonical_name="幂等性", status="active", origin="test")
+        )
+        db.add(
+            ConceptRevision(id="revision_idempotency", concept_id="concept_idempotency", revision=1, label="幂等性", definition="重复执行保持相同效果。", scope_json="{}", verification_status="route_scoped")
+        )
+        capability, bronze = ensure_route_capability_subnet(
+            db,
+            series_id="series_capability",
+            label="在复杂执行环境中综合运用递归与幂等性",
+            concepts=(
+                CapabilityConceptSpec(concept_revision_id="revision_recursion", role="anchor", required=True),
+                CapabilityConceptSpec(concept_revision_id="revision_idempotency", role="required", required=True),
+            ),
+            relations=(
+                CapabilityRelationSpec(
+                    "revision_recursion",
+                    "revision_idempotency",
+                    "enables",
+                    "递归控制分解与终止，幂等性控制重复执行的副作用。",
+                    minimum_stage="silver",
+                    purpose="integrated_application",
+                ),
+            ),
+            natural_stage_ceiling="diamond",
+        )
+    else:
+        capability, bronze = ensure_route_capability(
+            db,
+            series_id="series_capability",
+            concept_revision_id="revision_recursion",
+        )
     _add_target(
         db,
         target_id="target_bronze_application_path",
@@ -743,6 +810,82 @@ def test_unseen_unassisted_independently_evaluated_task_promotes_gold() -> None:
         assert result["capabilityStage"] == "gold"
         assert state.current_stage == "gold"
         assert evaluation.qualification_status == "eligible"
+
+
+def test_unfamiliar_recombination_task_promotes_gold_to_diamond() -> None:
+    with _session() as db:
+        service, capability_id = _application_service_fixture(
+            db, diamond_route=True
+        )
+        gold = asyncio.run(service.prepare("section_capability"))
+        asyncio.run(service.submit(
+            gold["id"],
+            response={"answer": "标准任务中给出终止、步骤、验证和边界" * 5},
+            assistance_used=False,
+            idempotency_key="diamond-gold-first",
+        ))
+        transfer = asyncio.run(
+            service.prepare("section_capability", "transfer_task")
+        )
+        result = asyncio.run(service.submit(
+            transfer["id"],
+            response={
+                "plan": "用规模递减保证终止，用幂等键吸收重试，两者共同约束执行",
+                "rationale": "只保证终止不能避免重试副作用，只保证幂等不能阻止无限分解",
+                "validation": "观察任务规模单调下降且同一幂等键只产生一次效果",
+                "boundary": "不可生成稳定幂等键或规模不可度量时方案失效",
+            },
+            assistance_used=False,
+            idempotency_key="diamond-success-001",
+            expected_task_kind="transfer_task",
+        ))
+
+        state = db.scalar(
+            select(CapabilityStateProjection).where(
+                CapabilityStateProjection.capability_revision_id == capability_id
+            )
+        )
+        task_row = db.get(CapabilityApplicationTaskVersion, transfer["id"])
+        route = db.scalar(
+            select(CapabilityRouteBinding).where(
+                CapabilityRouteBinding.capability_revision_id == capability_id
+            )
+        )
+        assert transfer["taskKind"] == "transfer_task"
+        assert len(transfer["requiredKnowledgeRecombination"]) == 2
+        assert task_row.context_fingerprint
+        assert result["evidenceEligible"] is True
+        assert result["capabilityStage"] == "diamond"
+        assert state.current_stage == "diamond"
+        assert route.target_stage == "diamond"
+
+
+def test_transfer_submission_cannot_skip_gold() -> None:
+    with _session() as db:
+        service, capability_id = _application_service_fixture(
+            db, diamond_route=True
+        )
+        asyncio.run(service.prepare("section_capability"))
+        transfer = asyncio.run(
+            service.prepare("section_capability", "transfer_task")
+        )
+
+        with pytest.raises(AppError) as raised:
+            asyncio.run(service.submit(
+                transfer["id"],
+                response={"answer": "试图从白银直接完成迁移" * 8},
+                assistance_used=False,
+                idempotency_key="diamond-before-gold",
+                expected_task_kind="transfer_task",
+            ))
+
+        state = db.scalar(
+            select(CapabilityStateProjection).where(
+                CapabilityStateProjection.capability_revision_id == capability_id
+            )
+        )
+        assert raised.value.code == "TRANSFER_TASK_GOLD_REQUIRED"
+        assert state.current_stage == "silver"
 
 
 @pytest.mark.parametrize(

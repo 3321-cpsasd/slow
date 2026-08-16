@@ -613,7 +613,7 @@ class CapabilityApplicationSubmit(ApiModel):
     @model_validator(mode="after")
     def response_is_not_empty(self):
         if not self.response:
-            raise ValueError("标准应用任务提交不能为空")
+            raise ValueError("能力任务提交不能为空")
         return self
 
 

@@ -14,22 +14,31 @@ from ...infrastructure.tables import (
     CapabilityApplicationEvaluation,
     CapabilityApplicationSubmission,
     CapabilityApplicationTaskVersion,
+    CapabilityConceptBinding,
+    CapabilityRelationRequirement,
     CapabilityRevision,
     CapabilityStageCriterion,
     CapabilityStateProjection,
     ContentBlockVersion,
     ContentVersion,
+    ConceptRevision,
     EvidenceQualificationEvent,
     LearningContractAssessmentTarget,
     LearningContractVersion,
     LearningRunSectionBinding,
+    KnowledgeRelationRevision,
 )
 from .assessment import QUALIFICATION_RULE_VERSION, rebuild_assessment_projections
-from .capabilities import publish_standard_application_opportunity
+from .capabilities import (
+    publish_standard_application_opportunity,
+    publish_transfer_opportunity,
+)
 
 
 APPLICATION_AUTHORING_RULE_VERSION = "standard_application_authoring_v1"
 APPLICATION_EVALUATION_RULE_VERSION = "standard_application_evaluation_v1"
+TRANSFER_AUTHORING_RULE_VERSION = "transfer_task_authoring_v1"
+TRANSFER_EVALUATION_RULE_VERSION = "transfer_task_evaluation_v1"
 
 
 def _uid(prefix: str) -> str:
@@ -56,7 +65,7 @@ def _normalized(value: str) -> str:
 
 
 class CapabilityApplicationTaskService:
-    """Owns the published gold task -> submission -> evaluation fact chain."""
+    """Owns immutable gold/diamond task -> submission -> evaluation facts."""
 
     def __init__(self, db: Session, *, user_id: str, ai, contexts, progress):
         self.db = db
@@ -82,8 +91,18 @@ class CapabilityApplicationTaskService:
         return binding
 
     def _target(
-        self, contract_id: str
+        self,
+        contract_id: str,
+        task_kind: str = "standard_application",
     ) -> tuple[LearningContractAssessmentTarget, AssessmentTarget]:
+        protocol = (
+            "transfer_task_v1"
+            if task_kind == "transfer_task"
+            else "standard_application_v1"
+        )
+        dimension = (
+            "transfer_task" if task_kind == "transfer_task" else "application"
+        )
         rows = self.db.execute(
             select(LearningContractAssessmentTarget, AssessmentTarget)
             .join(
@@ -95,14 +114,14 @@ class CapabilityApplicationTaskService:
                 LearningContractAssessmentTarget.contract_version_id == contract_id,
                 LearningContractAssessmentTarget.diagnostic_only.is_(True),
                 LearningContractAssessmentTarget.verification_policy
-                == "standard_application_v1",
-                AssessmentTarget.dimension == "application",
+                == protocol,
+                AssessmentTarget.dimension == dimension,
             )
         ).all()
         if len(rows) != 1:
             raise AppError(
-                "学习契约没有唯一的标准应用能力目标",
-                code="APPLICATION_TASK_CONTRACT_TARGET_INVALID",
+                "学习契约没有唯一的正式能力任务目标",
+                code="CAPABILITY_TASK_CONTRACT_TARGET_INVALID",
                 status=409,
             )
         binding, target = rows[0]
@@ -114,19 +133,26 @@ class CapabilityApplicationTaskService:
             if target.capability_stage_criterion_id
             else None
         )
+        expected_stage = "diamond" if task_kind == "transfer_task" else "gold"
+        expected_context = (
+            "unfamiliar_or_integrated"
+            if task_kind == "transfer_task"
+            else "standard_novel"
+        )
         if (
             not target.capability_revision_id
             or criterion is None
             or criterion.capability_revision_id != target.capability_revision_id
-            or criterion.stage != "gold"
-            or criterion.task_type != "standard_application"
+            or criterion.stage != expected_stage
+            or criterion.task_type != task_kind
             or criterion.novelty_requirement != "unseen"
             or criterion.assistance_limit != "unassisted"
-            or criterion.verification_protocol != "standard_application_v1"
+            or criterion.context_requirement != expected_context
+            or criterion.verification_protocol != protocol
         ):
             raise AppError(
-                "标准应用目标与黄金阶段量规不一致",
-                code="APPLICATION_TASK_CRITERION_PROTOCOL_INVALID",
+                "正式能力任务与阶段量规不一致",
+                code="CAPABILITY_TASK_CRITERION_PROTOCOL_INVALID",
                 status=409,
             )
         return binding, target
@@ -158,25 +184,35 @@ class CapabilityApplicationTaskService:
 
     @staticmethod
     def _task_view(task: CapabilityApplicationTaskVersion) -> dict:
+        transfer = task.task_kind == "transfer_task"
         return {
             "id": task.id,
-            "schemaVersion": "standard_application_task_v1",
+            "schemaVersion": (
+                "transfer_task_v1" if transfer else "standard_application_task_v1"
+            ),
+            "taskKind": task.task_kind,
             "prompt": task.prompt,
             "taskContext": _load(task.task_context_json, {}),
             "deliverables": _load(task.deliverables_json, []),
             "status": "ready",
             "evidenceEligible": task.publication_status == "published",
             "isDemo": task.provenance_mode == "local_demo",
+            "unfamiliarityBasis": _load(task.unfamiliarity_basis_json, {}),
+            "requiredKnowledgeRecombination": _load(
+                task.recombination_requirements_json, []
+            ),
         }
 
-    def view(self, section_id: str) -> dict:
+    def view(
+        self, section_id: str, task_kind: str = "standard_application"
+    ) -> dict:
         context = self.contexts.resolve_section(
             user_id=self.user_id, section_id=section_id
         )
         run = self.progress.active_run(context.series.id)
         binding = self._binding(run.id, section_id)
         _contract_binding, target = self._target(
-            binding.learning_contract_version_id
+            binding.learning_contract_version_id, task_kind
         )
         task = self._existing(
             binding.learning_contract_version_id,
@@ -220,12 +256,50 @@ class CapabilityApplicationTaskService:
                 )
         if not all(item.required for item in candidate.rubric):
             raise AppError(
-                "黄金任务量规不能包含可跳过标准",
+                "正式能力任务量规不能包含可跳过标准",
                 code="APPLICATION_TASK_RUBRIC_OPTIONAL_INVALID",
                 status=409,
             )
 
-    async def prepare(self, section_id: str) -> dict:
+    def _required_knowledge(self, capability_id: str) -> list[dict]:
+        concepts = self.db.execute(
+            select(CapabilityConceptBinding, ConceptRevision)
+            .join(
+                ConceptRevision,
+                ConceptRevision.id == CapabilityConceptBinding.concept_revision_id,
+            )
+            .where(
+                CapabilityConceptBinding.capability_revision_id == capability_id,
+                CapabilityConceptBinding.required.is_(True),
+            )
+            .order_by(CapabilityConceptBinding.position)
+        ).all()
+        relations = self.db.execute(
+            select(CapabilityRelationRequirement, KnowledgeRelationRevision)
+            .join(
+                KnowledgeRelationRevision,
+                KnowledgeRelationRevision.id
+                == CapabilityRelationRequirement.knowledge_relation_revision_id,
+            )
+            .where(
+                CapabilityRelationRequirement.capability_revision_id == capability_id,
+                CapabilityRelationRequirement.required.is_(True),
+            )
+            .order_by(CapabilityRelationRequirement.position)
+        ).all()
+        return [
+            {"kind": "concept", "id": revision.id, "label": revision.label}
+            for _binding, revision in concepts
+        ] + [
+            {"kind": "relation", "id": revision.id, "label": revision.statement}
+            for _requirement, revision in relations
+        ]
+
+    async def prepare(
+        self,
+        section_id: str,
+        task_kind: str = "standard_application",
+    ) -> dict:
         context = self.contexts.resolve_section(
             user_id=self.user_id, section_id=section_id
         )
@@ -246,7 +320,7 @@ class CapabilityApplicationTaskService:
                 code="APPLICATION_TASK_CONTENT_BOUNDARY_INVALID",
                 status=409,
             )
-        _contract_binding, target = self._target(contract.id)
+        _contract_binding, target = self._target(contract.id, task_kind)
         existing = self._existing(
             contract.id, target.capability_stage_criterion_id
         )
@@ -268,44 +342,70 @@ class CapabilityApplicationTaskService:
                 code="APPLICATION_TASK_CONTENT_BLOCKS_MISSING",
                 status=409,
             )
-        candidate = await self.ai.author_standard_application_task(
-            {
-                "schemaVersion": "standard_application_author_request_v1",
-                "learningContract": {
-                    "id": contract.id,
-                    "question": contract.section_question_snapshot,
-                    "targetDepth": contract.target_depth,
-                },
-                "capability": {
-                    "id": capability.id,
-                    "label": capability.label,
-                    "scope": _load(capability.scope_json, {}),
-                },
-                "criterion": {
-                    "id": criterion.id,
-                    "statement": criterion.statement,
-                    "taskType": criterion.task_type,
-                    "noveltyRequirement": criterion.novelty_requirement,
-                    "assistanceLimit": criterion.assistance_limit,
-                    "contextRequirement": criterion.context_requirement,
-                },
-                "publishedContentBlocks": [
-                    {
-                        "blockId": item.id,
-                        "role": item.semantic_role,
-                        "heading": item.heading,
-                        "content": item.content,
-                    }
-                    for item in blocks
-                ],
-            }
+        required_knowledge = self._required_knowledge(capability.id)
+        if task_kind == "transfer_task" and len(required_knowledge) < 2:
+            raise AppError(
+                "该能力子网不足以形成真实的知识重组迁移任务",
+                code="TRANSFER_TASK_RECOMBINATION_SUBNET_INSUFFICIENT",
+                status=409,
+            )
+        author_request = {
+            "schemaVersion": (
+                "transfer_task_author_request_v1"
+                if task_kind == "transfer_task"
+                else "standard_application_author_request_v1"
+            ),
+            "learningContract": {
+                "id": contract.id,
+                "question": contract.section_question_snapshot,
+                "targetDepth": contract.target_depth,
+            },
+            "capability": {
+                "id": capability.id,
+                "label": capability.label,
+                "scope": _load(capability.scope_json, {}),
+            },
+            "criterion": {
+                "id": criterion.id,
+                "statement": criterion.statement,
+                "taskType": criterion.task_type,
+                "noveltyRequirement": criterion.novelty_requirement,
+                "assistanceLimit": criterion.assistance_limit,
+                "contextRequirement": criterion.context_requirement,
+            },
+            "publishedContentBlocks": [
+                {
+                    "blockId": item.id,
+                    "role": item.semantic_role,
+                    "heading": item.heading,
+                    "content": item.content,
+                }
+                for item in blocks
+            ],
+            "requiredKnowledge": required_knowledge,
+        }
+        candidate = await (
+            self.ai.author_transfer_task(author_request)
+            if task_kind == "transfer_task"
+            else self.ai.author_standard_application_task(author_request)
         )
         self._validate_candidate(candidate, blocks)
+        if task_kind == "transfer_task":
+            frozen_labels = {item["label"] for item in required_knowledge}
+            recombination = candidate.required_knowledge_recombination
+            if len(recombination) < 2 or not set(recombination).issubset(
+                frozen_labels
+            ):
+                raise AppError(
+                    "迁移任务没有重组冻结能力子网中的多项必需知识",
+                    code="TRANSFER_TASK_RECOMBINATION_INVALID",
+                    status=409,
+                )
         author_deployment, author_family, author_model = self._lineage(self.ai)
         formal = bool(getattr(self.ai, "configured", False))
         if formal and (not author_deployment or not author_family):
             raise AppError(
-                "标准应用任务缺少模型作者血缘",
+                "正式能力任务缺少模型作者血缘",
                 code="APPLICATION_TASK_AUTHOR_LINEAGE_MISSING",
                 status=409,
             )
@@ -328,7 +428,12 @@ class CapabilityApplicationTaskService:
             "rubric": rubric,
             "referenceAnswerPoints": candidate.reference_answer_points,
             "noveltyBasis": candidate.novelty_basis,
-            "authoringRuleVersion": APPLICATION_AUTHORING_RULE_VERSION,
+            "taskKind": task_kind,
+            "authoringRuleVersion": (
+                TRANSFER_AUTHORING_RULE_VERSION
+                if task_kind == "transfer_task"
+                else APPLICATION_AUTHORING_RULE_VERSION
+            ),
         }
         version = (
             self.db.scalar(
@@ -349,6 +454,7 @@ class CapabilityApplicationTaskService:
             assessment_target_id=target.id,
             capability_revision_id=capability.id,
             capability_stage_criterion_id=criterion.id,
+            task_kind=task_kind,
             version=version,
             prompt=candidate.prompt,
             task_context_json=_dump({"scenario": candidate.task_context}),
@@ -360,18 +466,43 @@ class CapabilityApplicationTaskService:
                 "deterministicCheck": "normalized_copy_and_similarity_v1",
                 "comparedContentBlockIds": [item.id for item in blocks],
             }),
+            unfamiliarity_basis_json=_dump(
+                {
+                    "authorClaim": candidate.unfamiliarity_basis,
+                    "decisionRationaleRequirement": candidate.decision_rationale_requirement,
+                }
+                if task_kind == "transfer_task"
+                else {}
+            ),
+            recombination_requirements_json=_dump(
+                candidate.required_knowledge_recombination
+                if task_kind == "transfer_task"
+                else []
+            ),
+            context_fingerprint=_hash(
+                {"taskContext": candidate.task_context, "prompt": candidate.prompt}
+            ),
             author_deployment_id=author_deployment,
             author_model_family_id=author_family,
             author_model=author_model,
             provenance_mode="ai_authored" if formal else "local_demo",
             publication_status="published" if formal else "published_demo",
             task_hash=_hash(task_payload),
-            authoring_rule_version=APPLICATION_AUTHORING_RULE_VERSION,
+            authoring_rule_version=(
+                TRANSFER_AUTHORING_RULE_VERSION
+                if task_kind == "transfer_task"
+                else APPLICATION_AUTHORING_RULE_VERSION
+            ),
         )
         self.db.add(task)
         self.db.flush()
         if formal:
-            publish_standard_application_opportunity(
+            publisher = (
+                publish_transfer_opportunity
+                if task_kind == "transfer_task"
+                else publish_standard_application_opportunity
+            )
+            publisher(
                 self.db,
                 series_id=context.series.id,
                 capability_revision_id=capability.id,
@@ -417,6 +548,8 @@ class CapabilityApplicationTaskService:
         evaluation: CapabilityApplicationEvaluation,
         qualified: bool,
     ) -> AssessmentObservation:
+        transfer = task.task_kind == "transfer_task"
+        source_type = "transfer_task" if transfer else "standard_application"
         observation = AssessmentObservation(
             id=_uid("observation"),
             learning_run_id=submission.learning_run_id,
@@ -430,12 +563,12 @@ class CapabilityApplicationTaskService:
             assessment_target_id=task.assessment_target_id,
             question_index=None,
             correct=evaluation.verdict == "pass",
-            source_type="standard_application",
+            source_type=source_type,
             evidence_key=hashlib.sha256(
-                f"standard_application:{submission.id}:{task.assessment_target_id}".encode()
+                f"{source_type}:{submission.id}:{task.assessment_target_id}".encode()
             ).hexdigest(),
             assistance_mode=submission.assistance_mode,
-            learning_episode_id=f"standard_application:{submission.id}",
+            learning_episode_id=f"{source_type}:{submission.id}",
             equivalence_group_id=hashlib.sha256(task.task_hash.encode()).hexdigest(),
             qualification_at_creation=(
                 "eligible_grouped" if qualified else "ineligible"
@@ -462,7 +595,13 @@ class CapabilityApplicationTaskService:
             "rank": ("ineligible", "new capability stages replace legacy rank progression"),
             "capability": (
                 "eligible_grouped" if qualified else "ineligible",
-                "qualified unseen unassisted standard task satisfies gold criterion" if qualified else evaluation.qualification_reason,
+                (
+                    "qualified unfamiliar unassisted recombination task satisfies diamond criterion"
+                    if transfer
+                    else "qualified unseen unassisted standard task satisfies gold criterion"
+                )
+                if qualified
+                else evaluation.qualification_reason,
             ),
         }
         for family, (status, reason) in statuses.items():
@@ -486,6 +625,7 @@ class CapabilityApplicationTaskService:
         response: dict,
         assistance_used: bool,
         idempotency_key: str,
+        expected_task_kind: str | None = None,
     ) -> dict:
         request_key = (idempotency_key or "").strip()
         if not 8 <= len(request_key) <= 128:
@@ -506,6 +646,12 @@ class CapabilityApplicationTaskService:
                 "标准应用任务不存在",
                 code="APPLICATION_TASK_NOT_FOUND",
                 status=404,
+            )
+        if expected_task_kind and task.task_kind != expected_task_kind:
+            raise AppError(
+                "任务类型与提交入口不一致",
+                code="CAPABILITY_TASK_ENDPOINT_KIND_MISMATCH",
+                status=409,
             )
         context = self.contexts.resolve_section(
             user_id=self.user_id, section_id=task.section_id
@@ -528,14 +674,24 @@ class CapabilityApplicationTaskService:
                 == task.capability_revision_id,
             )
         )
-        if state_before is None or state_before.current_stage not in {
-            "silver",
-            "gold",
-            "diamond",
-        }:
+        transfer = task.task_kind == "transfer_task"
+        allowed_stages = (
+            {"gold", "diamond"}
+            if transfer
+            else {"silver", "gold", "diamond"}
+        )
+        if state_before is None or state_before.current_stage not in allowed_stages:
             raise AppError(
-                "请先完成讲清机制与边界的能力验证",
-                code="APPLICATION_TASK_SILVER_REQUIRED",
+                (
+                    "请先完成黄金标准应用验证"
+                    if transfer
+                    else "请先完成讲清机制与边界的能力验证"
+                ),
+                code=(
+                    "TRANSFER_TASK_GOLD_REQUIRED"
+                    if transfer
+                    else "APPLICATION_TASK_SILVER_REQUIRED"
+                ),
                 status=403,
             )
         request_hash = _hash(
@@ -574,20 +730,35 @@ class CapabilityApplicationTaskService:
             idempotency_key=request_key,
             request_hash=request_hash,
             response_json=_dump(response),
-            assistance_mode=("declared_assisted" if assistance_used else "unassisted_application"),
+            assistance_mode=(
+                "declared_assisted"
+                if assistance_used
+                else "unassisted_transfer"
+                if transfer
+                else "unassisted_application"
+            ),
             status="processing",
         )
         self.db.add(submission)
         self.db.flush()
         rubric = _load(task.rubric_json, [])
-        evaluation_candidate = await self.ai.evaluate_standard_application_submission(
-            {
-                "schemaVersion": "standard_application_evaluation_request_v1",
+        evaluation_request = {
+                "schemaVersion": (
+                    "transfer_task_evaluation_request_v1"
+                    if transfer
+                    else "standard_application_evaluation_request_v1"
+                ),
                 "task": {
                     "id": task.id,
                     "prompt": task.prompt,
                     "taskContext": _load(task.task_context_json, {}),
                     "deliverables": _load(task.deliverables_json, []),
+                    "unfamiliarityBasis": _load(
+                        task.unfamiliarity_basis_json, {}
+                    ),
+                    "requiredKnowledgeRecombination": _load(
+                        task.recombination_requirements_json, []
+                    ),
                 },
                 "rubric": rubric,
                 "referenceAnswerPoints": _load(task.reference_answer_json, []),
@@ -596,6 +767,10 @@ class CapabilityApplicationTaskService:
                 "authorModelFamilyId": task.author_model_family_id,
                 "authorModel": task.author_model,
             }
+        evaluation_candidate = await (
+            self.ai.evaluate_transfer_submission(evaluation_request)
+            if transfer
+            else self.ai.evaluate_standard_application_submission(evaluation_request)
         )
         self._validate_evaluation(evaluation_candidate, rubric)
         evaluator_deployment, evaluator_family, evaluator_model = self._lineage(
@@ -616,6 +791,14 @@ class CapabilityApplicationTaskService:
             and passed
             and not assistance_used
             and independent
+            and (
+                not transfer
+                or (
+                    len(_load(task.recombination_requirements_json, [])) >= 2
+                    and bool(_load(task.unfamiliarity_basis_json, {}))
+                    and bool(task.context_fingerprint)
+                )
+            )
         )
         reason = (
             "qualified_unseen_unassisted_independent_evaluation"
@@ -648,7 +831,11 @@ class CapabilityApplicationTaskService:
             evaluator_model=evaluator_model,
             qualification_status="eligible" if qualified else "ineligible",
             qualification_reason=reason,
-            evaluation_rule_version=APPLICATION_EVALUATION_RULE_VERSION,
+            evaluation_rule_version=(
+                TRANSFER_EVALUATION_RULE_VERSION
+                if transfer
+                else APPLICATION_EVALUATION_RULE_VERSION
+            ),
         )
         self.db.add(evaluation)
         self.db.flush()
@@ -667,16 +854,28 @@ class CapabilityApplicationTaskService:
             )
         )
         result = {
-            "schemaVersion": "standard_application_result_v1",
+            "schemaVersion": (
+                "transfer_task_result_v1"
+                if transfer
+                else "standard_application_result_v1"
+            ),
             "submissionId": submission.id,
             "verdict": evaluation.verdict,
             "evidenceSufficiency": evaluation.evidence_sufficiency,
             "evidenceEligible": qualified,
             "capabilityStage": state.current_stage if state else "unranked",
             "feedback": (
-                "已满足全部标准，形成一次正式应用证据。"
+                (
+                    "已满足全部标准，形成一次正式迁移证据。"
+                    if transfer
+                    else "已满足全部标准，形成一次正式应用证据。"
+                )
                 if qualified
-                else "本次提交已评定，但没有形成正式黄金能力证据。"
+                else (
+                    "本次提交已评定，但没有形成正式钻石能力证据。"
+                    if transfer
+                    else "本次提交已评定，但没有形成正式黄金能力证据。"
+                )
             ),
         }
         submission.status = "completed"

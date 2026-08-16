@@ -1952,6 +1952,29 @@ def create_app(
     ):
         return await s.submit_application_task(task_id, body, idempotency_key)
 
+    @app.post("/api/sections/{section_id}/transfer-task/prepare")
+    async def prepare_transfer_task(
+        section_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return await s.prepare_transfer_task(section_id)
+
+    @app.get("/api/sections/{section_id}/transfer-task")
+    def transfer_task(
+        section_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return s.transfer_task(section_id)
+
+    @app.post("/api/transfer-tasks/{task_id}/submit")
+    async def submit_transfer_task(
+        task_id: str,
+        body: CapabilityApplicationSubmit,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return await s.submit_transfer_task(task_id, body, idempotency_key)
+
     @app.get("/api/sections/{section_id}")
     def section(section_id: str, s: SlowService = Depends(service)): return s.section(section_id)
 

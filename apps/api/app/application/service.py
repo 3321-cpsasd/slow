@@ -740,6 +740,12 @@ class SlowService:
     def application_task(self, section_id: str):
         return self.application_tasks.view(section_id)
 
+    async def prepare_transfer_task(self, section_id: str):
+        return await self.application_tasks.prepare(section_id, "transfer_task")
+
+    def transfer_task(self, section_id: str):
+        return self.application_tasks.view(section_id, "transfer_task")
+
     async def submit_application_task(
         self,
         task_id: str,
@@ -751,6 +757,21 @@ class SlowService:
             response=body.response,
             assistance_used=body.assistance_used,
             idempotency_key=idempotency_key or "",
+            expected_task_kind="standard_application",
+        )
+
+    async def submit_transfer_task(
+        self,
+        task_id: str,
+        body,
+        idempotency_key: str | None,
+    ):
+        return await self.application_tasks.submit(
+            task_id,
+            response=body.response,
+            assistance_used=body.assistance_used,
+            idempotency_key=idempotency_key or "",
+            expected_task_kind="transfer_task",
         )
 
     def skip_chapter(

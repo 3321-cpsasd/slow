@@ -53,7 +53,7 @@
 | [ADR-0019](0019-learning-start-and-chapter-route-choices.md) | Accepted，MVP 已实现 | 系列启动兴趣选择、章级挑战与显式略过的路线/掌握分离 |
 | [ADR-0020](0020-audited-historical-rank-identity.md) | Accepted，已实现 | 历史学习证据的追加式段位身份决定、确定性画像重放与在线空结算防护 |
 | [ADR-0021](0021-series-local-knowledge-identity-resolution.md) | Accepted，第一版薄切片已实现 | 系列内按需知识候选、追加式身份裁决、跨书复用与能力维度分离 |
-| [ADR-0022](0022-capability-profile-and-cumulative-stages.md) | Accepted，章节综合能力规划、多节点能力子网、黄金任务与跨系列发布身份链路已实现 | 基于知识子网的稳定能力、四级累计阶段、三轴能力画像与复习证据入口 |
+| [ADR-0022](0022-capability-profile-and-cumulative-stages.md) | Accepted，章节综合能力规划、多节点能力子网、青铜至钻石正式任务与跨系列发布身份链路已实现 | 基于知识子网的稳定能力、四级累计阶段、三轴能力画像与复习证据入口 |
 
 ## Changelog
 
@@ -63,3 +63,4 @@
 - 2026-08-16：完成 ADR-0022 黄金标准应用纵向链路：冻结未见构造任务、原始提交、逐项量规评定与模型家族独立性，只有已达白银且无辅助正式通过才累计晋级黄金；Demo 和不合格评定失败关闭。
 - 2026-08-16：完成 ADR-0022 跨系列发布身份链路：经审核的概念、关系和能力子网可按精确语义跨系列复用；同一家族语义变化默认 unresolved，只有显式 supersedes 裁决才能形成稳定身份下的新 Revision。
 - 2026-08-16：完成能力驱动复习选择第一切片：按 Capability 去重，到期能力唤醒优先于近期错题补强，错题降为次级信号；多题型 Stage Criterion 任务规划仍待后续。
+- 2026-08-16：完成 ADR-0022 钻石正式迁移纵向链路：冻结陌生情境、知识重组与决策理由，独立评定且严格要求黄金前置；诊断迁移口试继续与正式钻石证据隔离。

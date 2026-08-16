@@ -4195,7 +4195,7 @@ class ArtifactSubmission(Base):
 
 
 class CapabilityApplicationTaskVersion(Base):
-    """Immutable, published standard-application task bound to one gold criterion."""
+    """Immutable published application or transfer task bound to one criterion."""
 
     __tablename__ = "capability_application_task_versions"
     __table_args__ = (
@@ -4224,6 +4224,9 @@ class CapabilityApplicationTaskVersion(Base):
     capability_stage_criterion_id: Mapped[str] = mapped_column(
         ForeignKey("capability_stage_criteria.id"), index=True
     )
+    task_kind: Mapped[str] = mapped_column(
+        String(32), default="standard_application", index=True
+    )
     version: Mapped[int] = mapped_column(Integer)
     prompt: Mapped[str] = mapped_column(Text)
     task_context_json: Mapped[str] = mapped_column(Text, default="{}")
@@ -4231,6 +4234,9 @@ class CapabilityApplicationTaskVersion(Base):
     rubric_json: Mapped[str] = mapped_column(Text)
     reference_answer_json: Mapped[str] = mapped_column(Text)
     novelty_basis_json: Mapped[str] = mapped_column(Text, default="{}")
+    unfamiliarity_basis_json: Mapped[str] = mapped_column(Text, default="{}")
+    recombination_requirements_json: Mapped[str] = mapped_column(Text, default="[]")
+    context_fingerprint: Mapped[str] = mapped_column(String(64), default="", index=True)
     author_deployment_id: Mapped[str] = mapped_column(String(160), default="")
     author_model_family_id: Mapped[str] = mapped_column(String(160), default="")
     author_model: Mapped[str] = mapped_column(String(160), default="")
@@ -4282,7 +4288,7 @@ class CapabilityApplicationSubmission(Base):
 
 
 class CapabilityApplicationEvaluation(Base):
-    """Append-only server evaluation fact; only qualified passes grant gold."""
+    """Append-only evaluation fact; only qualified passes satisfy a stage."""
 
     __tablename__ = "capability_application_evaluations"
     id: Mapped[str] = mapped_column(String, primary_key=True)

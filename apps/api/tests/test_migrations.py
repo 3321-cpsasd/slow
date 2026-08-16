@@ -13,7 +13,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0070_cross_series_identity_publication"
+HEAD_REVISION = "0071_formal_transfer_tasks"
 
 pytestmark = pytest.mark.migration
 
@@ -204,6 +204,34 @@ def test_cross_series_publication_indexes_fit_postgresql_limit() -> None:
     ]
     assert len(names) == len(set(names))
     assert max(map(len, names)) <= 63
+
+
+def test_0071_adds_formal_transfer_task_fields(tmp_path) -> None:
+    database = tmp_path / "0071-transfer-task.db"
+    run_alembic(database, "upgrade", "head")
+    with sqlite3.connect(database) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(capability_application_task_versions)"
+            )
+        }
+        indexes = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA index_list(capability_application_task_versions)"
+            )
+        }
+    assert {
+        "task_kind",
+        "unfamiliarity_basis_json",
+        "recombination_requirements_json",
+        "context_fingerprint",
+    }.issubset(columns)
+    assert {
+        "ix_cap_app_task_task_kind",
+        "ix_cap_app_task_context_fingerprint",
+    }.issubset(indexes)
 
 
 def run_alembic(database: Path, *arguments: str) -> None:

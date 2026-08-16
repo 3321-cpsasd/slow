@@ -217,9 +217,9 @@ def test_unmaterialized_m1_section_gets_deterministic_provisional_targets():
         db.get(AssessmentTarget, item.assessment_target_id)
         for item in diagnostic_bindings
     ]
-    assert len(targets) == 6
+    assert len(targets) == 7
     assert len(gate_bindings) == 2
-    assert len(diagnostic_bindings) == 4
+    assert len(diagnostic_bindings) == 5
     assert gate_bindings[0].required is True
     assert gate_bindings[1].required is False
     assert all(item.concept_revision_id for item in targets)
@@ -235,6 +235,7 @@ def test_unmaterialized_m1_section_gets_deterministic_provisional_targets():
         "boundary": "route_scoped_capability",
         "transfer": "route_scoped_capability",
         "application": "route_scoped_capability",
+        "transfer_task": "route_scoped_capability",
     }
     assert {
         item.verification_policy for item in diagnostic_bindings
@@ -243,6 +244,7 @@ def test_unmaterialized_m1_section_gets_deterministic_provisional_targets():
         "oral_boundary_v1",
         "oral_transfer_probe_v1",
         "standard_application_v1",
+        "transfer_task_v1",
     }
     revisions = [
         db.get(ConceptRevision, item.concept_revision_id)
@@ -307,9 +309,9 @@ def test_route_target_reuses_identity_inside_series_without_cross_route_guessing
             )
         )
     )
-    assert len(first_diagnostic_ids) == 4
+    assert len(first_diagnostic_ids) == 5
     assert second_diagnostic_ids == first_diagnostic_ids
-    assert db.scalar(select(func.count()).select_from(AssessmentTarget)) == 5
+    assert db.scalar(select(func.count()).select_from(AssessmentTarget)) == 6
 
 
 def test_diagnostic_oral_target_cannot_be_bound_to_choice_quiz():
@@ -396,6 +398,7 @@ def test_structured_candidate_builds_one_concept_with_separate_capability_target
         "boundary",
         "transfer",
         "application",
+        "transfer_task",
     }
     assert len({target.concept_revision_id for target in targets}) == 1
     assert db.scalar(select(func.count()).select_from(KnowledgeIdentityCandidate)) == 1
