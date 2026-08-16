@@ -665,6 +665,137 @@ def bind_assessment_target_to_capability_subnet(
     db.flush()
 
 
+def materialize_planned_capability_target(
+    db: Session,
+    *,
+    series_id: str,
+    statement: str,
+    dimension: str,
+    planned_capability: dict,
+) -> AssessmentTarget:
+    """Create a target from a server-frozen chapter capability reference."""
+
+    if not isinstance(planned_capability, dict):
+        raise AppError(
+            "综合能力目标缺少规划引用",
+            code="PLANNED_CAPABILITY_REFERENCE_INVALID",
+            status=409,
+        )
+    capability_revision_id = str(
+        planned_capability.get("capabilityRevisionId") or ""
+    )
+    criterion_id = str(planned_capability.get("stageCriterionId") or "")
+    anchor_concept_revision_id = str(
+        planned_capability.get("anchorConceptRevisionId") or ""
+    )
+    revision = db.get(CapabilityRevision, capability_revision_id)
+    criterion = db.get(CapabilityStageCriterion, criterion_id)
+    route = db.scalar(
+        select(CapabilityRouteBinding).where(
+            CapabilityRouteBinding.series_id == series_id,
+            CapabilityRouteBinding.capability_revision_id
+            == capability_revision_id,
+            CapabilityRouteBinding.status == "active",
+        )
+    )
+    anchor = db.scalar(
+        select(CapabilityConceptBinding).where(
+            CapabilityConceptBinding.capability_revision_id
+            == capability_revision_id,
+            CapabilityConceptBinding.concept_revision_id
+            == anchor_concept_revision_id,
+            CapabilityConceptBinding.role == "anchor",
+        )
+    )
+    if (
+        revision is None
+        or criterion is None
+        or criterion.capability_revision_id != capability_revision_id
+        or criterion.stage != "bronze"
+        or route is None
+        or anchor is None
+    ):
+        raise AppError(
+            "综合能力目标引用与冻结路线不一致",
+            code="PLANNED_CAPABILITY_REFERENCE_MISMATCH",
+            status=409,
+        )
+    validate_capability_subnet(
+        db, capability_revision_id=capability_revision_id
+    )
+    statement_hash = hashlib.sha256(
+        " ".join(statement.strip().lower().split()).encode()
+    ).hexdigest()
+    objective_id = _stable_id(
+        "learning_objective_planned_capability",
+        capability_revision_id,
+        criterion_id,
+        statement_hash,
+    )
+    if db.get(LearningObjective, objective_id) is None:
+        db.add(
+            LearningObjective(
+                id=objective_id,
+                namespace=f"planned_capability:{series_id}",
+                objective_key=(
+                    f"{capability_revision_id}:{criterion_id}:{statement_hash}"
+                ),
+                statement=statement,
+                cognitive_verb=(
+                    "recognize" if dimension == "recognition" else "demonstrate"
+                ),
+                outcome_type="capability",
+                provenance_mode="chapter_capability_plan",
+                verification_status="route_scoped",
+                status="active",
+            )
+        )
+        db.flush()
+    target_id = _stable_id(
+        "target_planned_capability",
+        capability_revision_id,
+        criterion_id,
+        statement_hash,
+    )
+    target = db.get(AssessmentTarget, target_id)
+    if target is None:
+        target = AssessmentTarget(
+            id=target_id,
+            concept_revision_id=anchor_concept_revision_id,
+            learning_objective_id=objective_id,
+            capability_revision_id=capability_revision_id,
+            capability_stage_criterion_id=criterion_id,
+            objective_key=(
+                f"planned-capability:{capability_revision_id}:{criterion_id}:"
+                f"{statement_hash}"
+            ),
+            objective_statement=statement,
+            dimension=dimension,
+            target_depth="standard",
+            identity_status="route_scoped_capability",
+            status="active",
+        )
+        db.add(target)
+        db.flush()
+    elif (
+        target.capability_revision_id != capability_revision_id
+        or target.capability_stage_criterion_id != criterion_id
+        or target.concept_revision_id != anchor_concept_revision_id
+    ):
+        raise AppError(
+            "综合能力考核目标身份发生冲突",
+            code="PLANNED_CAPABILITY_TARGET_CONFLICT",
+            status=409,
+        )
+    bind_assessment_target_to_capability_subnet(
+        db,
+        assessment_target_id=target.id,
+        capability_revision_id=capability_revision_id,
+        stage_criterion_id=criterion_id,
+    )
+    return target
+
+
 def ensure_ask_me_stage_targets(
     db: Session,
     *,

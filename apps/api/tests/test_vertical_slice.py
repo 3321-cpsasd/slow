@@ -13,7 +13,7 @@ import pytest
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, event, func, select
-from app.ai.contracts import AskMeDiscussionTurn, AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedChapter, GeneratedContent, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedQuiz, GeneratedSectionOutline, PlanBook, PlanChapter, PlanMilestone, PlanMilestoneCriterion, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
+from app.ai.contracts import AskMeDiscussionTurn, AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedCapabilityMember, GeneratedCapabilityRelation, GeneratedCapabilitySubnetCandidate, GeneratedChapter, GeneratedConceptCandidate, GeneratedContent, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedQuiz, GeneratedSectionOutline, PlanBook, PlanChapter, PlanMilestone, PlanMilestoneCriterion, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
 from app.application.service import (
     apply_source_repair_scope,
     source_blacklist_from_generation_traces,
@@ -181,7 +181,52 @@ class FakeAi:
             ],
         )
     async def chapter(self, request, memory):
-        return GeneratedChapter(sections=[GeneratedSectionOutline(title=f"第{i}节", question=f"问题{i}", objectives=[f"目标{i}"]) for i in range(1,4)])
+        sections = [
+            GeneratedSectionOutline(
+                title=f"第{i}节",
+                question=f"问题{i}",
+                objectives=[f"目标{i}"],
+                concept_candidate=GeneratedConceptCandidate(
+                    candidate_key=f"fixture-concept-{i}",
+                    label=f"测试知识点 {i}",
+                    definition=f"测试知识点 {i} 是纵向测试中的独立知识对象。",
+                    scope="验证对象、关系和学习闭环",
+                ),
+                objective_dimensions=["recognition"],
+            )
+            for i in range(1, 4)
+        ]
+        return GeneratedChapter(
+            sections=sections,
+            capability_subnets=[
+                GeneratedCapabilitySubnetCandidate(
+                    candidate_key="fixture-composite-capability",
+                    label="解释三个测试知识点之间的递进关系",
+                    operation="解释三个测试知识点并完成标准判断",
+                    boundary="限于纵向测试章节的三个知识点",
+                    members=[
+                        GeneratedCapabilityMember(section_position=1, role="anchor"),
+                        GeneratedCapabilityMember(section_position=2, role="required"),
+                        GeneratedCapabilityMember(section_position=3, role="required"),
+                    ],
+                    relations=[
+                        GeneratedCapabilityRelation(
+                            from_section_position=1,
+                            to_section_position=2,
+                            relation_type="prerequisite_for",
+                            statement="测试知识点一为知识点二提供前提。",
+                        ),
+                        GeneratedCapabilityRelation(
+                            from_section_position=2,
+                            to_section_position=3,
+                            relation_type="prerequisite_for",
+                            statement="测试知识点二为知识点三提供前提。",
+                        ),
+                    ],
+                    assessment_section_position=3,
+                )
+            ],
+        )
     async def lesson(self, request, memory, prior_questions=None):
         self.last_lesson_request = request
         generation = 1
@@ -189,7 +234,12 @@ class FakeAi:
             previous_prefix = prior_questions[0]["prompt"].split("套", 1)[0]
             generation = int(previous_prefix.removeprefix("第")) + 1
         roles = ["conclusion","mechanism","example","boundary","practice"]
-        objectives = request.get("objectives") or [request["question"]]
+        objectives = [
+            str(item.get("statement") or item.get("objective") or "")
+            if isinstance(item, dict)
+            else str(item)
+            for item in (request.get("objectives") or [request["question"]])
+        ]
         question_count = len(prior_questions) if prior_questions else 5
         return GeneratedLesson(
             confidence="high",

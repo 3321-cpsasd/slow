@@ -207,6 +207,12 @@ class ChapterPlanningService:
         self.db.commit()
         generated = await self.ai.chapter(request, memory)
         self._renew_lease(resource_key, owner_id)
+        if not generated.capability_subnets:
+            raise AppError(
+                "章节规划没有形成可冻结的稳定能力子网",
+                code="CHAPTER_CAPABILITY_PLAN_REQUIRED",
+                status=502,
+            )
         KnowledgeFactGraphService(self.db).validate_chapter_outline_identities(
             chapter.id,
             generated.sections,
@@ -222,6 +228,7 @@ class ChapterPlanningService:
             return self.chapter_view(chapter)
 
         run = self.progress.active_run(chapter_context.series.id)
+        sections: list[Section] = []
         for position, item in enumerate(generated.sections, 1):
             section = Section(
                 id=_uid("section"),
@@ -232,11 +239,23 @@ class ChapterPlanningService:
                 objectives_json=_dump(section_objectives_payload(item)),
             )
             self.db.add(section)
+            sections.append(section)
             self.progress.add_section(
                 run,
                 section,
                 status=first_section_status if position == 1 else "locked",
             )
+        self.db.flush()
+        from .capability_planning import freeze_chapter_capability_plans
+
+        freeze_chapter_capability_plans(
+            self.db,
+            series_id=chapter_context.series.id,
+            chapter_id=chapter.id,
+            sections=sections,
+            generated_chapter=generated,
+            published_allowlist=knowledge_identities,
+        )
 
         practice = ChapterPractice(
             id=_uid("practice"),

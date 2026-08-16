@@ -2,7 +2,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from app.ai.contracts import (
+    GeneratedCapabilityMember,
+    GeneratedCapabilityRelation,
+    GeneratedCapabilitySubnetCandidate,
     GeneratedChapter,
+    GeneratedConceptCandidate,
     GeneratedPlan,
     GeneratedSectionOutline,
     PlanBook,
@@ -97,9 +101,39 @@ class ContractThinSliceAi(FakeAi):
                     title=f"{request['title']}：第 {index} 节",
                     question=f"{request['objective']} 的递进问题 {index} 是什么？",
                     objectives=[f"{request['objective']}（目标 {index}）"],
+                    concept_candidate=GeneratedConceptCandidate(
+                        candidate_key=f"m2-thin-slice-{index}",
+                        label=f"M2 薄切片知识点 {index}",
+                        definition=(
+                            f"M2 薄切片知识点 {index} 是验证契约链路的独立对象。"
+                        ),
+                        scope="验证多目标契约与证据闭环",
+                    ),
+                    objective_dimensions=["recognition"],
                 )
                 for index in range(1, 3)
-            ]
+            ],
+            capability_subnets=[
+                GeneratedCapabilitySubnetCandidate(
+                    candidate_key="m2-thin-slice-capability",
+                    label="解释两个 M2 薄切片知识点之间的关系",
+                    operation="解释两个知识点并形成可验证判断",
+                    boundary="限于 M2 契约薄切片",
+                    members=[
+                        GeneratedCapabilityMember(section_position=1, role="anchor"),
+                        GeneratedCapabilityMember(section_position=2, role="required"),
+                    ],
+                    relations=[
+                        GeneratedCapabilityRelation(
+                            from_section_position=1,
+                            to_section_position=2,
+                            relation_type="prerequisite_for",
+                            statement="第一个薄切片知识点为第二个提供验证前提。",
+                        )
+                    ],
+                    assessment_section_position=2,
+                )
+            ],
         )
 
 
@@ -162,7 +196,8 @@ def test_m2_contract_thin_slice_engineering_chain_is_complete():
                 result = submitted.json()
                 assert result["passed"] is True
                 for task in result["workflowTasks"]:
-                    assert wait_for_task(client, task["taskId"])["status"] == "succeeded"
+                    completed_task = wait_for_task(client, task["taskId"])
+                    assert completed_task["status"] == "succeeded", completed_task
                 completed_ids.append(summary["id"])
 
         assert len(completed_ids) == len(set(completed_ids)) == 4

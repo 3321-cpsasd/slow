@@ -13,7 +13,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0068_capability_knowledge_subnets"
+HEAD_REVISION = "0069_chapter_capability_planning"
 
 pytestmark = pytest.mark.migration
 
@@ -105,6 +105,55 @@ def test_capability_subnet_index_names_fit_postgresql_identifier_limit() -> None
             "assessment_target_relation_bindings": (
                 "assessment_target_id",
                 "knowledge_relation_revision_id",
+            ),
+        }.items()
+        for column in columns
+    ]
+    assert len(names) == len(set(names))
+    assert max(map(len, names)) <= 63
+
+
+def test_chapter_capability_planning_indexes_fit_postgresql_limit() -> None:
+    migration = importlib.import_module(
+        "migrations.versions.0069_chapter_capability_planning"
+    )
+    names = [
+        f"ix_{migration._ALIASES[table]}_{column}"
+        for table, columns in {
+            "knowledge_relation_candidates": (
+                "series_id",
+                "chapter_id",
+                "candidate_key",
+                "from_concept_revision_id",
+                "to_concept_revision_id",
+                "relation_type",
+                "candidate_hash",
+                "status",
+            ),
+            "knowledge_relation_identity_decisions": (
+                "candidate_id",
+                "decision",
+                "resolved_relation_revision_id",
+                "rule_version",
+                "supersedes_id",
+                "created_at",
+            ),
+            "capability_planning_candidates": (
+                "series_id",
+                "chapter_id",
+                "candidate_key",
+                "assessment_section_id",
+                "natural_stage_ceiling",
+                "candidate_hash",
+                "status",
+            ),
+            "capability_planning_decisions": (
+                "candidate_id",
+                "decision",
+                "resolved_capability_revision_id",
+                "rule_version",
+                "supersedes_id",
+                "created_at",
             ),
         }.items()
         for column in columns

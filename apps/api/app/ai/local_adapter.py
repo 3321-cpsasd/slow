@@ -14,6 +14,9 @@ from .contracts import (
     ContentBlock,
     DistractorDiagnostic,
     GeneratedChapter,
+    GeneratedCapabilityMember,
+    GeneratedCapabilityRelation,
+    GeneratedCapabilitySubnetCandidate,
     GeneratedConceptCandidate,
     GeneratedContent,
     GeneratedLesson,
@@ -141,16 +144,27 @@ class LocalDemoAdapter:
             .get("topic", "")
         ) or request["title"]
         concept_label = str(topic).split("：", 1)[0].strip()
-        candidate = GeneratedConceptCandidate(
-            candidate_key=concept_label.lower().replace(" ", "-"),
-            label=concept_label,
-            definition=f"{concept_label} 是当前系列反复调用、解释并迁移的核心机制。",
-            scope=f"在当前学习目标中解释 {concept_label} 的运行机制、适用边界与迁移方式。",
-            boundaries=[
-                "不把正文中临时出现的支撑知识自动升级为并列考核目标",
-                "不把只因名称相同但定义或范围不同的概念自动合并",
-            ],
-        )
+        candidates = [
+            GeneratedConceptCandidate(
+                candidate_key=(
+                    f"{concept_label.lower().replace(' ', '-')}-part-{index}"
+                ),
+                label=f"{concept_label}的递进要点 {index}",
+                definition=(
+                    f"{concept_label}的递进要点 {index} 是本章第 {index} 个"
+                    "可独立教授和验证的知识对象。"
+                ),
+                scope=(
+                    f"在当前学习目标中解释 {concept_label} 的第 {index} 个"
+                    "递进问题及其与相邻要点的关系。"
+                ),
+                boundaries=[
+                    "不把正文中临时出现的支撑知识自动升级为并列考核目标",
+                    "不把只因名称相同但定义或范围不同的概念自动合并",
+                ],
+            )
+            for index in range(1, 4)
+        ]
         objective = str(request.get("objective") or "").strip()
         if objective.startswith("把 ") or objective.startswith("迁移"):
             dimension = "transfer"
@@ -170,11 +184,51 @@ class LocalDemoAdapter:
                     title=f"{request['title']}：问题 {index}",
                     question=f"本节如何解决递进问题 {index}？",
                     objectives=[f"{request['objective']}（目标 {index}）"],
-                    concept_candidate=candidate,
+                    concept_candidate=candidates[index - 1],
                     objective_dimensions=[dimension],
                 )
                 for index in range(1, 4)
-            ]
+            ],
+            capability_subnets=[
+                GeneratedCapabilitySubnetCandidate(
+                    candidate_key=(
+                        f"{concept_label.lower().replace(' ', '-')}-chapter-capability"
+                    ),
+                    label=f"解释并运用{concept_label}各递进要点之间的关系",
+                    operation=f"解释{concept_label}各递进要点并在标准情境中运用",
+                    boundary=f"限于本章确认的{concept_label}知识范围",
+                    members=[
+                        GeneratedCapabilityMember(
+                            section_position=1,
+                            role="anchor",
+                        ),
+                        GeneratedCapabilityMember(
+                            section_position=2,
+                            role="required",
+                        ),
+                        GeneratedCapabilityMember(
+                            section_position=3,
+                            role="required",
+                        ),
+                    ],
+                    relations=[
+                        GeneratedCapabilityRelation(
+                            from_section_position=1,
+                            to_section_position=2,
+                            relation_type="prerequisite_for",
+                            statement="第一个递进要点为第二个要点提供理解前提。",
+                        ),
+                        GeneratedCapabilityRelation(
+                            from_section_position=2,
+                            to_section_position=3,
+                            relation_type="prerequisite_for",
+                            statement="第二个递进要点为第三个要点提供理解前提。",
+                        ),
+                    ],
+                    assessment_section_position=3,
+                    assessment_objective_position=1,
+                )
+            ],
         )
 
     async def teaching_blueprint(self, request, memory):

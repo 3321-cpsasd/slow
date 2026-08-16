@@ -1054,6 +1054,136 @@ class KnowledgeIdentityDecision(Base):
     )
 
 
+class KnowledgeRelationCandidate(Base):
+    """Chapter-planning proposal for one exact relation meaning."""
+
+    __tablename__ = "knowledge_relation_candidates"
+    __table_args__ = (
+        UniqueConstraint(
+            "chapter_id",
+            "candidate_hash",
+            name="uq_knowledge_relation_candidate_chapter_hash",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    series_id: Mapped[str] = mapped_column(ForeignKey("series.id"), index=True)
+    chapter_id: Mapped[str] = mapped_column(ForeignKey("chapters.id"), index=True)
+    candidate_key: Mapped[str] = mapped_column(String(160), index=True)
+    from_concept_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("concept_revisions.id"), index=True
+    )
+    to_concept_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("concept_revisions.id"), index=True
+    )
+    relation_type: Mapped[str] = mapped_column(String(40), index=True)
+    statement: Mapped[str] = mapped_column(Text)
+    scope_json: Mapped[str] = mapped_column(Text, default="{}")
+    candidate_hash: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="proposed", index=True)
+    provenance_mode: Mapped[str] = mapped_column(
+        String(40), default="chapter_capability_plan"
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class KnowledgeRelationIdentityDecision(Base):
+    """Append-only resolution of a relation candidate to an immutable revision."""
+
+    __tablename__ = "knowledge_relation_identity_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "decision_hash", name="uq_knowledge_relation_decision_hash"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_relation_candidates.id"), index=True
+    )
+    decision: Mapped[str] = mapped_column(String(24), index=True)
+    resolved_relation_revision_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_relation_revisions.id"), nullable=True, index=True
+    )
+    compared_revision_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    basis_json: Mapped[str] = mapped_column(Text, default="{}")
+    actor_kind: Mapped[str] = mapped_column(String(32), default="system")
+    actor_id: Mapped[str] = mapped_column(String(160), default="")
+    rule_version: Mapped[str] = mapped_column(String(48), index=True)
+    model_version: Mapped[str] = mapped_column(String(80), default="")
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_relation_identity_decisions.id"),
+        nullable=True,
+        index=True,
+    )
+    decision_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
+class CapabilityPlanningCandidate(Base):
+    """Auditable chapter-level proposal for a stable capability subnet."""
+
+    __tablename__ = "capability_planning_candidates"
+    __table_args__ = (
+        UniqueConstraint(
+            "chapter_id",
+            "candidate_hash",
+            name="uq_capability_planning_candidate_chapter_hash",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    series_id: Mapped[str] = mapped_column(ForeignKey("series.id"), index=True)
+    chapter_id: Mapped[str] = mapped_column(ForeignKey("chapters.id"), index=True)
+    candidate_key: Mapped[str] = mapped_column(String(160), index=True)
+    label: Mapped[str] = mapped_column(String(300))
+    operation: Mapped[str] = mapped_column(Text)
+    boundary_json: Mapped[str] = mapped_column(Text, default="{}")
+    members_json: Mapped[str] = mapped_column(Text)
+    relations_json: Mapped[str] = mapped_column(Text, default="[]")
+    assessment_section_id: Mapped[str] = mapped_column(
+        ForeignKey("sections.id"), index=True
+    )
+    assessment_objective_position: Mapped[int] = mapped_column(Integer)
+    natural_stage_ceiling: Mapped[str] = mapped_column(String(24), index=True)
+    candidate_hash: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="proposed", index=True)
+    provenance_mode: Mapped[str] = mapped_column(
+        String(40), default="chapter_outline"
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CapabilityPlanningDecision(Base):
+    """Append-only resolution of a plan candidate into a capability revision."""
+
+    __tablename__ = "capability_planning_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "decision_hash", name="uq_capability_planning_decision_hash"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_planning_candidates.id"), index=True
+    )
+    decision: Mapped[str] = mapped_column(String(32), index=True)
+    resolved_capability_revision_id: Mapped[str | None] = mapped_column(
+        ForeignKey("capability_revisions.id"), nullable=True, index=True
+    )
+    basis_json: Mapped[str] = mapped_column(Text, default="{}")
+    actor_kind: Mapped[str] = mapped_column(String(32), default="system")
+    actor_id: Mapped[str] = mapped_column(String(160), default="")
+    rule_version: Mapped[str] = mapped_column(String(48), index=True)
+    model_version: Mapped[str] = mapped_column(String(80), default="")
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("capability_planning_decisions.id"), nullable=True, index=True
+    )
+    decision_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
 class LearningObjective(Base):
     """Immutable observable outcome used by contracts and assessments."""
 

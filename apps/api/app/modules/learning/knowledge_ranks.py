@@ -28,6 +28,7 @@ KNOWLEDGE_RANK_POLICY_VERSION = "knowledge_rank_policy_v1"
 RANK_SETTLEABLE_IDENTITY_STATUSES = (
     "published_knowledge_graph",
     "route_scoped_knowledge",
+    "route_scoped_capability",
 )
 RANK_SETTLEABLE_REVISION_STATUSES = ("reviewed", "route_scoped")
 

@@ -267,23 +267,15 @@ def _record_decision(
     return row
 
 
-def materialize_candidate_target(
+def resolve_candidate_revision(
     db: Session,
     *,
     series_id: str,
     section_id: str,
-    statement: str,
-    dimension: str,
     candidate: dict,
-) -> AssessmentTarget:
-    """Resolve one candidate conservatively and materialize a separate target."""
+) -> ConceptRevision:
+    """Resolve a chapter-planning concept candidate without inventing a target."""
 
-    if dimension not in CAPABILITY_DIMENSIONS:
-        raise AppError(
-            "能力目标维度无效，请重新规划本章",
-            code="KNOWLEDGE_CAPABILITY_DIMENSION_INVALID",
-            status=409,
-        )
     normalized = normalize_candidate(candidate)
     semantic_hash = candidate_semantic_hash(candidate)
     occurrence = _ensure_candidate_occurrence(
@@ -293,7 +285,6 @@ def materialize_candidate_target(
         candidate=normalized,
         semantic_hash=semantic_hash,
     )
-
     explicit_revision_id = normalized["reuseConceptRevisionId"]
     deterministic_revision_id = _stable_id(
         "concept_revision_candidate", series_id, semantic_hash, 1
@@ -365,6 +356,7 @@ def materialize_candidate_target(
                     origin="on_demand_candidate",
                 )
             )
+            db.flush()
             db.add(
                 ConceptRevision(
                     id=revision_id,
@@ -413,6 +405,33 @@ def materialize_candidate_target(
             compared_revision_ids=family_revision_ids,
             basis=basis,
         )
+    return revision
+
+
+def materialize_candidate_target(
+    db: Session,
+    *,
+    series_id: str,
+    section_id: str,
+    statement: str,
+    dimension: str,
+    candidate: dict,
+) -> AssessmentTarget:
+    """Resolve one candidate conservatively and materialize a separate target."""
+
+    if dimension not in CAPABILITY_DIMENSIONS:
+        raise AppError(
+            "能力目标维度无效，请重新规划本章",
+            code="KNOWLEDGE_CAPABILITY_DIMENSION_INVALID",
+            status=409,
+        )
+    revision = resolve_candidate_revision(
+        db,
+        series_id=series_id,
+        section_id=section_id,
+        candidate=candidate,
+    )
+    revision_id = revision.id
 
     statement_hash = hashlib.sha256(_normalized(statement).encode()).hexdigest()
     objective_id = _stable_id(

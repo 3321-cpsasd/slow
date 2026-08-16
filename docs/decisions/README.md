@@ -53,7 +53,7 @@
 | [ADR-0019](0019-learning-start-and-chapter-route-choices.md) | Accepted，MVP 已实现 | 系列启动兴趣选择、章级挑战与显式略过的路线/掌握分离 |
 | [ADR-0020](0020-audited-historical-rank-identity.md) | Accepted，已实现 | 历史学习证据的追加式段位身份决定、确定性画像重放与在线空结算防护 |
 | [ADR-0021](0021-series-local-knowledge-identity-resolution.md) | Accepted，第一版薄切片已实现 | 系列内按需知识候选、追加式身份裁决、跨书复用与能力维度分离 |
-| [ADR-0022](0022-capability-profile-and-cumulative-stages.md) | Accepted，知识网络与多节点能力子网底座、黄金标准应用纵向链路已实现 | 基于知识子网的稳定能力、四级累计阶段、三轴能力画像与复习证据入口 |
+| [ADR-0022](0022-capability-profile-and-cumulative-stages.md) | Accepted，章节综合能力规划、知识网络与多节点能力子网底座、黄金标准应用纵向链路已实现 | 基于知识子网的稳定能力、四级累计阶段、三轴能力画像与复习证据入口 |
 
 ## Changelog
 

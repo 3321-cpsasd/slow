@@ -7,6 +7,8 @@ from sqlalchemy.orm import Session
 from ...core.errors import AppError
 from ...infrastructure.tables import (
     AssessmentTarget,
+    AssessmentTargetConceptBinding,
+    AssessmentTargetRelationBinding,
     Book,
     Chapter,
     Concept,
@@ -30,17 +32,20 @@ from .capabilities import (
     bind_assessment_target_to_capability_subnet,
     ensure_ask_me_stage_targets,
     ensure_route_capability,
+    materialize_planned_capability_target,
 )
 
 
 M1_NAMESPACE = "m1_provisional"
 ROUTE_KNOWLEDGE_NAMESPACE = "route_knowledge"
 ROUTE_KNOWLEDGE_IDENTITY_STATUS = "route_scoped_knowledge"
+ROUTE_CAPABILITY_IDENTITY_STATUS = "route_scoped_capability"
 RANK_SETTLEABLE_IDENTITY_STATUSES = {
     "published_knowledge_graph",
     ROUTE_KNOWLEDGE_IDENTITY_STATUS,
+    ROUTE_CAPABILITY_IDENTITY_STATUS,
 }
-M1_CONTRACT_SCHEMA_VERSION = "learning_contract_v2_capability_stages"
+M1_CONTRACT_SCHEMA_VERSION = "learning_contract_v3_capability_subnets"
 
 
 def _dump(value) -> str:
@@ -69,8 +74,10 @@ def _objective_key(statement: str) -> str:
 
 def _section_objectives(
     section: Section,
-) -> list[tuple[str, bool, str | None, dict | None]]:
-    parsed: list[tuple[str, bool | None, str | None, dict | None]] = []
+) -> list[tuple[str, bool, str | None, dict | None, dict | None]]:
+    parsed: list[
+        tuple[str, bool | None, str | None, dict | None, dict | None]
+    ] = []
     for item in _load(section.objectives_json, []):
         if isinstance(item, dict):
             statement = str(item.get("statement") or item.get("objective") or "").strip()
@@ -79,11 +86,15 @@ def _section_objectives(
             candidate = item.get("conceptCandidate")
             if not isinstance(candidate, dict):
                 candidate = None
+            planned_capability = item.get("plannedCapability")
+            if not isinstance(planned_capability, dict):
+                planned_capability = None
         else:
             statement = str(item).strip()
             required = None
             dimension = None
             candidate = None
+            planned_capability = None
         if statement:
             parsed.append(
                 (
@@ -91,21 +102,38 @@ def _section_objectives(
                     bool(required) if required is not None else None,
                     dimension,
                     candidate,
+                    planned_capability,
                 )
             )
     if not parsed:
-        parsed = [(section.question.strip(), True, None, None)]
+        parsed = [(section.question.strip(), True, None, None, None)]
 
-    result: list[tuple[str, bool, str | None, dict | None]] = []
+    result: list[
+        tuple[str, bool, str | None, dict | None, dict | None]
+    ] = []
     positions: dict[str, int] = {}
-    for position, (statement, explicit_required, dimension, candidate) in enumerate(parsed):
+    for position, (
+        statement,
+        explicit_required,
+        dimension,
+        candidate,
+        planned_capability,
+    ) in enumerate(parsed):
         key = _objective_key(statement)
         required = explicit_required if explicit_required is not None else position == 0
         if key in positions:
-            old_statement, old_required, old_dimension, old_candidate = result[
-                positions[key]
-            ]
-            if old_dimension != dimension or old_candidate != candidate:
+            (
+                old_statement,
+                old_required,
+                old_dimension,
+                old_candidate,
+                old_planned_capability,
+            ) = result[positions[key]]
+            if (
+                old_dimension != dimension
+                or old_candidate != candidate
+                or old_planned_capability != planned_capability
+            ):
                 raise AppError(
                     "同一能力目标声明了冲突的知识身份或维度",
                     code="SECTION_OBJECTIVE_IDENTITY_CONFLICT",
@@ -116,10 +144,13 @@ def _section_objectives(
                 old_required or required,
                 old_dimension,
                 old_candidate,
+                old_planned_capability,
             )
         else:
             positions[key] = len(result)
-            result.append((statement, required, dimension, candidate))
+            result.append(
+                (statement, required, dimension, candidate, planned_capability)
+            )
     return result
 
 
@@ -342,24 +373,52 @@ def _ensure_section_targets(
     )
     if published_identities:
         series_id = _series_id_for_section(db, section)
+        raw_objectives = _load(section.objectives_json, [])
+        planned_by_pair = {
+            (
+                str(item.get("baselineConceptKey") or ""),
+                str(item.get("baselineObjectiveKey") or ""),
+            ): item.get("plannedCapability")
+            for item in raw_objectives
+            if isinstance(item, dict)
+            and isinstance(item.get("plannedCapability"), dict)
+        }
         expected_pairs = {
             (item.concept_revision_id, item.learning_objective_id)
             for item in published_identities
         }
         if rows:
-            actual_pairs = {
-                (target.concept_revision_id, target.learning_objective_id)
-                for _, target in rows
-            }
-            if actual_pairs != expected_pairs or any(
-                target.identity_status != "published_knowledge_graph"
-                for _, target in rows
-            ):
+            if len(rows) != len(published_identities):
                 raise AppError(
                     "小节已有考核目标与显式发布知识身份不一致，不能静默改写",
                     code="SECTION_TARGET_STABLE_IDENTITY_CONFLICT",
                     status=409,
                 )
+            for (_binding, target), identity in zip(
+                sorted(rows, key=lambda pair: pair[0].position),
+                published_identities,
+                strict=True,
+            ):
+                planned = planned_by_pair.get(
+                    (identity.concept_key, identity.objective_key)
+                )
+                valid = (
+                    target.capability_revision_id
+                    == str(planned.get("capabilityRevisionId") or "")
+                    if planned
+                    else (
+                        target.concept_revision_id,
+                        target.learning_objective_id,
+                    )
+                    in expected_pairs
+                    and target.identity_status == "published_knowledge_graph"
+                )
+                if not valid:
+                    raise AppError(
+                        "小节已有考核目标与显式发布知识身份不一致，不能静默改写",
+                        code="SECTION_TARGET_STABLE_IDENTITY_CONFLICT",
+                        status=409,
+                    )
             return sorted(rows, key=lambda pair: pair[0].position)
         stable_rows = []
         for position, identity in enumerate(published_identities, 1):
@@ -371,53 +430,65 @@ def _ensure_section_targets(
                 if "code" in identity.verification_policy
                 else "recognition"
             )
-            target = db.scalar(
-                select(AssessmentTarget).where(
-                    AssessmentTarget.objective_key == semantic_key,
-                    AssessmentTarget.dimension == dimension,
-                    AssessmentTarget.target_depth == "standard",
-                )
+            planned = planned_by_pair.get(
+                (identity.concept_key, identity.objective_key)
             )
-            capability_revision, bronze_criterion = ensure_route_capability(
-                db,
-                series_id=series_id,
-                concept_revision_id=identity.concept_revision_id,
-            )
-            if target is None:
-                target = AssessmentTarget(
-                    id=_stable_id(
-                        "target_knowledge_graph",
-                        identity.concept_revision_id,
-                        identity.learning_objective_id,
-                        dimension,
-                        "standard",
-                    ),
-                    concept_revision_id=identity.concept_revision_id,
-                    learning_objective_id=identity.learning_objective_id,
-                    capability_revision_id=capability_revision.id,
-                    capability_stage_criterion_id=bronze_criterion.id,
-                    objective_key=semantic_key,
-                    objective_statement=identity.objective_statement,
+            if planned:
+                target = materialize_planned_capability_target(
+                    db,
+                    series_id=series_id,
+                    statement=identity.objective_statement,
                     dimension=dimension,
-                    target_depth="standard",
-                    identity_status="published_knowledge_graph",
-                    status="active",
+                    planned_capability=planned,
                 )
-                db.add(target)
-                db.flush()
-            elif (
-                target.capability_revision_id is None
-                and target.capability_stage_criterion_id is None
-            ):
-                target.capability_revision_id = capability_revision.id
-                target.capability_stage_criterion_id = bronze_criterion.id
-                db.flush()
-            bind_assessment_target_to_capability_subnet(
-                db,
-                assessment_target_id=target.id,
-                capability_revision_id=capability_revision.id,
-                stage_criterion_id=bronze_criterion.id,
-            )
+            else:
+                target = db.scalar(
+                    select(AssessmentTarget).where(
+                        AssessmentTarget.objective_key == semantic_key,
+                        AssessmentTarget.dimension == dimension,
+                        AssessmentTarget.target_depth == "standard",
+                    )
+                )
+                capability_revision, bronze_criterion = ensure_route_capability(
+                    db,
+                    series_id=series_id,
+                    concept_revision_id=identity.concept_revision_id,
+                )
+                if target is None:
+                    target = AssessmentTarget(
+                        id=_stable_id(
+                            "target_knowledge_graph",
+                            identity.concept_revision_id,
+                            identity.learning_objective_id,
+                            dimension,
+                            "standard",
+                        ),
+                        concept_revision_id=identity.concept_revision_id,
+                        learning_objective_id=identity.learning_objective_id,
+                        capability_revision_id=capability_revision.id,
+                        capability_stage_criterion_id=bronze_criterion.id,
+                        objective_key=semantic_key,
+                        objective_statement=identity.objective_statement,
+                        dimension=dimension,
+                        target_depth="standard",
+                        identity_status="published_knowledge_graph",
+                        status="active",
+                    )
+                    db.add(target)
+                    db.flush()
+                elif (
+                    target.capability_revision_id is None
+                    and target.capability_stage_criterion_id is None
+                ):
+                    target.capability_revision_id = capability_revision.id
+                    target.capability_stage_criterion_id = bronze_criterion.id
+                    db.flush()
+                bind_assessment_target_to_capability_subnet(
+                    db,
+                    assessment_target_id=target.id,
+                    capability_revision_id=capability_revision.id,
+                    stage_criterion_id=bronze_criterion.id,
+                )
             binding = SectionAssessmentTarget(
                 id=_stable_id("section_target_knowledge_graph", section.id, target.id),
                 section_id=section.id,
@@ -435,13 +506,28 @@ def _ensure_section_targets(
     # expand a partially materialized M1 set during migration.
     objectives = [] if rows else _section_objectives(section)
     series_id = _series_id_for_section(db, section) if objectives else None
-    for position, (statement, required, dimension, candidate) in enumerate(
+    for position, (
+        statement,
+        required,
+        dimension,
+        candidate,
+        planned_capability,
+    ) in enumerate(
         objectives, 1
     ):
         key = _objective_key(statement)
         pair = by_key.get(key)
         if pair is None:
-            if candidate is not None:
+            if planned_capability is not None:
+                target = materialize_planned_capability_target(
+                    db,
+                    series_id=series_id,
+                    statement=statement,
+                    dimension=dimension or "recognition",
+                    planned_capability=planned_capability,
+                )
+                binding_prefix = "section_target_planned_capability"
+            elif candidate is not None:
                 from ..knowledge.identity import materialize_candidate_target
 
                 target = materialize_candidate_target(
@@ -554,9 +640,35 @@ def ensure_learning_contract(
         "published_knowledge_graph"
         if identity_statuses == {"published_knowledge_graph"}
         else "route_scoped_knowledge"
-        if identity_statuses == {ROUTE_KNOWLEDGE_IDENTITY_STATUS}
+        if identity_statuses
+        and identity_statuses.issubset(
+            {
+                ROUTE_KNOWLEDGE_IDENTITY_STATUS,
+                ROUTE_CAPABILITY_IDENTITY_STATUS,
+            }
+        )
         else provenance_mode
     )
+    target_concept_scope = {
+        target.id: db.scalars(
+            select(AssessmentTargetConceptBinding)
+            .where(
+                AssessmentTargetConceptBinding.assessment_target_id == target.id
+            )
+            .order_by(AssessmentTargetConceptBinding.position)
+        ).all()
+        for _, target in target_rows
+    }
+    target_relation_scope = {
+        target.id: db.scalars(
+            select(AssessmentTargetRelationBinding)
+            .where(
+                AssessmentTargetRelationBinding.assessment_target_id == target.id
+            )
+            .order_by(AssessmentTargetRelationBinding.position)
+        ).all()
+        for _, target in target_rows
+    }
     payload = {
         "schemaVersion": M1_CONTRACT_SCHEMA_VERSION,
         "sectionId": section.id,
@@ -567,6 +679,15 @@ def ensure_learning_contract(
             {
                 "assessmentTargetId": target.id,
                 "conceptRevisionId": target.concept_revision_id,
+                "conceptRevisionIds": [
+                    item.concept_revision_id
+                    for item in target_concept_scope[target.id]
+                ],
+                "requiredRelationRevisionIds": [
+                    item.knowledge_relation_revision_id
+                    for item in target_relation_scope[target.id]
+                    if item.required
+                ],
                 "learningObjectiveId": target.learning_objective_id,
                 "position": binding.position,
                 "required": binding.required,
@@ -625,7 +746,9 @@ def ensure_learning_contract(
                 "targetDepth": delivery_depth,
                 "contextPolicyVersion": "lesson_content_context_v1",
                 "conceptRevisionIds": [
-                    target.concept_revision_id for _, target in target_rows
+                    concept.concept_revision_id
+                    for _, target in target_rows
+                    for concept in target_concept_scope[target.id]
                 ],
                 "learningObjectiveIds": [
                     target.learning_objective_id for _, target in target_rows
@@ -642,20 +765,23 @@ def ensure_learning_contract(
     seen_concepts: set[str] = set()
     seen_objectives: set[str] = set()
     for binding, target in target_rows:
-        if target.concept_revision_id not in seen_concepts:
-            seen_concepts.add(target.concept_revision_id)
-            db.add(
-                LearningContractConcept(
-                    id=_stable_id(
-                        "contract_concept_m1", contract.id, target.concept_revision_id
-                    ),
-                    contract_version_id=contract.id,
-                    concept_revision_id=target.concept_revision_id,
-                    position=len(seen_concepts),
-                    role="primary",
-                    required=binding.required,
+        for concept_binding in target_concept_scope[target.id]:
+            if concept_binding.concept_revision_id not in seen_concepts:
+                seen_concepts.add(concept_binding.concept_revision_id)
+                db.add(
+                    LearningContractConcept(
+                        id=_stable_id(
+                            "contract_concept_m1",
+                            contract.id,
+                            concept_binding.concept_revision_id,
+                        ),
+                        contract_version_id=contract.id,
+                        concept_revision_id=concept_binding.concept_revision_id,
+                        position=len(seen_concepts),
+                        role=concept_binding.role,
+                        required=binding.required and concept_binding.required,
+                    )
                 )
-            )
         if target.learning_objective_id not in seen_objectives:
             seen_objectives.add(target.learning_objective_id)
             db.add(

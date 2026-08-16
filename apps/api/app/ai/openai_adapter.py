@@ -237,6 +237,8 @@ def _apply_chapter_outline_review(
             objectives=objectives,
             baseline_concept_key=original.baseline_concept_key,
             baseline_objective_key=original.baseline_objective_key,
+            concept_candidate=original.concept_candidate,
+            objective_dimensions=original.objective_dimensions,
         ))
     fingerprints = [
         (
@@ -250,7 +252,10 @@ def _apply_chapter_outline_review(
     ]
     if len(fingerprints) != len(set(fingerprints)):
         raise ValueError("outline review left duplicate question and objective scopes")
-    return GeneratedChapter(sections=sections)
+    return GeneratedChapter(
+        sections=sections,
+        capability_subnets=chapter.capability_subnets,
+    )
 
 
 def _lesson_body_author_payload(spec: dict) -> dict:
@@ -1222,7 +1227,11 @@ class OpenAiAdapter:
         self._begin_structured_operation()
         return await self._parse(GeneratedChapter, """把一个作为“相关知识点聚合”的已确认章节拆成递进小节。典型目标是 3-5 节；简单或已有较高掌握度的章节可以 2 节，复杂或薄弱关联较多的章节可以超过 5 节，但必须处于 2-12 节技术范围内。数量只是工作量信号，不得为了满足范围机械拆分，也不得自行新增章或修改章目标。每节必须有一个核心知识点和一个主要验证问题，典型投入 15-20 分钟；这不意味着把知识点当成孤立节点。规划时必须保留它与前置、机制依赖、对比、边界、应用和迁移知识的必要关系，并依据 learningState 中的合格证据决定哪些关联只需连接、哪些薄弱关联需要在正文中补强。先为整章分配互斥的知识增量，再写各节：逐对比较相邻小节的定义、机制、主要例子和验证目标；如果两节将用同一套核心解释或考同一件事，必须合并其共同内容，并把后一节收窄到新的机制、边界或迁移问题。前一节内容在后一节只能作为简短前提，不能再次成为主要讲解和考核目标。知识完整性优先，不得为了凑时长机械拆碎，也不得让多个并列核心目标挤进同一节。定义、机制、例子、边界、练习、小结和自测通常是节内正文内容块，不得仅因它们是讲授阶段就生成新的并列小节；也不得在小节下创造新的导航或解锁层级。generationContext.mission、learner、curriculum 和 policy.depthPolicy 是必须遵守的服务端上下文：小节序列要服务当前 Mission，起点和例子方向要适合学习者，并与整本书的相邻章节递进，避免重复已有合格证据。
 
-知识身份规则：模型只提出候选，不能决定按名称合并。每条 objective 必须在 objective_dimensions 中声明 recognition、mechanism、application、boundary 或 transfer 之一，二者位置一一对应。若 chapter.knowledgeIdentityAllowlist 非空，继续使用已发布身份：每个小节必须分别在 baseline_concept_key 和 baseline_objective_key 中逐字引用允许清单内的一组键，concept_candidate 返回空；不得发明、翻译或按标题猜键。若发布清单为空，则 baseline 两字段返回空字符串，并为每节输出 concept_candidate：candidate_key 是跨书稳定的语义族键，label 是概念名称，definition、scope、boundaries 共同界定本节真正教授的知识。正文中的例子、材料和临时脚手架不能成为候选。只有在 chapter.knowledgeIdentityCandidateAllowlist 中存在语义完全兼容的版本时，才可逐字填写 reuse_concept_revision_id；拿不准时必须留空，由服务端保守裁决。同名不等于同一概念，不得通过改写定义规避边界。整个小节序列仍须覆盖章节目标，但 Assessment Target 是可验证能力目标，不能与 Concept 混为一物。输出每个小节的核心知识点标题、主要问题和可验证目标，不生成正文，不改变 Mission 或章目标。中文输出。""", {"chapter": request, "relevant_learning_memory": memory}, 5000)
+知识身份规则：模型只提出候选，不能决定按名称合并。每条 objective 必须在 objective_dimensions 中声明 recognition、mechanism、application、boundary 或 transfer 之一，二者位置一一对应。若 chapter.knowledgeIdentityAllowlist 非空，继续使用已发布身份：每个小节必须分别在 baseline_concept_key 和 baseline_objective_key 中逐字引用允许清单内的一组键，concept_candidate 返回空；不得发明、翻译或按标题猜键。若发布清单为空，则 baseline 两字段返回空字符串，并为每节输出 concept_candidate：candidate_key 是跨书稳定的语义族键，label 是概念名称，definition、scope、boundaries 共同界定本节真正教授的知识。正文中的例子、材料和临时脚手架不能成为候选。只有在 chapter.knowledgeIdentityCandidateAllowlist 中存在语义完全兼容的版本时，才可逐字填写 reuse_concept_revision_id；拿不准时必须留空，由服务端保守裁决。同名不等于同一概念，不得通过改写定义规避边界。
+
+能力子网规则：在 capability_subnets 中提出本章真正形成的稳定综合能力，不要把每个知识点机械包装成一项能力。member 通过 section_position 精确引用本次输出的小节知识身份；每项能力必须且只能有一个 anchor，缺少即无法证明能力的节点标为 required，只用于教学连接且不得进入考核的节点标为 supporting 且 required=false。relations 必须逐条说明能力真正要求学习者理解或操作的关系；多个必需节点必须由 required 关系连接，不能只把若干名词拼在一起。assessment_section_position 和 assessment_objective_position 必须指向实际存在、负责综合验证的目标；同一目标不能结算多项能力。声明白银所需关系时 minimum_stage 至少为 silver；没有真实标准应用机会时 natural_stage_ceiling 不得高于 silver。模型只提出候选，服务端负责身份裁决、连通性校验和冻结，不能把相邻节点或正文支撑知识自动纳入能力。
+
+整个小节序列仍须覆盖章节目标，但 Assessment Target 是可验证能力目标，不能与 Concept 混为一物。输出每个小节的核心知识点标题、主要问题、可验证目标和章级能力子网候选，不生成正文，不改变 Mission 或章目标。中文输出。""", {"chapter": request, "relevant_learning_memory": memory}, 6500)
 
     async def review_chapter_outline(self, payload: dict):
         self._begin_structured_operation()

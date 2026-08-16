@@ -399,6 +399,9 @@ ADR-0021 的系列内知识候选、追加式身份裁决、跨书 Concept Revis
 - 新增 `CapabilitySubnet`：每个新 `CapabilityRevision` 必须冻结一个确定 Knowledge Network Revision、唯一锚点、必需/支撑节点及版本化关系要求；多必需节点必须由必需关系连通，缺节点、越界关系、删除关系或哈希漂移均失败关闭；
 - 新增多节点、多关系 Assessment Target 范围绑定；阶段目标只绑定 `anchor` / `required` 节点，`supporting` 节点不能静默成为考核目标，关系按 `minimum_stage` 进入对应白银、黄金或钻石目标；
 - route-scoped 单概念能力也统一经过知识网络和能力子网创建，只是合法地形成单节点最小子网，不再存在绕过子网的正式新建路径；
+- 章节规划协议新增章级 `capability_subnets` 候选：通过小节位置引用精确知识身份，冻结唯一验证小节、节点角色、必需关系、能力操作、边界和自然上限；规划器只提出候选，服务端在章节发布事务内解析知识身份并创建正式子网；
+- 新增追加式 `CapabilityPlanningCandidate` / `CapabilityPlanningDecision` 和 `KnowledgeRelationCandidate` / `KnowledgeRelationIdentityDecision`；同一系列内相同能力键或关系端点族出现不同语义时进入 `unresolved` 并使章节规划失败，不能静默创建另一项能力；
+- 规划指定的 Assessment Target 直接引用已冻结 Capability Revision 和青铜 Stage Criterion，Learning Contract 同时冻结该目标的全部必需 Concept Revision 与关系范围，不再根据目标句子临时猜测知识组合；
 - 新增 `CapabilityRouteBinding`；能力自然上限可达黄金，但路线在只存在选择题时仅承诺青铜，冻结两项正式口试目标后提升到白银，只有发布真实标准应用任务后才提升到黄金；投影器同时受能力自然上限和路线正式上限约束；
 - 新 Assessment Target 显式绑定 Capability Revision 和青铜 Stage Criterion；
 - 正式证据新增独立的 `capability` 资格事件；Ask Me 机制解释和边界辨析分别绑定两个独立白银标准，只有两者都取得强证据且青铜已满足时才能升白银；
@@ -414,7 +417,6 @@ ADR-0021 的系列内知识候选、追加式身份裁决、跨书 Concept Revis
 
 仍未完成的范围：
 
-- 章节规划协议尚未自动提出跨小节的综合 Capability 子网候选；当前底层已经能冻结和验证多节点能力，但普通章节规划仍默认创建单节点最小子网；
 - route-scoped 知识关系候选的跨系列发布、复用、新版本和 unresolved 身份裁决；
 - 钻石迁移任务及其真实晋级入口门禁；
 - 按缺失 Stage Criterion 选择口试、标准应用或迁移任务的多题型复习规划；当前到期唤醒仍使用受治理的新选择题，只形成保持证据，不能借复习选择题制造黄金或钻石；
