@@ -5171,13 +5171,20 @@ button:disabled { cursor: not-allowed; }
 }
 .quiz-next-note-warning small { line-height: 1.55; }
 .quiz-next-note-warning button { flex: 0 0 auto; }
+.quiz-completion-choices {
+  display: grid;
+  grid-template-columns: minmax(0, .88fr) minmax(0, 1.12fr);
+  gap: 18px;
+  align-items: stretch;
+}
+.quiz-completion-choices:not(.has-askme) { grid-template-columns: minmax(0, 1fr); }
 .quiz-next-navigation { display: flex; justify-content: flex-end; }
 .quiz-next-section-card {
   width: min(440px, 100%);
-  min-height: 118px;
+  min-height: 168px;
   padding: 23px 25px;
   display: grid;
-  align-content: center;
+  align-content: space-between;
   justify-items: end;
   gap: 8px;
   border: 1px solid #d2ddd4;
@@ -5208,6 +5215,58 @@ button:disabled { cursor: not-allowed; }
 }
 .quiz-next-section-card > strong > span { color: #718379; font: 700 10px/1 var(--font-mono); }
 .quiz-next-section-card > strong > i { margin-left: 2px; font-family: system-ui, sans-serif; font-style: normal; font-weight: 500; }
+.quiz-completion-choices > .askme-choice-view {
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+}
+.askme-choice-card {
+  min-height: 168px;
+  padding: 21px 22px 20px;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 10px;
+  border: 1px solid #cbd8cd;
+  border-top: 4px solid var(--reader-lime);
+  border-radius: 11px;
+  background: #f1f6ef;
+  color: #173f30;
+  box-shadow: 0 8px 24px rgba(31, 67, 49, .045);
+}
+.askme-choice-card > div { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; }
+.askme-choice-card .eyebrow { margin: 0; color: #66806d; font-size: 9px; letter-spacing: .08em; }
+.askme-choice-card h2 { margin: 0; color: #173f30; font: 700 25px/1 var(--font-display); letter-spacing: -.025em; }
+.askme-choice-card > p {
+  max-width: 330px;
+  margin: 0;
+  align-self: center;
+  color: #647168;
+  font-size: 10px;
+  line-height: 1.65;
+}
+.askme-choice-card > button {
+  min-height: 36px;
+  padding: 0 15px;
+  justify-self: start;
+  border: 0;
+  border-radius: 7px;
+  background: #1d5a40;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 760;
+}
+.askme-choice-card > button:hover:not(:disabled) { background: #154931; }
+.askme-choice-card > button:focus-visible { outline: 3px solid rgba(57, 120, 94, .22); outline-offset: 2px; }
+.askme-choice-card > button:disabled { opacity: .58; }
+.askme-choice-card.is-loading { opacity: .72; }
+.quiz-completion-choices:has(> .askme-choice-view.has-discussion) { grid-template-columns: minmax(0, 1fr); }
+.quiz-completion-choices > .askme-choice-view.has-discussion { grid-column: 1 / -1; }
+.quiz-completion-choices:has(> .askme-choice-view.has-discussion) .quiz-next-section-card {
+  width: min(440px, 100%);
+  min-height: 118px;
+  align-content: center;
+}
 .quiz-review-feedback {
   margin-top: 48px;
   padding: 25px 0 2px;
@@ -6747,8 +6806,19 @@ button:disabled { cursor: not-allowed; }
   .remediation-readiness-actions { grid-column: 1; grid-row: auto; justify-self: start; margin-top: 5px; }
   .remediation-readiness-actions { flex-wrap: wrap; }
   .remediation-readiness.next-section-ready { padding-top: 26px; }
-  .quiz-next-section-card { width: 100%; min-height: 104px; padding: 19px 20px; }
+  .quiz-completion-choices { grid-template-columns: 1fr; gap: 12px; }
+  .quiz-completion-choices > .askme-choice-view { order: 1; }
+  .quiz-completion-choices .quiz-next-navigation { order: 2; }
+  .quiz-next-section-card,
+  .quiz-completion-choices:has(> .askme-choice-view.has-discussion) .quiz-next-section-card {
+    width: 100%;
+    min-height: 104px;
+    padding: 19px 20px;
+  }
   .quiz-next-section-card > strong { font-size: 15px; }
+  .askme-choice-card { min-height: 150px; padding: 19px 20px 18px; }
+  .askme-choice-card > div { align-items: flex-start; flex-direction: column; gap: 6px; }
+  .askme-choice-card h2 { font-size: 24px; }
   .quiz-review-feedback { margin-top: 36px; align-items: flex-start; flex-direction: column; gap: 8px; }
   .quiz-next-note-warning { align-items: flex-start; flex-direction: column; }
 }

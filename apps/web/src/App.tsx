@@ -9378,7 +9378,7 @@ function Quiz({
       <div id="quiz-submission-feedback" aria-live="polite">
         {submissionError && <p className="result failure" role="alert">{submissionError}</p>}
       </div>
-      {section.askMeUnlocked && <AskMePanel sectionId={section.id} />}
+      {section.askMeUnlocked && !result && <AskMePanel sectionId={section.id} />}
     </div>
   );
 }
@@ -9744,20 +9744,25 @@ function QuizReview({
                   )}
                 </aside>
               )}
-              <nav className="quiz-next-navigation" aria-label="继续学习">
-                <button
-                  className="quiz-next-section-card"
-                  disabled={openingNextSection}
-                  onClick={onOpenNextSection}
-                >
-                  <small>{openingNextSection ? '正在进入' : '下一节'}</small>
-                  <strong>
-                    {nextSectionNumber && <span>{nextSectionNumber}</span>}
-                    {nextSectionTitle || '继续下一节'}
-                    <i aria-hidden="true">→</i>
-                  </strong>
-                </button>
-              </nav>
+              <div className={`quiz-completion-choices ${section.askMeUnlocked ? 'has-askme' : ''}`}>
+                {section.askMeUnlocked && (
+                  <AskMePanel sectionId={section.id} compactEntry />
+                )}
+                <nav className="quiz-next-navigation" aria-label="继续学习">
+                  <button
+                    className="quiz-next-section-card"
+                    disabled={openingNextSection}
+                    onClick={onOpenNextSection}
+                  >
+                    <small>{openingNextSection ? '正在进入' : '继续学习 · 下一节'}</small>
+                    <strong>
+                      {nextSectionNumber && <span>{nextSectionNumber}</span>}
+                      {nextSectionTitle || '继续下一节'}
+                      <i aria-hidden="true">→</i>
+                    </strong>
+                  </button>
+                </nav>
+              </div>
               <footer className="quiz-review-feedback">
                 <p>这节内容帮你解决问题了吗？</p>
                 <button type="button" onClick={onFeedback}>
@@ -10127,7 +10132,13 @@ function Note({
   );
 }
 
-function AskMePanel({ sectionId }: { sectionId: string }) {
+function AskMePanel({
+  sectionId,
+  compactEntry = false,
+}: {
+  sectionId: string;
+  compactEntry?: boolean;
+}) {
   const [discussion, setDiscussion] = useState<AskMeDiscussion | null>(null);
   const [answer, setAnswer] = useState('');
   const [loading, setLoading] = useState(true);
@@ -10268,8 +10279,8 @@ function AskMePanel({ sectionId }: { sectionId: string }) {
     weak: '需要补强',
   }[value] || value);
   return (
-    <div className="askme-view">
-      {(loading || discussion) && (
+    <div className={`askme-view ${compactEntry ? 'askme-choice-view' : ''} ${discussion ? 'has-discussion' : ''}`}>
+      {(loading || discussion) && (!compactEntry || discussion) && (
         <header className="askme-intro">
           <div>
             <p className="eyebrow">隐藏关卡</p>
@@ -10286,26 +10297,49 @@ function AskMePanel({ sectionId }: { sectionId: string }) {
       )}
 
       {loading ? (
-        <div className="askme-loading" aria-live="polite">正在恢复讨论…</div>
-      ) : !discussion ? (
-        <section className="askme-entry-card" aria-labelledby="askme-entry-title">
-          <div className="askme-entry-copy">
-            <p className="eyebrow">满分已解锁 · 可选挑战</p>
-            <h2 id="askme-entry-title">Grill Me</h2>
-            <p>不是再做一套题。考官会连续追问，确认你能不能把这一节讲清楚、判断边界，并用到新的情境。</p>
-            <div className="askme-entry-actions">
-              <button className="primary-button large" disabled={actioning} onClick={start}>
-                {actioning ? '正在准备…' : '开始口试挑战'}
-              </button>
-              <small>过程中只评估，不继续教学；可以随时暂停。</small>
+        compactEntry ? (
+          <section className="askme-choice-card is-loading" aria-live="polite" aria-busy="true">
+            <div>
+              <p className="eyebrow">满分已解锁 · 可选挑战</p>
+              <h2>Grill Me</h2>
             </div>
-          </div>
-          <ol className="askme-entry-probes" aria-label="口试探测顺序">
-            <li><span>01</span><div><b>机制</b><small>解释为什么成立</small></div></li>
-            <li><span>02</span><div><b>边界</b><small>判断何时不适用</small></div></li>
-            <li><span>03</span><div><b>迁移</b><small>用到新的情境</small></div></li>
-          </ol>
-        </section>
+            <p>正在确认口试状态…</p>
+          </section>
+        ) : (
+          <div className="askme-loading" aria-live="polite">正在恢复讨论…</div>
+        )
+      ) : !discussion ? (
+        compactEntry ? (
+          <section className="askme-choice-card" aria-labelledby="askme-choice-title">
+            <div>
+              <p className="eyebrow">满分已解锁 · 可选挑战</p>
+              <h2 id="askme-choice-title">Grill Me</h2>
+            </div>
+            <p>用连续追问检验机制、边界与迁移；过程中只评估，不继续教学。</p>
+            <button type="button" disabled={actioning} onClick={start}>
+              {actioning ? '正在准备口试…' : '开始口试挑战'}
+            </button>
+          </section>
+        ) : (
+          <section className="askme-entry-card" aria-labelledby="askme-entry-title">
+            <div className="askme-entry-copy">
+              <p className="eyebrow">满分已解锁 · 可选挑战</p>
+              <h2 id="askme-entry-title">Grill Me</h2>
+              <p>不是再做一套题。考官会连续追问，确认你能不能把这一节讲清楚、判断边界，并用到新的情境。</p>
+              <div className="askme-entry-actions">
+                <button className="primary-button large" disabled={actioning} onClick={start}>
+                  {actioning ? '正在准备…' : '开始口试挑战'}
+                </button>
+                <small>过程中只评估，不继续教学；可以随时暂停。</small>
+              </div>
+            </div>
+            <ol className="askme-entry-probes" aria-label="口试探测顺序">
+              <li><span>01</span><div><b>机制</b><small>解释为什么成立</small></div></li>
+              <li><span>02</span><div><b>边界</b><small>判断何时不适用</small></div></li>
+              <li><span>03</span><div><b>迁移</b><small>用到新的情境</small></div></li>
+            </ol>
+          </section>
+        )
       ) : (
         <div className="askme-discussion">
           <nav className="askme-topic-tabs" aria-label="讨论主题">
