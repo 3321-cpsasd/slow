@@ -60,6 +60,22 @@ class GeneratedPlan(StrictModel):
         return self
 
 
+KnowledgeCapabilityDimension = Literal[
+    "recognition", "mechanism", "application", "boundary", "transfer"
+]
+
+
+class GeneratedConceptCandidate(StrictModel):
+    """A semantic proposal, never an instruction to merge knowledge identities."""
+
+    candidate_key: str = Field(min_length=1, max_length=160)
+    label: str = Field(min_length=1, max_length=300)
+    definition: str = Field(min_length=4, max_length=2000)
+    scope: str = Field(min_length=2, max_length=1000)
+    boundaries: list[str] = Field(default_factory=list, max_length=12)
+    reuse_concept_revision_id: str = Field(default="", max_length=160)
+
+
 class OverviewPlanBook(PlanBook):
     chapters: list[PlanChapter] = Field(min_length=2, max_length=4)
 
@@ -171,6 +187,11 @@ class GeneratedSectionOutline(StrictModel):
     objectives: list[str] = Field(min_length=1, max_length=4)
     baseline_concept_key: str = Field(default="", max_length=160)
     baseline_objective_key: str = Field(default="", max_length=160)
+    concept_candidate: GeneratedConceptCandidate | None = None
+    objective_dimensions: list[KnowledgeCapabilityDimension] = Field(
+        default_factory=list,
+        max_length=4,
+    )
 
     @model_validator(mode="after")
     def stable_curriculum_identity_is_complete(self):
@@ -178,6 +199,108 @@ class GeneratedSectionOutline(StrictModel):
             raise ValueError(
                 "baseline concept and objective keys must be declared together"
             )
+        if self.concept_candidate and self.baseline_concept_key:
+            raise ValueError(
+                "published curriculum identity and concept candidate are mutually exclusive"
+            )
+        if self.concept_candidate and len(self.objective_dimensions) != len(
+            self.objectives
+        ):
+            raise ValueError(
+                "concept candidate objectives must declare one capability dimension each"
+            )
+        if self.objective_dimensions and len(self.objective_dimensions) != len(
+            self.objectives
+        ):
+            raise ValueError(
+                "objective dimensions must align with objective statements"
+            )
+        return self
+
+
+CapabilityKnowledgeRole = Literal["anchor", "required", "supporting"]
+CapabilityStage = Literal["bronze", "silver", "gold", "diamond"]
+CapabilityRelationType = Literal[
+    "applies_to",
+    "causes",
+    "contrasts_with",
+    "contributes_to",
+    "enables",
+    "explains",
+    "helps_explain",
+    "part_of",
+    "precedes",
+    "prerequisite_for",
+    "refines",
+]
+
+
+class GeneratedCapabilityMember(StrictModel):
+    section_position: int = Field(ge=1, le=12)
+    role: CapabilityKnowledgeRole
+    required: bool = True
+
+    @model_validator(mode="after")
+    def supporting_is_not_a_silent_target(self):
+        if self.role == "supporting" and self.required:
+            raise ValueError("supporting capability knowledge cannot be required")
+        return self
+
+
+class GeneratedCapabilityRelation(StrictModel):
+    from_section_position: int = Field(ge=1, le=12)
+    to_section_position: int = Field(ge=1, le=12)
+    relation_type: CapabilityRelationType
+    statement: str = Field(min_length=4, max_length=1200)
+    minimum_stage: CapabilityStage = "silver"
+    purpose: str = Field(default="explain", min_length=2, max_length=80)
+    required: bool = True
+
+    @model_validator(mode="after")
+    def endpoints_are_distinct(self):
+        if self.from_section_position == self.to_section_position:
+            raise ValueError("capability relation cannot connect a section to itself")
+        return self
+
+
+class GeneratedCapabilitySubnetCandidate(StrictModel):
+    candidate_key: str = Field(min_length=1, max_length=160)
+    label: str = Field(min_length=4, max_length=300)
+    operation: str = Field(min_length=2, max_length=800)
+    boundary: str = Field(min_length=2, max_length=1000)
+    members: list[GeneratedCapabilityMember] = Field(min_length=1, max_length=12)
+    relations: list[GeneratedCapabilityRelation] = Field(
+        default_factory=list, max_length=24
+    )
+    assessment_section_position: int = Field(ge=1, le=12)
+    assessment_objective_position: int = Field(default=1, ge=1, le=4)
+    natural_stage_ceiling: CapabilityStage = "gold"
+
+    @model_validator(mode="after")
+    def subnet_is_closed(self):
+        positions = [item.section_position for item in self.members]
+        if len(positions) != len(set(positions)):
+            raise ValueError("capability members must reference unique sections")
+        if sum(item.role == "anchor" for item in self.members) != 1:
+            raise ValueError("capability subnet must have exactly one anchor")
+        if self.assessment_section_position not in set(positions):
+            raise ValueError("capability assessment section must belong to its subnet")
+        member_positions = set(positions)
+        relation_keys: set[tuple[int, int, str]] = set()
+        for relation in self.relations:
+            if (
+                relation.from_section_position not in member_positions
+                or relation.to_section_position not in member_positions
+            ):
+                raise ValueError("capability relation endpoint is outside its subnet")
+            key = (
+                relation.from_section_position,
+                relation.to_section_position,
+                relation.relation_type,
+            )
+            if key in relation_keys:
+                raise ValueError("capability subnet contains a duplicate relation")
+            relation_keys.add(key)
         return self
 
 
@@ -185,6 +308,33 @@ class GeneratedChapter(StrictModel):
     # 3-5 is a planning target, not a semantic gate. The wider bounds only
     # reject anomalous structured output and must not force mechanical splits.
     sections: list[GeneratedSectionOutline] = Field(min_length=2, max_length=12)
+    capability_subnets: list[GeneratedCapabilitySubnetCandidate] = Field(
+        default_factory=list, max_length=12
+    )
+
+    @model_validator(mode="after")
+    def capability_references_exist(self):
+        section_count = len(self.sections)
+        assessment_slots: set[tuple[int, int]] = set()
+        for capability in self.capability_subnets:
+            if any(
+                member.section_position > section_count
+                for member in capability.members
+            ):
+                raise ValueError("capability member references a missing section")
+            if capability.assessment_section_position > section_count:
+                raise ValueError("capability assessment references a missing section")
+            section = self.sections[capability.assessment_section_position - 1]
+            if capability.assessment_objective_position > len(section.objectives):
+                raise ValueError("capability assessment references a missing objective")
+            slot = (
+                capability.assessment_section_position,
+                capability.assessment_objective_position,
+            )
+            if slot in assessment_slots:
+                raise ValueError("one objective cannot settle multiple capabilities")
+            assessment_slots.add(slot)
+        return self
 
 
 CHAPTER_OUTLINE_REVIEW_ISSUES = Literal[
@@ -1060,6 +1210,84 @@ class AskMeDiscussionEvaluation(StrictModel):
 class AskMeDiscussionProbe(StrictModel):
     follow_up_prompt: str = Field(min_length=4, max_length=2000)
     follow_up_purpose: str = Field(min_length=4, max_length=1000)
+
+
+class StandardApplicationRubricCriterion(StrictModel):
+    criterion_key: str = Field(pattern=r"^C[1-9][0-9]*$")
+    statement: str = Field(min_length=4, max_length=1000)
+    required: bool = True
+
+
+class StandardApplicationTaskCandidate(StrictModel):
+    prompt: str = Field(min_length=20, max_length=4000)
+    task_context: str = Field(min_length=4, max_length=2000)
+    deliverables: list[str] = Field(min_length=1, max_length=6)
+    rubric: list[StandardApplicationRubricCriterion] = Field(
+        min_length=2, max_length=6
+    )
+    reference_answer_points: list[str] = Field(min_length=2, max_length=10)
+    novelty_basis: str = Field(min_length=4, max_length=1200)
+
+    @model_validator(mode="after")
+    def rubric_keys_are_unique(self):
+        keys = [item.criterion_key for item in self.rubric]
+        if len(keys) != len(set(keys)):
+            raise ValueError("application rubric keys must be unique")
+        return self
+
+
+class TransferTaskCandidate(StandardApplicationTaskCandidate):
+    unfamiliarity_basis: str = Field(min_length=8, max_length=1200)
+    required_knowledge_recombination: list[str] = Field(
+        min_length=2, max_length=12
+    )
+    decision_rationale_requirement: str = Field(min_length=8, max_length=1200)
+
+    @model_validator(mode="after")
+    def recombination_items_are_unique(self):
+        normalized = [item.strip().lower() for item in self.required_knowledge_recombination]
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("transfer recombination requirements must be unique")
+        return self
+
+
+class CapabilityReviewRubricCriterion(StandardApplicationRubricCriterion):
+    stage_criterion_id: str = Field(min_length=1, max_length=200)
+
+
+class CapabilityReviewTaskCandidate(StrictModel):
+    prompt: str = Field(min_length=20, max_length=4000)
+    task_context: str = Field(min_length=4, max_length=2000)
+    deliverables: list[str] = Field(min_length=1, max_length=8)
+    rubric: list[CapabilityReviewRubricCriterion] = Field(min_length=2, max_length=8)
+    reference_answer_points: list[str] = Field(min_length=1, max_length=12)
+    novelty_basis: str = Field(min_length=4, max_length=1200)
+    unfamiliarity_basis: str = Field(default="", max_length=1200)
+    required_knowledge_recombination: list[str] = Field(
+        default_factory=list, max_length=12
+    )
+
+    @model_validator(mode="after")
+    def rubric_keys_are_unique(self):
+        keys = [item.criterion_key for item in self.rubric]
+        if len(keys) != len(set(keys)):
+            raise ValueError("capability review rubric keys must be unique")
+        return self
+
+
+class StandardApplicationCriterionResult(StrictModel):
+    criterion_key: str = Field(pattern=r"^C[1-9][0-9]*$")
+    satisfied: bool
+    rationale: str = Field(min_length=4, max_length=1200)
+
+
+class StandardApplicationEvaluation(StrictModel):
+    verdict: Literal["pass", "fail"]
+    evidence_sufficiency: Literal["sufficient", "insufficient"]
+    criterion_results: list[StandardApplicationCriterionResult] = Field(
+        min_length=2, max_length=6
+    )
+    rationale: str = Field(min_length=4, max_length=2000)
 
 
 class ReplannedChapter(StrictModel):

@@ -485,6 +485,17 @@ class ReviewSubmit(ApiModel):
     answers: list[list[int]] = Field(min_length=1, max_length=5)
 
 
+class CapabilityReviewSubmit(ApiModel):
+    response: dict
+    assistance_used: bool = False
+
+    @model_validator(mode="after")
+    def response_is_not_empty(self):
+        if not self.response:
+            raise ValueError("能力复习提交不能为空")
+        return self
+
+
 class ReinforcementRespond(ApiModel):
     activity_key: str = Field(min_length=1, max_length=64)
     selected_options: list[int] = Field(default_factory=list, max_length=6)
@@ -702,6 +713,17 @@ class ChapterChallengeSubmit(ApiModel):
         section_ids = [item.section_id for item in self.sections]
         if len(section_ids) != len(set(section_ids)):
             raise ValueError("章挑战不能重复提交同一小节")
+        return self
+
+
+class CapabilityApplicationSubmit(ApiModel):
+    response: dict
+    assistance_used: bool = False
+
+    @model_validator(mode="after")
+    def response_is_not_empty(self):
+        if not self.response:
+            raise ValueError("能力任务提交不能为空")
         return self
 
 

@@ -20,9 +20,15 @@ from ...domain.learning import grade_choice_quiz
 from ...infrastructure.tables import (
     AssessmentObservation,
     AssessmentTarget,
+    CapabilityRevision,
+    CapabilityApplicationTaskVersion,
+    CapabilityRouteBinding,
+    CapabilityStageCriterion,
+    CapabilityStateProjection,
     ContentVersion,
     LearningContractVersion,
     LearningMissionVersion,
+    LearningRun,
     QuizAttempt,
     QuizSet,
     ReviewAssignment,
@@ -59,6 +65,12 @@ from .review_assignments import (
     select_daily_reviews,
     transition_assignment,
 )
+from .review_task_plans import (
+    REVIEW_TASK_PLAN_RULE_VERSION,
+    ReviewCriterion,
+    plan_review_tasks,
+)
+from .review_stage_tasks import CapabilityReviewTaskService
 
 
 logger = logging.getLogger(__name__)
@@ -283,6 +295,82 @@ class ReviewAssignmentService:
                 result.add(fingerprint)
         return result
 
+    def _task_plan(
+        self,
+        *,
+        target: AssessmentTarget,
+        capability_state: CapabilityStateProjection | None,
+        source: AssessmentObservation,
+        remediation_due: bool,
+    ) -> dict:
+        if not target.capability_revision_id or capability_state is None:
+            return {
+                "ruleVersion": REVIEW_TASK_PLAN_RULE_VERSION,
+                "reactivation": {
+                    "purpose": "retention_reactivation",
+                    "taskKind": "choice_reactivation",
+                    "stage": "bronze",
+                    "criterionIds": [],
+                    "verificationProtocols": ["choice_quiz_v1"],
+                    "evidenceEffect": "activation_only",
+                },
+                "strengthening": None,
+            }
+        run = self.db.get(LearningRun, source.learning_run_id)
+        route = self.db.scalar(
+            select(CapabilityRouteBinding).where(
+                CapabilityRouteBinding.series_id == run.series_id,
+                CapabilityRouteBinding.capability_revision_id
+                == target.capability_revision_id,
+                CapabilityRouteBinding.status == "active",
+            )
+        ) if run else None
+        if route is None:
+            raise AppError(
+                "能力复习缺少当前系列的正式任务路线",
+                code="REVIEW_CAPABILITY_ROUTE_MISSING",
+                status=409,
+            )
+        criteria = self.db.scalars(
+            select(CapabilityStageCriterion)
+            .where(
+                CapabilityStageCriterion.capability_revision_id
+                == target.capability_revision_id,
+                CapabilityStageCriterion.required.is_(True),
+            )
+            .order_by(CapabilityStageCriterion.position)
+        ).all()
+        available = frozenset(
+            str(item.get("criterionId"))
+            for item in _load(route.opportunities_json, [])
+            if item.get("criterionId")
+        )
+        try:
+            return plan_review_tasks(
+                current_stage=capability_state.current_stage,
+                criteria=tuple(
+                    ReviewCriterion(
+                        criterion_id=item.id,
+                        stage=item.stage,
+                        position=item.position,
+                        task_type=item.task_type,
+                        verification_protocol=item.verification_protocol,
+                    )
+                    for item in criteria
+                ),
+                missing_criterion_ids=tuple(
+                    _load(capability_state.missing_criterion_ids_json, [])
+                ),
+                available_criterion_ids=available,
+                remediation_due=remediation_due,
+            )
+        except ValueError as error:
+            raise AppError(
+                "当前能力阶段没有可执行的正式复习任务",
+                code="REVIEW_CAPABILITY_TASK_PLAN_INVALID",
+                status=409,
+            ) from error
+
     def due(self, *, daily_budget: int = 10, as_of: datetime | None = None) -> dict:
         moment = _utc(as_of or now())
         budget = max(0, min(daily_budget, 100))
@@ -313,7 +401,34 @@ class ReviewAssignmentService:
                     ReviewState.next_due_at.is_not(None),
                 )
             ).all()
+            target_rows = {
+                item.id: item
+                for item in self.db.scalars(
+                    select(AssessmentTarget).where(
+                        AssessmentTarget.id.in_(
+                            [item.assessment_target_id for item in states]
+                        )
+                    )
+                ).all()
+            } if states else {}
+            capability_ids = {
+                item.capability_revision_id
+                for item in target_rows.values()
+                if item.capability_revision_id
+            }
+            capability_states = {
+                item.capability_revision_id: item
+                for item in self.db.scalars(
+                    select(CapabilityStateProjection).where(
+                        CapabilityStateProjection.user_id == self.user_id,
+                        CapabilityStateProjection.capability_revision_id.in_(
+                            capability_ids
+                        ),
+                    )
+                ).all()
+            } if capability_ids else {}
             source_by_target: dict[str, AssessmentObservation] = {}
+            task_plan_by_target: dict[str, dict] = {}
             candidates = []
             for item in states:
                 if item.assessment_target_id in active_target_ids:
@@ -325,12 +440,64 @@ class ReviewAssignmentService:
                         raise
                     continue
                 source_by_target[item.assessment_target_id] = source
+                target = target_rows.get(item.assessment_target_id)
+                capability = (
+                    capability_states.get(target.capability_revision_id)
+                    if target and target.capability_revision_id
+                    else None
+                )
+                capability_activation = (
+                    "due_for_reactivation"
+                    if capability
+                    and capability.next_due_at is not None
+                    and _utc(capability.next_due_at) <= moment
+                    else capability.activation_state
+                    if capability
+                    else ""
+                )
+                try:
+                    task_plan_by_target[item.assessment_target_id] = self._task_plan(
+                        target=target,
+                        capability_state=capability,
+                        source=source,
+                        remediation_due=item.status == "remediation_due",
+                    )
+                except AppError as error:
+                    if error.code not in {
+                        "REVIEW_CAPABILITY_ROUTE_MISSING",
+                        "REVIEW_CAPABILITY_TASK_PLAN_INVALID",
+                    }:
+                        raise
+                    logger.info(
+                        "review selection skipped capability without executable task "
+                        "user_id=%s assessment_target_id=%s code=%s",
+                        self.user_id,
+                        item.assessment_target_id,
+                        error.code,
+                    )
+                    continue
                 candidates.append(ReviewCandidate(
                     review_state_id=item.id,
                     assessment_target_id=item.assessment_target_id,
                     due_at=_utc(item.next_due_at),
                     priority=item.priority,
                     status=item.status,
+                    need_kind=(
+                        "remediation"
+                        if item.status == "remediation_due"
+                        else "activation_due"
+                    ),
+                    capability_stage=(
+                        capability.current_stage if capability else "unranked"
+                    ),
+                    capability_activation_state=(
+                        capability_activation
+                    ),
+                    capability_revision_id=(
+                        target.capability_revision_id
+                        if target and target.capability_revision_id
+                        else ""
+                    ),
                 ))
             try:
                 selection = select_daily_reviews(
@@ -347,6 +514,12 @@ class ReviewAssignmentService:
                     "dueAt": _utc(item.due_at).isoformat(),
                     "priority": item.priority,
                     "status": item.status,
+                    "needKind": item.need_kind,
+                    "capabilityStage": item.capability_stage,
+                    "capabilityActivationState": (
+                        item.capability_activation_state
+                    ),
+                    "capabilityRevisionId": item.capability_revision_id,
                 }
                 for item in sorted(candidates, key=lambda value: value.assessment_target_id)
             ]).encode()).hexdigest()
@@ -391,6 +564,10 @@ class ReviewAssignmentService:
                     effective_priority=item.effective_priority,
                     selection_rule_version=item.rule_version,
                     qualification_rule_version=RETENTION_QUALIFICATION_RULE_VERSION,
+                    task_plan_json=_dump(
+                        task_plan_by_target[item.assessment_target_id]
+                    ),
+                    task_plan_rule_version=REVIEW_TASK_PLAN_RULE_VERSION,
                     prior_item_signatures_json=_dump(sorted(self._prior_signatures(item.assessment_target_id))),
                     item_signatures_json="[]",
                     last_event_at=scheduled.last_event_at,
@@ -420,6 +597,38 @@ class ReviewAssignmentService:
                 )
             ).all()
         } if assignments else {}
+        review_states = {
+            item.id: item
+            for item in self.db.scalars(
+                select(ReviewState).where(
+                    ReviewState.id.in_([item.review_state_id for item in assignments])
+                )
+            ).all()
+        } if assignments else {}
+        capability_ids = {
+            target.capability_revision_id
+            for target in targets.values()
+            if target.capability_revision_id
+        }
+        capability_states = {
+            item.capability_revision_id: item
+            for item in self.db.scalars(
+                select(CapabilityStateProjection).where(
+                    CapabilityStateProjection.user_id == self.user_id,
+                    CapabilityStateProjection.capability_revision_id.in_(
+                        capability_ids
+                    ),
+                )
+            ).all()
+        } if capability_ids else {}
+        capability_revisions = {
+            item.id: item
+            for item in self.db.scalars(
+                select(CapabilityRevision).where(
+                    CapabilityRevision.id.in_(capability_ids)
+                )
+            ).all()
+        } if capability_ids else {}
         targets_by_contract: dict[str, set[str]] = {}
         for assignment in assignments:
             targets_by_contract.setdefault(
@@ -447,6 +656,27 @@ class ReviewAssignmentService:
             effective_concepts_by_assignment[assignment.id] = (
                 effective.concept_revision_id if effective else None
             )
+
+        def capability_view(assignment: ReviewAssignment) -> dict | None:
+            capability_id = targets[
+                assignment.assessment_target_id
+            ].capability_revision_id
+            state = capability_states.get(capability_id or "")
+            revision = capability_revisions.get(capability_id or "")
+            if state is None or revision is None:
+                return None
+            activation = (
+                "due_for_reactivation"
+                if state.next_due_at is not None
+                and _utc(state.next_due_at) <= _utc(selection.as_of)
+                else state.activation_state
+            )
+            return {
+                "label": revision.label,
+                "currentStage": state.current_stage,
+                "activationState": activation,
+            }
+
         return {
             "selectionRunId": selection.id,
             "asOf": _utc(selection.as_of).isoformat(),
@@ -469,6 +699,14 @@ class ReviewAssignmentService:
                     "knowledgeNode": node_views.get(
                         effective_concepts_by_assignment[item.id] or ""
                     ),
+                    "reviewReason": (
+                        "近期作答暴露了需要补强的部分"
+                        if review_states[item.review_state_id].status
+                        == "remediation_due"
+                        else "这项能力已经到复习时间"
+                    ),
+                    "capability": capability_view(item),
+                    "taskPlan": _load(item.task_plan_json, {}),
                 }
                 for item in assignments
             ],
@@ -546,6 +784,9 @@ class ReviewAssignmentService:
             )
             if quiz else []
         )
+        capability_task = CapabilityReviewTaskService(
+            self.db, user_id=self.user_id, ai=self.ai
+        ).view_for_assignment(assignment.id)
         return {
             "assignmentId": assignment.id,
             "status": assignment.status,
@@ -560,6 +801,161 @@ class ReviewAssignmentService:
                 ],
             } if quiz else None,
             "attemptId": assignment.submitted_attempt_id,
+            "taskPlan": _load(assignment.task_plan_json, {}),
+            "capabilityTask": capability_task,
+        }
+
+    def strengthening(self, assignment_id: str) -> dict:
+        """Resolve the frozen next-stage action after successful reactivation.
+
+        Reactivation evidence never advances the stage.  This endpoint only
+        exposes the separately published formal opportunity frozen by the
+        assignment plan; it does not create or silently substitute a task.
+        """
+
+        assignment = self._owned(assignment_id)
+        if assignment.status != "submitted":
+            raise AppError(
+                "请先完成本次能力再激活",
+                code="REVIEW_STRENGTHENING_REACTIVATION_REQUIRED",
+                status=409,
+            )
+        result = _load(assignment.response_json, {})
+        reactivated = bool(
+            result.get("reactivationQualified")
+            if "reactivationQualified" in result
+            else result.get("passed")
+        )
+        if not reactivated:
+            raise AppError(
+                "当前能力尚未重新确认，请先完成针对性补强",
+                code="REVIEW_STRENGTHENING_REACTIVATION_NOT_QUALIFIED",
+                status=409,
+            )
+        plan = _load(assignment.task_plan_json, {})
+        strengthening = plan.get("strengthening")
+        if not isinstance(strengthening, dict):
+            return {
+                "schemaVersion": "capability_strengthening_launch_v1",
+                "assignmentId": assignment.id,
+                "status": "unavailable",
+                "reason": "no_published_next_stage_opportunity",
+                "entry": None,
+            }
+        target = self.db.get(AssessmentTarget, assignment.assessment_target_id)
+        run = self.db.get(LearningRun, assignment.source_learning_run_id)
+        capability_id = target.capability_revision_id if target else None
+        if target is None or run is None or not capability_id:
+            raise AppError(
+                "下一阶强化缺少稳定能力路线",
+                code="REVIEW_STRENGTHENING_ROUTE_MISSING",
+                status=409,
+            )
+        state = self.db.scalar(
+            select(CapabilityStateProjection).where(
+                CapabilityStateProjection.user_id == self.user_id,
+                CapabilityStateProjection.capability_revision_id == capability_id,
+            )
+        )
+        stage_order = {"unranked": 0, "bronze": 1, "silver": 2, "gold": 3, "diamond": 4}
+        target_stage = str(strengthening.get("stage") or "")
+        if state and stage_order.get(state.current_stage, 0) >= stage_order.get(target_stage, 99):
+            return {
+                "schemaVersion": "capability_strengthening_launch_v1",
+                "assignmentId": assignment.id,
+                "status": "already_achieved",
+                "stage": target_stage,
+                "currentStage": state.current_stage,
+                "entry": None,
+            }
+        route = self.db.scalar(
+            select(CapabilityRouteBinding).where(
+                CapabilityRouteBinding.series_id == run.series_id,
+                CapabilityRouteBinding.capability_revision_id == capability_id,
+                CapabilityRouteBinding.status == "active",
+            )
+        )
+        if route is None:
+            raise AppError(
+                "下一阶强化路线已经失效",
+                code="REVIEW_STRENGTHENING_ROUTE_MISSING",
+                status=409,
+            )
+        criterion_ids = {
+            str(item) for item in strengthening.get("criterionIds", []) if item
+        }
+        opportunities = [
+            item
+            for item in _load(route.opportunities_json, [])
+            if str(item.get("criterionId") or "") in criterion_ids
+        ]
+        if {str(item.get("criterionId") or "") for item in opportunities} != criterion_ids:
+            raise AppError(
+                "下一阶正式验证机会已经变更，请等待新的复习安排",
+                code="REVIEW_STRENGTHENING_OPPORTUNITY_STALE",
+                status=409,
+            )
+        task_kind = str(strengthening.get("taskKind") or "")
+        base = {
+            "schemaVersion": "capability_strengthening_launch_v1",
+            "assignmentId": assignment.id,
+            "status": "ready",
+            "stage": target_stage,
+            "currentStage": state.current_stage if state else "unranked",
+            "taskKind": task_kind,
+            "criterionIds": sorted(criterion_ids),
+            "evidenceEffect": "may_advance_stage_after_qualified_evidence",
+        }
+        if task_kind == "oral_strengthening":
+            return {
+                **base,
+                "entry": {
+                    "kind": "ask_me",
+                    "seriesId": run.series_id,
+                    "sectionId": assignment.source_section_id,
+                    "label": "进入口试，讲清机制与边界",
+                },
+            }
+        expected_kind = {
+            "application_strengthening": "standard_application",
+            "transfer_strengthening": "transfer_task",
+        }.get(task_kind)
+        if expected_kind is None or len(opportunities) != 1:
+            raise AppError(
+                "下一阶强化任务类型不可执行",
+                code="REVIEW_STRENGTHENING_TASK_KIND_INVALID",
+                status=409,
+            )
+        task_id = str(opportunities[0].get("taskVersionId") or "")
+        task = self.db.get(CapabilityApplicationTaskVersion, task_id)
+        if (
+            task is None
+            or task.task_kind != expected_kind
+            or task.capability_revision_id != capability_id
+            or task.capability_stage_criterion_id not in criterion_ids
+            or task.publication_status not in {"published", "published_demo"}
+        ):
+            raise AppError(
+                "下一阶正式任务已经失效",
+                code="REVIEW_STRENGTHENING_TASK_STALE",
+                status=409,
+            )
+        return {
+            **base,
+            "entry": {
+                "kind": expected_kind,
+                "seriesId": run.series_id,
+                "sectionId": task.section_id,
+                "task": {
+                    "id": task.id,
+                    "taskKind": task.task_kind,
+                    "prompt": task.prompt,
+                    "taskContext": _load(task.task_context_json, {}),
+                    "deliverables": _load(task.deliverables_json, []),
+                    "evidenceEligible": task.publication_status == "published",
+                    "isDemo": task.provenance_mode == "local_demo",
+                },
+            },
         }
 
     async def start(self, assignment_id: str, *, as_of: datetime | None = None) -> dict:
@@ -569,6 +965,27 @@ class ReviewAssignmentService:
             return self._assignment_view(assignment)
         if assignment.status != "presented":
             raise AppError("复习任务当前不可开始", code="REVIEW_ASSIGNMENT_TRANSITION_INVALID", status=409)
+        task_plan = _load(assignment.task_plan_json, {})
+        reactivation = task_plan.get("reactivation", {})
+        task_kind = (
+            reactivation.get("taskKind", "")
+            if isinstance(reactivation, dict)
+            else ""
+        )
+        if task_kind != "choice_reactivation":
+            task = await CapabilityReviewTaskService(
+                self.db,
+                user_id=self.user_id,
+                ai=self.ai,
+            ).prepare(assignment)
+            self._apply_transition(
+                assignment,
+                "started",
+                moment,
+                payload={"capabilityReviewTaskId": task.id, "taskKind": task.task_kind},
+            )
+            self.db.commit()
+            return self._assignment_view(assignment)
         source = self._source_for_assignment(assignment)
         content = source.content
         section = source.section
@@ -694,6 +1111,59 @@ class ReviewAssignmentService:
         )
         self.db.commit()
         return self._assignment_view(assignment)
+
+    async def respond(
+        self,
+        assignment_id: str,
+        *,
+        response: dict,
+        assistance_used: bool,
+        idempotency_key: str | None,
+        as_of: datetime | None = None,
+    ) -> dict:
+        moment = _utc(as_of or now())
+        assignment = self._owned(assignment_id)
+        if assignment.status not in {"started", "submitted"}:
+            raise AppError(
+                "能力复习任务尚未开始",
+                code="CAPABILITY_REVIEW_TASK_NOT_STARTED",
+                status=409,
+            )
+        plan = _load(assignment.task_plan_json, {})
+        reactivation = plan.get("reactivation", {})
+        if not isinstance(reactivation, dict) or reactivation.get(
+            "taskKind"
+        ) == "choice_reactivation":
+            raise AppError(
+                "选择题复习必须通过答案提交入口完成",
+                code="CAPABILITY_REVIEW_ENDPOINT_KIND_MISMATCH",
+                status=409,
+            )
+        result, _submission = await CapabilityReviewTaskService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+        ).submit(
+            assignment,
+            response=response,
+            assistance_used=assistance_used,
+            idempotency_key=idempotency_key or "",
+        )
+        if assignment.status == "started":
+            self._apply_transition(
+                assignment,
+                "submitted",
+                moment,
+                payload={
+                    "submissionId": result["submissionId"],
+                    "reactivationQualified": result["reactivationQualified"],
+                    "evidenceEffect": "activation_only",
+                },
+                idempotency_key=idempotency_key or "",
+            )
+            assignment.response_json = _dump(result)
+        self.db.commit()
+        return result
 
     def submit(
         self,

@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 
-REVIEW_ASSIGNMENT_RULE_VERSION = "review_assignment_v1"
+REVIEW_ASSIGNMENT_RULE_VERSION = "review_assignment_v2_capability_priority"
 RETENTION_QUALIFICATION_RULE_VERSION = "retention_assignment_v1"
 MAX_OVERDUE_PRIORITY_BOOST_DAYS = 30
 
@@ -50,6 +50,10 @@ class ReviewCandidate:
     due_at: datetime
     priority: int
     status: str = "scheduled"
+    need_kind: Literal["activation_due", "remediation"] = "activation_due"
+    capability_stage: str = "unranked"
+    capability_activation_state: str = ""
+    capability_revision_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -60,6 +64,9 @@ class SelectedReview:
     base_priority: int
     effective_priority: int
     rank: int
+    need_kind: Literal["activation_due", "remediation"] = "activation_due"
+    capability_stage: str = "unranked"
+    capability_revision_id: str = ""
     rule_version: str = REVIEW_ASSIGNMENT_RULE_VERSION
 
 
@@ -93,6 +100,11 @@ def select_daily_reviews(
                 "REVIEW_CANDIDATE_ID_MISSING",
                 "review candidates require stable state and target ids",
             )
+        if candidate.need_kind not in {"activation_due", "remediation"}:
+            raise ReviewAssignmentRuleError(
+                "REVIEW_CANDIDATE_NEED_KIND_INVALID",
+                "review candidates require a supported need kind",
+            )
         if candidate.assessment_target_id in by_target:
             raise ReviewAssignmentRuleError(
                 "REVIEW_CANDIDATE_DUPLICATE",
@@ -109,20 +121,36 @@ def select_daily_reviews(
 
     def effective_priority(item: ReviewCandidate) -> int:
         overdue_days = max(0, (as_of - _utc(item.due_at)).days)
-        return item.priority + min(
+        activation_boost = (
+            20 if item.capability_activation_state == "due_for_reactivation" else 0
+        )
+        return item.priority + activation_boost + min(
             overdue_days,
             MAX_OVERDUE_PRIORITY_BOOST_DAYS,
         )
 
-    ranked = sorted(
+    ranked_targets = sorted(
         due,
         key=lambda item: (
+            0 if item.need_kind == "activation_due" else 1,
             -effective_priority(item),
             _utc(item.due_at),
             item.assessment_target_id,
             item.review_state_id,
         ),
     )
+    ranked = []
+    seen_needs: set[str] = set()
+    for item in ranked_targets:
+        need_key = (
+            f"capability:{item.capability_revision_id}"
+            if item.capability_revision_id
+            else f"target:{item.assessment_target_id}"
+        )
+        if need_key in seen_needs:
+            continue
+        seen_needs.add(need_key)
+        ranked.append(item)
     selected = ranked[:daily_budget]
     return DailyReviewSelection(
         as_of=as_of,
@@ -136,6 +164,9 @@ def select_daily_reviews(
                 base_priority=item.priority,
                 effective_priority=effective_priority(item),
                 rank=rank,
+                need_kind=item.need_kind,
+                capability_stage=item.capability_stage,
+                capability_revision_id=item.capability_revision_id,
             )
             for rank, item in enumerate(selected, 1)
         ),

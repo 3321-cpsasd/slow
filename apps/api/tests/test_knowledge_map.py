@@ -6,15 +6,14 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import AppError
 from app.infrastructure.tables import (
-    AssessmentTarget, Base, Book, Chapter, Concept, ConceptRevision,
+    AssessmentTarget, Base, Book, Capability, CapabilityConceptBinding,
+    CapabilityRevision, CapabilityRouteBinding, CapabilityStageCriterion,
+    CapabilityStateProjection, Chapter, Concept, ConceptRevision,
     KnowledgeNodeStateProjection, KnowledgeStateProjection,
     LearningContractAssessmentTarget, LearningContractVersion,
     LearningMissionVersion, LearningPlan, Section, Series, Shelf, User, now,
 )
-from app.modules.learning.knowledge_map import (
-    KnowledgeMapService,
-    _recommended_target_id,
-)
+from app.modules.learning.knowledge_map import KnowledgeMapService
 
 
 def _session() -> Session:
@@ -36,14 +35,24 @@ def _seed_route(db: Session) -> None:
         Section(id="section_map", chapter_id="chapter_map", position=1, title="瞬时变化率", question="导数表示什么？", objectives_json='["解释瞬时变化率"]'),
         Concept(id="concept_map", namespace="test", concept_key="instant_rate", canonical_name="瞬时变化率", origin="test"),
         ConceptRevision(id="revision_map", concept_id="concept_map", revision=1, label="瞬时变化率", definition="解释导数表示的瞬时变化率。", scope_json=json.dumps({"rankPolicy": {"version": "knowledge_rank_policy_v1", "capabilityScope": "解释导数表示的瞬时变化率", "rankCeiling": "silver", "dimensionRanks": {"recognition": "bronze", "mechanism": "silver"}}}), verification_status="reviewed"),
-        AssessmentTarget(id="target_map", concept_revision_id="revision_map", objective_key="instant_rate", objective_statement="解释导数表示的瞬时变化率", dimension="mechanism", target_depth="deep", identity_status="published_knowledge_graph", status="active"),
+        Capability(id="capability_map", namespace="test", capability_key="explain_instant_rate", canonical_name="解释瞬时变化率", origin="test"),
+        CapabilityRevision(id="capability_revision_map", capability_id="capability_map", revision=1, label="解释瞬时变化率及其关系", natural_stage_ceiling="silver", verification_status="published"),
         LearningContractVersion(id="contract_map", section_id="section_map", mission_version_id="mission_map", version=1, section_question_snapshot="导数表示什么？", target_depth="deep", contract_hash="b" * 64),
+    ])
+    db.flush()
+    db.add_all([
+        CapabilityStageCriterion(id="criterion_map_bronze", capability_revision_id="capability_revision_map", stage="bronze", position=1, statement="说出瞬时变化率的含义", task_type="choice", verification_protocol="choice_quiz_v1"),
+        CapabilityStageCriterion(id="criterion_map_silver", capability_revision_id="capability_revision_map", stage="silver", position=1, statement="讲清瞬时变化率的机制", task_type="oral", verification_protocol="oral_explanation_v1"),
+        CapabilityConceptBinding(id="capability_concept_map", capability_revision_id="capability_revision_map", concept_revision_id="revision_map", role="anchor", position=1, required=True),
+        CapabilityRouteBinding(id="capability_route_map", series_id="series_map", capability_revision_id="capability_revision_map", target_stage="silver", status="active"),
+        AssessmentTarget(id="target_map", concept_revision_id="revision_map", capability_revision_id="capability_revision_map", capability_stage_criterion_id="criterion_map_bronze", objective_key="instant_rate", objective_statement="解释导数表示的瞬时变化率", dimension="mechanism", target_depth="deep", identity_status="published_knowledge_graph", status="active"),
     ])
     db.flush()
     db.add_all([
         LearningContractAssessmentTarget(id="binding_map", contract_version_id="contract_map", assessment_target_id="target_map", position=1, required=True, diagnostic_only=False),
         KnowledgeStateProjection(id="state_map", user_id="user_map", assessment_target_id="target_map", p_known_ppm=800000, uncertainty_ppm=300000, claim_status="verified_immediate", parameter_set_version="bkt_multimodal_v2", projection_rule_version="mastery_v3", source_observation_watermark=3),
         KnowledgeNodeStateProjection(id="node_map", user_id="user_map", concept_revision_id="revision_map", current_rank="silver", current_rank_order=2, current_stars=2, highest_rank="silver", highest_rank_order=2, highest_stars=2, activation_state="active", stability_days=3, evidence_count=2, independent_evidence_count=2, uncertainty_ppm=300000, rank_rule_version="knowledge_rank_v2", source_observation_watermark=3),
+        CapabilityStateProjection(id="capability_state_map", user_id="user_map", capability_revision_id="capability_revision_map", current_stage="silver", current_stage_order=2, highest_stage="silver", highest_stage_order=2, satisfied_criterion_ids_json='["criterion_map_bronze","criterion_map_silver"]', missing_criterion_ids_json="[]", evidence_maturity_json="{}", activation_state="available", stability_days=3, evidence_count=2, independent_evidence_count=2, projection_rule_version="capability_stage_v1", source_observation_watermark=3),
     ])
     db.commit()
 
@@ -54,10 +63,11 @@ def test_personal_map_uses_latest_contract_and_qualified_projection() -> None:
         result = KnowledgeMapService(db, user_id="user_map").view(series_id="series_map")
         assert result["availability"] == "ready"
         assert result["progress"]["coveragePpm"] == 1_000_000
-        assert result["nodes"][0]["rankLabel"] == "白银 · 理解"
-        assert result["nodes"][0]["capabilityScope"] == "解释导数表示的瞬时变化率"
+        assert result["schemaVersion"] == "personal_capability_map_v2"
+        assert result["nodes"][0]["stageLabel"] == "白银 · 讲得清"
+        assert result["nodes"][0]["knowledge"][0]["label"] == "瞬时变化率"
         assert result["nodes"][0]["nextAction"]["kind"] == "maintain"
-        assert result["learnerProfile"]["rankedNodeCount"] == 1
+        assert result["progress"]["stagedCapabilities"] == 1
 
 
 def test_personal_map_rejects_another_users_series() -> None:
@@ -66,17 +76,3 @@ def test_personal_map_rejects_another_users_series() -> None:
         with pytest.raises(AppError) as error:
             KnowledgeMapService(db, user_id="other_user").view(series_id="series_map")
         assert error.value.code == "SERIES_NOT_FOUND"
-
-
-def test_recommended_target_prefers_newest_failed_wake_for_multi_target_node() -> None:
-    assert _recommended_target_id(
-        {"target_alpha", "target_beta"},
-        ["target_unrelated", "target_beta", "target_alpha"],
-    ) == "target_beta"
-
-
-def test_recommended_target_has_stable_fallback_without_failed_wake() -> None:
-    assert _recommended_target_id(
-        {"target_beta", "target_alpha"},
-        [],
-    ) == "target_alpha"

@@ -13,6 +13,7 @@ from ...infrastructure.tables import (
     AssessmentGateState,
     AssessmentObservation,
     AssessmentTarget,
+    CapabilityStageCriterion,
     EvidenceQualificationEvent,
     GovernanceDecisionSnapshot,
     KnowledgeStateProjection,
@@ -36,6 +37,7 @@ from .knowledge_ranks import (
     resolve_effective_rank_target,
 )
 from .knowledge_profile import rebuild_learner_knowledge_profile
+from .capability_profiles import rebuild_capability_state_projections
 
 
 SCORING_RULE_VERSION = "choice_exact_v2"
@@ -49,6 +51,7 @@ QUALIFIED_STATUSES_BY_FAMILY = {
     "mastery": frozenset({"eligible", "eligible_grouped"}),
     "retention": frozenset({"eligible", "candidate"}),
     "rank": frozenset({"eligible", "eligible_grouped"}),
+    "capability": frozenset({"eligible", "eligible_grouped"}),
 }
 
 
@@ -188,7 +191,8 @@ def assessment_contract_view(
             == LearningContractAssessmentTarget.assessment_target_id,
         )
         .where(
-            LearningContractAssessmentTarget.contract_version_id == contract.id
+            LearningContractAssessmentTarget.contract_version_id == contract.id,
+            LearningContractAssessmentTarget.diagnostic_only.is_(False),
         )
         .order_by(LearningContractAssessmentTarget.position)
     ).all()
@@ -196,6 +200,10 @@ def assessment_contract_view(
         {
             "assessmentTargetId": target.id,
             "conceptRevisionId": target.concept_revision_id or "",
+            "capabilityRevisionId": target.capability_revision_id or "",
+            "capabilityStageCriterionId": (
+                target.capability_stage_criterion_id or ""
+            ),
             "objective": target.objective_statement,
             "dimension": target.dimension,
             "targetDepth": contract.target_depth,
@@ -222,7 +230,8 @@ def bind_questions_to_targets(
             == LearningContractAssessmentTarget.assessment_target_id,
         )
         .where(
-            LearningContractAssessmentTarget.contract_version_id == contract.id
+            LearningContractAssessmentTarget.contract_version_id == contract.id,
+            LearningContractAssessmentTarget.diagnostic_only.is_(False),
         )
         .order_by(LearningContractAssessmentTarget.position)
     ).all()
@@ -585,6 +594,7 @@ def rebuild_assessment_projections(
     by_target_mastery: dict[str, list[AssessmentObservation]] = defaultdict(list)
     retention_observation_ids: set[str] = set()
     rank_observation_ids: set[str] = set()
+    capability_observation_ids: set[str] = set()
     for observation in observations:
         if qualified(observation, "gate"):
             by_gate[
@@ -600,6 +610,8 @@ def rebuild_assessment_projections(
             retention_observation_ids.add(observation.id)
         if qualified(observation, "rank"):
             rank_observation_ids.add(observation.id)
+        if qualified(observation, "capability"):
+            capability_observation_ids.add(observation.id)
 
     for key, items in by_gate.items():
         _sync_gate(db, key=key, observations=items, existing=existing_gates.pop(key, None))
@@ -630,6 +642,55 @@ def rebuild_assessment_projections(
         db.delete(stale)
     for stale in existing_reviews.values():
         db.delete(stale)
+    capability_review_groups: dict[str, list[AssessmentObservation]] = defaultdict(list)
+    for observation in observations:
+        if (
+            observation.source_type == "capability_review"
+            and observation.qualification_at_creation != "ineligible"
+        ):
+            capability_review_groups[observation.assessment_target_id].append(
+                observation
+            )
+    for target_id, items in capability_review_groups.items():
+        review = db.scalar(
+            select(ReviewState).where(
+                ReviewState.user_id == user_id,
+                ReviewState.assessment_target_id == target_id,
+            )
+        )
+        if review is None:
+            review = ReviewState(
+                id=_uid("review_state"),
+                user_id=user_id,
+                assessment_target_id=target_id,
+            )
+            db.add(review)
+        latest = max(items, key=lambda item: item.sequence)
+        successful_rounds = sum(
+            item.correct and item.id in retention_observation_ids for item in items
+        )
+        review.status = "scheduled" if latest.correct else "remediation_due"
+        spacing_days = [1, 3, 7, 14][min(successful_rounds, 3)]
+        review.next_due_at = _utc(latest.created_at) + (
+            timedelta(days=spacing_days) if latest.correct else timedelta()
+        )
+        review.priority = 40 if latest.correct else 100
+        review.reason = (
+            "capability_reactivation_follow_up"
+            if latest.correct
+            else "capability_reactivation_failed"
+        )
+        review.spacing_stage = successful_rounds
+        review.projection_rule_version = REVIEW_RULE_VERSION
+        review.source_observation_watermark = latest.sequence
+        review.updated_at = now()
+    db.flush()
+    capability_states = rebuild_capability_state_projections(
+        db,
+        user_id=user_id,
+        observations=observations,
+        capability_observation_ids=capability_observation_ids,
+    )
     source_targets = {
         item.id: item
         for item in db.scalars(
@@ -681,11 +742,13 @@ def rebuild_assessment_projections(
         ),
         "qualifiedRetentionObservations": len(retention_observation_ids),
         "qualifiedRankObservations": len(rank_observation_ids),
+        "qualifiedCapabilityObservations": len(capability_observation_ids),
         "qualificationRuleVersion": qualification_rule_version,
         "gates": len(by_gate),
         "knowledgeStates": len(by_target_mastery),
         "reviewStates": len(by_target_mastery),
         "knowledgeNodeStates": knowledge_node_states,
+        "capabilityStates": capability_states,
         "learnerKnowledgeProfileVersion": learner_profile.projection_version,
     }
 
@@ -919,6 +982,68 @@ def _record_qualification_events(
                 else ("ineligible", "rank evidence requires an authorized independent assessment")
             ),
         }
+    if qualification_profile == "ask_me":
+        target = db.get(AssessmentTarget, observation.assessment_target_id)
+        criterion = (
+            db.get(
+                CapabilityStageCriterion,
+                target.capability_stage_criterion_id,
+            )
+            if target and target.capability_stage_criterion_id
+            else None
+        )
+        binding = (
+            db.scalar(
+                select(LearningContractAssessmentTarget).where(
+                    LearningContractAssessmentTarget.contract_version_id
+                    == observation.learning_contract_version_id,
+                    LearningContractAssessmentTarget.assessment_target_id
+                    == observation.assessment_target_id,
+                )
+            )
+            if observation.learning_contract_version_id
+            else None
+        )
+        expected_policy = {
+            "mechanism": "oral_explanation_v1",
+            "boundary": "oral_boundary_v1",
+        }.get(target.dimension if target else "")
+        if (
+            target
+            and criterion
+            and criterion.stage == "silver"
+            and target.dimension in {"mechanism", "boundary"}
+            and binding
+            and binding.diagnostic_only
+            and binding.verification_policy == expected_policy
+        ):
+            statuses["capability"] = (
+                "eligible_grouped",
+                "contract-bound oral result may satisfy its explicit silver criterion",
+            )
+        else:
+            statuses["capability"] = (
+                "ineligible",
+                "oral evidence is not bound to a qualifying silver criterion and protocol",
+            )
+    elif governance_ineligible:
+        statuses["capability"] = (
+            "ineligible",
+            "assessment is not governance-qualified for capability projection",
+        )
+    elif observation.assistance_mode in {
+        "unassisted_initial",
+        "unassisted_review",
+    } or qualification_profile == "reinforcement_verification":
+        statuses["capability"] = (
+            "eligible_grouped",
+            "contract-bound unassisted evidence may satisfy its explicit stage criterion",
+        )
+    else:
+        statuses["capability"] = (
+            "ineligible",
+            "capability evidence requires an authorized unassisted task",
+        )
     for family, (status, reason) in statuses.items():
         db.add(EvidenceQualificationEvent(
             id=_uid("qualification"),
@@ -965,21 +1090,49 @@ def record_ask_me_assessment_facts(
             code="ASK_ME_EVIDENCE_LINEAGE_MISSING",
             status=409,
         )
-    contract_target_ids = set(db.scalars(
-        select(LearningContractAssessmentTarget.assessment_target_id).where(
-            LearningContractAssessmentTarget.contract_version_id
-            == learning_contract_version_id
-        )
-    ))
     requested_target_ids = list(dict.fromkeys(assessment_target_ids))
-    if len(requested_target_ids) != 1 or not set(requested_target_ids).issubset(
-        contract_target_ids
-    ):
+    target_row = (
+        db.execute(
+            select(LearningContractAssessmentTarget, AssessmentTarget)
+            .join(
+                AssessmentTarget,
+                AssessmentTarget.id
+                == LearningContractAssessmentTarget.assessment_target_id,
+            )
+            .where(
+                LearningContractAssessmentTarget.contract_version_id
+                == learning_contract_version_id,
+                LearningContractAssessmentTarget.assessment_target_id
+                == requested_target_ids[0],
+            )
+        ).first()
+        if len(requested_target_ids) == 1
+        else None
+    )
+    if target_row is None:
         raise AppError(
             "每条口试证据必须且只能绑定一个契约目标",
             code="ASK_ME_EVIDENCE_TARGET_BOUNDARY_INVALID",
             status=409,
         )
+    target_binding, target = target_row
+    if target.capability_revision_id:
+        expected_policy = {
+            "mechanism": "oral_explanation_v1",
+            "boundary": "oral_boundary_v1",
+            "transfer": "oral_transfer_probe_v1",
+        }.get(dimension)
+        if (
+            not target_binding.diagnostic_only
+            or target.dimension != dimension
+            or target_binding.verification_policy != expected_policy
+            or not target.capability_stage_criterion_id
+        ):
+            raise AppError(
+                "口试证据与冻结的能力阶段协议不一致",
+                code="ASK_ME_CAPABILITY_PROTOCOL_INVALID",
+                status=409,
+            )
 
     observations: list[AssessmentObservation] = []
     episode_id = f"{source_type}:{source_id}"
@@ -1072,7 +1225,8 @@ def record_scoring_facts(
         binding_rows = db.scalars(
             select(LearningContractAssessmentTarget).where(
                 LearningContractAssessmentTarget.contract_version_id
-                == attempt.learning_contract_version_id
+                == attempt.learning_contract_version_id,
+                LearningContractAssessmentTarget.diagnostic_only.is_(False),
             )
         ).all()
     else:

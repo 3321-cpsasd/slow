@@ -244,5 +244,25 @@ class FallbackAiAdapter:
     async def ask_me_discussion_probe(self, request):
         return await self._call("ask_me_discussion_probe", request)
 
+    async def author_standard_application_task(self, request):
+        return await self._call("author_standard_application_task", request)
+
+    async def evaluate_standard_application_submission(self, request):
+        return await self._call(
+            "evaluate_standard_application_submission", request
+        )
+
+    async def author_transfer_task(self, request):
+        return await self._call("author_transfer_task", request)
+
+    async def evaluate_transfer_submission(self, request):
+        return await self._call("evaluate_transfer_submission", request)
+
+    async def author_capability_review_task(self, request):
+        return await self._call("author_capability_review_task", request)
+
+    async def evaluate_capability_review_submission(self, request):
+        return await self._call("evaluate_capability_review_submission", request)
+
     async def replan_book(self, request, memory):
         return await self._call("replan_book", request, memory)

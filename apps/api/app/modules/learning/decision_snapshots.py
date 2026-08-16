@@ -18,16 +18,14 @@ from ...infrastructure.tables import (
     SectionAssessmentTarget,
 )
 from .assessment import GATE_RULE_VERSION, SectionGateDecision
+from .capability_profiles import (
+    CAPABILITY_PROJECTION_RULE_VERSION,
+    capability_state_views_for_targets,
+)
 from .domain import (
     PROGRESSION_RULE_VERSION,
     ProgressionDecision,
     ProgressionSnapshot,
-)
-from .knowledge_ranks import (
-    KNOWLEDGE_RANK_RULE_VERSION,
-    knowledge_node_views_for_targets,
-    knowledge_settlement,
-    require_effective_rank_targets,
 )
 
 
@@ -217,7 +215,7 @@ def append_progression_snapshot(
     )
 
 
-def append_knowledge_settlement_snapshot(
+def append_capability_settlement_snapshot(
     db: Session,
     *,
     attempt: QuizAttempt,
@@ -226,38 +224,64 @@ def append_knowledge_settlement_snapshot(
     before: dict[str, dict],
     trigger_kind: str,
 ) -> dict:
-    """Freeze the user-facing knowledge change derived from immutable facts."""
+    """Freeze the four-stage capability change derived from immutable facts."""
 
-    effective_targets = require_effective_rank_targets(
-        db,
-        learning_contract_version_id=attempt.learning_contract_version_id,
-        target_ids=target_ids,
+    after = capability_state_views_for_targets(
+        db, user_id=attempt.user_id, target_ids=target_ids
     )
-    after = knowledge_node_views_for_targets(
-        db,
-        user_id=attempt.user_id,
-        target_ids=target_ids,
-        learning_contract_version_id=attempt.learning_contract_version_id,
-    )
-    expected_concept_ids = {
-        target.concept_revision_id
-        for target in effective_targets.values()
-        if target.concept_revision_id
+    if target_ids and not after:
+        raise AppError(
+            "本次验证缺少稳定能力身份，答案尚未写入，请稍后重试",
+            code="CAPABILITY_SETTLEMENT_IDENTITY_MISSING",
+            status=500,
+        )
+    updates = []
+    for capability_id, current in sorted(after.items()):
+        previous = before.get(capability_id, {
+            **current,
+            "stage": "unranked",
+            "stageOrder": 0,
+            "stageLabel": "尚未验证",
+            "highestStage": "unranked",
+            "activationState": "learning",
+            "stabilityDays": 0,
+            "nextDueAt": None,
+            "evidenceCount": 0,
+            "independentEvidenceCount": 0,
+            "satisfiedCriterionIds": [],
+            "sourceObservationWatermark": 0,
+        })
+        if current["stageOrder"] > previous["stageOrder"]:
+            change = "stage_up"
+            message = f"你已经用正式任务证明自己达到{current['stageLabel']}。"
+        elif (
+            previous["activationState"] == "due_for_reactivation"
+            and current["activationState"] == "available"
+        ):
+            change = "reactivated"
+            message = "这项能力已经重新恢复为可调用状态。"
+        elif current["activationState"] == "due_for_reactivation":
+            change = "needs_reactivation"
+            message = "历史阶段保留，但这项能力需要一次短唤醒。"
+        elif current["evidenceCount"] > previous["evidenceCount"]:
+            change = "evidence_added"
+            message = "本次验证增加了独立证据，能力阶段按累计标准保持。"
+        else:
+            change = "confirmed"
+            message = "本次结果与现有能力判断一致，没有重复制造晋级。"
+        updates.append({
+            "capabilityRevisionId": capability_id,
+            "label": current["label"],
+            "before": previous,
+            "after": current,
+            "change": change,
+            "message": message,
+        })
+    output = {
+        "schemaVersion": "capability_settlement_v1",
+        "ruleVersion": CAPABILITY_PROJECTION_RULE_VERSION,
+        "updates": updates,
     }
-    missing_concept_ids = expected_concept_ids - set(after)
-    if missing_concept_ids:
-        raise AppError(
-            "本次能力结算不完整，答案尚未写入，请稍后重试",
-            code="KNOWLEDGE_SETTLEMENT_INCOMPLETE",
-            status=500,
-        )
-    output = knowledge_settlement(before, after)
-    if target_ids and not output["updates"]:
-        raise AppError(
-            "本次能力结算没有形成段位记录，答案尚未写入，请稍后重试",
-            code="KNOWLEDGE_SETTLEMENT_EMPTY",
-            status=500,
-        )
     source_watermark = max(
         (
             int(view.get("sourceObservationWatermark", 0))
@@ -269,9 +293,9 @@ def append_knowledge_settlement_snapshot(
         db,
         attempt=attempt,
         section_id=section_id,
-        decision_kind="knowledge_settlement",
+        decision_kind="capability_settlement",
         trigger_kind=trigger_kind,
-        rule_version=KNOWLEDGE_RANK_RULE_VERSION,
+        rule_version=CAPABILITY_PROJECTION_RULE_VERSION,
         input_snapshot={
             "attemptId": attempt.id,
             "assessmentTargetIds": sorted(target_ids),

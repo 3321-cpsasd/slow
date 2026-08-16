@@ -18,12 +18,27 @@ from app.modules.learning.review_assignments import (
 NOW = datetime(2026, 8, 4, 9, 0, tzinfo=timezone.utc)
 
 
-def candidate(target: str, *, due_days: int, priority: int) -> ReviewCandidate:
+def candidate(
+    target: str,
+    *,
+    due_days: int,
+    priority: int,
+    status: str = "scheduled",
+    need_kind: str = "activation_due",
+    capability_stage: str = "bronze",
+    capability_activation_state: str = "",
+    capability_revision_id: str = "",
+) -> ReviewCandidate:
     return ReviewCandidate(
         review_state_id=f"state-{target}",
         assessment_target_id=target,
         due_at=NOW + timedelta(days=due_days),
         priority=priority,
+        status=status,
+        need_kind=need_kind,
+        capability_stage=capability_stage,
+        capability_activation_state=capability_activation_state,
+        capability_revision_id=capability_revision_id,
     )
 
 
@@ -94,6 +109,89 @@ def test_daily_selection_uses_ids_as_final_deterministic_tie_breaker():
         "target-a",
         "target-b",
     ]
+
+
+def test_due_capability_reactivation_precedes_recent_wrong_answer_remediation():
+    selected = select_daily_reviews(
+        [
+            candidate(
+                "wrong-answer",
+                due_days=-3,
+                priority=100,
+                status="remediation_due",
+                need_kind="remediation",
+            ),
+            candidate(
+                "forgotten-capability",
+                due_days=0,
+                priority=40,
+                capability_stage="silver",
+                capability_activation_state="due_for_reactivation",
+            ),
+        ],
+        daily_budget=1,
+        as_of=NOW,
+    )
+
+    assert [item.assessment_target_id for item in selected.items] == [
+        "forgotten-capability"
+    ]
+    assert selected.items[0].need_kind == "activation_due"
+    assert selected.items[0].capability_stage == "silver"
+
+
+def test_wrong_answer_remediation_remains_a_secondary_review_signal():
+    selected = select_daily_reviews(
+        [
+            candidate(
+                "wrong-answer",
+                due_days=0,
+                priority=100,
+                status="remediation_due",
+                need_kind="remediation",
+            )
+        ],
+        daily_budget=1,
+        as_of=NOW,
+    )
+
+    assert [item.assessment_target_id for item in selected.items] == [
+        "wrong-answer"
+    ]
+    assert selected.items[0].need_kind == "remediation"
+
+
+def test_daily_selection_deduplicates_multiple_targets_for_one_capability():
+    selected = select_daily_reviews(
+        [
+            candidate(
+                "target-mechanism",
+                due_days=-2,
+                priority=60,
+                capability_revision_id="capability-recursion",
+            ),
+            candidate(
+                "target-boundary",
+                due_days=-1,
+                priority=50,
+                capability_revision_id="capability-recursion",
+            ),
+            candidate(
+                "target-search",
+                due_days=-1,
+                priority=40,
+                capability_revision_id="capability-search",
+            ),
+        ],
+        daily_budget=10,
+        as_of=NOW,
+    )
+
+    assert [item.assessment_target_id for item in selected.items] == [
+        "target-mechanism",
+        "target-search",
+    ]
+    assert selected.due_count == 2
 
 
 def test_daily_selection_rejects_duplicate_target_authorities():

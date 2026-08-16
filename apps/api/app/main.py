@@ -35,7 +35,7 @@ from .ai.gateway import (
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, BookReplanCreate, ChapterChallengeSubmit, ChapterCreate, ChapterOrder, ChapterSkipCreate, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningGoalInterviewCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, LearningStartPreviewCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ReadingAnnotationCreate, ReadingAnnotationUpdate, RecoveryCodeRotate, ReinforcementRespond, ResumeUpdate, ReviewSubmit, SeriesRename, ShelfCreate, ShelfRename, StudyActivityHeartbeat
+from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, BookReplanCreate, CapabilityApplicationSubmit, CapabilityReviewSubmit, ChapterChallengeSubmit, ChapterCreate, ChapterOrder, ChapterSkipCreate, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningGoalInterviewCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, LearningStartPreviewCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ReadingAnnotationCreate, ReadingAnnotationUpdate, RecoveryCodeRotate, ReinforcementRespond, ResumeUpdate, ReviewSubmit, SeriesRename, ShelfCreate, ShelfRename, StudyActivityHeartbeat
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -1960,6 +1960,52 @@ def create_app(
             idempotency_key,
         )
 
+    @app.post("/api/sections/{section_id}/application-task/prepare")
+    async def prepare_application_task(
+        section_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return await s.prepare_application_task(section_id)
+
+    @app.get("/api/sections/{section_id}/application-task")
+    def application_task(
+        section_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return s.application_task(section_id)
+
+    @app.post("/api/application-tasks/{task_id}/submit")
+    async def submit_application_task(
+        task_id: str,
+        body: CapabilityApplicationSubmit,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return await s.submit_application_task(task_id, body, idempotency_key)
+
+    @app.post("/api/sections/{section_id}/transfer-task/prepare")
+    async def prepare_transfer_task(
+        section_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return await s.prepare_transfer_task(section_id)
+
+    @app.get("/api/sections/{section_id}/transfer-task")
+    def transfer_task(
+        section_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return s.transfer_task(section_id)
+
+    @app.post("/api/transfer-tasks/{task_id}/submit")
+    async def submit_transfer_task(
+        task_id: str,
+        body: CapabilityApplicationSubmit,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return await s.submit_transfer_task(task_id, body, idempotency_key)
+
     @app.get("/api/sections/{section_id}")
     def section(section_id: str, s: SlowService = Depends(service)): return s.section(section_id)
 
@@ -2030,6 +2076,24 @@ def create_app(
         s: SlowService = Depends(service),
     ):
         return s.submit_review(assignment_id, body, idempotency_key)
+
+    @app.post("/api/reviews/{assignment_id}/respond")
+    async def respond_capability_review(
+        assignment_id: str,
+        body: CapabilityReviewSubmit,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return await s.respond_capability_review(
+            assignment_id, body, idempotency_key
+        )
+
+    @app.post("/api/reviews/{assignment_id}/strengthening")
+    def review_strengthening(
+        assignment_id: str,
+        s: SlowService = Depends(service),
+    ):
+        return s.review_strengthening(assignment_id)
 
     @app.post("/api/reviews/{assignment_id}/reinforcement")
     async def start_review_reinforcement(

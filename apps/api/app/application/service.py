@@ -22,6 +22,7 @@ from ..infrastructure.tables import (
     AssessmentTarget,
     Book,
     BookCapstone,
+    CapabilityStateProjection,
     Chapter,
     ChapterPractice,
     ContentVersion,
@@ -55,6 +56,7 @@ from ..modules.artifacts.progress import ArtifactProgressStore
 from ..modules.artifacts.service import ArtifactService
 from ..modules.learning.commands import SubmitQuiz
 from ..modules.learning.assessment import record_ask_me_assessment_facts
+from ..modules.learning.application_tasks import CapabilityApplicationTaskService
 from ..modules.learning.generation_leases import (
     acquire_generation_lease,
     release_generation_lease,
@@ -157,6 +159,13 @@ class SlowService:
         self.chapter_choices = ChapterChoiceService(
             db,
             user_id=self.user_id,
+            contexts=self.contexts,
+            progress=self.progress,
+        )
+        self.application_tasks = CapabilityApplicationTaskService(
+            db,
+            user_id=self.user_id,
+            ai=self.ai,
             contexts=self.contexts,
             progress=self.progress,
         )
@@ -743,6 +752,46 @@ class SlowService:
             chapter_id,
             body,
             idempotency_key or "",
+        )
+
+    async def prepare_application_task(self, section_id: str):
+        return await self.application_tasks.prepare(section_id)
+
+    def application_task(self, section_id: str):
+        return self.application_tasks.view(section_id)
+
+    async def prepare_transfer_task(self, section_id: str):
+        return await self.application_tasks.prepare(section_id, "transfer_task")
+
+    def transfer_task(self, section_id: str):
+        return self.application_tasks.view(section_id, "transfer_task")
+
+    async def submit_application_task(
+        self,
+        task_id: str,
+        body,
+        idempotency_key: str | None,
+    ):
+        return await self.application_tasks.submit(
+            task_id,
+            response=body.response,
+            assistance_used=body.assistance_used,
+            idempotency_key=idempotency_key or "",
+            expected_task_kind="standard_application",
+        )
+
+    async def submit_transfer_task(
+        self,
+        task_id: str,
+        body,
+        idempotency_key: str | None,
+    ):
+        return await self.application_tasks.submit(
+            task_id,
+            response=body.response,
+            assistance_used=body.assistance_used,
+            idempotency_key=idempotency_key or "",
+            expected_task_kind="transfer_task",
         )
 
     def skip_chapter(
@@ -1690,6 +1739,26 @@ class SlowService:
             user_id=self.user_id,
             target_ids=set(target_ids),
         )
+        capability_revision_ids = {
+            target.capability_revision_id
+            for _, target in projection_rows
+            if target.capability_revision_id
+        }
+        capability_states = {
+            item.capability_revision_id: item
+            for item in (
+                self.db.scalars(
+                    select(CapabilityStateProjection).where(
+                        CapabilityStateProjection.user_id == self.user_id,
+                        CapabilityStateProjection.capability_revision_id.in_(
+                            capability_revision_ids
+                        ),
+                    )
+                ).all()
+                if capability_revision_ids
+                else []
+            )
+        }
         evidence_counts = dict(
             self.db.execute(
                 select(
@@ -1715,8 +1784,22 @@ class SlowService:
                 if effective_target and effective_target.concept_revision_id
                 else ""
             )
+            capability_state = capability_states.get(
+                target.capability_revision_id or ""
+            )
             teaching_action = (
                 "wake"
+                if capability_state
+                and capability_state.activation_state == "due_for_reactivation"
+                else "compress"
+                if capability_state
+                and capability_state.current_stage_order >= 3
+                else "connect"
+                if capability_state
+                and capability_state.current_stage_order > 0
+                else "teach"
+                if capability_state
+                else "wake"
                 if node and node["activation"] == "due"
                 else "scaffold"
                 if node and node["activation"] == "reassessment"
@@ -1728,6 +1811,9 @@ class SlowService:
             )
             result.append({
                 "concept": target.objective_statement,
+                "conceptLabel": (
+                    node["label"] if node else target.objective_statement
+                ),
                 "mastery": round(state.p_known_ppm / 10_000),
                 "evidenceCount": evidence_counts.get(target.id, 0),
                 "summary": (
@@ -1735,6 +1821,15 @@ class SlowService:
                     f"声明 {state.claim_status}；保持轮次 {state.retention_rounds}"
                 ),
                 "assessmentTargetId": target.id,
+                "assessmentTarget": {
+                    "id": target.id,
+                    "statement": target.objective_statement,
+                    "dimension": target.dimension,
+                    "capabilityRevisionId": target.capability_revision_id or "",
+                    "capabilityStageCriterionId": (
+                        target.capability_stage_criterion_id or ""
+                    ),
+                },
                 "pKnown": round(state.p_known_ppm / 1_000_000, 6),
                 "uncertainty": round(state.uncertainty_ppm / 1_000_000, 6),
                 "claimStatus": state.claim_status,
@@ -1754,6 +1849,30 @@ class SlowService:
                     },
                     "teachingAction": teaching_action,
                 } if node else {"teachingAction": "teach"}),
+                **(
+                    {
+                        "capabilityState": {
+                            "capabilityRevisionId": (
+                                capability_state.capability_revision_id
+                            ),
+                            "stage": capability_state.current_stage,
+                            "stageOrder": capability_state.current_stage_order,
+                            "activation": capability_state.activation_state,
+                            "evidenceMaturity": load(
+                                capability_state.evidence_maturity_json, {}
+                            ),
+                            "missingCriterionIds": load(
+                                capability_state.missing_criterion_ids_json, []
+                            ),
+                            "projectionRuleVersion": (
+                                capability_state.projection_rule_version
+                            ),
+                        },
+                        "teachingAction": teaching_action,
+                    }
+                    if capability_state
+                    else {}
+                ),
             })
 
         # Ask Me and pre-M2 evidence still use the legacy memory projection.
@@ -1842,6 +1961,36 @@ class SlowService:
             body.answers,
             idempotency_key=idempotency_key,
         )
+
+    async def respond_capability_review(
+        self,
+        assignment_id: str,
+        body,
+        idempotency_key=None,
+    ):
+        return await ReviewAssignmentService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+            context_builder=self.generation_contexts,
+            context_resolver=self.contexts,
+            memory_loader=self._memory,
+        ).respond(
+            assignment_id,
+            response=body.response,
+            assistance_used=body.assistance_used,
+            idempotency_key=idempotency_key,
+        )
+
+    def review_strengthening(self, assignment_id: str):
+        return ReviewAssignmentService(
+            self.db,
+            user_id=self.user_id,
+            ai=self.ai,
+            context_builder=self.generation_contexts,
+            context_resolver=self.contexts,
+            memory_loader=self._memory,
+        ).strengthening(assignment_id)
 
     async def start_review_reinforcement(self, assignment_id: str):
         return await ReinforcementService(

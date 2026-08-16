@@ -98,10 +98,16 @@ class ContextRecordingAi(FakeAi):
 
     async def review_lesson_alignment(self, request, content, quiz):
         self.requests["alignment"].append(request)
+        objectives = [
+            str(item.get("statement") or item.get("objective") or "")
+            if isinstance(item, dict)
+            else str(item)
+            for item in (request.get("objectives") or [request["question"]])
+        ]
         return LessonAlignmentReview(
             allowed=True,
             issues=[],
-            covered_objectives=request.get("objectives") or [request["question"]],
+            covered_objectives=objectives,
         )
 
 

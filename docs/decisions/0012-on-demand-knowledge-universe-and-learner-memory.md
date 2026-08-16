@@ -1,9 +1,10 @@
 # ADR-0012：按需知识宇宙、个人知识子网与三层学习记忆
 
-- **状态**：Accepted，MVP 核心闭环已实现
+- **状态**：Accepted；知识节点六级段位部分已被 ADR-0022 取代，其余知识宇宙、不可变证据和可重建记忆边界继续有效
 - **决策日期**：2026-08-12
 - **适用范围**：知识身份、学习证据、掌握投影、复习、用户画像、节末反馈、课程规划与正文个性化
 - **继承边界**：[ADR-0001](0001-lesson-generation-v2.md)、[ADR-0004](0004-curriculum-baseline-authority.md)、[ADR-0005](0005-m2-acceptance-v2.md)、[ADR-0006](0006-daily-mode.md)、[ADR-0007](0007-user-interface-expression-boundary.md)
+- **取代说明**：[ADR-0022](0022-capability-profile-and-cumulative-stages.md) 取代本文中知识节点直接拥有六级段位、能力维度直接映射段位以及跨时间稳定形成大师段位的规则。知识身份、类型化关系、三层记忆、证据不可变、画像可重建和失败关闭原则继续有效。
 
 ## 1. 决策
 

@@ -1,7 +1,14 @@
+import asyncio
+
 import pytest
 from pydantic import ValidationError
 
-from app.ai.contracts import GeneratedChapter, GeneratedSectionOutline
+from app.ai.contracts import (
+    GeneratedChapter,
+    GeneratedConceptCandidate,
+    GeneratedSectionOutline,
+)
+from app.ai.local_adapter import LocalDemoAdapter
 from app.modules.curriculum.policy import CHAPTER_SECTION_POLICY
 
 
@@ -43,3 +50,53 @@ def test_historical_partial_chapter_is_visible_but_explicitly_anomalous():
     hint = CHAPTER_SECTION_POLICY.workload(1)
     assert hint["level"] == "anomalous"
     assert "显式检查" in hint["message"]
+
+
+def test_candidate_objectives_require_aligned_capability_dimensions():
+    candidate = GeneratedConceptCandidate(
+        candidate_key="recursion",
+        label="递归",
+        definition="递归通过缩小问题并抵达基本情形完成求解",
+        scope="解释终止机制与迁移边界",
+    )
+
+    with pytest.raises(ValidationError):
+        GeneratedSectionOutline(
+            title="递归终止",
+            question="递归为什么能够终止？",
+            objectives=["解释基本情形", "解释规模缩小"],
+            concept_candidate=candidate,
+            objective_dimensions=["mechanism"],
+        )
+
+    outline = GeneratedSectionOutline(
+        title="递归终止",
+        question="递归为什么能够终止？",
+        objectives=["解释基本情形", "迁移到深度优先搜索"],
+        concept_candidate=candidate,
+        objective_dimensions=["mechanism", "transfer"],
+    )
+    assert outline.objective_dimensions == ["mechanism", "transfer"]
+
+
+def test_local_demo_dimension_uses_capability_verb_not_topic_keywords():
+    adapter = LocalDemoAdapter()
+    context = {
+        "generationContext": {
+            "curriculum": {
+                "book": {
+                    "topic": "递归：从终止机制到搜索与动态规划迁移"
+                }
+            }
+        },
+        "title": "核心对象",
+        "objective": "解释 递归：从终止机制到搜索与动态规划迁移 的核心对象及关系",
+    }
+
+    chapter = asyncio.run(adapter.chapter(context, []))
+
+    assert {
+        dimension
+        for section in chapter.sections
+        for dimension in section.objective_dimensions
+    } == {"mechanism"}

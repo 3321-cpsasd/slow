@@ -27,17 +27,28 @@ def _dump(value) -> str:
 def section_objectives_payload(item) -> list:
     """Freeze model-selected allowlisted identity keys with each section objective."""
 
-    if not item.baseline_concept_key:
-        return list(item.objectives)
-    return [
-        {
-            "statement": statement,
-            "required": objective_position == 1,
-            "baselineConceptKey": item.baseline_concept_key,
-            "baselineObjectiveKey": item.baseline_objective_key,
-        }
-        for objective_position, statement in enumerate(item.objectives, 1)
-    ]
+    if item.baseline_concept_key:
+        return [
+            {
+                "statement": statement,
+                "required": objective_position == 1,
+                "baselineConceptKey": item.baseline_concept_key,
+                "baselineObjectiveKey": item.baseline_objective_key,
+            }
+            for objective_position, statement in enumerate(item.objectives, 1)
+        ]
+    if item.concept_candidate:
+        candidate = item.concept_candidate.model_dump()
+        return [
+            {
+                "statement": statement,
+                "required": objective_position == 1,
+                "dimension": item.objective_dimensions[objective_position - 1],
+                "conceptCandidate": candidate,
+            }
+            for objective_position, statement in enumerate(item.objectives, 1)
+        ]
+    return list(item.objectives)
 
 
 class ChapterPlanningService:
@@ -166,6 +177,12 @@ class ChapterPlanningService:
         knowledge_identities = KnowledgeFactGraphService(
             self.db
         ).chapter_identity_allowlist(chapter.id)
+        from ..knowledge.identity import candidate_allowlist_for_series
+
+        candidate_identities = candidate_allowlist_for_series(
+            self.db,
+            chapter_context.series.id,
+        )
         context_pack = self.generation_contexts.build(
             "chapter",
             shelf=chapter_context.shelf,
@@ -180,6 +197,7 @@ class ChapterPlanningService:
                 "title": chapter.title,
                 "objective": chapter.objective,
                 "knowledgeIdentityAllowlist": knowledge_identities,
+                "knowledgeIdentityCandidateAllowlist": candidate_identities,
             },
             context_pack,
         )
@@ -189,6 +207,12 @@ class ChapterPlanningService:
         self.db.commit()
         generated = await self.ai.chapter(request, memory)
         self._renew_lease(resource_key, owner_id)
+        if not generated.capability_subnets:
+            raise AppError(
+                "章节规划没有形成可冻结的稳定能力子网",
+                code="CHAPTER_CAPABILITY_PLAN_REQUIRED",
+                status=502,
+            )
         KnowledgeFactGraphService(self.db).validate_chapter_outline_identities(
             chapter.id,
             generated.sections,
@@ -204,6 +228,7 @@ class ChapterPlanningService:
             return self.chapter_view(chapter)
 
         run = self.progress.active_run(chapter_context.series.id)
+        sections: list[Section] = []
         for position, item in enumerate(generated.sections, 1):
             section = Section(
                 id=_uid("section"),
@@ -214,11 +239,23 @@ class ChapterPlanningService:
                 objectives_json=_dump(section_objectives_payload(item)),
             )
             self.db.add(section)
+            sections.append(section)
             self.progress.add_section(
                 run,
                 section,
                 status=first_section_status if position == 1 else "locked",
             )
+        self.db.flush()
+        from .capability_planning import freeze_chapter_capability_plans
+
+        freeze_chapter_capability_plans(
+            self.db,
+            series_id=chapter_context.series.id,
+            chapter_id=chapter.id,
+            sections=sections,
+            generated_chapter=generated,
+            published_allowlist=knowledge_identities,
+        )
 
         practice = ChapterPractice(
             id=_uid("practice"),

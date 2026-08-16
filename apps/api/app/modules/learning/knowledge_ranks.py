@@ -27,9 +27,11 @@ KNOWLEDGE_RANK_RULE_VERSION = "knowledge_rank_v3"
 KNOWLEDGE_RANK_POLICY_VERSION = "knowledge_rank_policy_v1"
 RANK_SETTLEABLE_IDENTITY_STATUSES = (
     "published_knowledge_graph",
+    "published_capability",
     "route_scoped_knowledge",
+    "route_scoped_capability",
 )
-RANK_SETTLEABLE_REVISION_STATUSES = ("reviewed", "route_scoped")
+RANK_SETTLEABLE_REVISION_STATUSES = ("published", "reviewed", "route_scoped")
 
 RANKS = {
     "unranked": (0, "尚未验证", "还没有足够证据形成能力判断"),
@@ -467,6 +469,7 @@ def rebuild_knowledge_node_projections(
                 if item.next_due_at is not None
             ),
             default=None,
+            key=_utc,
         )
         latest = max(items, key=lambda item: (_utc(item.created_at), item.sequence))
         activation_state = (

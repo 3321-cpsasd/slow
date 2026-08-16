@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from .contracts import (
     AskMeDiscussionEvaluation,
@@ -7,12 +8,18 @@ from .contracts import (
     AskMeEvaluation,
     AskMeProbe,
     AskMeTurn,
+    CapabilityReviewRubricCriterion,
+    CapabilityReviewTaskCandidate,
     ChoiceQuestion,
     ClaimSupportReview,
     ClassifiedAnswer,
     ContentBlock,
     DistractorDiagnostic,
     GeneratedChapter,
+    GeneratedCapabilityMember,
+    GeneratedCapabilityRelation,
+    GeneratedCapabilitySubnetCandidate,
+    GeneratedConceptCandidate,
     GeneratedContent,
     GeneratedLesson,
     GeneratedLessonBlock,
@@ -39,8 +46,13 @@ from .contracts import (
     ReplannedBook,
     ReplannedChapter,
     Source,
+    StandardApplicationCriterionResult,
+    StandardApplicationEvaluation,
+    StandardApplicationRubricCriterion,
+    StandardApplicationTaskCandidate,
     TeachingBlueprint,
     TeachingBlueprintBlock,
+    TransferTaskCandidate,
 )
 from .port import ProviderCapabilities
 
@@ -272,11 +284,98 @@ class LocalDemoAdapter:
         )
 
     async def chapter(self, request, memory):
+        topic = (
+            request.get("generationContext", {})
+            .get("curriculum", {})
+            .get("book", {})
+            .get("topic", "")
+        ) or request["title"]
+        concept_label = str(topic).split("：", 1)[0].strip()
+        candidates = [
+            GeneratedConceptCandidate(
+                candidate_key=(
+                    f"{concept_label.lower().replace(' ', '-')}-part-{index}"
+                ),
+                label=f"{concept_label}的递进要点 {index}",
+                definition=(
+                    f"{concept_label}的递进要点 {index} 是本章第 {index} 个"
+                    "可独立教授和验证的知识对象。"
+                ),
+                scope=(
+                    f"在当前学习目标中解释 {concept_label} 的第 {index} 个"
+                    "递进问题及其与相邻要点的关系。"
+                ),
+                boundaries=[
+                    "不把正文中临时出现的支撑知识自动升级为并列考核目标",
+                    "不把只因名称相同但定义或范围不同的概念自动合并",
+                ],
+            )
+            for index in range(1, 4)
+        ]
+        objective = str(request.get("objective") or "").strip()
+        if objective.startswith("把 ") or objective.startswith("迁移"):
+            dimension = "transfer"
+        elif objective.startswith("综合") or objective.startswith("定位"):
+            dimension = "application"
+        elif objective.startswith("识别") or objective.startswith("辨别"):
+            dimension = "boundary"
+        elif objective.startswith("解释"):
+            dimension = "mechanism"
+        elif "适用边界" in objective:
+            dimension = "boundary"
+        else:
+            dimension = "recognition"
         return GeneratedChapter(
             sections=[
-                GeneratedSectionOutline(title=f"{request['title']}：问题 {index}", question=f"本节如何解决递进问题 {index}？", objectives=[f"{request['objective']}（目标 {index}）"])
+                GeneratedSectionOutline(
+                    title=f"{request['title']}：问题 {index}",
+                    question=f"本节如何解决递进问题 {index}？",
+                    objectives=[f"{request['objective']}（目标 {index}）"],
+                    concept_candidate=candidates[index - 1],
+                    objective_dimensions=[dimension],
+                )
                 for index in range(1, 4)
-            ]
+            ],
+            capability_subnets=[
+                GeneratedCapabilitySubnetCandidate(
+                    candidate_key=(
+                        f"{concept_label.lower().replace(' ', '-')}-chapter-capability"
+                    ),
+                    label=f"解释并运用{concept_label}各递进要点之间的关系",
+                    operation=f"解释{concept_label}各递进要点并在标准情境中运用",
+                    boundary=f"限于本章确认的{concept_label}知识范围",
+                    members=[
+                        GeneratedCapabilityMember(
+                            section_position=1,
+                            role="anchor",
+                        ),
+                        GeneratedCapabilityMember(
+                            section_position=2,
+                            role="required",
+                        ),
+                        GeneratedCapabilityMember(
+                            section_position=3,
+                            role="required",
+                        ),
+                    ],
+                    relations=[
+                        GeneratedCapabilityRelation(
+                            from_section_position=1,
+                            to_section_position=2,
+                            relation_type="prerequisite_for",
+                            statement="第一个递进要点为第二个要点提供理解前提。",
+                        ),
+                        GeneratedCapabilityRelation(
+                            from_section_position=2,
+                            to_section_position=3,
+                            relation_type="prerequisite_for",
+                            statement="第二个递进要点为第三个要点提供理解前提。",
+                        ),
+                    ],
+                    assessment_section_position=3,
+                    assessment_objective_position=1,
+                )
+            ],
         )
 
     async def teaching_blueprint(self, request, memory):
@@ -617,6 +716,143 @@ class LocalDemoAdapter:
         return AskMeDiscussionProbe(
             follow_up_prompt=f"请再为“{topic.get('title', '当前主题')}”补充一个边界反例。",
             follow_up_purpose="继续观察边界条件和证据选择。",
+        )
+
+    async def author_standard_application_task(self, request):
+        label = request.get("capability", {}).get("label", "当前知识")
+        return StandardApplicationTaskCandidate(
+            prompt=(
+                f"请在一个正文未直接给出数值和结论的新案例中运用{label}："
+                "先写出你的判断，再列出执行步骤、可观察验证信号和一个失败边界。"
+            ),
+            task_context="本地演示生成的未见标准案例；只用于验证任务事实链。",
+            deliverables=["判断与依据", "执行步骤", "验证信号", "失败边界"],
+            rubric=[
+                StandardApplicationRubricCriterion(
+                    criterion_key="C1",
+                    statement="判断明确，并正确调用目标能力的核心机制",
+                ),
+                StandardApplicationRubricCriterion(
+                    criterion_key="C2",
+                    statement="步骤可执行，且包含可被第三方观察的验证信号",
+                ),
+                StandardApplicationRubricCriterion(
+                    criterion_key="C3",
+                    statement="指出至少一个会让方案失效的适用边界",
+                ),
+            ],
+            reference_answer_points=[
+                "判断必须与目标能力的机制一致",
+                "步骤、验证信号和边界需要彼此对应",
+            ],
+            novelty_basis="题面使用新的案例参数，未复述正文示例。",
+        )
+
+    async def evaluate_standard_application_submission(self, request):
+        response = json.dumps(request.get("submission", {}), ensure_ascii=False)
+        sufficient = len(response.strip()) >= 80
+        results = [
+            StandardApplicationCriterionResult(
+                criterion_key=item["criterionKey"],
+                satisfied=sufficient,
+                rationale=(
+                    "演示回答包含了足够长度的结构化说明。"
+                    if sufficient
+                    else "演示回答信息不足，无法确认满足该标准。"
+                ),
+            )
+            for item in request.get("rubric", [])
+        ]
+        return StandardApplicationEvaluation(
+            verdict="pass" if sufficient else "fail",
+            evidence_sufficiency="sufficient" if sufficient else "insufficient",
+            criterion_results=results,
+            rationale="本地演示评定不具有正式黄金证据资格。",
+        )
+
+    async def author_transfer_task(self, request):
+        required = request.get("requiredKnowledge") or []
+        labels = [item.get("label", "相关知识") for item in required][:3]
+        while len(labels) < 2:
+            labels.append(f"支撑知识{len(labels) + 1}")
+        return TransferTaskCandidate(
+            prompt=(
+                f"面对一个正文没有出现过的综合故障，请同时运用{labels[0]}与{labels[1]}"
+                "提出方案，并说明为什么这样组合、如何验证以及何时失效。"
+            ),
+            task_context="跨系统、约束条件变化的本地演示陌生情境。",
+            deliverables=["综合判断", "知识重组", "选择理由", "验证信号", "失效边界"],
+            rubric=[
+                StandardApplicationRubricCriterion(criterion_key="C1", statement="正确重组至少两项必需知识"),
+                StandardApplicationRubricCriterion(criterion_key="C2", statement="说明方案选择理由和关系机制"),
+                StandardApplicationRubricCriterion(criterion_key="C3", statement="给出验证信号和失效边界"),
+            ],
+            reference_answer_points=["知识必须共同参与方案", "理由、验证与边界必须对应"],
+            novelty_basis="情境约束和目标组合均未在正文出现。",
+            unfamiliarity_basis="需要跨系统适配并处理正文未给出的约束变化。",
+            required_knowledge_recombination=labels[:2],
+            decision_rationale_requirement="说明为何选择这一组合，而不是分别复述两项知识。",
+        )
+
+    async def evaluate_transfer_submission(self, request):
+        evaluation = await self.evaluate_standard_application_submission(request)
+        return evaluation.model_copy(
+            update={"rationale": "本地演示评定不具有正式钻石证据资格。"}
+        )
+
+    async def author_capability_review_task(self, request):
+        task_kind = request.get("taskKind", "oral_reactivation")
+        planned = request.get("plannedCriteria", [])
+        labels = [item.get("label", "相关知识") for item in request.get("requiredKnowledge", [])]
+        prompt = (
+            "请重新解释当前能力的关键机制与失效边界，并用一个新例子说明二者如何共同约束判断。"
+            if task_kind == "oral_reactivation"
+            else "请在一个正文未出现的新标准案例中独立给出判断、步骤、验证信号与失效边界。"
+            if task_kind == "application_reactivation"
+            else f"请在陌生综合情境中重组{'、'.join(labels[:2])}，给出方案、选择理由、验证信号与失效边界。"
+        )
+        rubric_sources = list(planned)
+        if len(rubric_sources) == 1:
+            rubric_sources.append(planned[0])
+        return CapabilityReviewTaskCandidate(
+            prompt=prompt,
+            task_context="本地演示生成的延迟能力再激活情境。",
+            deliverables=["判断", "理由", "验证信号", "失效边界"],
+            rubric=[
+                CapabilityReviewRubricCriterion(
+                    criterion_key=f"C{index}",
+                    stage_criterion_id=item["id"],
+                    statement=item["statement"],
+                )
+                for index, item in enumerate(rubric_sources, 1)
+            ],
+            reference_answer_points=[item["statement"] for item in planned],
+            novelty_basis="使用与正文不同的新情境重新观察当前阶段能力。",
+            unfamiliarity_basis=(
+                "情境约束与正文示例不同，需要重新组合知识。"
+                if task_kind == "transfer_reactivation"
+                else ""
+            ),
+            required_knowledge_recombination=(
+                labels[:2] if task_kind == "transfer_reactivation" else []
+            ),
+        )
+
+    async def evaluate_capability_review_submission(self, request):
+        response = json.dumps(request.get("submission", {}), ensure_ascii=False)
+        sufficient = len(response.strip()) >= 40
+        return StandardApplicationEvaluation(
+            verdict="pass" if sufficient else "fail",
+            evidence_sufficiency="sufficient" if sufficient else "insufficient",
+            criterion_results=[
+                StandardApplicationCriterionResult(
+                    criterion_key=item["criterionKey"],
+                    satisfied=sufficient,
+                    rationale="演示提交覆盖该项标准。" if sufficient else "演示提交信息不足。",
+                )
+                for item in request.get("rubric", [])
+            ],
+            rationale="本地演示评定不具有正式再激活证据资格。",
         )
 
     async def replan_book(self, request, memory):

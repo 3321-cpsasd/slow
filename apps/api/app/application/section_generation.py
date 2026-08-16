@@ -99,6 +99,11 @@ def teaching_action_snapshot(memory, target_payloads, knowledge_context):
         str(item.get("conceptRevisionId") or "") for item in target_payloads
         if item.get("conceptRevisionId")
     }
+    target_capabilities = {
+        str(item.get("capabilityRevisionId") or "")
+        for item in target_payloads
+        if item.get("capabilityRevisionId")
+    }
     decisions = []
     evidenced_concepts = set()
     reason_by_action = {
@@ -115,9 +120,15 @@ def teaching_action_snapshot(memory, target_payloads, knowledge_context):
             or raw.get("conceptRevisionId")
             or ""
         )
+        capability_id = str(
+            (raw.get("capabilityState") or {}).get("capabilityRevisionId")
+            or (raw.get("assessmentTarget") or {}).get("capabilityRevisionId")
+            or ""
+        )
         if (
             str(raw.get("assessmentTargetId") or "") not in target_ids
             and concept_id not in target_concepts
+            and capability_id not in target_capabilities
         ):
             continue
         action = str(raw.get("teachingAction") or "teach")
@@ -128,6 +139,11 @@ def teaching_action_snapshot(memory, target_payloads, knowledge_context):
         decisions.append({
             **raw,
             "conceptRevisionId": concept_id,
+            **(
+                {"capabilityRevisionId": capability_id}
+                if capability_id
+                else {}
+            ),
             "teachingAction": action,
             "reasonCode": reason_by_action[action],
             "evidenceWatermark": int(raw.get("sourceObservationWatermark") or 0),

@@ -794,6 +794,60 @@ class AskMeService:
                 code="ASK_ME_CONTENT_VERSION_MISSING",
                 status=409,
             )
+        diagnostic_rows = self.db.execute(
+            select(LearningContractAssessmentTarget, AssessmentTarget)
+            .join(
+                AssessmentTarget,
+                AssessmentTarget.id
+                == LearningContractAssessmentTarget.assessment_target_id,
+            )
+            .where(
+                LearningContractAssessmentTarget.contract_version_id
+                == contract_version_id,
+                LearningContractAssessmentTarget.diagnostic_only.is_(True),
+            )
+            .order_by(LearningContractAssessmentTarget.position)
+        ).all()
+        if diagnostic_rows:
+            by_dimension: dict[str, list[dict[str, str]]] = {}
+            for binding, target in diagnostic_rows:
+                if (
+                    not target.capability_revision_id
+                    or not target.capability_stage_criterion_id
+                ):
+                    raise AppError(
+                        "深入讨论目标缺少能力阶段绑定",
+                        code="ASK_ME_CAPABILITY_TARGET_BINDING_MISSING",
+                        status=409,
+                    )
+                by_dimension.setdefault(target.dimension, []).append(
+                    {
+                        "assessmentTargetId": target.id,
+                        "objective": target.objective_statement,
+                        "dimension": target.dimension,
+                        "verificationPolicy": binding.verification_policy,
+                        "capabilityRevisionId": target.capability_revision_id,
+                        "capabilityStageCriterionId": (
+                            target.capability_stage_criterion_id
+                        ),
+                    }
+                )
+            missing_or_ambiguous = [
+                dimension
+                for dimension in self.DIMENSIONS
+                if len(by_dimension.get(dimension, [])) != 1
+            ]
+            if missing_or_ambiguous:
+                raise AppError(
+                    "深入讨论的能力阶段目标不完整",
+                    code="ASK_ME_CAPABILITY_TARGETS_INCOMPLETE",
+                    status=409,
+                    details={"dimensions": missing_or_ambiguous},
+                )
+            return {
+                dimension: by_dimension[dimension][0]
+                for dimension in self.DIMENSIONS
+            }
         rows = self.db.execute(
             select(
                 LearningContractAssessmentTarget.position,

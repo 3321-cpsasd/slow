@@ -47,6 +47,32 @@ def test_one_missing_direct_prerequisite_becomes_scaffold():
     assert actions[0]["requiredByConceptRevisionId"] == "concept-target"
 
 
+def test_cross_book_state_matches_stable_capability_binding():
+    actions = teaching_action_snapshot(
+        [{
+            "assessmentTargetId": "target-old-book",
+            "teachingAction": "connect",
+            "sourceObservationWatermark": 23,
+            "capabilityState": {
+                "capabilityRevisionId": "capability-shared",
+                "stage": "bronze",
+            },
+        }],
+        [{
+            "assessmentTargetId": "target-new-book",
+            "conceptRevisionId": "concept-expanded-scope",
+            "capabilityRevisionId": "capability-shared",
+            "objective": "在新一册继续推进稳定能力",
+        }],
+        {"edges": []},
+    )
+
+    assert len(actions) == 1
+    assert actions[0]["capabilityRevisionId"] == "capability-shared"
+    assert actions[0]["teachingAction"] == "connect"
+    assert actions[0]["reasonCode"] == "qualified_prior_understanding"
+
+
 def test_multiple_missing_direct_prerequisites_require_replan():
     actions = teaching_action_snapshot(
         [],

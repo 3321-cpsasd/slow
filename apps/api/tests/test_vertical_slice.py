@@ -13,7 +13,7 @@ import pytest
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, event, func, select
-from app.ai.contracts import AskMeDiscussionTurn, AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedChapter, GeneratedContent, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedQuiz, GeneratedSectionOutline, LearningGoalBrief, LearningGoalDimension, LearningGoalInterviewResult, LearningGoalQuestion, LearningGoalQuestionOption, PlanBook, PlanChapter, PlanMilestone, PlanMilestoneCriterion, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
+from app.ai.contracts import AskMeDiscussionTurn, AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedCapabilityMember, GeneratedCapabilityRelation, GeneratedCapabilitySubnetCandidate, GeneratedChapter, GeneratedConceptCandidate, GeneratedContent, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedQuiz, GeneratedSectionOutline, LearningGoalBrief, LearningGoalDimension, LearningGoalInterviewResult, LearningGoalQuestion, LearningGoalQuestionOption, PlanBook, PlanChapter, PlanMilestone, PlanMilestoneCriterion, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
 from app.application.service import (
     apply_source_repair_scope,
     source_blacklist_from_generation_traces,
@@ -47,6 +47,7 @@ from app.infrastructure.tables import (
     ChapterRevision,
     ChapterChallengeAttempt,
     ChapterRouteDecisionEvent,
+    CapabilityStateProjection,
     ContentBlockClaimAnchor,
     ContentBlockAssessmentTarget,
     ContentBlockVersion,
@@ -245,7 +246,52 @@ class FakeAi:
             ],
         )
     async def chapter(self, request, memory):
-        return GeneratedChapter(sections=[GeneratedSectionOutline(title=f"第{i}节", question=f"问题{i}", objectives=[f"目标{i}"]) for i in range(1,4)])
+        sections = [
+            GeneratedSectionOutline(
+                title=f"第{i}节",
+                question=f"问题{i}",
+                objectives=[f"目标{i}"],
+                concept_candidate=GeneratedConceptCandidate(
+                    candidate_key=f"fixture-concept-{i}",
+                    label=f"测试知识点 {i}",
+                    definition=f"测试知识点 {i} 是纵向测试中的独立知识对象。",
+                    scope="验证对象、关系和学习闭环",
+                ),
+                objective_dimensions=["recognition"],
+            )
+            for i in range(1, 4)
+        ]
+        return GeneratedChapter(
+            sections=sections,
+            capability_subnets=[
+                GeneratedCapabilitySubnetCandidate(
+                    candidate_key="fixture-composite-capability",
+                    label="解释三个测试知识点之间的递进关系",
+                    operation="解释三个测试知识点并完成标准判断",
+                    boundary="限于纵向测试章节的三个知识点",
+                    members=[
+                        GeneratedCapabilityMember(section_position=1, role="anchor"),
+                        GeneratedCapabilityMember(section_position=2, role="required"),
+                        GeneratedCapabilityMember(section_position=3, role="required"),
+                    ],
+                    relations=[
+                        GeneratedCapabilityRelation(
+                            from_section_position=1,
+                            to_section_position=2,
+                            relation_type="prerequisite_for",
+                            statement="测试知识点一为知识点二提供前提。",
+                        ),
+                        GeneratedCapabilityRelation(
+                            from_section_position=2,
+                            to_section_position=3,
+                            relation_type="prerequisite_for",
+                            statement="测试知识点二为知识点三提供前提。",
+                        ),
+                    ],
+                    assessment_section_position=3,
+                )
+            ],
+        )
     async def lesson(self, request, memory, prior_questions=None):
         self.last_lesson_request = request
         generation = 1
@@ -253,7 +299,12 @@ class FakeAi:
             previous_prefix = prior_questions[0]["prompt"].split("套", 1)[0]
             generation = int(previous_prefix.removeprefix("第")) + 1
         roles = ["conclusion","mechanism","example","boundary","practice"]
-        objectives = request.get("objectives") or [request["question"]]
+        objectives = [
+            str(item.get("statement") or item.get("objective") or "")
+            if isinstance(item, dict)
+            else str(item)
+            for item in (request.get("objectives") or [request["question"]])
+        ]
         question_count = len(prior_questions) if prior_questions else 5
         return GeneratedLesson(
             confidence="high",
@@ -348,6 +399,19 @@ class ParallelWorkflowAi(FakeAi):
                 raise TimeoutError("test did not release note generation")
             self.events.append("note_end")
         return await super().note(request)
+
+
+class StrongDiscussionAi(FakeAi):
+    async def ask_me_discussion(self, request):
+        return AskMeDiscussionTurn(
+            evaluation="strong",
+            correct_points=["机制、边界和证据表达完整。"],
+            issues=[],
+            suggestions=["继续保持独立解释。"],
+            follow_up_prompt="请继续说明你的判断依据。",
+            follow_up_purpose="确认解释可以稳定调用。",
+            topic_sufficiency="sufficient",
+        )
 
 
 class MissingLineageAi(FakeAi):
@@ -786,6 +850,20 @@ def test_claim_verification_failure_publishes_no_content_or_quiz(tmp_path):
 def client(tmp_path):
     storage = LocalAttachmentStorage(tmp_path / "attachments")
     with TestClient(create_app("sqlite+pysqlite:///:memory:", FakeAi(), AcceptingSourceVerifier(), storage)) as value:
+        yield value
+
+
+@pytest.fixture
+def strong_discussion_client(tmp_path):
+    storage = LocalAttachmentStorage(tmp_path / "strong-discussion-attachments")
+    with TestClient(
+        create_app(
+            "sqlite+pysqlite:///:memory:",
+            StrongDiscussionAi(),
+            AcceptingSourceVerifier(),
+            storage,
+        )
+    ) as value:
         yield value
 
 
@@ -1492,9 +1570,10 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
     assert replay.json()["knowledgeSettlement"] == first.json()["knowledgeSettlement"]
     settlement_updates = first.json()["knowledgeSettlement"]["updates"]
     assert len(settlement_updates) == 1
-    assert settlement_updates[0]["change"] == "rank_up"
-    assert settlement_updates[0]["before"]["rank"] == "unranked"
-    assert settlement_updates[0]["after"]["rank"] == "bronze"
+    assert first.json()["knowledgeSettlement"]["schemaVersion"] == "capability_settlement_v1"
+    assert settlement_updates[0]["change"] == "stage_up"
+    assert settlement_updates[0]["before"]["stage"] == "unranked"
+    assert settlement_updates[0]["after"]["stage"] == "bronze"
     assert first.json()["knowledgeSettlement"]["settlementId"]
     with client.app.state.sessions() as db:
         attempts = db.scalars(
@@ -1523,6 +1602,11 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
                 )
             )
         ).all()
+        capability_states = db.scalars(
+            select(CapabilityStateProjection).where(
+                CapabilityStateProjection.user_id == attempts[0].user_id
+            )
+        ).all()
         decisions = db.scalars(
             select(LearningDecisionSnapshot)
             .where(LearningDecisionSnapshot.attempt_id == attempts[0].id)
@@ -1532,10 +1616,12 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
         assert len(evidence) == len(section["quiz"]["questions"])
         assert len(scoring) == 1
         assert len(observations) == len(section["quiz"]["questions"])
-        assert len(qualification) == len(observations) * 4
+        assert len(qualification) == len(observations) * 5
+        assert capability_states
+        assert {item.current_stage for item in capability_states} == {"bronze"}
         assert [item.decision_kind for item in decisions] == [
             "assessment_gate",
-            "knowledge_settlement",
+            "capability_settlement",
             "progression",
         ]
         gate = decisions[0]
@@ -1549,11 +1635,11 @@ def test_quiz_submission_is_idempotent_and_does_not_duplicate_evidence(client):
         assert gate_output["passed"] is True
         assert gate_output["unresolvedRequiredTargetIds"] == []
         settlement = decisions[1]
-        assert settlement.rule_version == "knowledge_rank_v3"
+        assert settlement.rule_version == "capability_stage_v1"
         frozen_updates = json.loads(settlement.output_decision_json)["updates"]
         assert len(frozen_updates) == 1
-        assert frozen_updates[0]["change"] == "rank_up"
-        assert frozen_updates[0]["after"]["rank"] == "bronze"
+        assert frozen_updates[0]["change"] == "stage_up"
+        assert frozen_updates[0]["after"]["stage"] == "bronze"
         progression = decisions[2]
         assert progression.rule_version == "progression_v2_book_outline_gate"
         assert json.loads(progression.input_snapshot_json)["section_id"] == section["id"]
@@ -3805,6 +3891,125 @@ def test_ask_me_discussion_rejects_multi_target_topic_evidence(client):
         assert topic.status in {"active", "sufficient"}
         assert not topic.evidence_recorded
         assert oral_count == 0
+
+
+def test_ask_me_requires_two_silver_criteria_and_transfer_stays_diagnostic(
+    strong_discussion_client,
+):
+    client = strong_discussion_client
+    series = create_series(client)
+    chapter = client.post(
+        f"/api/chapters/{series['books'][0]['chapters'][0]['id']}/generate"
+    ).json()
+    section = generate_and_pass(client, chapter["sections"][0]["id"])
+    path = f"/api/sections/{section['id']}/ask-me/discussion"
+    started = client.post(path).json()
+
+    mechanism_turn = client.post(
+        f"{path}/turns",
+        json={
+            "sessionId": started["id"],
+            "topicId": started["activeTopicId"],
+            "expectedRevision": 0,
+            "answer": "我会解释机制、因果关系和可观察依据。",
+        },
+        headers={"Idempotency-Key": "ask-me-silver-mechanism-turn"},
+    ).json()
+    after_mechanism = client.post(
+        f"{path}/actions",
+        json={
+            "sessionId": started["id"],
+            "expectedRevision": mechanism_turn["revision"],
+            "action": "next_topic",
+        },
+        headers={"Idempotency-Key": "ask-me-silver-mechanism-next"},
+    ).json()
+
+    mechanism_target_id = started["topics"][0]["assessmentTargetIds"][0]
+    with client.app.state.sessions() as db:
+        mechanism_target = db.get(AssessmentTarget, mechanism_target_id)
+        capability_state = db.scalar(
+            select(CapabilityStateProjection).where(
+                CapabilityStateProjection.capability_revision_id
+                == mechanism_target.capability_revision_id
+            )
+        )
+        assert capability_state.current_stage == "bronze"
+        assert len(json.loads(capability_state.missing_criterion_ids_json)) == 1
+
+    boundary_turn = client.post(
+        f"{path}/turns",
+        json={
+            "sessionId": started["id"],
+            "topicId": after_mechanism["activeTopicId"],
+            "expectedRevision": after_mechanism["revision"],
+            "answer": "我会说明适用边界、反例和最容易混淆的情况。",
+        },
+        headers={"Idempotency-Key": "ask-me-silver-boundary-turn"},
+    ).json()
+    after_boundary = client.post(
+        f"{path}/actions",
+        json={
+            "sessionId": started["id"],
+            "expectedRevision": boundary_turn["revision"],
+            "action": "next_topic",
+        },
+        headers={"Idempotency-Key": "ask-me-silver-boundary-next"},
+    ).json()
+    with client.app.state.sessions() as db:
+        capability_state = db.scalar(
+            select(CapabilityStateProjection).where(
+                CapabilityStateProjection.capability_revision_id
+                == mechanism_target.capability_revision_id
+            )
+        )
+        assert capability_state.current_stage == "silver"
+        assert json.loads(capability_state.missing_criterion_ids_json) == []
+
+    transfer_turn = client.post(
+        f"{path}/turns",
+        json={
+            "sessionId": started["id"],
+            "topicId": after_boundary["activeTopicId"],
+            "expectedRevision": after_boundary["revision"],
+            "answer": "我会迁移到正文没有直接出现的新场景。",
+        },
+        headers={"Idempotency-Key": "ask-me-silver-transfer-turn"},
+    ).json()
+    finished = client.post(
+        f"{path}/actions",
+        json={
+            "sessionId": started["id"],
+            "expectedRevision": transfer_turn["revision"],
+            "action": "finish",
+        },
+        headers={"Idempotency-Key": "ask-me-silver-transfer-finish"},
+    )
+    assert finished.status_code == 200, finished.json()
+
+    transfer_target_id = started["topics"][2]["assessmentTargetIds"][0]
+    with client.app.state.sessions() as db:
+        capability_state = db.scalar(
+            select(CapabilityStateProjection).where(
+                CapabilityStateProjection.capability_revision_id
+                == mechanism_target.capability_revision_id
+            )
+        )
+        transfer_observation = db.scalar(
+            select(AssessmentObservation).where(
+                AssessmentObservation.assessment_target_id == transfer_target_id,
+                AssessmentObservation.source_type == "ask_me_topic",
+            )
+        )
+        transfer_qualification = db.scalar(
+            select(EvidenceQualificationEvent).where(
+                EvidenceQualificationEvent.observation_id
+                == transfer_observation.id,
+                EvidenceQualificationEvent.projection_family == "capability",
+            )
+        )
+        assert capability_state.current_stage == "silver"
+        assert transfer_qualification.status == "ineligible"
 
 
 def test_future_chapter_edits_and_started_boundary(client):

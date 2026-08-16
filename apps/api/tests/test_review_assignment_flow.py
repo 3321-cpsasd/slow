@@ -8,22 +8,30 @@ import pytest
 from sqlalchemy import delete, func, select
 
 from app.ai.contracts import (
+    CapabilityReviewRubricCriterion,
+    CapabilityReviewTaskCandidate,
     ChoiceQuestion,
     GeneratedQuiz,
     LessonAlignmentIssue,
     LessonAlignmentReview,
+    StandardApplicationCriterionResult,
+    StandardApplicationEvaluation,
 )
 from app.core.errors import AppError
 from app.infrastructure.tables import (
     AssessmentObservation,
+    AssessmentTarget,
     AssessmentAnswerVersion,
     AssessmentItemEvidenceBlock,
     AssessmentItemVersion,
+    CapabilityStageCriterion,
+    CapabilityStateProjection,
     ContentBlockAssessmentTarget,
     ContentBlockVersion,
     ContentVersion,
     EvidenceQualificationEvent,
     GovernanceDecisionSnapshot,
+    LearningContractAssessmentTarget,
     QuizSet,
     ReviewAssignment,
     ReviewAssignmentEventRecord,
@@ -31,6 +39,7 @@ from app.infrastructure.tables import (
     now,
 )
 from app.main import create_app
+from app.modules.learning.assessment import record_ask_me_assessment_facts
 from app.modules.learning.reviews import ReviewAssignmentService
 from app.services.attachment_storage import LocalAttachmentStorage
 from app.services.source_verifier import AcceptingSourceVerifier
@@ -39,6 +48,9 @@ from test_vertical_slice import FakeAi, create_series, wait_for_task
 
 
 class ReviewCapableAi(FakeAi):
+    last_deployment_id = ""
+    last_model_family_id = ""
+
     async def lesson_quiz(self, request, content, prior_questions=None):
         assert request["reviewMode"] == "delayed_assignment"
         prior = prior_questions[0]
@@ -56,6 +68,52 @@ class ReviewCapableAi(FakeAi):
         return LessonAlignmentReview(
             allowed=True,
             covered_objectives=[quiz.questions[0].objective],
+        )
+
+    async def author_capability_review_task(self, request):
+        self.last_deployment_id = "review-author"
+        self.last_model_family_id = "review-author-family"
+        self.model = "review-author-model"
+        rubric_sources = list(request["plannedCriteria"])
+        if len(rubric_sources) == 1:
+            rubric_sources.append(request["plannedCriteria"][0])
+        return CapabilityReviewTaskCandidate(
+            prompt=(
+                "请用一个正文没有出现过的运行故障，重新解释当前能力的关键机制与失效边界，"
+                "并说明两个判断如何共同约束最终处理方案。"
+            ),
+            task_context="一个延迟复习时生成的全新运行故障",
+            deliverables=["机制解释", "边界判断", "综合结论"],
+            rubric=[
+                CapabilityReviewRubricCriterion(
+                    criterion_key=f"C{index}",
+                    stage_criterion_id=item["id"],
+                    statement=item["statement"],
+                )
+                for index, item in enumerate(rubric_sources, 1)
+            ],
+            reference_answer_points=[
+                item["statement"] for item in request["plannedCriteria"]
+            ],
+            novelty_basis="题面使用新的运行故障，没有复述正文示例。",
+        )
+
+    async def evaluate_capability_review_submission(self, request):
+        self.last_deployment_id = "review-evaluator"
+        self.last_model_family_id = "review-evaluator-family"
+        self.model = "review-evaluator-model"
+        return StandardApplicationEvaluation(
+            verdict="pass",
+            evidence_sufficiency="sufficient",
+            criterion_results=[
+                StandardApplicationCriterionResult(
+                    criterion_key=item["criterionKey"],
+                    satisfied=True,
+                    rationale="提交重新展示了该项当前阶段能力。",
+                )
+                for item in request["rubric"]
+            ],
+            rationale="当前阶段能力仍可独立调用。",
         )
 
 
@@ -174,6 +232,11 @@ def test_review_assignment_materializes_once_and_submits_candidate(tmp_path):
         due = first.json()
         assert due["selectedCount"] == 1
         assert due["items"][0]["status"] == "presented"
+        assert due["items"][0]["reviewReason"] == "这项能力已经到复习时间"
+        assert due["items"][0]["capability"]["currentStage"] == "bronze"
+        assert due["items"][0]["taskPlan"]["reactivation"]["taskKind"] == "choice_reactivation"
+        assert due["items"][0]["taskPlan"]["reactivation"]["evidenceEffect"] == "activation_only"
+        assert due["items"][0]["taskPlan"]["strengthening"]["taskKind"] == "oral_strengthening"
         assignment_id = due["items"][0]["assignmentId"]
 
         repeated = client.get("/api/reviews/due?daily_budget=99").json()
@@ -265,6 +328,22 @@ def test_review_assignment_materializes_once_and_submits_candidate(tmp_path):
         assert result["status"] == "submitted"
         assert result["retentionQualification"]["status"] == "candidate"
 
+        strengthening = client.post(
+            f"/api/reviews/{assignment_id}/strengthening"
+        )
+        assert strengthening.status_code == 200, strengthening.json()
+        launch = strengthening.json()
+        assert launch["status"] == "ready"
+        assert launch["stage"] == "silver"
+        assert launch["taskKind"] == "oral_strengthening"
+        assert launch["evidenceEffect"] == (
+            "may_advance_stage_after_qualified_evidence"
+        )
+        assert launch["entry"]["kind"] == "ask_me"
+        assert launch["entry"]["seriesId"]
+        assert launch["entry"]["sectionId"] == section_id
+        assert launch["entry"]["label"] == "进入口试，讲清机制与边界"
+
         section = client.get(f"/api/sections/{section_id}").json()
         assert section["latestAttemptReview"]["total"] == 5
         assert len(section["latestAttemptReview"]["questions"]) == 5
@@ -308,12 +387,143 @@ def test_review_assignment_materializes_once_and_submits_candidate(tmp_path):
                 "mastery": "eligible_grouped",
                 "retention": "candidate",
                 "rank": "eligible_grouped",
+                "capability": "eligible_grouped",
             }
             assert db.scalar(
                 select(func.count(ReviewAssignmentEventRecord.id)).where(
                     ReviewAssignmentEventRecord.assignment_id == assignment_id
                 )
             ) == 3
+
+
+def test_strengthening_requires_successful_reactivation(tmp_path):
+    with _review_client(tmp_path) as client:
+        _complete_initial_quiz_and_make_due(client)
+        assignment_id = client.get(
+            "/api/reviews/due?daily_budget=1"
+        ).json()["items"][0]["assignmentId"]
+
+        before = client.post(f"/api/reviews/{assignment_id}/strengthening")
+        assert before.status_code == 409
+        assert before.json()["code"] == (
+            "REVIEW_STRENGTHENING_REACTIVATION_REQUIRED"
+        )
+
+        assert client.post(f"/api/reviews/{assignment_id}/start").status_code == 200
+        failed = client.post(
+            f"/api/reviews/{assignment_id}/submit",
+            headers={"Idempotency-Key": "review-submit-failed-strengthening"},
+            json={"answers": [[0]]},
+        )
+        assert failed.status_code == 200
+        assert failed.json()["passed"] is False
+
+        after = client.post(f"/api/reviews/{assignment_id}/strengthening")
+        assert after.status_code == 409
+        assert after.json()["code"] == (
+            "REVIEW_STRENGTHENING_REACTIVATION_NOT_QUALIFIED"
+        )
+
+
+def test_silver_review_freezes_oral_reactivation_instead_of_choice_quiz(tmp_path):
+    with _review_client(tmp_path) as client:
+        _complete_initial_quiz_and_make_due(client)
+        with client.app.state.sessions() as db:
+            source = db.scalar(
+                select(AssessmentObservation)
+                .where(AssessmentObservation.user_id == "user_demo")
+                .order_by(AssessmentObservation.sequence.desc())
+            )
+            target_rows = db.execute(
+                select(LearningContractAssessmentTarget, AssessmentTarget)
+                .join(
+                    AssessmentTarget,
+                    AssessmentTarget.id
+                    == LearningContractAssessmentTarget.assessment_target_id,
+                )
+                .where(
+                    LearningContractAssessmentTarget.contract_version_id
+                    == source.learning_contract_version_id,
+                    LearningContractAssessmentTarget.diagnostic_only.is_(True),
+                    AssessmentTarget.dimension.in_({"mechanism", "boundary"}),
+                )
+            ).all()
+            for _binding, target in target_rows:
+                record_ask_me_assessment_facts(
+                    db,
+                    learning_run_id=source.learning_run_id,
+                    user_id="user_demo",
+                    section_id=source.section_id,
+                    learning_contract_version_id=source.learning_contract_version_id,
+                    content_version_id=source.content_version_id,
+                    assessment_target_ids=[target.id],
+                    source_type="ask_me_topic",
+                    source_id=f"silver_review_{target.dimension}",
+                    evaluation="strong",
+                    dimension=target.dimension,
+                    payload={},
+                )
+            review = db.scalar(
+                select(ReviewState).where(ReviewState.user_id == "user_demo")
+            )
+            review.status = "scheduled"
+            review.next_due_at = now() - timedelta(hours=1)
+            db.commit()
+
+        due = client.get("/api/reviews/due?daily_budget=1")
+        assert due.status_code == 200, due.json()
+        item = due.json()["items"][0]
+        assert item["taskPlan"]["reactivation"]["taskKind"] == "oral_reactivation"
+        assert len(item["taskPlan"]["reactivation"]["criterionIds"]) == 2
+        assert item["taskPlan"]["strengthening"] is None
+
+        started = client.post(f"/api/reviews/{item['assignmentId']}/start")
+        assert started.status_code == 200, started.json()
+        assert started.json()["status"] == "started"
+        assert started.json()["quiz"] is None
+        assert started.json()["capabilityTask"]["taskKind"] == "oral_reactivation"
+
+        submitted = client.post(
+            f"/api/reviews/{item['assignmentId']}/respond",
+            headers={"Idempotency-Key": "silver-review-response-001"},
+            json={
+                "response": {
+                    "mechanism": "机制说明与新的故障案例推理",
+                    "boundary": "列出失效条件并解释为什么会失效",
+                },
+                "assistanceUsed": False,
+            },
+        )
+        assert submitted.status_code == 200, submitted.json()
+        assert submitted.json()["reactivationQualified"] is True
+        assert submitted.json()["stageChanged"] is False
+        with client.app.state.sessions() as db:
+            assignment = db.get(ReviewAssignment, item["assignmentId"])
+            state = db.scalar(
+                select(CapabilityStateProjection).where(
+                    CapabilityStateProjection.user_id == "user_demo"
+                )
+            )
+            observation = db.scalar(
+                select(AssessmentObservation).where(
+                    AssessmentObservation.source_type == "capability_review"
+                )
+            )
+            qualifications = {
+                row.projection_family: row.status
+                for row in db.scalars(
+                    select(EvidenceQualificationEvent).where(
+                    EvidenceQualificationEvent.observation_id == observation.id,
+                )
+                ).all()
+            }
+            assert assignment.status == "submitted"
+            assert assignment.review_quiz_set_id is None
+            assert state.current_stage == "silver"
+            assert state.activation_state == "available"
+            assert qualifications["mastery"] == "ineligible"
+            assert qualifications["capability"] == "ineligible"
+            assert qualifications["retention"] == "candidate"
 
 
 def test_review_start_accepts_published_v2_content_blocks(tmp_path):

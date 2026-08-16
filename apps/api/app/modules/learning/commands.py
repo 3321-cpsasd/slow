@@ -41,10 +41,10 @@ from .progress import ProgressStore, best_score_pair
 from .contracts import open_run_section
 from .decision_snapshots import (
     append_assessment_gate_snapshot,
-    append_knowledge_settlement_snapshot,
+    append_capability_settlement_snapshot,
     append_progression_snapshot,
 )
-from .knowledge_ranks import knowledge_node_views_for_targets
+from .capability_profiles import capability_state_views_for_targets
 from .tasks import task_view
 
 
@@ -357,11 +357,10 @@ class SubmitQuiz:
             for question in questions
             if question.get("assessmentTargetId")
         }
-        knowledge_before = knowledge_node_views_for_targets(
+        capability_before = capability_state_views_for_targets(
             self.db,
             user_id=self.user_id,
             target_ids=target_ids,
-            learning_contract_version_id=binding.learning_contract_version_id,
         )
         grade = grade_choice_quiz(questions, body.answers)
         attempt = QuizAttempt(
@@ -410,12 +409,12 @@ class SubmitQuiz:
                 else f"quiz:{attempt.id}"
             ),
         )
-        knowledge_settlement = append_knowledge_settlement_snapshot(
+        knowledge_settlement = append_capability_settlement_snapshot(
             self.db,
             attempt=attempt,
             section_id=section.id,
             target_ids=target_ids,
-            before=knowledge_before,
+            before=capability_before,
             trigger_kind="quiz_submit",
         )
         gate_decision = section_gate_decision(

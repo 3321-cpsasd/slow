@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 from pathlib import Path
 import sqlite3
@@ -21,6 +22,8 @@ from app.infrastructure.tables import (
     LearningMissionVersion,
     LearningObjective,
     LearningPlan,
+    KnowledgeIdentityCandidate,
+    KnowledgeIdentityDecision,
     Section,
     SectionAssessmentTarget,
     Series,
@@ -28,6 +31,7 @@ from app.infrastructure.tables import (
     User,
 )
 from app.core.errors import AppError
+from app.modules.learning.assessment import bind_questions_to_targets
 from app.modules.learning.contracts import (
     ensure_m1_learning_contract,
     require_rank_settleable_contract,
@@ -203,14 +207,49 @@ def test_unmaterialized_m1_section_gets_deterministic_provisional_targets():
         .order_by(LearningContractAssessmentTarget.position)
     ).all()
 
-    assert len(targets) == 2
-    assert len(contract_targets) == 2
-    assert contract_targets[0].required is True
-    assert contract_targets[1].required is False
+    gate_bindings = [item for item in contract_targets if not item.diagnostic_only]
+    diagnostic_bindings = [item for item in contract_targets if item.diagnostic_only]
+    gate_targets = [
+        db.get(AssessmentTarget, item.assessment_target_id)
+        for item in gate_bindings
+    ]
+    diagnostic_targets = [
+        db.get(AssessmentTarget, item.assessment_target_id)
+        for item in diagnostic_bindings
+    ]
+    assert len(targets) == 7
+    assert len(gate_bindings) == 2
+    assert len(diagnostic_bindings) == 5
+    assert gate_bindings[0].required is True
+    assert gate_bindings[1].required is False
     assert all(item.concept_revision_id for item in targets)
     assert all(item.learning_objective_id for item in targets)
-    assert all(item.identity_status == "route_scoped_knowledge" for item in targets)
-    revisions = [db.get(ConceptRevision, item.concept_revision_id) for item in targets]
+    assert all(
+        item.identity_status == "route_scoped_knowledge"
+        for item in gate_targets
+    )
+    assert {
+        item.dimension: item.identity_status for item in diagnostic_targets
+    } == {
+        "mechanism": "route_scoped_capability",
+        "boundary": "route_scoped_capability",
+        "transfer": "route_scoped_capability",
+        "application": "route_scoped_capability",
+        "transfer_task": "route_scoped_capability",
+    }
+    assert {
+        item.verification_policy for item in diagnostic_bindings
+    } == {
+        "oral_explanation_v1",
+        "oral_boundary_v1",
+        "oral_transfer_probe_v1",
+        "standard_application_v1",
+        "transfer_task_v1",
+    }
+    revisions = [
+        db.get(ConceptRevision, item.concept_revision_id)
+        for item in gate_targets
+    ]
     assert all(item.verification_status == "route_scoped" for item in revisions)
     assert all(rank_policy_for_revision(item) is not None for item in revisions)
     assert all(
@@ -218,7 +257,7 @@ def test_unmaterialized_m1_section_gets_deterministic_provisional_targets():
         for item in revisions
     )
     require_rank_settleable_contract(db, contract)
-    assert db.scalar(select(func.count()).select_from(LearningObjective)) == 2
+    assert db.scalar(select(func.count()).select_from(LearningObjective)) == 6
 
 
 def test_route_target_reuses_identity_inside_series_without_cross_route_guessing():
@@ -228,7 +267,8 @@ def test_route_target_reuses_identity_inside_series_without_cross_route_guessing
     first_contract = ensure_m1_learning_contract(db, first_section)
     first_binding = db.scalar(
         select(LearningContractAssessmentTarget).where(
-            LearningContractAssessmentTarget.contract_version_id == first_contract.id
+            LearningContractAssessmentTarget.contract_version_id == first_contract.id,
+            LearningContractAssessmentTarget.diagnostic_only.is_(False),
         )
     )
 
@@ -245,12 +285,125 @@ def test_route_target_reuses_identity_inside_series_without_cross_route_guessing
     second_contract = ensure_m1_learning_contract(db, second_section)
     second_binding = db.scalar(
         select(LearningContractAssessmentTarget).where(
-            LearningContractAssessmentTarget.contract_version_id == second_contract.id
+            LearningContractAssessmentTarget.contract_version_id == second_contract.id,
+            LearningContractAssessmentTarget.diagnostic_only.is_(False),
         )
     )
 
     assert second_binding.assessment_target_id == first_binding.assessment_target_id
-    assert db.scalar(select(func.count()).select_from(AssessmentTarget)) == 1
+    first_diagnostic_ids = set(
+        db.scalars(
+            select(LearningContractAssessmentTarget.assessment_target_id).where(
+                LearningContractAssessmentTarget.contract_version_id
+                == first_contract.id,
+                LearningContractAssessmentTarget.diagnostic_only.is_(True),
+            )
+        )
+    )
+    second_diagnostic_ids = set(
+        db.scalars(
+            select(LearningContractAssessmentTarget.assessment_target_id).where(
+                LearningContractAssessmentTarget.contract_version_id
+                == second_contract.id,
+                LearningContractAssessmentTarget.diagnostic_only.is_(True),
+            )
+        )
+    )
+    assert len(first_diagnostic_ids) == 5
+    assert second_diagnostic_ids == first_diagnostic_ids
+    assert db.scalar(select(func.count()).select_from(AssessmentTarget)) == 6
+
+
+def test_diagnostic_oral_target_cannot_be_bound_to_choice_quiz():
+    db = _db()
+    section, _ = _seed_section(db, with_target=False)
+    contract = ensure_m1_learning_contract(db, section)
+    diagnostic_binding = db.scalar(
+        select(LearningContractAssessmentTarget).where(
+            LearningContractAssessmentTarget.contract_version_id == contract.id,
+            LearningContractAssessmentTarget.diagnostic_only.is_(True),
+        )
+    )
+    diagnostic_target = db.get(
+        AssessmentTarget,
+        diagnostic_binding.assessment_target_id,
+    )
+
+    with pytest.raises(AppError) as raised:
+        bind_questions_to_targets(
+            db,
+            section,
+            [
+                {
+                    "assessmentTargetId": diagnostic_target.id,
+                    "objective": diagnostic_target.objective_statement,
+                    "prompt": "这道选择题试图越过题型边界",
+                }
+            ],
+            contract,
+        )
+
+    assert raised.value.code == "ASSESSMENT_TARGET_UNBOUND"
+
+
+def test_structured_candidate_builds_one_concept_with_separate_capability_targets():
+    db = _db()
+    section, _ = _seed_section(db, with_target=False)
+    candidate = {
+        "candidate_key": "recursion",
+        "label": "递归",
+        "definition": "递归通过缩小问题并抵达基本情形完成求解",
+        "scope": "解释终止机制并迁移到搜索",
+        "boundaries": ["循环不是递归"],
+        "reuse_concept_revision_id": "",
+    }
+    section.objectives_json = json.dumps(
+        [
+            {
+                "statement": "解释递归为什么终止",
+                "required": True,
+                "dimension": "mechanism",
+                "conceptCandidate": candidate,
+            },
+            {
+                "statement": "把递归迁移到深度优先搜索",
+                "required": False,
+                "dimension": "transfer",
+                "conceptCandidate": candidate,
+            },
+        ],
+        ensure_ascii=False,
+    )
+
+    contract = ensure_m1_learning_contract(db, section)
+    targets = db.scalars(select(AssessmentTarget).order_by(AssessmentTarget.id)).all()
+    gate_targets = [
+        target
+        for target in targets
+        if target.identity_status == "route_scoped_knowledge"
+    ]
+    diagnostic_targets = [
+        target
+        for target in targets
+        if target.identity_status == "route_scoped_capability"
+    ]
+
+    assert contract.provenance_mode == "route_scoped_knowledge"
+    assert {target.dimension for target in gate_targets} == {
+        "mechanism",
+        "transfer",
+    }
+    assert {target.dimension for target in diagnostic_targets} == {
+        "mechanism",
+        "boundary",
+        "transfer",
+        "application",
+        "transfer_task",
+    }
+    assert len({target.concept_revision_id for target in targets}) == 1
+    assert db.scalar(select(func.count()).select_from(KnowledgeIdentityCandidate)) == 1
+    assert db.scalar(select(func.count()).select_from(KnowledgeIdentityDecision)) == 1
+    require_rank_settleable_contract(db, contract)
 
 
 @pytest.mark.migration

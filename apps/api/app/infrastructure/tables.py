@@ -744,6 +744,632 @@ class ConceptRevision(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class KnowledgeNetwork(Base):
+    """Stable identity of a reusable, incrementally published knowledge network."""
+
+    __tablename__ = "knowledge_networks"
+    __table_args__ = (
+        UniqueConstraint(
+            "namespace", "network_key", name="uq_knowledge_network_namespace_key"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    namespace: Mapped[str] = mapped_column(String(120), index=True)
+    network_key: Mapped[str] = mapped_column(String(200))
+    label: Mapped[str] = mapped_column(String(300))
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    origin: Mapped[str] = mapped_column(String(40), default="route_scoped")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class KnowledgeNetworkRevision(Base):
+    """Immutable node-and-relation publication boundary for a knowledge network."""
+
+    __tablename__ = "knowledge_network_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "knowledge_network_id",
+            "revision",
+            name="uq_knowledge_network_revision_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    knowledge_network_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_networks.id"), index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24), default="route_scoped", index=True)
+    provenance_mode: Mapped[str] = mapped_column(
+        String(40), default="route_scoped"
+    )
+    source_release_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    boundary_json: Mapped[str] = mapped_column(Text, default="{}")
+    content_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_network_revisions.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class KnowledgeNetworkConceptBinding(Base):
+    """Exact concept revision included in one immutable network revision."""
+
+    __tablename__ = "knowledge_network_concept_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "knowledge_network_revision_id",
+            "concept_revision_id",
+            name="uq_knowledge_network_concept_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    knowledge_network_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_network_revisions.id"), index=True
+    )
+    concept_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("concept_revisions.id"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class KnowledgeRelation(Base):
+    """Stable identity for a typed semantic relation between knowledge nodes."""
+
+    __tablename__ = "knowledge_relations"
+    __table_args__ = (
+        UniqueConstraint(
+            "namespace", "relation_key", name="uq_knowledge_relation_namespace_key"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    namespace: Mapped[str] = mapped_column(String(120), index=True)
+    relation_key: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    origin: Mapped[str] = mapped_column(String(40), default="route_scoped")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class KnowledgeRelationRevision(Base):
+    """Immutable meaning of a typed relation between exact concept revisions."""
+
+    __tablename__ = "knowledge_relation_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "knowledge_relation_id",
+            "revision",
+            name="uq_knowledge_relation_revision_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    knowledge_relation_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_relations.id"), index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer)
+    from_concept_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("concept_revisions.id"), index=True
+    )
+    to_concept_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("concept_revisions.id"), index=True
+    )
+    relation_type: Mapped[str] = mapped_column(String(40), index=True)
+    statement: Mapped[str] = mapped_column(Text)
+    scope_json: Mapped[str] = mapped_column(Text, default="{}")
+    provenance_json: Mapped[str] = mapped_column(Text, default="{}")
+    verification_status: Mapped[str] = mapped_column(
+        String(32), default="route_scoped", index=True
+    )
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_relation_revisions.id"), nullable=True
+    )
+    content_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class KnowledgeNetworkRelationBinding(Base):
+    """Exact relation revision included in one immutable network revision."""
+
+    __tablename__ = "knowledge_network_relation_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "knowledge_network_revision_id",
+            "knowledge_relation_revision_id",
+            name="uq_knowledge_network_relation_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    knowledge_network_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_network_revisions.id"), index=True
+    )
+    knowledge_relation_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_relation_revisions.id"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class Capability(Base):
+    """Stable identity for an observable ability, independent of lesson wording."""
+
+    __tablename__ = "capabilities"
+    __table_args__ = (
+        UniqueConstraint(
+            "namespace", "capability_key", name="uq_capabilities_namespace_key"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    namespace: Mapped[str] = mapped_column(String(120), index=True)
+    capability_key: Mapped[str] = mapped_column(String(200))
+    canonical_name: Mapped[str] = mapped_column(String(300))
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    origin: Mapped[str] = mapped_column(String(40), default="route_scoped")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CapabilityRevision(Base):
+    """Immutable scope and natural ceiling of one stable capability."""
+
+    __tablename__ = "capability_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "capability_id",
+            "revision",
+            name="uq_capability_revisions_capability_revision",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    capability_id: Mapped[str] = mapped_column(
+        ForeignKey("capabilities.id"), index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer)
+    label: Mapped[str] = mapped_column(String(300))
+    scope_json: Mapped[str] = mapped_column(Text, default="{}")
+    operation_json: Mapped[str] = mapped_column(Text, default="{}")
+    context_constraints_json: Mapped[str] = mapped_column(Text, default="{}")
+    natural_stage_ceiling: Mapped[str] = mapped_column(
+        String(24), default="silver", index=True
+    )
+    provenance_mode: Mapped[str] = mapped_column(
+        String(40), default="route_scoped"
+    )
+    verification_status: Mapped[str] = mapped_column(
+        String(32), default="route_scoped", index=True
+    )
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("capability_revisions.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CapabilityConceptBinding(Base):
+    """Versioned capability-to-knowledge-subgraph binding."""
+
+    __tablename__ = "capability_concept_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "capability_revision_id",
+            "concept_revision_id",
+            name="uq_capability_concept_binding_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    capability_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_revisions.id"), index=True
+    )
+    concept_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("concept_revisions.id"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(24), default="anchor", index=True)
+    position: Mapped[int] = mapped_column(Integer, default=1)
+    required: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CapabilitySubnet(Base):
+    """Immutable knowledge-network slice governed by one capability revision."""
+
+    __tablename__ = "capability_subnets"
+    __table_args__ = (
+        UniqueConstraint(
+            "capability_revision_id", name="uq_capability_subnet_revision"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    capability_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_revisions.id"), index=True
+    )
+    knowledge_network_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_network_revisions.id"), index=True
+    )
+    boundary_json: Mapped[str] = mapped_column(Text, default="{}")
+    context_json: Mapped[str] = mapped_column(Text, default="{}")
+    content_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(24), default="frozen", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CapabilityRelationRequirement(Base):
+    """Exact network relation a capability must explain or operate."""
+
+    __tablename__ = "capability_relation_requirements"
+    __table_args__ = (
+        UniqueConstraint(
+            "capability_revision_id",
+            "knowledge_relation_revision_id",
+            name="uq_capability_relation_requirement_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    capability_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_revisions.id"), index=True
+    )
+    knowledge_relation_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_relation_revisions.id"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(24), default="required", index=True)
+    required: Mapped[bool] = mapped_column(Boolean, default=True)
+    minimum_stage: Mapped[str] = mapped_column(String(24), default="bronze", index=True)
+    purpose: Mapped[str] = mapped_column(String(40), default="explain")
+    position: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CapabilityStageCriterion(Base):
+    """Observable, task-bound criterion in a cumulative four-stage rubric."""
+
+    __tablename__ = "capability_stage_criteria"
+    __table_args__ = (
+        UniqueConstraint(
+            "capability_revision_id",
+            "stage",
+            "position",
+            name="uq_capability_stage_criterion_position",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    capability_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_revisions.id"), index=True
+    )
+    stage: Mapped[str] = mapped_column(String(24), index=True)
+    position: Mapped[int] = mapped_column(Integer, default=1)
+    statement: Mapped[str] = mapped_column(Text)
+    task_type: Mapped[str] = mapped_column(String(40), index=True)
+    novelty_requirement: Mapped[str] = mapped_column(String(32), default="initial")
+    assistance_limit: Mapped[str] = mapped_column(String(32), default="unassisted")
+    context_requirement: Mapped[str] = mapped_column(String(40), default="taught")
+    required: Mapped[bool] = mapped_column(Boolean, default=True)
+    verification_protocol: Mapped[str] = mapped_column(String(48), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CapabilityRouteBinding(Base):
+    """A series-local promise of how and how far a capability can progress."""
+
+    __tablename__ = "capability_route_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "series_id",
+            "capability_revision_id",
+            name="uq_capability_route_binding_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    series_id: Mapped[str] = mapped_column(ForeignKey("series.id"), index=True)
+    capability_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_revisions.id"), index=True
+    )
+    target_stage: Mapped[str] = mapped_column(String(24), default="silver", index=True)
+    route_json: Mapped[str] = mapped_column(Text, default="{}")
+    opportunities_json: Mapped[str] = mapped_column(Text, default="[]")
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    rule_version: Mapped[str] = mapped_column(
+        String(48), default="capability_route_v2_subnet"
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class KnowledgeIdentityCandidate(Base):
+    """One section-scoped semantic proposal emitted during chapter planning."""
+
+    __tablename__ = "knowledge_identity_candidates"
+    __table_args__ = (
+        UniqueConstraint(
+            "section_id",
+            "candidate_hash",
+            name="uq_knowledge_identity_candidates_section_hash",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    series_id: Mapped[str] = mapped_column(ForeignKey("series.id"), index=True)
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    candidate_key: Mapped[str] = mapped_column(String(160), index=True)
+    label: Mapped[str] = mapped_column(String(300), index=True)
+    definition: Mapped[str] = mapped_column(Text)
+    scope_json: Mapped[str] = mapped_column(Text, default="{}")
+    boundaries_json: Mapped[str] = mapped_column(Text, default="[]")
+    candidate_hash: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="proposed", index=True)
+    provenance_mode: Mapped[str] = mapped_column(
+        String(40), default="chapter_outline"
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class KnowledgeIdentityDecision(Base):
+    """Append-only resolution of a candidate into an immutable concept revision."""
+
+    __tablename__ = "knowledge_identity_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "decision_hash", name="uq_knowledge_identity_decisions_hash"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_identity_candidates.id"), index=True
+    )
+    decision: Mapped[str] = mapped_column(String(24), index=True)
+    resolved_concept_revision_id: Mapped[str | None] = mapped_column(
+        ForeignKey("concept_revisions.id"), nullable=True, index=True
+    )
+    compared_revision_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    basis_json: Mapped[str] = mapped_column(Text, default="{}")
+    actor_kind: Mapped[str] = mapped_column(String(32), default="system")
+    actor_id: Mapped[str] = mapped_column(String(160), default="")
+    rule_version: Mapped[str] = mapped_column(String(48), index=True)
+    model_version: Mapped[str] = mapped_column(String(80), default="")
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_identity_decisions.id"), nullable=True, index=True
+    )
+    decision_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
+class KnowledgeRelationCandidate(Base):
+    """Chapter-planning proposal for one exact relation meaning."""
+
+    __tablename__ = "knowledge_relation_candidates"
+    __table_args__ = (
+        UniqueConstraint(
+            "chapter_id",
+            "candidate_hash",
+            name="uq_knowledge_relation_candidate_chapter_hash",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    series_id: Mapped[str] = mapped_column(ForeignKey("series.id"), index=True)
+    chapter_id: Mapped[str] = mapped_column(ForeignKey("chapters.id"), index=True)
+    candidate_key: Mapped[str] = mapped_column(String(160), index=True)
+    from_concept_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("concept_revisions.id"), index=True
+    )
+    to_concept_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("concept_revisions.id"), index=True
+    )
+    relation_type: Mapped[str] = mapped_column(String(40), index=True)
+    statement: Mapped[str] = mapped_column(Text)
+    scope_json: Mapped[str] = mapped_column(Text, default="{}")
+    candidate_hash: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="proposed", index=True)
+    provenance_mode: Mapped[str] = mapped_column(
+        String(40), default="chapter_capability_plan"
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class KnowledgeRelationIdentityDecision(Base):
+    """Append-only resolution of a relation candidate to an immutable revision."""
+
+    __tablename__ = "knowledge_relation_identity_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "decision_hash", name="uq_knowledge_relation_decision_hash"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_relation_candidates.id"), index=True
+    )
+    decision: Mapped[str] = mapped_column(String(24), index=True)
+    resolved_relation_revision_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_relation_revisions.id"), nullable=True, index=True
+    )
+    compared_revision_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    basis_json: Mapped[str] = mapped_column(Text, default="{}")
+    actor_kind: Mapped[str] = mapped_column(String(32), default="system")
+    actor_id: Mapped[str] = mapped_column(String(160), default="")
+    rule_version: Mapped[str] = mapped_column(String(48), index=True)
+    model_version: Mapped[str] = mapped_column(String(80), default="")
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_relation_identity_decisions.id"),
+        nullable=True,
+        index=True,
+    )
+    decision_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
+class CapabilityPlanningCandidate(Base):
+    """Auditable chapter-level proposal for a stable capability subnet."""
+
+    __tablename__ = "capability_planning_candidates"
+    __table_args__ = (
+        UniqueConstraint(
+            "chapter_id",
+            "candidate_hash",
+            name="uq_capability_planning_candidate_chapter_hash",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    series_id: Mapped[str] = mapped_column(ForeignKey("series.id"), index=True)
+    chapter_id: Mapped[str] = mapped_column(ForeignKey("chapters.id"), index=True)
+    candidate_key: Mapped[str] = mapped_column(String(160), index=True)
+    label: Mapped[str] = mapped_column(String(300))
+    operation: Mapped[str] = mapped_column(Text)
+    boundary_json: Mapped[str] = mapped_column(Text, default="{}")
+    members_json: Mapped[str] = mapped_column(Text)
+    relations_json: Mapped[str] = mapped_column(Text, default="[]")
+    assessment_section_id: Mapped[str] = mapped_column(
+        ForeignKey("sections.id"), index=True
+    )
+    assessment_objective_position: Mapped[int] = mapped_column(Integer)
+    natural_stage_ceiling: Mapped[str] = mapped_column(String(24), index=True)
+    candidate_hash: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(24), default="proposed", index=True)
+    provenance_mode: Mapped[str] = mapped_column(
+        String(40), default="chapter_outline"
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CapabilityPlanningDecision(Base):
+    """Append-only resolution of a plan candidate into a capability revision."""
+
+    __tablename__ = "capability_planning_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "decision_hash", name="uq_capability_planning_decision_hash"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_planning_candidates.id"), index=True
+    )
+    decision: Mapped[str] = mapped_column(String(32), index=True)
+    resolved_capability_revision_id: Mapped[str | None] = mapped_column(
+        ForeignKey("capability_revisions.id"), nullable=True, index=True
+    )
+    basis_json: Mapped[str] = mapped_column(Text, default="{}")
+    actor_kind: Mapped[str] = mapped_column(String(32), default="system")
+    actor_id: Mapped[str] = mapped_column(String(160), default="")
+    rule_version: Mapped[str] = mapped_column(String(48), index=True)
+    model_version: Mapped[str] = mapped_column(String(80), default="")
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("capability_planning_decisions.id"), nullable=True, index=True
+    )
+    decision_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
+class PublishedConceptIdentity(Base):
+    """Reviewed cross-series identity for one exact concept meaning."""
+
+    __tablename__ = "published_concept_identities"
+    __table_args__ = (
+        UniqueConstraint(
+            "semantic_hash", name="uq_published_concept_identity_semantic_hash"
+        ),
+        UniqueConstraint(
+            "concept_revision_id", name="uq_published_concept_identity_revision"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    family_key: Mapped[str] = mapped_column(String(160), index=True)
+    semantic_hash: Mapped[str] = mapped_column(String(64), index=True)
+    concept_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("concept_revisions.id"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(24), default="published", index=True)
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("published_concept_identities.id"), nullable=True, index=True
+    )
+    review_json: Mapped[str] = mapped_column(Text, default="{}")
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class PublishedRelationIdentity(Base):
+    """Reviewed cross-series identity for one exact relation meaning."""
+
+    __tablename__ = "published_relation_identities"
+    __table_args__ = (
+        UniqueConstraint(
+            "semantic_hash", name="uq_published_relation_identity_semantic_hash"
+        ),
+        UniqueConstraint(
+            "knowledge_relation_revision_id",
+            name="uq_published_relation_identity_revision",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    family_key: Mapped[str] = mapped_column(String(240), index=True)
+    semantic_hash: Mapped[str] = mapped_column(String(64), index=True)
+    knowledge_relation_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_relation_revisions.id"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(24), default="published", index=True)
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("published_relation_identities.id"), nullable=True, index=True
+    )
+    review_json: Mapped[str] = mapped_column(Text, default="{}")
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class PublishedCapabilityIdentity(Base):
+    """Reviewed cross-series identity for one exact capability subnet."""
+
+    __tablename__ = "published_capability_identities"
+    __table_args__ = (
+        UniqueConstraint(
+            "semantic_hash", name="uq_published_capability_identity_semantic_hash"
+        ),
+        UniqueConstraint(
+            "capability_revision_id",
+            name="uq_published_capability_identity_revision",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    family_key: Mapped[str] = mapped_column(String(160), index=True)
+    semantic_hash: Mapped[str] = mapped_column(String(64), index=True)
+    capability_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_revisions.id"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(24), default="published", index=True)
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("published_capability_identities.id"), nullable=True, index=True
+    )
+    review_json: Mapped[str] = mapped_column(Text, default="{}")
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class IdentityPublicationDecision(Base):
+    """Append-only human-reviewed publication, reuse, revision, or conflict decision."""
+
+    __tablename__ = "identity_publication_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "decision_hash", name="uq_identity_publication_decision_hash"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    subject_kind: Mapped[str] = mapped_column(String(24), index=True)
+    candidate_id: Mapped[str] = mapped_column(String(200), index=True)
+    decision: Mapped[str] = mapped_column(String(32), index=True)
+    resolved_revision_id: Mapped[str | None] = mapped_column(
+        String(200), nullable=True, index=True
+    )
+    compared_revision_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    basis_json: Mapped[str] = mapped_column(Text, default="{}")
+    actor_kind: Mapped[str] = mapped_column(String(32), default="reviewer")
+    actor_id: Mapped[str] = mapped_column(String(160))
+    rule_version: Mapped[str] = mapped_column(String(48), index=True)
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("identity_publication_decisions.id"), nullable=True, index=True
+    )
+    decision_hash: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
 class LearningObjective(Base):
     """Immutable observable outcome used by contracts and assessments."""
 
@@ -2306,6 +2932,12 @@ class AssessmentTarget(Base):
     learning_objective_id: Mapped[str | None] = mapped_column(
         ForeignKey("learning_objectives.id"), nullable=True, index=True
     )
+    capability_revision_id: Mapped[str | None] = mapped_column(
+        ForeignKey("capability_revisions.id"), nullable=True, index=True
+    )
+    capability_stage_criterion_id: Mapped[str | None] = mapped_column(
+        ForeignKey("capability_stage_criteria.id"), nullable=True, index=True
+    )
     objective_key: Mapped[str] = mapped_column(String(300))
     objective_statement: Mapped[str] = mapped_column(Text)
     dimension: Mapped[str] = mapped_column(String(32), default="recognition")
@@ -2314,6 +2946,53 @@ class AssessmentTarget(Base):
         String(32), default="legacy_provisional", index=True
     )
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AssessmentTargetConceptBinding(Base):
+    """Exact capability-subnet node that one assessment target may attribute."""
+
+    __tablename__ = "assessment_target_concept_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "assessment_target_id",
+            "concept_revision_id",
+            name="uq_assessment_target_concept_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    assessment_target_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_targets.id"), index=True
+    )
+    concept_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("concept_revisions.id"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(24), index=True)
+    required: Mapped[bool] = mapped_column(Boolean, default=True)
+    position: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AssessmentTargetRelationBinding(Base):
+    """Exact capability-subnet relation assessed by one stage target."""
+
+    __tablename__ = "assessment_target_relation_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "assessment_target_id",
+            "knowledge_relation_revision_id",
+            name="uq_assessment_target_relation_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    assessment_target_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_targets.id"), index=True
+    )
+    knowledge_relation_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_relation_revisions.id"), index=True
+    )
+    required: Mapped[bool] = mapped_column(Boolean, default=True)
+    position: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -2688,6 +3367,54 @@ class KnowledgeNodeStateProjection(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class CapabilityStateProjection(Base):
+    """Rebuildable three-axis learner state for one stable capability."""
+
+    __tablename__ = "capability_state_projections"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "capability_revision_id",
+            name="uq_capability_state_user_revision",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    capability_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_revisions.id"), index=True
+    )
+    current_stage: Mapped[str] = mapped_column(
+        String(24), default="unranked", index=True
+    )
+    current_stage_order: Mapped[int] = mapped_column(Integer, default=0)
+    highest_stage: Mapped[str] = mapped_column(
+        String(24), default="unranked", index=True
+    )
+    highest_stage_order: Mapped[int] = mapped_column(Integer, default=0)
+    satisfied_criterion_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    missing_criterion_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    evidence_maturity_json: Mapped[str] = mapped_column(Text, default="{}")
+    activation_state: Mapped[str] = mapped_column(
+        String(24), default="learning", index=True
+    )
+    stability_days: Mapped[int] = mapped_column(Integer, default=0)
+    next_due_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    last_qualified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    evidence_count: Mapped[int] = mapped_column(Integer, default=0)
+    independent_evidence_count: Mapped[int] = mapped_column(Integer, default=0)
+    projection_rule_version: Mapped[str] = mapped_column(
+        String(48), default="capability_stage_v1"
+    )
+    projection_version: Mapped[int] = mapped_column(Integer, default=1)
+    source_observation_watermark: Mapped[int] = mapped_column(Integer, default=0)
+    rebuilt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class LearnerKnowledgeProfileProjection(Base):
     """Rebuildable, evidence-only third-layer learner profile.
 
@@ -2860,6 +3587,10 @@ class ReviewAssignment(Base):
     effective_priority: Mapped[int] = mapped_column(Integer)
     selection_rule_version: Mapped[str] = mapped_column(String(40))
     qualification_rule_version: Mapped[str] = mapped_column(String(40))
+    task_plan_json: Mapped[str] = mapped_column(Text, default="{}")
+    task_plan_rule_version: Mapped[str] = mapped_column(
+        String(48), default="review_task_plan_v1", index=True
+    )
     prior_item_signatures_json: Mapped[str] = mapped_column(Text, default="[]")
     item_signatures_json: Mapped[str] = mapped_column(Text, default="[]")
     response_json: Mapped[str] = mapped_column(Text, default="")
@@ -2890,6 +3621,92 @@ class ReviewAssignmentEventRecord(Base):
     idempotency_key: Mapped[str] = mapped_column(String(160), default="")
     payload_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CapabilityReviewTaskVersion(Base):
+    """Immutable stage-matched delayed reactivation task."""
+
+    __tablename__ = "capability_review_task_versions"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    review_assignment_id: Mapped[str] = mapped_column(
+        ForeignKey("review_assignments.id"), unique=True, index=True
+    )
+    assessment_target_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_targets.id"), index=True
+    )
+    capability_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_revisions.id"), index=True
+    )
+    task_kind: Mapped[str] = mapped_column(String(32), index=True)
+    stage: Mapped[str] = mapped_column(String(24), index=True)
+    criterion_ids_json: Mapped[str] = mapped_column(Text)
+    prompt: Mapped[str] = mapped_column(Text)
+    task_context_json: Mapped[str] = mapped_column(Text, default="{}")
+    deliverables_json: Mapped[str] = mapped_column(Text, default="[]")
+    rubric_json: Mapped[str] = mapped_column(Text)
+    reference_answer_json: Mapped[str] = mapped_column(Text)
+    novelty_basis_json: Mapped[str] = mapped_column(Text, default="{}")
+    required_knowledge_json: Mapped[str] = mapped_column(Text, default="[]")
+    author_deployment_id: Mapped[str] = mapped_column(String(160), default="")
+    author_model_family_id: Mapped[str] = mapped_column(String(160), default="")
+    author_model: Mapped[str] = mapped_column(String(160), default="")
+    provenance_mode: Mapped[str] = mapped_column(String(40))
+    publication_status: Mapped[str] = mapped_column(String(24), index=True)
+    task_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    rule_version: Mapped[str] = mapped_column(String(48))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
+class CapabilityReviewSubmission(Base):
+    """Immutable learner response to one delayed capability task."""
+
+    __tablename__ = "capability_review_submissions"
+    __table_args__ = (
+        UniqueConstraint(
+            "review_task_version_id",
+            "idempotency_key",
+            name="uq_capability_review_submission_task_idempotency",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    review_task_version_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_review_task_versions.id"), unique=True, index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    response_json: Mapped[str] = mapped_column(Text)
+    assistance_mode: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(24), index=True)
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
+class CapabilityReviewEvaluation(Base):
+    """Independent evaluation fact whose qualification only reactivates ability."""
+
+    __tablename__ = "capability_review_evaluations"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    submission_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_review_submissions.id"), unique=True, index=True
+    )
+    verdict: Mapped[str] = mapped_column(String(24), index=True)
+    evidence_sufficiency: Mapped[str] = mapped_column(String(24))
+    criterion_results_json: Mapped[str] = mapped_column(Text)
+    rationale: Mapped[str] = mapped_column(Text, default="")
+    evaluator_deployment_id: Mapped[str] = mapped_column(String(160), default="")
+    evaluator_model_family_id: Mapped[str] = mapped_column(String(160), default="")
+    evaluator_model: Mapped[str] = mapped_column(String(160), default="")
+    qualification_status: Mapped[str] = mapped_column(String(24), index=True)
+    qualification_reason: Mapped[str] = mapped_column(Text)
+    rule_version: Mapped[str] = mapped_column(String(48))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
 
 
 class ReinforcementRun(Base):
@@ -3546,6 +4363,122 @@ class ArtifactSubmission(Base):
     content_json: Mapped[str] = mapped_column(Text)
     attachment_ids_json: Mapped[str] = mapped_column(Text, default="[]")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, index=True)
+
+
+class CapabilityApplicationTaskVersion(Base):
+    """Immutable published application or transfer task bound to one criterion."""
+
+    __tablename__ = "capability_application_task_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "learning_contract_version_id",
+            "capability_stage_criterion_id",
+            "version",
+            name="uq_capability_application_task_contract_criterion_version",
+        ),
+        UniqueConstraint("task_hash", name="uq_capability_application_task_hash"),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    section_id: Mapped[str] = mapped_column(ForeignKey("sections.id"), index=True)
+    learning_contract_version_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_contract_versions.id"), index=True
+    )
+    content_version_id: Mapped[str] = mapped_column(
+        ForeignKey("content_versions.id"), index=True
+    )
+    assessment_target_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_targets.id"), index=True
+    )
+    capability_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_revisions.id"), index=True
+    )
+    capability_stage_criterion_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_stage_criteria.id"), index=True
+    )
+    task_kind: Mapped[str] = mapped_column(
+        String(32), default="standard_application", index=True
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    prompt: Mapped[str] = mapped_column(Text)
+    task_context_json: Mapped[str] = mapped_column(Text, default="{}")
+    deliverables_json: Mapped[str] = mapped_column(Text, default="[]")
+    rubric_json: Mapped[str] = mapped_column(Text)
+    reference_answer_json: Mapped[str] = mapped_column(Text)
+    novelty_basis_json: Mapped[str] = mapped_column(Text, default="{}")
+    unfamiliarity_basis_json: Mapped[str] = mapped_column(Text, default="{}")
+    recombination_requirements_json: Mapped[str] = mapped_column(Text, default="[]")
+    context_fingerprint: Mapped[str] = mapped_column(String(64), default="", index=True)
+    author_deployment_id: Mapped[str] = mapped_column(String(160), default="")
+    author_model_family_id: Mapped[str] = mapped_column(String(160), default="")
+    author_model: Mapped[str] = mapped_column(String(160), default="")
+    provenance_mode: Mapped[str] = mapped_column(String(40), default="ai_authored")
+    publication_status: Mapped[str] = mapped_column(
+        String(24), default="published", index=True
+    )
+    task_hash: Mapped[str] = mapped_column(String(64))
+    authoring_rule_version: Mapped[str] = mapped_column(String(48))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
+class CapabilityApplicationSubmission(Base):
+    """Immutable independent response to one published application task."""
+
+    __tablename__ = "capability_application_submissions"
+    __table_args__ = (
+        UniqueConstraint(
+            "learning_run_id",
+            "user_id",
+            "idempotency_key",
+            name="uq_capability_application_submission_run_user_idempotency",
+        ),
+        ForeignKeyConstraint(
+            ["learning_run_id", "user_id"],
+            ["learning_runs.id", "learning_runs.user_id"],
+            name="fk_capability_application_submission_run_user",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    task_version_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_application_task_versions.id"), index=True
+    )
+    learning_run_id: Mapped[str] = mapped_column(
+        ForeignKey("learning_runs.id"), index=True
+    )
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    request_hash: Mapped[str] = mapped_column(String(64))
+    response_json: Mapped[str] = mapped_column(Text)
+    assistance_mode: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(24), default="processing", index=True)
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
+
+
+class CapabilityApplicationEvaluation(Base):
+    """Append-only evaluation fact; only qualified passes satisfy a stage."""
+
+    __tablename__ = "capability_application_evaluations"
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    submission_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_application_submissions.id"), unique=True, index=True
+    )
+    verdict: Mapped[str] = mapped_column(String(24), index=True)
+    evidence_sufficiency: Mapped[str] = mapped_column(String(24))
+    criterion_results_json: Mapped[str] = mapped_column(Text)
+    rationale: Mapped[str] = mapped_column(Text, default="")
+    evaluator_deployment_id: Mapped[str] = mapped_column(String(160), default="")
+    evaluator_model_family_id: Mapped[str] = mapped_column(String(160), default="")
+    evaluator_model: Mapped[str] = mapped_column(String(160), default="")
+    qualification_status: Mapped[str] = mapped_column(String(24), index=True)
+    qualification_reason: Mapped[str] = mapped_column(Text, default="")
+    evaluation_rule_version: Mapped[str] = mapped_column(String(48))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now, index=True
+    )
 
 
 class LearningResumePosition(Base):

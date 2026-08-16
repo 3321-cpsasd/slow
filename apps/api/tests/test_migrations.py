@@ -1,4 +1,5 @@
 import json
+import importlib
 import os
 from pathlib import Path
 import sqlite3
@@ -12,9 +13,271 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0066_reading_annotations"
+HEAD_REVISION = "0074_merge_capabilities_annotations"
 
 pytestmark = pytest.mark.migration
+
+
+def test_application_task_index_names_fit_postgresql_identifier_limit() -> None:
+    migration = importlib.import_module(
+        "migrations.versions.0067_capability_application_tasks"
+    )
+    names = [
+        migration._index_name(table, column)
+        for table, columns in {
+            "capability_application_task_versions": (
+                "section_id",
+                "learning_contract_version_id",
+                "content_version_id",
+                "assessment_target_id",
+                "capability_revision_id",
+                "capability_stage_criterion_id",
+                "publication_status",
+                "created_at",
+            ),
+            "capability_application_submissions": (
+                "task_version_id",
+                "learning_run_id",
+                "user_id",
+                "status",
+                "created_at",
+            ),
+            "capability_application_evaluations": (
+                "submission_id",
+                "verdict",
+                "qualification_status",
+                "created_at",
+            ),
+        }.items()
+        for column in columns
+    ]
+    assert len(names) == len(set(names))
+    assert max(map(len, names)) <= 63
+
+
+def test_capability_subnet_index_names_fit_postgresql_identifier_limit() -> None:
+    migration = importlib.import_module(
+        "migrations.versions.0068_capability_knowledge_subnets"
+    )
+    names = [
+        f"ix_{migration._ALIASES[table]}_{column}"
+        for table, columns in {
+            "knowledge_networks": ("namespace", "status"),
+            "knowledge_network_revisions": (
+                "knowledge_network_id",
+                "status",
+                "content_hash",
+            ),
+            "knowledge_network_concept_bindings": (
+                "knowledge_network_revision_id",
+                "concept_revision_id",
+            ),
+            "knowledge_relations": ("namespace", "status"),
+            "knowledge_relation_revisions": (
+                "knowledge_relation_id",
+                "from_concept_revision_id",
+                "to_concept_revision_id",
+                "relation_type",
+                "verification_status",
+                "content_hash",
+            ),
+            "knowledge_network_relation_bindings": (
+                "knowledge_network_revision_id",
+                "knowledge_relation_revision_id",
+            ),
+            "capability_subnets": (
+                "capability_revision_id",
+                "knowledge_network_revision_id",
+                "content_hash",
+                "status",
+            ),
+            "capability_relation_requirements": (
+                "capability_revision_id",
+                "knowledge_relation_revision_id",
+                "role",
+                "minimum_stage",
+            ),
+            "assessment_target_concept_bindings": (
+                "assessment_target_id",
+                "concept_revision_id",
+                "role",
+            ),
+            "assessment_target_relation_bindings": (
+                "assessment_target_id",
+                "knowledge_relation_revision_id",
+            ),
+        }.items()
+        for column in columns
+    ]
+    assert len(names) == len(set(names))
+    assert max(map(len, names)) <= 63
+
+
+def test_chapter_capability_planning_indexes_fit_postgresql_limit() -> None:
+    migration = importlib.import_module(
+        "migrations.versions.0069_chapter_capability_planning"
+    )
+    names = [
+        f"ix_{migration._ALIASES[table]}_{column}"
+        for table, columns in {
+            "knowledge_relation_candidates": (
+                "series_id",
+                "chapter_id",
+                "candidate_key",
+                "from_concept_revision_id",
+                "to_concept_revision_id",
+                "relation_type",
+                "candidate_hash",
+                "status",
+            ),
+            "knowledge_relation_identity_decisions": (
+                "candidate_id",
+                "decision",
+                "resolved_relation_revision_id",
+                "rule_version",
+                "supersedes_id",
+                "created_at",
+            ),
+            "capability_planning_candidates": (
+                "series_id",
+                "chapter_id",
+                "candidate_key",
+                "assessment_section_id",
+                "natural_stage_ceiling",
+                "candidate_hash",
+                "status",
+            ),
+            "capability_planning_decisions": (
+                "candidate_id",
+                "decision",
+                "resolved_capability_revision_id",
+                "rule_version",
+                "supersedes_id",
+                "created_at",
+            ),
+        }.items()
+        for column in columns
+    ]
+    assert len(names) == len(set(names))
+    assert max(map(len, names)) <= 63
+
+
+def test_cross_series_publication_indexes_fit_postgresql_limit() -> None:
+    migration = importlib.import_module(
+        "migrations.versions.0070_cross_series_identity_publication"
+    )
+    names = [
+        f"ix_{migration._ALIASES[table]}_{column}"
+        for table, columns in {
+            "published_concept_identities": (
+                "family_key",
+                "semantic_hash",
+                "concept_revision_id",
+                "status",
+                "supersedes_id",
+            ),
+            "published_relation_identities": (
+                "family_key",
+                "semantic_hash",
+                "knowledge_relation_revision_id",
+                "status",
+                "supersedes_id",
+            ),
+            "published_capability_identities": (
+                "family_key",
+                "semantic_hash",
+                "capability_revision_id",
+                "status",
+                "supersedes_id",
+            ),
+            "identity_publication_decisions": (
+                "subject_kind",
+                "candidate_id",
+                "decision",
+                "resolved_revision_id",
+                "rule_version",
+                "supersedes_id",
+                "created_at",
+            ),
+        }.items()
+        for column in columns
+    ]
+    assert len(names) == len(set(names))
+    assert max(map(len, names)) <= 63
+
+
+def test_0071_adds_formal_transfer_task_fields(tmp_path) -> None:
+    database = tmp_path / "0071-transfer-task.db"
+    run_alembic(database, "upgrade", "head")
+    with sqlite3.connect(database) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(capability_application_task_versions)"
+            )
+        }
+        indexes = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA index_list(capability_application_task_versions)"
+            )
+        }
+    assert {
+        "task_kind",
+        "unfamiliarity_basis_json",
+        "recombination_requirements_json",
+        "context_fingerprint",
+    }.issubset(columns)
+    assert {
+        "ix_cap_app_task_task_kind",
+        "ix_cap_app_task_context_fingerprint",
+    }.issubset(indexes)
+
+
+def test_0072_adds_frozen_review_task_plan_fields(tmp_path) -> None:
+    database = tmp_path / "0072-review-task-plan.db"
+    run_alembic(database, "upgrade", "head")
+    with sqlite3.connect(database) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(review_assignments)")
+        }
+        indexes = {
+            row[1]
+            for row in connection.execute("PRAGMA index_list(review_assignments)")
+        }
+    assert {"task_plan_json", "task_plan_rule_version"}.issubset(columns)
+    assert "ix_review_assignments_task_plan_rule_version" in indexes
+
+
+def test_0073_adds_capability_review_fact_chain(tmp_path) -> None:
+    database = tmp_path / "0073-capability-review.db"
+    run_alembic(database, "upgrade", "head")
+    with sqlite3.connect(database) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        task_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(capability_review_task_versions)"
+            )
+        }
+    assert {
+        "capability_review_task_versions",
+        "capability_review_submissions",
+        "capability_review_evaluations",
+    }.issubset(tables)
+    assert {
+        "review_assignment_id",
+        "task_kind",
+        "stage",
+        "criterion_ids_json",
+        "task_hash",
+    }.issubset(task_columns)
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
@@ -188,6 +451,14 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
             )
         }
         assert {
+            "capabilities",
+            "capability_revisions",
+            "capability_concept_bindings",
+            "capability_stage_criteria",
+            "capability_route_bindings",
+            "capability_state_projections",
+            "knowledge_identity_candidates",
+            "knowledge_identity_decisions",
             "user_daily_mode_states",
             "daily_mode_events",
             "learning_preference_evidence",
@@ -208,6 +479,14 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
             "reading_annotations",
             "reading_annotation_revisions",
         }.issubset(trustworthy_tables)
+        assessment_target_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(assessment_targets)")
+        }
+        assert {
+            "capability_revision_id",
+            "capability_stage_criterion_id",
+        }.issubset(assessment_target_columns)
         qa_message_columns = {
             row[1]
             for row in connection.execute("PRAGMA table_info(qa_messages)")

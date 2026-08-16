@@ -98,7 +98,8 @@ def _contract_target_maps(
         )
         .where(
             LearningContractAssessmentTarget.contract_version_id
-            == contract_version_id
+            == contract_version_id,
+            LearningContractAssessmentTarget.diagnostic_only.is_(False),
         )
         .order_by(LearningContractAssessmentTarget.position)
     ).all()
