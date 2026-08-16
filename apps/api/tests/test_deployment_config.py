@@ -98,6 +98,37 @@ def test_deployment_backups_are_postgresql_and_cutover_is_fail_closed():
         assert '--env-file "$runtime_env" --env-file "$release_env"' in script
 
 
+def test_deployment_logs_failed_containers_before_rollback():
+    for name in ("remote-build-deploy.sh", "remote-deploy.sh"):
+        script = (PROJECT_ROOT / "deploy/scripts" / name).read_text(
+            encoding="utf-8"
+        )
+        assert "log_failed_startup()" in script
+        assert "compose ps -a" in script
+        assert "compose logs --no-color --tail=200 db api web" in script
+        startup_position = script.index("if ! compose up")
+        diagnostics_position = script.index(
+            "log_failed_startup\n", startup_position
+        )
+        rollback_position = script.index(
+            "restore_previous_release", diagnostics_position
+        )
+        assert diagnostics_position < rollback_position
+
+
+def test_production_rollback_restores_exact_previous_release_metadata():
+    script = (
+        PROJECT_ROOT / "deploy/scripts/remote-deploy.sh"
+    ).read_text(encoding="utf-8")
+
+    assert 'previous_release_env=$(mktemp "$deploy_root/' in script
+    assert 'cp "$previous_release_env" "$release_env"' in script
+    assert '. "$release_env"' in script
+    assert "trap cleanup_previous_release_env EXIT HUP INT TERM" in script
+    assert "previous_version" not in script
+    assert "--force-recreate db api web" in script
+
+
 def test_cutover_stops_public_writes_and_verifies_before_authority_switch():
     script = (
         PROJECT_ROOT / "deploy/scripts/cutover-sqlite-to-postgres.sh"

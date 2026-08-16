@@ -24,17 +24,91 @@ API_ROOT = Path(__file__).resolve().parents[1]
 pytestmark = pytest.mark.postgresql
 
 
-def _upgrade(url: str) -> None:
+def _upgrade(url: str, revision: str = "head") -> None:
     environment = os.environ.copy()
     environment["DATABASE_URL"] = url
     subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", "head"],
+        [
+            sys.executable,
+            "-m",
+            "alembic",
+            "-c",
+            "alembic.ini",
+            "upgrade",
+            revision,
+        ],
         cwd=API_ROOT,
         env=environment,
         check=True,
         capture_output=True,
         text=True,
     )
+
+
+def test_postgresql_upgrades_existing_schema_from_previous_head():
+    target_url = os.environ.get("POSTGRES_TEST_DATABASE_URL", "").strip()
+    if not target_url:
+        pytest.skip("POSTGRES_TEST_DATABASE_URL is not configured")
+    parsed = make_url(target_url)
+    assert parsed.get_backend_name() == "postgresql"
+    assert parsed.database == "slow_test", (
+        "integration test requires disposable slow_test"
+    )
+
+    migration_database = "slow_migration_test"
+    admin_url = parsed.set(database="postgres").render_as_string(
+        hide_password=False
+    )
+    migration_url = parsed.set(database=migration_database).render_as_string(
+        hide_password=False
+    )
+    admin_engine = sa.create_engine(admin_url, isolation_level="AUTOCOMMIT")
+    try:
+        with admin_engine.connect() as connection:
+            connection.exec_driver_sql(
+                f'DROP DATABASE IF EXISTS "{migration_database}" WITH (FORCE)'
+            )
+            connection.exec_driver_sql(
+                f'CREATE DATABASE "{migration_database}"'
+            )
+
+        _upgrade(migration_url, "0064_shelf_soft_delete")
+        migration_engine = sa.create_engine(migration_url)
+        try:
+            with migration_engine.connect() as connection:
+                assert connection.execute(
+                    sa.text("SELECT version_num FROM alembic_version")
+                ).scalar_one() == "0064_shelf_soft_delete"
+                assert "reading_annotations" not in sa.inspect(
+                    connection
+                ).get_table_names()
+        finally:
+            migration_engine.dispose()
+
+        _upgrade(migration_url)
+        migration_engine = sa.create_engine(migration_url)
+        try:
+            with migration_engine.connect() as connection:
+                assert connection.execute(
+                    sa.text("SELECT version_num FROM alembic_version")
+                ).scalar_one() == "0066_reading_annotations"
+                inspector = sa.inspect(connection)
+                assert "reading_annotations" in inspector.get_table_names()
+                assert "display_title" in {
+                    column["name"] for column in inspector.get_columns("series")
+                }
+                assert "created_at" in {
+                    column["name"]
+                    for column in inspector.get_columns("qa_sessions")
+                }
+        finally:
+            migration_engine.dispose()
+    finally:
+        with admin_engine.connect() as connection:
+            connection.exec_driver_sql(
+                f'DROP DATABASE IF EXISTS "{migration_database}" WITH (FORCE)'
+            )
+        admin_engine.dispose()
 
 
 def test_active_learning_run_index_is_partial_on_both_databases():
