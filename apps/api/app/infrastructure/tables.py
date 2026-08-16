@@ -3510,6 +3510,10 @@ class ReviewAssignment(Base):
     effective_priority: Mapped[int] = mapped_column(Integer)
     selection_rule_version: Mapped[str] = mapped_column(String(40))
     qualification_rule_version: Mapped[str] = mapped_column(String(40))
+    task_plan_json: Mapped[str] = mapped_column(Text, default="{}")
+    task_plan_rule_version: Mapped[str] = mapped_column(
+        String(48), default="review_task_plan_v1", index=True
+    )
     prior_item_signatures_json: Mapped[str] = mapped_column(Text, default="[]")
     item_signatures_json: Mapped[str] = mapped_column(Text, default="[]")
     response_json: Mapped[str] = mapped_column(Text, default="")

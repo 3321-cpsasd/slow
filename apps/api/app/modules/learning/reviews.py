@@ -21,10 +21,13 @@ from ...infrastructure.tables import (
     AssessmentObservation,
     AssessmentTarget,
     CapabilityRevision,
+    CapabilityRouteBinding,
+    CapabilityStageCriterion,
     CapabilityStateProjection,
     ContentVersion,
     LearningContractVersion,
     LearningMissionVersion,
+    LearningRun,
     QuizAttempt,
     QuizSet,
     ReviewAssignment,
@@ -60,6 +63,11 @@ from .review_assignments import (
     scheduled_assignment,
     select_daily_reviews,
     transition_assignment,
+)
+from .review_task_plans import (
+    REVIEW_TASK_PLAN_RULE_VERSION,
+    ReviewCriterion,
+    plan_review_tasks,
 )
 
 
@@ -285,6 +293,82 @@ class ReviewAssignmentService:
                 result.add(fingerprint)
         return result
 
+    def _task_plan(
+        self,
+        *,
+        target: AssessmentTarget,
+        capability_state: CapabilityStateProjection | None,
+        source: AssessmentObservation,
+        remediation_due: bool,
+    ) -> dict:
+        if not target.capability_revision_id or capability_state is None:
+            return {
+                "ruleVersion": REVIEW_TASK_PLAN_RULE_VERSION,
+                "reactivation": {
+                    "purpose": "retention_reactivation",
+                    "taskKind": "choice_reactivation",
+                    "stage": "bronze",
+                    "criterionIds": [],
+                    "verificationProtocols": ["choice_quiz_v1"],
+                    "evidenceEffect": "activation_only",
+                },
+                "strengthening": None,
+            }
+        run = self.db.get(LearningRun, source.learning_run_id)
+        route = self.db.scalar(
+            select(CapabilityRouteBinding).where(
+                CapabilityRouteBinding.series_id == run.series_id,
+                CapabilityRouteBinding.capability_revision_id
+                == target.capability_revision_id,
+                CapabilityRouteBinding.status == "active",
+            )
+        ) if run else None
+        if route is None:
+            raise AppError(
+                "能力复习缺少当前系列的正式任务路线",
+                code="REVIEW_CAPABILITY_ROUTE_MISSING",
+                status=409,
+            )
+        criteria = self.db.scalars(
+            select(CapabilityStageCriterion)
+            .where(
+                CapabilityStageCriterion.capability_revision_id
+                == target.capability_revision_id,
+                CapabilityStageCriterion.required.is_(True),
+            )
+            .order_by(CapabilityStageCriterion.position)
+        ).all()
+        available = frozenset(
+            str(item.get("criterionId"))
+            for item in _load(route.opportunities_json, [])
+            if item.get("criterionId")
+        )
+        try:
+            return plan_review_tasks(
+                current_stage=capability_state.current_stage,
+                criteria=tuple(
+                    ReviewCriterion(
+                        criterion_id=item.id,
+                        stage=item.stage,
+                        position=item.position,
+                        task_type=item.task_type,
+                        verification_protocol=item.verification_protocol,
+                    )
+                    for item in criteria
+                ),
+                missing_criterion_ids=tuple(
+                    _load(capability_state.missing_criterion_ids_json, [])
+                ),
+                available_criterion_ids=available,
+                remediation_due=remediation_due,
+            )
+        except ValueError as error:
+            raise AppError(
+                "当前能力阶段没有可执行的正式复习任务",
+                code="REVIEW_CAPABILITY_TASK_PLAN_INVALID",
+                status=409,
+            ) from error
+
     def due(self, *, daily_budget: int = 10, as_of: datetime | None = None) -> dict:
         moment = _utc(as_of or now())
         budget = max(0, min(daily_budget, 100))
@@ -342,6 +426,7 @@ class ReviewAssignmentService:
                 ).all()
             } if capability_ids else {}
             source_by_target: dict[str, AssessmentObservation] = {}
+            task_plan_by_target: dict[str, dict] = {}
             candidates = []
             for item in states:
                 if item.assessment_target_id in active_target_ids:
@@ -368,6 +453,27 @@ class ReviewAssignmentService:
                     if capability
                     else ""
                 )
+                try:
+                    task_plan_by_target[item.assessment_target_id] = self._task_plan(
+                        target=target,
+                        capability_state=capability,
+                        source=source,
+                        remediation_due=item.status == "remediation_due",
+                    )
+                except AppError as error:
+                    if error.code not in {
+                        "REVIEW_CAPABILITY_ROUTE_MISSING",
+                        "REVIEW_CAPABILITY_TASK_PLAN_INVALID",
+                    }:
+                        raise
+                    logger.info(
+                        "review selection skipped capability without executable task "
+                        "user_id=%s assessment_target_id=%s code=%s",
+                        self.user_id,
+                        item.assessment_target_id,
+                        error.code,
+                    )
+                    continue
                 candidates.append(ReviewCandidate(
                     review_state_id=item.id,
                     assessment_target_id=item.assessment_target_id,
@@ -456,6 +562,10 @@ class ReviewAssignmentService:
                     effective_priority=item.effective_priority,
                     selection_rule_version=item.rule_version,
                     qualification_rule_version=RETENTION_QUALIFICATION_RULE_VERSION,
+                    task_plan_json=_dump(
+                        task_plan_by_target[item.assessment_target_id]
+                    ),
+                    task_plan_rule_version=REVIEW_TASK_PLAN_RULE_VERSION,
                     prior_item_signatures_json=_dump(sorted(self._prior_signatures(item.assessment_target_id))),
                     item_signatures_json="[]",
                     last_event_at=scheduled.last_event_at,
@@ -594,6 +704,7 @@ class ReviewAssignmentService:
                         else "这项能力已经到复习时间"
                     ),
                     "capability": capability_view(item),
+                    "taskPlan": _load(item.task_plan_json, {}),
                 }
                 for item in assignments
             ],
@@ -685,6 +796,7 @@ class ReviewAssignmentService:
                 ],
             } if quiz else None,
             "attemptId": assignment.submitted_attempt_id,
+            "taskPlan": _load(assignment.task_plan_json, {}),
         }
 
     async def start(self, assignment_id: str, *, as_of: datetime | None = None) -> dict:
@@ -694,6 +806,20 @@ class ReviewAssignmentService:
             return self._assignment_view(assignment)
         if assignment.status != "presented":
             raise AppError("复习任务当前不可开始", code="REVIEW_ASSIGNMENT_TRANSITION_INVALID", status=409)
+        task_plan = _load(assignment.task_plan_json, {})
+        reactivation = task_plan.get("reactivation", {})
+        task_kind = (
+            reactivation.get("taskKind", "")
+            if isinstance(reactivation, dict)
+            else ""
+        )
+        if task_kind != "choice_reactivation":
+            raise AppError(
+                "该复习需要进入对应能力任务，而不是生成选择题",
+                code="REVIEW_TASK_EXECUTOR_REQUIRED",
+                status=409,
+                details={"taskKind": task_kind},
+            )
         source = self._source_for_assignment(assignment)
         content = source.content
         section = source.section

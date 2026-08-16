@@ -19,6 +19,8 @@ from app.infrastructure.tables import (
     AssessmentAnswerVersion,
     AssessmentItemEvidenceBlock,
     AssessmentItemVersion,
+    CapabilityStageCriterion,
+    CapabilityStateProjection,
     ContentBlockAssessmentTarget,
     ContentBlockVersion,
     ContentVersion,
@@ -176,6 +178,9 @@ def test_review_assignment_materializes_once_and_submits_candidate(tmp_path):
         assert due["items"][0]["status"] == "presented"
         assert due["items"][0]["reviewReason"] == "这项能力已经到复习时间"
         assert due["items"][0]["capability"]["currentStage"] == "bronze"
+        assert due["items"][0]["taskPlan"]["reactivation"]["taskKind"] == "choice_reactivation"
+        assert due["items"][0]["taskPlan"]["reactivation"]["evidenceEffect"] == "activation_only"
+        assert due["items"][0]["taskPlan"]["strengthening"]["taskKind"] == "oral_strengthening"
         assignment_id = due["items"][0]["assignmentId"]
 
         repeated = client.get("/api/reviews/due?daily_budget=99").json()
@@ -317,6 +322,47 @@ def test_review_assignment_materializes_once_and_submits_candidate(tmp_path):
                     ReviewAssignmentEventRecord.assignment_id == assignment_id
                 )
             ) == 3
+
+
+def test_silver_review_freezes_oral_reactivation_instead_of_choice_quiz(tmp_path):
+    with _review_client(tmp_path) as client:
+        _complete_initial_quiz_and_make_due(client)
+        with client.app.state.sessions() as db:
+            state = db.scalar(
+                select(CapabilityStateProjection).where(
+                    CapabilityStateProjection.user_id == "user_demo"
+                )
+            )
+            criteria = db.scalars(
+                select(CapabilityStageCriterion).where(
+                    CapabilityStageCriterion.capability_revision_id
+                    == state.capability_revision_id
+                )
+            ).all()
+            gold_and_diamond = [
+                item.id for item in criteria if item.stage in {"gold", "diamond"}
+            ]
+            state.current_stage = "silver"
+            state.current_stage_order = 2
+            state.highest_stage = "silver"
+            state.highest_stage_order = 2
+            state.missing_criterion_ids_json = json.dumps(gold_and_diamond)
+            db.commit()
+
+        due = client.get("/api/reviews/due?daily_budget=1")
+        assert due.status_code == 200, due.json()
+        item = due.json()["items"][0]
+        assert item["taskPlan"]["reactivation"]["taskKind"] == "oral_reactivation"
+        assert len(item["taskPlan"]["reactivation"]["criterionIds"]) == 2
+        assert item["taskPlan"]["strengthening"] is None
+
+        blocked = client.post(f"/api/reviews/{item['assignmentId']}/start")
+        assert blocked.status_code == 409
+        assert blocked.json()["code"] == "REVIEW_TASK_EXECUTOR_REQUIRED"
+        with client.app.state.sessions() as db:
+            assignment = db.get(ReviewAssignment, item["assignmentId"])
+            assert assignment.status == "presented"
+            assert assignment.review_quiz_set_id is None
 
 
 def test_review_start_accepts_published_v2_content_blocks(tmp_path):

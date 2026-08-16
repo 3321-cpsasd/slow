@@ -13,7 +13,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0071_formal_transfer_tasks"
+HEAD_REVISION = "0072_review_task_plans"
 
 pytestmark = pytest.mark.migration
 
@@ -232,6 +232,22 @@ def test_0071_adds_formal_transfer_task_fields(tmp_path) -> None:
         "ix_cap_app_task_task_kind",
         "ix_cap_app_task_context_fingerprint",
     }.issubset(indexes)
+
+
+def test_0072_adds_frozen_review_task_plan_fields(tmp_path) -> None:
+    database = tmp_path / "0072-review-task-plan.db"
+    run_alembic(database, "upgrade", "head")
+    with sqlite3.connect(database) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(review_assignments)")
+        }
+        indexes = {
+            row[1]
+            for row in connection.execute("PRAGMA index_list(review_assignments)")
+        }
+    assert {"task_plan_json", "task_plan_rule_version"}.issubset(columns)
+    assert "ix_review_assignments_task_plan_rule_version" in indexes
 
 
 def run_alembic(database: Path, *arguments: str) -> None:
