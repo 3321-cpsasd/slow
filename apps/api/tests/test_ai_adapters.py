@@ -89,6 +89,49 @@ def test_curriculum_hierarchy_is_versioned_and_embedded_in_generation_prompts():
     assert "支撑性关联知识不得静默变成新的 assessmentTargets" in prompts["GeneratedContent"]
 
 
+def test_learning_goal_interview_preserves_precollected_schedule_without_reasking():
+    async def capture_prompt():
+        adapter = OpenAiAdapter("", "test-model")
+        calls = []
+
+        async def fake_parse(schema, prompt, payload, tokens):
+            calls.append(prompt)
+            return SimpleNamespace()
+
+        adapter._parse = fake_parse
+        await adapter.learning_goal_interview(
+            {
+                "topic": "AI是什么",
+                "dailyCommitment": "每天约1小时",
+                "completionHorizon": "14天内",
+            }
+        )
+        return calls[0]
+
+    prompt = asyncio.run(capture_prompt())
+    assert "必须分别原样保留为 confirmed" in prompt
+    assert "不得合并、替换、推测或再次追问" in prompt
+    assert "不要再次询问每天投入、完成周期或可用总时间" in prompt
+
+    result = asyncio.run(
+        LocalDemoAdapter().learning_goal_interview(
+            {
+                "topic": "AI是什么",
+                "dailyCommitment": "每天约1小时",
+                "completionHorizon": "14天内",
+                "answers": [],
+            }
+        )
+    )
+    assert result.question is not None
+    assert result.question.dimension == "purpose"
+    by_key = {item.key: item for item in result.dimensions}
+    assert by_key["daily_commitment"].summary == "每天约1小时"
+    assert by_key["completion_horizon"].summary == "14天内"
+    assert by_key["daily_commitment"].status == "confirmed"
+    assert by_key["completion_horizon"].status == "confirmed"
+
+
 def test_teaching_blueprint_requires_every_learning_role():
     with pytest.raises(ValidationError):
         TeachingBlueprint.model_validate(

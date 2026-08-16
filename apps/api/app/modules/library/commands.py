@@ -118,6 +118,14 @@ class CatalogCommandService:
             plan.status = "deleted"
         self.db.commit()
 
+    def rename_series(self, series_id: str, body) -> None:
+        series = self.contexts.resolve_series(
+            user_id=self.user_id,
+            series_id=series_id,
+        ).series
+        series.display_title = body.name
+        self.db.commit()
+
     def delete_book(self, book_id: str) -> None:
         book = self.contexts.resolve_book(
             user_id=self.user_id,

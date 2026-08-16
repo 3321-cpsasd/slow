@@ -18,6 +18,7 @@ from ...infrastructure.tables import (
     Series,
     now,
 )
+from .content_safety import require_safe_generated_plan, require_safe_plan_request
 
 
 def _uid(prefix: str) -> str:
@@ -26,6 +27,43 @@ def _uid(prefix: str) -> str:
 
 def _dump(value) -> str:
     return json.dumps(value, ensure_ascii=False)
+
+
+def require_plan_within_route_budget(generated, depth_policy: dict) -> None:
+    """Fail closed when a candidate ignores the selected learning depth."""
+
+    budget = depth_policy.get("routeBudget") or {}
+    checks = [
+        (len(generated.books), budget.get("books") or {}),
+        (len(generated.milestones), budget.get("milestones") or {}),
+    ]
+    for actual, bounds in checks:
+        minimum = bounds.get("min")
+        maximum = bounds.get("max")
+        if (minimum is not None and actual < minimum) or (
+            maximum is not None and actual > maximum
+        ):
+            raise AppError(
+                f"AI 生成的路线没有收敛到“{depth_policy.get('label', '所选深度')}”的范围，请重试",
+                code="PLAN_DEPTH_BUDGET_EXCEEDED",
+                status=502,
+                retryable=True,
+            )
+
+    chapter_bounds = budget.get("chaptersPerBook") or {}
+    chapter_minimum = chapter_bounds.get("min")
+    chapter_maximum = chapter_bounds.get("max")
+    for book in generated.books:
+        actual = len(book.chapters)
+        if (chapter_minimum is not None and actual < chapter_minimum) or (
+            chapter_maximum is not None and actual > chapter_maximum
+        ):
+            raise AppError(
+                f"AI 生成的路线没有收敛到“{depth_policy.get('label', '所选深度')}”的范围，请重试",
+                code="PLAN_DEPTH_BUDGET_EXCEEDED",
+                status=502,
+                retryable=True,
+            )
 
 
 class SeriesPlanningService:
@@ -64,6 +102,7 @@ class SeriesPlanningService:
 
     async def create(self, body, idempotency_key: str | None = None) -> dict:
         shelf = self.shelf_provider(body.shelf_id)
+        require_safe_plan_request(body)
         request = self.learning_start.plan_payload(body)
         learning_start_context = self.learning_start.planning_context(body)
         memory = self.memory_provider(body.shelf_id)
@@ -148,6 +187,11 @@ class SeriesPlanningService:
         try:
             self.db.commit()
             generated = await self.ai.plan(ai_request, memory)
+            require_plan_within_route_budget(
+                generated,
+                context_pack.policy.depth_policy,
+            )
+            require_safe_generated_plan(generated)
             if baseline:
                 self.baselines.validate_plan_coverage(baseline, generated)
         except Exception as error:

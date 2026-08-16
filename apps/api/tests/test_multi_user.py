@@ -406,6 +406,14 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
     assert hidden_shelf_delete.status_code == 404
     assert hidden_shelf_delete.json()["code"] == "SHELF_NOT_FOUND"
 
+    hidden_series_rename = client.patch(
+        f"/api/series/{foreign_series_id}",
+        json={"name": "试图改名"},
+        headers={"X-CSRF-Token": me["csrfToken"]},
+    )
+    assert hidden_series_rename.status_code == 404
+    assert hidden_series_rename.json()["code"] == "SERIES_NOT_FOUND"
+
     hidden = client.get(f"/api/series/{foreign_series_id}")
     assert hidden.status_code == 404
 
@@ -1058,6 +1066,43 @@ def test_expired_worker_cannot_commit_after_new_lease():
         completed = complete_task(db, second, {"writer": "new"})
         assert completed.status == "succeeded"
         assert '"new"' in completed.result_json
+    engine.dispose()
+
+
+def test_expired_persisted_worker_lease_can_be_reclaimed(tmp_path):
+    engine, sessions = build_database(
+        f"sqlite+pysqlite:///{tmp_path / 'persisted-worker.db'}"
+    )
+    Base.metadata.create_all(engine)
+    with sessions() as db:
+        run, sections = build_task_graph(db)
+        task = LearningTask(
+            id="task_persisted_lease",
+            learning_run_id=run.id,
+            user_id="user_a",
+            section_id=sections["user_a"].id,
+            task_type="note_generation",
+            idempotency_key="persisted-lease",
+            trigger_id="trigger",
+            status="pending",
+        )
+        db.add(task)
+        db.commit()
+        first = claim_task(db, task.id, lease_owner="worker_one")
+        claimed = db.get(LearningTask, task.id)
+        claimed.lease_expires_at = now() - timedelta(seconds=1)
+        db.commit()
+
+    with sessions() as db:
+        persisted = db.get(LearningTask, "task_persisted_lease")
+        assert persisted.lease_expires_at.tzinfo is None
+        second = claim_task(
+            db,
+            "task_persisted_lease",
+            lease_owner="worker_two",
+        )
+        assert second is not None
+        assert second.lease_token != first.lease_token
     engine.dispose()
 
 

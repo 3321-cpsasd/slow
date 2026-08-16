@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from ...application.generation_context import GenerationContextBuilder
 from ...core.errors import AiError, AppError
 from ...infrastructure.tables import (
+    ContentVersion,
     LearningContractVersion,
     LearningMissionVersion,
     LearningPreferenceEvidence,
@@ -58,7 +59,7 @@ class QaService:
         self.dump = dump
         self.load = load
 
-    def history(self, section_id: str):
+    def history(self, section_id: str, content_version_id: str | None = None):
         """Return persisted Ask AI history for the user's active learning run.
 
         Reading history is deliberately side-effect free: opening a section that
@@ -69,16 +70,97 @@ class QaService:
             section_id=section_id,
         )
         learning_run = self.progress.active_run(section_context.series.id)
-        session = self.db.scalar(
+        binding = self.db.scalar(
+            select(LearningRunSectionBinding).where(
+                LearningRunSectionBinding.learning_run_id == learning_run.id,
+                LearningRunSectionBinding.user_id == self.user_id,
+                LearningRunSectionBinding.section_id == section_id,
+            )
+        )
+        current_content_version_id = binding.content_version_id if binding else None
+        sessions = self.db.scalars(
             select(QaSession).where(
                 QaSession.section_id == section_id,
                 QaSession.user_id == self.user_id,
                 QaSession.learning_run_id == learning_run.id,
             )
+            .order_by(QaSession.created_at, QaSession.id)
+        ).all()
+        selected_content_version_id = (
+            content_version_id or current_content_version_id
         )
+        session = next(
+            (
+                item for item in sessions
+                if item.content_version_id == selected_content_version_id
+            ),
+            None,
+        )
+        if (
+            content_version_id
+            and not session
+            and content_version_id != current_content_version_id
+        ):
+            raise AppError(
+                "这份正文没有可读取的答疑记录",
+                code="QA_HISTORY_VERSION_NOT_FOUND",
+                status=404,
+            )
+        version_ids = {
+            item.content_version_id for item in sessions if item.content_version_id
+        }
+        versions = {
+            item.id: item
+            for item in self.db.scalars(
+                select(ContentVersion).where(ContentVersion.id.in_(version_ids))
+            ).all()
+        } if version_ids else {}
+        history_versions = [
+            {
+                "contentVersionId": item.content_version_id,
+                "contentVersion": (
+                    versions[item.content_version_id].version
+                    if item.content_version_id in versions
+                    else None
+                ),
+                "isCurrent": item.content_version_id == current_content_version_id,
+                "createdAt": item.created_at.isoformat(),
+            }
+            for item in reversed(sessions)
+            if item.content_version_id
+        ]
+        if (
+            current_content_version_id
+            and current_content_version_id not in {
+                item["contentVersionId"] for item in history_versions
+            }
+        ):
+            current_version = self.db.get(
+                ContentVersion,
+                current_content_version_id,
+            )
+            history_versions.insert(
+                0,
+                {
+                    "contentVersionId": current_content_version_id,
+                    "contentVersion": (
+                        current_version.version if current_version else None
+                    ),
+                    "isCurrent": True,
+                    "createdAt": (
+                        current_version.created_at.isoformat()
+                        if current_version
+                        else None
+                    ),
+                },
+            )
         if not session:
             return {
                 "sectionId": section_id,
+                "contentVersionId": selected_content_version_id,
+                "currentContentVersionId": current_content_version_id,
+                "readOnly": False,
+                "versions": history_versions,
                 "lastThreadId": None,
                 "threads": [],
                 "truncated": False,
@@ -161,6 +243,10 @@ class QaService:
 
         return {
             "sectionId": section_id,
+            "contentVersionId": session.content_version_id,
+            "currentContentVersionId": current_content_version_id,
+            "readOnly": session.content_version_id != current_content_version_id,
+            "versions": history_versions,
             "lastThreadId": last_thread_id,
             "truncated": threads_truncated or messages_truncated,
             "threads": [
@@ -253,6 +339,7 @@ class QaService:
                 QaSession.section_id == section_id,
                 QaSession.user_id == self.user_id,
                 QaSession.learning_run_id == learning_run.id,
+                QaSession.content_version_id == binding.content_version_id,
             )
         )
         daily_mode_state = self.daily_mode_reader()
@@ -488,11 +575,20 @@ class QaService:
             section_id=section_id,
         )
         learning_run = self.progress.active_run(context.series.id)
+        binding = self.db.scalar(
+            select(LearningRunSectionBinding).where(
+                LearningRunSectionBinding.learning_run_id == learning_run.id,
+                LearningRunSectionBinding.user_id == self.user_id,
+                LearningRunSectionBinding.section_id == section_id,
+            )
+        )
         session = self.db.scalar(
             select(QaSession).where(
                 QaSession.section_id == section_id,
                 QaSession.user_id == self.user_id,
                 QaSession.learning_run_id == learning_run.id,
+                QaSession.content_version_id
+                == (binding.content_version_id if binding else ""),
             )
         )
         thread = (

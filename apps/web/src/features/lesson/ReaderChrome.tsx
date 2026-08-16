@@ -19,6 +19,9 @@ type LessonReaderHeaderProps = {
   onReaderTypographyStepChange: (step: number) => void;
   onRequestRegenerate: () => void;
   onFeedback: () => void;
+  condensed?: boolean;
+  directoryOpen: boolean;
+  onToggleDirectory: () => void;
 };
 
 const statusLabel = (status: string) => {
@@ -46,6 +49,9 @@ export function LessonReaderHeader({
   onReaderTypographyStepChange,
   onRequestRegenerate,
   onFeedback,
+  condensed = false,
+  directoryOpen,
+  onToggleDirectory,
 }: LessonReaderHeaderProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -68,7 +74,7 @@ export function LessonReaderHeader({
 
   return (
     <>
-      <div className="reader-toolbar">
+      <div className={`reader-toolbar ${condensed ? 'is-condensed' : ''}`}>
         <div className="reader-title-group">
           <nav className="breadcrumb" aria-label="当前位置">
             <ol>
@@ -80,6 +86,15 @@ export function LessonReaderHeader({
           <h1>{title}</h1>
         </div>
         <div className="reader-toolbar-actions">
+          <button
+            type="button"
+            className="reader-mobile-directory"
+            aria-controls="course-directory-panel"
+            aria-expanded={directoryOpen}
+            onClick={onToggleDirectory}
+          >
+            目录
+          </button>
           <span className="lesson-session-time">
             {sessionSeconds < 60
               ? '本次 <1 分钟'
@@ -94,7 +109,8 @@ export function LessonReaderHeader({
               aria-expanded={menuOpen}
               onClick={() => setMenuOpen((open) => !open)}
             >
-              小节选项 <span aria-hidden="true">···</span>
+              <span className="reader-options-label">小节选项</span>
+              <span aria-hidden="true">···</span>
             </button>
             {menuOpen && (
               <div className="reader-options-menu" role="dialog" aria-label="小节选项">

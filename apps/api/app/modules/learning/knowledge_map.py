@@ -67,7 +67,7 @@ class KnowledgeMapService:
                 Shelf.deleted_at.is_(None),
                 Series.deleted_at.is_(None),
             )
-            .order_by(Shelf.name, Series.title, Series.id)
+            .order_by(Shelf.name, Series.display_title, Series.title, Series.id)
         )
         if series_id:
             query = query.where(Series.id == series_id)
@@ -82,7 +82,7 @@ class KnowledgeMapService:
         series_meta = {
             series.id: {
                 "id": series.id,
-                "title": series.title,
+                "title": series.display_title or series.title,
                 "shelfId": shelf.id,
                 "shelfName": shelf.name,
             }
@@ -242,7 +242,7 @@ class KnowledgeMapService:
             seen_contexts.add(key)
             contexts_by_capability[capability_id].append({
                 "seriesId": series.id,
-                "seriesTitle": series.title,
+                "seriesTitle": series.display_title or series.title,
                 "bookId": book.id,
                 "bookTitle": book.title,
                 "chapterId": chapter.id,

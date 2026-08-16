@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -47,6 +48,7 @@ from .progress import best_score_pair
 
 LEARNING_START_PREVIEW_SCHEMA_VERSION = "learning_start_preview_v1"
 LEARNING_START_SELECTION_RULE_VERSION = "learning_start_selection_v1"
+LEARNING_GOAL_INTERVIEW_RULE_VERSION = "learning_goal_interview_v3"
 CHAPTER_ROUTE_RULE_VERSION = "chapter_route_choice_v1"
 CHAPTER_CHALLENGE_RULE_VERSION = "chapter_challenge_v1"
 
@@ -100,11 +102,104 @@ def _plan_payload(body) -> dict:
 class LearningStartService:
     """Shows a reviewed graph slice and binds the user's explicit startup choice."""
 
-    def __init__(self, db: Session, *, user_id: str, baselines, shelf_provider):
+    def __init__(
+        self,
+        db: Session,
+        *,
+        user_id: str,
+        ai,
+        baselines,
+        shelf_provider,
+        profile_provider: Callable[[], dict],
+    ):
         self.db = db
         self.user_id = user_id
+        self.ai = ai
         self.baselines = baselines
         self.shelf_provider = shelf_provider
+        self.profile_provider = profile_provider
+
+    async def interview(self, body) -> dict:
+        shelf = self.shelf_provider(body.shelf_id)
+        profile = self.profile_provider()
+        daily_hours = f"{body.daily_commitment_hours:g}"
+        horizon_unit = {"day": "天", "week": "周", "month": "月"}[
+            body.completion_horizon_unit
+        ]
+        daily_commitment = f"每天{daily_hours}小时"
+        completion_horizon = (
+            f"{body.completion_horizon_value}{horizon_unit}内"
+        )
+        request = {
+            "topic": body.topic.strip(),
+            "dailyCommitment": daily_commitment,
+            "completionHorizon": completion_horizon,
+            "schedule": {
+                "dailyCommitmentHours": body.daily_commitment_hours,
+                "completionHorizon": {
+                    "value": body.completion_horizon_value,
+                    "unit": body.completion_horizon_unit,
+                },
+            },
+            "relatedExperience": body.related_experience.strip(),
+            "answers": [item.model_dump(by_alias=True) for item in body.answers],
+            "profile": profile,
+            "shelf": {
+                "name": shelf.name,
+                "domain": shelf.domain,
+                "specialty": shelf.specialty,
+            },
+            "interviewRuleVersion": LEARNING_GOAL_INTERVIEW_RULE_VERSION,
+        }
+        result = await self.ai.learning_goal_interview(request)
+        question = None
+        if result.question:
+            question = {
+                "id": result.question.id,
+                "dimension": result.question.dimension,
+                "prompt": result.question.prompt,
+                "helper": result.question.helper,
+                "options": [
+                    {
+                        "id": item.id,
+                        "label": item.label,
+                        "description": item.description,
+                    }
+                    for item in result.question.options
+                ],
+            }
+        brief = None
+        if result.brief:
+            brief = {
+                "topic": result.brief.topic,
+                "purpose": result.brief.purpose,
+                "successMarker": result.brief.success_marker,
+                "startingPoint": result.brief.starting_point,
+                "dailyCommitment": result.brief.daily_commitment,
+                "completionHorizon": result.brief.completion_horizon,
+                "scope": result.brief.scope,
+                "outOfScope": result.brief.out_of_scope,
+                "recommendedDepth": result.brief.recommended_depth,
+            }
+        return {
+            "schemaVersion": result.schema_version,
+            "status": result.status,
+            "progressMessage": result.progress_message,
+            "dimensions": [
+                {
+                    "key": item.key,
+                    "status": item.status,
+                    "summary": item.summary,
+                    "confidence": item.confidence,
+                }
+                for item in result.dimensions
+            ],
+            "question": question,
+            "brief": brief,
+            "answerCount": len(body.answers),
+            "generationMode": "ai" if getattr(self.ai, "configured", True) else "demo",
+            "ruleVersion": LEARNING_GOAL_INTERVIEW_RULE_VERSION,
+        }
 
     def preview(self, body) -> dict:
         shelf = self.shelf_provider(body.shelf_id)

@@ -26,6 +26,7 @@ from .route_context import InvocationRouteContext, invocation_route_context
 class AiPurpose(StrEnum):
     DEFAULT = "default"
     CURRICULUM = "curriculum"
+    LEARNING_GOAL_INTERVIEW = "learning_goal_interview"
     CURRICULUM_REVIEW = "curriculum_review"
     LESSON_AUTHOR = "lesson_author"
     ASSESSMENT_ITEM_AUTHOR = "assessment_item_author"
@@ -811,6 +812,17 @@ class PurposeAiGateway:
             "plan",
             request,
             memory,
+        )
+
+    async def learning_goal_interview(self, request):
+        return await self._call(
+            AiTaskEnvelope(
+                AiPurpose.LEARNING_GOAL_INTERVIEW,
+                AuthorityLevel.CANDIDATE_ONLY,
+                CapabilityRequirements(structured=True),
+            ),
+            "learning_goal_interview",
+            request,
         )
 
     async def chapter(self, request, memory):

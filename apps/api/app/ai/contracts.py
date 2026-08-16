@@ -76,6 +76,111 @@ class GeneratedConceptCandidate(StrictModel):
     reuse_concept_revision_id: str = Field(default="", max_length=160)
 
 
+class OverviewPlanBook(PlanBook):
+    chapters: list[PlanChapter] = Field(min_length=2, max_length=4)
+
+
+class GeneratedOverviewPlan(GeneratedPlan):
+    """A compact route for the explicit “快速了解” depth choice."""
+
+    books: list[OverviewPlanBook] = Field(min_length=1, max_length=1)
+    milestones: list[PlanMilestone] = Field(min_length=2, max_length=3)
+
+
+LEARNING_GOAL_DIMENSIONS = (
+    "learning_object",
+    "purpose",
+    "success_marker",
+    "starting_point",
+    "daily_commitment",
+    "completion_horizon",
+    "scope",
+)
+LearningGoalDimensionKey = Literal[
+    "learning_object",
+    "purpose",
+    "success_marker",
+    "starting_point",
+    "daily_commitment",
+    "completion_horizon",
+    "scope",
+]
+
+
+class LearningGoalDimension(StrictModel):
+    key: LearningGoalDimensionKey
+    status: Literal["confirmed", "inferred", "missing", "conflict", "immaterial"]
+    summary: str = Field(min_length=1, max_length=500)
+    confidence: Literal["high", "medium", "low"]
+
+
+class LearningGoalQuestionOption(StrictModel):
+    id: str = Field(min_length=1, max_length=80, pattern=r"^[a-z0-9_-]+$")
+    label: str = Field(min_length=1, max_length=100)
+    description: str = Field(default="", max_length=240)
+
+
+class LearningGoalQuestion(StrictModel):
+    id: str = Field(min_length=1, max_length=120, pattern=r"^[a-z0-9_-]+$")
+    dimension: LearningGoalDimensionKey
+    prompt: str = Field(min_length=4, max_length=500)
+    helper: str = Field(min_length=1, max_length=300)
+    options: list[LearningGoalQuestionOption] = Field(min_length=2, max_length=4)
+
+    @model_validator(mode="after")
+    def unique_options(self):
+        option_ids = [item.id for item in self.options]
+        if len(option_ids) != len(set(option_ids)):
+            raise ValueError("learning goal question options must be unique")
+        return self
+
+
+class LearningGoalBrief(StrictModel):
+    topic: str = Field(min_length=1, max_length=160)
+    purpose: str = Field(min_length=4, max_length=1000)
+    success_marker: str = Field(min_length=4, max_length=1000)
+    starting_point: str = Field(min_length=1, max_length=1000)
+    daily_commitment: str = Field(min_length=1, max_length=240)
+    completion_horizon: str = Field(min_length=1, max_length=240)
+    scope: str = Field(min_length=1, max_length=1000)
+    out_of_scope: str = Field(min_length=1, max_length=1000)
+    recommended_depth: Literal["overview", "deep", "mastery"]
+
+
+class LearningGoalInterviewResult(StrictModel):
+    schema_version: Literal["learning_goal_interview_v1"] = (
+        "learning_goal_interview_v1"
+    )
+    status: Literal["ask", "ready"]
+    progress_message: str = Field(min_length=1, max_length=240)
+    dimensions: list[LearningGoalDimension] = Field(min_length=7, max_length=7)
+    question: LearningGoalQuestion | None = None
+    brief: LearningGoalBrief | None = None
+
+    @model_validator(mode="after")
+    def valid_interview_state(self):
+        keys = [item.key for item in self.dimensions]
+        if len(keys) != len(set(keys)) or set(keys) != set(LEARNING_GOAL_DIMENSIONS):
+            raise ValueError("learning goal dimensions must contain each required key once")
+        by_key = {item.key: item for item in self.dimensions}
+        if self.status == "ask":
+            if self.question is None or self.brief is not None:
+                raise ValueError("ask state requires one question and no final brief")
+            if by_key[self.question.dimension].status not in {"missing", "conflict"}:
+                raise ValueError("next question must address a missing or conflicting dimension")
+        else:
+            if self.question is not None or self.brief is None:
+                raise ValueError("ready state requires a final brief and no question")
+            unresolved = [
+                item.key
+                for item in self.dimensions
+                if item.status in {"missing", "conflict"}
+            ]
+            if unresolved:
+                raise ValueError("ready state cannot contain unresolved required dimensions")
+        return self
+
+
 class GeneratedSectionOutline(StrictModel):
     title: str
     question: str

@@ -29,12 +29,34 @@ def test_qa_history_is_empty_then_returns_stably_ordered_threads(tmp_path):
 
         empty = client.get(f"/api/sections/{section['id']}/qa/history")
         assert empty.status_code == 200
-        assert empty.json() == {
+        empty_payload = empty.json()
+        assert {
+            key: empty_payload[key]
+            for key in (
+                "sectionId",
+                "contentVersionId",
+                "currentContentVersionId",
+                "readOnly",
+                "lastThreadId",
+                "threads",
+                "truncated",
+            )
+        } == {
             "sectionId": section["id"],
+            "contentVersionId": section["content"]["id"],
+            "currentContentVersionId": section["content"]["id"],
+            "readOnly": False,
             "lastThreadId": None,
             "threads": [],
             "truncated": False,
         }
+        assert empty_payload["versions"] == [{
+            "contentVersionId": section["content"]["id"],
+            "contentVersion": section["content"]["version"],
+            "isCurrent": True,
+            "createdAt": empty_payload["versions"][0]["createdAt"],
+        }]
+        assert empty_payload["versions"][0]["createdAt"]
         with client.app.state.sessions() as db:
             assert db.query(QaSession).count() == 0
 

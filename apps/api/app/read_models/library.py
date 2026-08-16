@@ -482,7 +482,7 @@ class LibraryReadModel:
                 {
                     "_shelfId": series.shelf_id,
                     "id": series.id,
-                    "title": series.title,
+                    "title": series.display_title or series.title,
                     "rationale": series.rationale,
                     "progress": round(completed_minutes / total_minutes * 100),
                     "progressBasis": "resolvedRouteIncludingExplicitSkips",

@@ -27,11 +27,17 @@ from .contracts import (
     GeneratedLessonFeedbackReplacement,
     GeneratedLessonQuestion,
     GeneratedNote,
+    GeneratedOverviewPlan,
     GeneratedPlan,
     GeneratedQuiz,
     GeneratedRemediationContent,
     GeneratedRemediationLesson,
     GeneratedSectionOutline,
+    LearningGoalBrief,
+    LearningGoalDimension,
+    LearningGoalInterviewResult,
+    LearningGoalQuestion,
+    LearningGoalQuestionOption,
     LessonAlignmentReview,
     PlanBook,
     PlanChapter,
@@ -68,24 +74,151 @@ class LocalDemoAdapter:
     async def close(self):
         return None
 
-    async def plan(self, request, memory):
+    async def learning_goal_interview(self, request):
         topic = request["topic"]
-        return GeneratedPlan(
-            series_title=f"{topic}：本地演示学习路径",
-            rationale="未配置 API Key，使用可完整操作的本地示例内容。",
-            assumptions=["内容用于产品流程演示，不替代真实 AI 个性化教材"],
-            confidence="medium",
-            books=[
-                PlanBook(
-                    title=f"{topic} 基础机制",
-                    topic=topic,
-                    description="用两个章节演示生成、答疑、验证、口试与笔记闭环。",
-                    estimated_minutes=240,
-                    chapters=[
-                        PlanChapter(title="核心对象", objective=f"解释 {topic} 的核心对象及关系"),
-                        PlanChapter(title="边界与实践", objective=f"识别 {topic} 的适用边界并完成实践"),
+        answers = {
+            item["dimension"]: item["answer"]
+            for item in request.get("answers", [])
+        }
+        related_experience = request.get("relatedExperience", "").strip()
+        daily_commitment = request["dailyCommitment"].strip()
+        completion_horizon = request["completionHorizon"].strip()
+        question_specs = {
+            "purpose": (
+                f"你准备把「{topic}」主要用在什么地方？",
+                "这会决定教材采用课程、工作、研究还是实际任务的视角。",
+                [
+                    ("current_task", "解决眼前任务", "围绕现在遇到的具体问题学习。"),
+                    ("build_understanding", "建立系统认识", "先形成可靠框架，再决定是否深入。"),
+                    ("long_term_skill", "形成长期能力", "希望以后遇到类似问题也能独立处理。"),
+                ],
+            ),
+            "success_marker": (
+                "学完以后，什么结果最能说明这次学习有效？",
+                "完成标志会决定后续章节怎样练习和验证。",
+                [
+                    ("explain", "能够清楚解释", "可以用自己的话讲清关键内容。"),
+                    ("complete", "能够独立完成任务", "不依赖现成步骤完成一次真实任务。"),
+                    ("judge", "能够做出判断", "面对案例时能选择方法并说明依据。"),
+                ],
+            ),
+            "starting_point": (
+                f"你目前学习「{topic}」时，最接近哪种状态？",
+                "起点会影响第一本书从哪里开始，以及哪些前置只需快速带过。",
+                [
+                    ("new", "几乎没有接触", "需要从核心对象和基础语言开始。"),
+                    ("fragmented", "接触过但比较零散", "知道一些名词或例子，还没有连成体系。"),
+                    ("blocked", "做过一些，但有明确卡点", "已经有实践，希望针对问题补强。"),
+                ],
+            ),
+            "scope": (
+                "这次更希望怎样控制学习范围？",
+                "最后一次取舍会防止路线为了完整而不断扩张。",
+                [
+                    ("minimum", "只学当前必需内容", "先解决目标，不延伸旁支主题。"),
+                    ("balanced", "目标与必要前置都覆盖", "补齐理解所需基础，但不追求大而全。"),
+                    ("systematic", "希望形成更完整体系", "接受更多投入，覆盖复杂情况与后续应用。"),
+                ],
+            ),
+        }
+        next_dimension = next(
+            (key for key in question_specs if key not in answers),
+            None,
+        )
+        dimension_summaries = {
+            "learning_object": topic,
+            "purpose": answers.get("purpose", "还需要确认实际用途"),
+            "success_marker": answers.get("success_marker", "还需要确认完成标志"),
+            "starting_point": answers.get("starting_point") or related_experience or "还需要确认当前起点",
+            "daily_commitment": daily_commitment,
+            "completion_horizon": completion_horizon,
+            "scope": answers.get("scope", "还需要确认范围取舍"),
+        }
+        dimensions = [
+            LearningGoalDimension(
+                key=key,
+                status=(
+                    "inferred"
+                    if key == "learning_object" or (key == "starting_point" and related_experience and key not in answers)
+                    else "confirmed"
+                    if key in answers or key in {"daily_commitment", "completion_horizon"}
+                    else "missing"
+                ),
+                summary=dimension_summaries[key],
+                confidence="medium" if key == "learning_object" else "high" if key in answers or key in {"daily_commitment", "completion_horizon"} else "low",
+            )
+            for key in (
+                "learning_object",
+                "purpose",
+                "success_marker",
+                "starting_point",
+                "daily_commitment",
+                "completion_horizon",
+                "scope",
+            )
+        ]
+        if next_dimension == "starting_point" and related_experience:
+            next_dimension = next(
+                (key for key in ("scope",) if key not in answers),
+                None,
+            )
+        if next_dimension:
+            prompt, helper, options = question_specs[next_dimension]
+            return LearningGoalInterviewResult(
+                status="ask",
+                progress_message="目标正在变得具体，还需要确认一件会影响教材结构的事。",
+                dimensions=dimensions,
+                question=LearningGoalQuestion(
+                    id=f"goal_{next_dimension}_{len(request.get('answers', [])) + 1}",
+                    dimension=next_dimension,
+                    prompt=prompt,
+                    helper=helper,
+                    options=[
+                        LearningGoalQuestionOption(id=item[0], label=item[1], description=item[2])
+                        for item in options
                     ],
                 ),
+            )
+        starting_point = answers.get("starting_point") or related_experience or "按账号画像中的基础起点开始"
+        scope = answers["scope"]
+        return LearningGoalInterviewResult(
+            status="ready",
+            progress_message="目标、起点、节奏和范围已经足以开始规划。",
+            dimensions=dimensions,
+            brief=LearningGoalBrief(
+                topic=topic,
+                purpose=answers["purpose"],
+                success_marker=answers["success_marker"],
+                starting_point=starting_point,
+                daily_commitment=daily_commitment,
+                completion_horizon=completion_horizon,
+                scope=scope,
+                out_of_scope=f"不扩展超出“{scope}”所需的旁支内容。",
+                recommended_depth=("overview" if "只学" in scope else "mastery" if "完整" in scope else "deep"),
+            ),
+        )
+
+    async def plan(self, request, memory):
+        topic = request["topic"]
+        overview = request.get("depth") == "overview"
+        books = [
+            PlanBook(
+                title=f"{topic} 快速入门" if overview else f"{topic} 基础机制",
+                topic=topic,
+                description=(
+                    "用两个章节快速建立核心认识与关键边界。"
+                    if overview
+                    else "用两个章节演示生成、答疑、验证、口试与笔记闭环。"
+                ),
+                estimated_minutes=240,
+                chapters=[
+                    PlanChapter(title="核心对象", objective=f"解释 {topic} 的核心对象及关系"),
+                    PlanChapter(title="边界与实践", objective=f"识别 {topic} 的适用边界并完成实践"),
+                ],
+            )
+        ]
+        if not overview:
+            books.append(
                 PlanBook(
                     title=f"{topic} 迁移实践",
                     topic=topic,
@@ -95,48 +228,59 @@ class LocalDemoAdapter:
                         PlanChapter(title="迁移场景", objective=f"把 {topic} 机制迁移到新场景"),
                         PlanChapter(title="综合排障", objective=f"综合定位 {topic} 的边界问题"),
                     ],
-                ),
-            ],
-            milestones=[
+                )
+            )
+        milestones = [
+            PlanMilestone(
+                title=f"建立 {topic} 的核心理解",
+                outcome=f"能够解释 {topic} 的核心对象与关系",
+                criteria=[
+                    PlanMilestoneCriterion(
+                        statement=f"解释 {topic} 的核心对象及关系",
+                        book_position=1,
+                        chapter_position=1,
+                    ),
+                ],
+            ),
+            PlanMilestone(
+                title=f"判断 {topic} 的关键边界",
+                outcome=f"能够识别 {topic} 的适用边界",
+                criteria=[
+                    PlanMilestoneCriterion(
+                        statement=f"识别 {topic} 的适用边界并完成实践",
+                        book_position=1,
+                        chapter_position=2,
+                    ),
+                ],
+            ),
+        ]
+        if not overview:
+            milestones.append(
                 PlanMilestone(
-                    title=f"建立 {topic} 的核心理解",
-                    outcome=f"能够解释 {topic} 的核心对象与关系",
+                    title=f"迁移并诊断 {topic}",
+                    outcome=f"能够把 {topic} 用于新场景并定位边界问题",
                     criteria=[
-                        PlanMilestoneCriterion(
-                            statement=f"解释 {topic} 的核心对象及关系",
-                            book_position=1,
-                            chapter_position=1,
-                        ),
-                    ],
-                ),
-                PlanMilestone(
-                    title=f"判断 {topic} 的边界并迁移",
-                    outcome=f"能够识别 {topic} 的适用边界，并把机制用于新场景",
-                    criteria=[
-                        PlanMilestoneCriterion(
-                            statement=f"识别 {topic} 的适用边界并完成实践",
-                            book_position=1,
-                            chapter_position=2,
-                        ),
                         PlanMilestoneCriterion(
                             statement=f"把 {topic} 机制迁移到新场景",
                             book_position=2,
                             chapter_position=1,
                         ),
-                    ],
-                ),
-                PlanMilestone(
-                    title=f"综合诊断 {topic} 的异常",
-                    outcome=f"能够在综合场景中定位 {topic} 的边界问题",
-                    criteria=[
                         PlanMilestoneCriterion(
                             statement=f"综合定位 {topic} 的边界问题",
                             book_position=2,
                             chapter_position=2,
                         ),
                     ],
-                ),
-            ],
+                )
+            )
+        schema = GeneratedOverviewPlan if overview else GeneratedPlan
+        return schema(
+            series_title=f"{topic}：本地演示学习路径",
+            rationale="未配置 API Key，使用可完整操作的本地示例内容。",
+            assumptions=["内容用于产品流程演示，不替代真实 AI 个性化教材"],
+            confidence="medium",
+            books=[book.model_dump() for book in books],
+            milestones=milestones,
         )
 
     async def chapter(self, request, memory):

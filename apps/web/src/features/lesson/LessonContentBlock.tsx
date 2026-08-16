@@ -19,7 +19,7 @@ const roleLabels: Record<string, string> = {
 
 export function LessonContentBlock({
   block, selected, reviewTarget, explanationOptions, onFeedback,
-  onRestorePersonalPresentation, onExplain,
+  onRestorePersonalPresentation, onExplain, annotationCount, onOpenAnnotations,
 }: {
   block: Block;
   selected: boolean;
@@ -28,6 +28,8 @@ export function LessonContentBlock({
   onFeedback: () => void;
   onRestorePersonalPresentation: () => Promise<void>;
   onExplain: (style: ExplanationStyle, customInstruction?: string) => void;
+  annotationCount?: number;
+  onOpenAnnotations?: () => void;
 }) {
   return (
     <section
@@ -36,6 +38,17 @@ export function LessonContentBlock({
       tabIndex={-1}
     >
       {reviewTarget && <span className="review-target-label">错题依据</span>}
+      {Boolean(annotationCount) && (
+        <button
+          type="button"
+          className="annotation-block-count"
+          aria-label={`查看本段 ${annotationCount} 条标注`}
+          onClick={onOpenAnnotations}
+        >
+          <i aria-hidden="true" />
+          {annotationCount}
+        </button>
+      )}
       <div className="block-meta">
         <b>{kindLabels[block.kind] || '阅读'}</b>
         {roleLabels[block.role] && <span>{roleLabels[block.role]}</span>}
@@ -67,7 +80,7 @@ export function LessonBlockBody({ block, content = block.content }: { block: Blo
   // Keep legacy plain-code blocks readable, but let mixed prose + fenced code
   // retain the authored boundary instead of wrapping the prose in <code>.
   if (block.kind === 'code' && !hasBalancedCodeFences(content)) {
-    return <pre className="code-block"><code>{content}</code></pre>;
+    return <pre className="code-block" data-annotation-body><code>{content}</code></pre>;
   }
   const markdown = block.kind === 'table'
     ? normalizeTableMarkdown(content)
@@ -75,7 +88,7 @@ export function LessonBlockBody({ block, content = block.content }: { block: Blo
       ? normalizeLessonTextMarkdown(content)
       : content.replace(/\r\n?/g, '\n').trim();
   return (
-    <div className={`content-markdown kind-${block.kind}`}>
+    <div className={`content-markdown kind-${block.kind}`} data-annotation-body>
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
     </div>
   );

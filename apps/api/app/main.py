@@ -35,7 +35,7 @@ from .ai.gateway import (
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, BookReplanCreate, CapabilityApplicationSubmit, CapabilityReviewSubmit, ChapterChallengeSubmit, ChapterCreate, ChapterOrder, ChapterSkipCreate, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, LearningStartPreviewCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, RecoveryCodeRotate, ReinforcementRespond, ResumeUpdate, ReviewSubmit, ShelfCreate, ShelfRename, StudyActivityHeartbeat
+from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, BookReplanCreate, CapabilityApplicationSubmit, CapabilityReviewSubmit, ChapterChallengeSubmit, ChapterCreate, ChapterOrder, ChapterSkipCreate, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningGoalInterviewCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, LearningStartPreviewCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ReadingAnnotationCreate, ReadingAnnotationUpdate, RecoveryCodeRotate, ReinforcementRespond, ResumeUpdate, ReviewSubmit, SeriesRename, ShelfCreate, ShelfRename, StudyActivityHeartbeat
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -519,37 +519,53 @@ def create_app(
     async def learning_task_worker(app: FastAPI):
         next_lookahead_maintenance_at = 0.0
         while not app.state.learning_task_stop.is_set():
-            app.state.learning_task_wakeup.clear()
-            loop_time = asyncio.get_running_loop().time()
-            if loop_time >= next_lookahead_maintenance_at:
-                with sessions() as db:
-                    maintained_lookaheads = backfill_missing_lookahead_tasks(db)
-                if maintained_lookaheads:
-                    logger.info(
-                        "Queued or rearmed %s section lookahead task(s)",
-                        maintained_lookaheads,
-                    )
-                next_lookahead_maintenance_at = (
-                    loop_time + LOOKAHEAD_MAINTENANCE_INTERVAL_SECONDS
-                )
-            while not app.state.learning_task_stop.is_set():
-                with sessions() as db:
-                    task_ids = recoverable_task_ids(db)
-                if not task_ids:
-                    break
-                await asyncio.gather(*(
-                    execute_learning_task(task_id, app)
-                    for task_id in task_ids[:LEARNING_TASK_CONCURRENCY]
-                ))
-            if app.state.learning_task_stop.is_set():
-                break
             try:
-                await asyncio.wait_for(
-                    app.state.learning_task_wakeup.wait(),
-                    timeout=1,
+                app.state.learning_task_wakeup.clear()
+                loop_time = asyncio.get_running_loop().time()
+                if loop_time >= next_lookahead_maintenance_at:
+                    with sessions() as db:
+                        maintained_lookaheads = backfill_missing_lookahead_tasks(db)
+                    if maintained_lookaheads:
+                        logger.info(
+                            "Queued or rearmed %s section lookahead task(s)",
+                            maintained_lookaheads,
+                        )
+                    next_lookahead_maintenance_at = (
+                        loop_time + LOOKAHEAD_MAINTENANCE_INTERVAL_SECONDS
+                    )
+                while not app.state.learning_task_stop.is_set():
+                    with sessions() as db:
+                        task_ids = recoverable_task_ids(db)
+                    if not task_ids:
+                        break
+                    await asyncio.gather(*(
+                        execute_learning_task(task_id, app)
+                        for task_id in task_ids[:LEARNING_TASK_CONCURRENCY]
+                    ))
+                if app.state.learning_task_stop.is_set():
+                    break
+                try:
+                    await asyncio.wait_for(
+                        app.state.learning_task_wakeup.wait(),
+                        timeout=1,
+                    )
+                except TimeoutError:
+                    pass
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Learning task worker loop recovered after an unexpected failure"
                 )
-            except TimeoutError:
-                pass
+                if app.state.learning_task_stop.is_set():
+                    break
+                try:
+                    await asyncio.wait_for(
+                        app.state.learning_task_stop.wait(),
+                        timeout=1,
+                    )
+                except TimeoutError:
+                    pass
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -1810,6 +1826,13 @@ def create_app(
     ):
         return s.learning_start_preview(body)
 
+    @app.post("/api/learning-start/interview")
+    async def learning_goal_interview(
+        body: LearningGoalInterviewCreate,
+        s: SlowService = Depends(service),
+    ):
+        return await s.learning_goal_interview(body)
+
     @app.post("/api/plans", status_code=201)
     async def create_plan(
         request: Request,
@@ -1861,6 +1884,14 @@ def create_app(
         s: SlowService = Depends(service),
     ):
         return s.confirm_milestone_path(series_id)
+
+    @app.patch("/api/series/{series_id}")
+    def rename_series(
+        series_id: str,
+        body: SeriesRename,
+        s: SlowService = Depends(service),
+    ):
+        return s.rename_series(series_id, body)
 
     @app.delete("/api/series/{series_id}", status_code=204)
     def delete_series(series_id: str, s: SlowService = Depends(service)): s.delete_series(series_id)
@@ -2118,8 +2149,41 @@ def create_app(
     async def ask(section_id: str, body: AskRequest, s: SlowService = Depends(service)): return await s.ask(section_id, body)
 
     @app.get("/api/sections/{section_id}/qa/history")
-    def qa_history(section_id: str, s: SlowService = Depends(service)):
-        return s.qa_history(section_id)
+    def qa_history(
+        section_id: str,
+        content_version_id: str | None = Query(default=None, alias="contentVersionId"),
+        s: SlowService = Depends(service),
+    ):
+        return s.qa_history(section_id, content_version_id)
+
+    @app.get("/api/sections/{section_id}/annotations")
+    def annotations(section_id: str, s: SlowService = Depends(service)):
+        return s.annotations(section_id)
+
+    @app.post("/api/sections/{section_id}/annotations", status_code=201)
+    def create_annotation(
+        section_id: str,
+        body: ReadingAnnotationCreate,
+        idempotency_key: str = Header(alias="Idempotency-Key"),
+        s: SlowService = Depends(service),
+    ):
+        return s.create_annotation(section_id, body, idempotency_key)
+
+    @app.patch("/api/annotations/{annotation_id}")
+    def update_annotation(
+        annotation_id: str,
+        body: ReadingAnnotationUpdate,
+        s: SlowService = Depends(service),
+    ):
+        return s.update_annotation(annotation_id, body)
+
+    @app.delete("/api/annotations/{annotation_id}", status_code=204)
+    def delete_annotation(
+        annotation_id: str,
+        s: SlowService = Depends(service),
+    ):
+        s.delete_annotation(annotation_id)
+        return Response(status_code=204)
 
     @app.post("/api/sections/{section_id}/ask/stream")
     async def ask_stream(section_id: str, body: AskRequest, s: SlowService = Depends(service)):

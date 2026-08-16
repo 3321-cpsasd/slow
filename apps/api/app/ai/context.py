@@ -250,6 +250,11 @@ DEPTH_POLICIES: dict[str, dict[str, Any]] = {
         "requiredDimensions": ["recognition", "mechanism"],
         "practiceMode": "guided",
         "retentionRequired": False,
+        "routeBudget": {
+            "books": {"min": 1, "max": 1},
+            "chaptersPerBook": {"min": 2, "max": 4},
+            "milestones": {"min": 2, "max": 3},
+        },
     },
     "deep": {
         "label": "深入理解",
@@ -257,6 +262,11 @@ DEPTH_POLICIES: dict[str, dict[str, Any]] = {
         "requiredDimensions": ["mechanism", "boundary", "application"],
         "practiceMode": "applied",
         "retentionRequired": False,
+        "routeBudget": {
+            "books": {"min": 1, "max": 6},
+            "chaptersPerBook": {"min": 2, "max": 10},
+            "milestones": {"min": 3, "max": 5},
+        },
     },
     "mastery": {
         "label": "掌握运用",
@@ -264,6 +274,11 @@ DEPTH_POLICIES: dict[str, dict[str, Any]] = {
         "requiredDimensions": ["mechanism", "boundary", "transfer", "retention"],
         "practiceMode": "independent",
         "retentionRequired": True,
+        "routeBudget": {
+            "books": {"min": 1, "max": 6},
+            "chaptersPerBook": {"min": 2, "max": 10},
+            "milestones": {"min": 3, "max": 5},
+        },
     },
 }
 

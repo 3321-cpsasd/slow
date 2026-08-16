@@ -109,13 +109,34 @@ Slow 目前处于邀请制 Alpha 阶段。你可以访问 [slow.net.cn](https://
 - Node.js 22+
 - pnpm 11+
 
+### 配置模型 API Key
+
+先从模板创建仓库根目录的本地配置文件：
+
+```bash
+cp .env.example .env
+```
+
+然后编辑 `.env`，按所用模型服务填写以下配置：
+
+```dotenv
+OPENAI_API_KEY=your_api_key_here
+OPENAI_BASE_URL=
+OPENAI_MODEL=gpt-5
+```
+
+使用 OpenAI 官方 API 时，`OPENAI_BASE_URL` 留空即可；使用 OpenAI 兼容接口时，将它填写为服务商提供的 API Base URL（通常包含 `/v1`），并同时使用该服务商提供的 Key 和模型名称。OpenAI API Key 可以在 [OpenAI Platform](https://platform.openai.com/api-keys) 创建；`OPENAI_MODEL` 也可以改为你的账号实际可用的 Responses API 模型。
+
+Slow 的 API 服务会在启动时读取仓库根目录的 `.env`，修改后需要重启 `./start.sh` 才会生效。
+
+`.env` 已被 Git 忽略。不要提交这个文件，也不要把 Key 写入 `apps/web`、任何 `VITE_*` 变量或其他会发送到浏览器的配置中。未填写 `OPENAI_API_KEY` 时，本地开发环境只会使用明确标记的 Demo 模式。
+
 ### 启动应用
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r apps/api/requirements.txt
 cd apps/web && pnpm install && cd ../..
-cp .env.example .env
 ./start.sh
 ```
 

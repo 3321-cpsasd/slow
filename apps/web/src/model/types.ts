@@ -34,6 +34,7 @@ export type Series = {
 export type Shelf = { id:string; name:string; domain:string; specialty:string; tags:string[]; series:Series[] };
 export type ShelfCreateInput = { name:string };
 export type ShelfRenameInput = { name:string };
+export type SeriesRenameInput = { name:string };
 export type LearningStartPreference =
   | 'practical_application'
   | 'understand_principles'
@@ -48,6 +49,52 @@ export type LearningStartPreview = {
   nodes:{conceptRevisionId:string;label:string;meaning:string}[];
   edges:{id:string;from:string;to:string;type:string;label:string}[];
   message:string;
+};
+export type LearningGoalDimensionKey =
+  | 'learning_object'
+  | 'purpose'
+  | 'success_marker'
+  | 'starting_point'
+  | 'daily_commitment'
+  | 'completion_horizon'
+  | 'scope';
+export type LearningGoalInterviewAnswer = {
+  questionId:string;
+  dimension:LearningGoalDimensionKey;
+  question:string;
+  answer:string;
+};
+export type LearningGoalInterview = {
+  schemaVersion:'learning_goal_interview_v1';
+  status:'ask'|'ready';
+  progressMessage:string;
+  dimensions:{
+    key:LearningGoalDimensionKey;
+    status:'confirmed'|'inferred'|'missing'|'conflict'|'immaterial';
+    summary:string;
+    confidence:'high'|'medium'|'low';
+  }[];
+  question:null|{
+    id:string;
+    dimension:LearningGoalDimensionKey;
+    prompt:string;
+    helper:string;
+    options:{id:string;label:string;description:string}[];
+  };
+  brief:null|{
+    topic:string;
+    purpose:string;
+    successMarker:string;
+    startingPoint:string;
+    dailyCommitment:string;
+    completionHorizon:string;
+    scope:string;
+    outOfScope:string;
+    recommendedDepth:'overview'|'deep'|'mastery';
+  };
+  answerCount:number;
+  generationMode:'ai'|'demo';
+  ruleVersion:string;
 };
 export type ResumePosition = {
   learningRunId:string;
@@ -780,7 +827,39 @@ export type QaHistoryThread = {
 };
 export type QaHistory = {
   sectionId:string;
+  contentVersionId:string|null;
+  currentContentVersionId:string|null;
+  readOnly:boolean;
+  versions:{contentVersionId:string;contentVersion:number|null;isCurrent:boolean;createdAt:string}[];
   lastThreadId:string|null;
   truncated:boolean;
   threads:QaHistoryThread[];
+};
+export type ReadingAnnotationAnchor = {
+  exact:string;
+  prefix:string;
+  suffix:string;
+  startOffset:number;
+  endOffset:number;
+};
+export type ReadingAnnotation = {
+  id:string;
+  sectionId:string;
+  contentVersionId:string;
+  contentVersion:number|null;
+  blockId:string;
+  displayBlockId:string|null;
+  anchorStatus:'current'|'unchanged_in_current'|'old_version';
+  kind:'highlight'|'comment';
+  anchor:ReadingAnnotationAnchor;
+  body:string;
+  color:'amber';
+  version:number;
+  createdAt:string;
+  updatedAt:string;
+};
+export type ReadingAnnotationList = {
+  sectionId:string;
+  currentContentVersionId:string;
+  items:ReadingAnnotation[];
 };
