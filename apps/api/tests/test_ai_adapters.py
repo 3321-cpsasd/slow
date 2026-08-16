@@ -94,8 +94,15 @@ def test_learning_goal_interview_preserves_precollected_schedule_without_reaskin
         adapter = OpenAiAdapter("", "test-model")
         calls = []
 
-        async def fake_parse(schema, prompt, payload, tokens):
-            calls.append(prompt)
+        async def fake_parse(
+            schema,
+            prompt,
+            payload,
+            tokens,
+            *,
+            reasoning_mode_override=None,
+        ):
+            calls.append((prompt, reasoning_mode_override))
             return SimpleNamespace()
 
         adapter._parse = fake_parse
@@ -108,10 +115,11 @@ def test_learning_goal_interview_preserves_precollected_schedule_without_reaskin
         )
         return calls[0]
 
-    prompt = asyncio.run(capture_prompt())
+    prompt, reasoning_mode = asyncio.run(capture_prompt())
     assert "必须分别原样保留为 confirmed" in prompt
     assert "不得合并、替换、推测或再次追问" in prompt
     assert "不要再次询问每天投入、完成周期或可用总时间" in prompt
+    assert reasoning_mode == "disabled"
 
     result = asyncio.run(
         LocalDemoAdapter().learning_goal_interview(
@@ -214,6 +222,62 @@ async def chat_adapter(outputs, *, reasoning_mode="optional"):
         chat=SimpleNamespace(completions=completions)
     )
     return adapter, completions
+
+
+def test_learning_goal_interview_disables_provider_thinking():
+    dimensions = [
+        {
+            "key": key,
+            "status": "missing" if key == "purpose" else "confirmed",
+            "summary": "需要继续确认" if key == "purpose" else "已确认",
+            "confidence": "high",
+        }
+        for key in (
+            "learning_object",
+            "purpose",
+            "success_marker",
+            "starting_point",
+            "daily_commitment",
+            "completion_horizon",
+            "scope",
+        )
+    ]
+    response = json.dumps(
+        {
+            "schema_version": "learning_goal_interview_v1",
+            "status": "ask",
+            "progress_message": "还需要确认实际目的",
+            "dimensions": dimensions,
+            "question": {
+                "id": "purpose-1",
+                "dimension": "purpose",
+                "prompt": "你最希望把这项知识用在哪里？",
+                "helper": "这会影响第一本书的内容重点。",
+                "options": [
+                    {"id": "work", "label": "工作应用", "description": "解决实际工作问题"},
+                    {"id": "exam", "label": "考试准备", "description": "完成考试或认证"},
+                    {"id": "project", "label": "项目实践", "description": "独立完成一个项目"},
+                    {"id": "interest", "label": "兴趣了解", "description": "建立系统认知"},
+                ],
+            },
+            "brief": None,
+        },
+        ensure_ascii=False,
+    )
+
+    async def run():
+        adapter, completions = await chat_adapter(
+            [response],
+            reasoning_mode="required",
+        )
+        result = await adapter.learning_goal_interview({"topic": "AI"})
+        return result, completions.calls
+
+    result, calls = asyncio.run(run())
+    assert result.status == "ask"
+    assert len(calls) == 1
+    assert calls[0]["extra_body"] == {"enable_thinking": False}
+    assert "stream" not in calls[0]
 
 
 def test_openai_adapter_maps_invalid_key_to_actionable_error():

@@ -1246,6 +1246,7 @@ dailyCommitment 和 completionHorizon 是用户在进入访谈前已经明确填
 访谈轮数由信息充分度决定，不预设固定题数。通常 4-6 轮；目标具体时可以更短，宽泛或矛盾时可以更长。answers 已达 8 条时不得继续追问：用清晰、保守的推断补足剩余信息并在 scope 或 out_of_scope 中写明假设，然后返回 ready。中文输出。""",
             request,
             3500,
+            reasoning_mode_override="disabled",
         )
 
     async def plan(self, request: dict, memory: list[dict]):
