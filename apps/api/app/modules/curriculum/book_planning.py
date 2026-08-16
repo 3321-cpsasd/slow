@@ -16,6 +16,7 @@ from ...infrastructure.tables import (
     Section,
     now,
 )
+from .content_safety import require_safe_book_replan
 
 
 def _uid(prefix: str) -> str:
@@ -107,6 +108,7 @@ class BookPlanningService:
             user_id=self.user_id,
             book_id=book_id,
         )
+        require_safe_book_replan(feedback=feedback)
         book = context.book
         if book.outline_status == "draft" and not self._previous_book_completed(book):
             raise AppError(
@@ -157,6 +159,7 @@ class BookPlanningService:
         request = self.generation_contexts.attach(request, context_pack)
         self.db.commit()
         generated = await self.ai.replan_book(request, memory)
+        require_safe_book_replan(feedback="", generated=generated)
         proposal = ChapterRevision(
             id=_uid("revision"),
             book_id=book.id,

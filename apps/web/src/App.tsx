@@ -53,6 +53,8 @@ import type {
   LearningTask,
   LearningProfile,
   LearningPreferences,
+  LearningGoalInterview,
+  LearningGoalInterviewAnswer,
   LearningStartPreference,
   LearningStartPreview,
   KnowledgeSettlement,
@@ -62,6 +64,8 @@ import type {
   NoteContent,
   NoteVerificationAnnotation,
   QaHistory,
+  ReadingAnnotation,
+  ReadingAnnotationAnchor,
   QuizResult,
   ReviewResult,
   ReviewSession,
@@ -69,22 +73,33 @@ import type {
   Section,
   SectionSummary,
   Series,
+  SeriesRenameInput,
   Shelf,
   ShelfCreateInput,
   ShelfRenameInput,
   StudyActivitySummary,
 } from './model/types';
 
-type View = 'home' | 'shelf' | 'learn' | 'profile' | 'knowledge' | 'review';
+type View = 'home' | 'shelf' | 'series-create' | 'learn' | 'profile' | 'knowledge' | 'review';
 type AppRoute =
   | { view: 'home' }
   | { view: 'profile'; section: 'profile' | 'account' }
   | { view: 'knowledge' }
   | { view: 'review' }
   | { view: 'shelf'; shelfId: string }
+  | { view: 'series-create'; shelfId: string }
   | { view: 'learn'; seriesId: string; sectionId: string | null };
 type TextQuote = { text: string; blockId: string };
-type SelectionPopup = TextQuote & { top: number; left: number };
+type SelectionPopup = TextQuote & {
+  contentVersionId: string;
+  anchor: ReadingAnnotationAnchor;
+  top: number;
+  left: number;
+};
+type AnnotationComposerDraft = {
+  selection: SelectionPopup;
+  body: string;
+};
 type BookReplanState = {
   book: Book;
   proposal: BookReplanProposal | null;
@@ -127,6 +142,58 @@ function generationProgressNotice(reason: ApiError): ProgressNotice {
     title: '本节正在准备',
     message: '通常需要 1–2 分钟。完成后会自动更新，无需重复点击。',
   };
+}
+
+function domRangeFromTextOffsets(root: HTMLElement, start: number, end: number): Range | null {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let cursor = 0;
+  let startNode: Text | null = null;
+  let endNode: Text | null = null;
+  let startInNode = 0;
+  let endInNode = 0;
+  while (walker.nextNode()) {
+    const node = walker.currentNode as Text;
+    const next = cursor + node.data.length;
+    if (!startNode && start >= cursor && start <= next) {
+      startNode = node;
+      startInNode = Math.min(start - cursor, node.data.length);
+    }
+    if (endNode === null && end >= cursor && end <= next) {
+      endNode = node;
+      endInNode = Math.min(end - cursor, node.data.length);
+      break;
+    }
+    cursor = next;
+  }
+  if (!startNode || !endNode) return null;
+  const range = document.createRange();
+  range.setStart(startNode, startInNode);
+  range.setEnd(endNode, endInNode);
+  return range.collapsed ? null : range;
+}
+
+function annotationRange(root: HTMLElement, anchor: ReadingAnnotationAnchor): Range | null {
+  const text = root.textContent || '';
+  if (text.slice(anchor.startOffset, anchor.endOffset) === anchor.exact) {
+    return domRangeFromTextOffsets(root, anchor.startOffset, anchor.endOffset);
+  }
+  const candidates: number[] = [];
+  let cursor = text.indexOf(anchor.exact);
+  while (cursor >= 0) {
+    const prefixMatches = !anchor.prefix
+      || text.slice(Math.max(0, cursor - anchor.prefix.length), cursor) === anchor.prefix;
+    const suffixStart = cursor + anchor.exact.length;
+    const suffixMatches = !anchor.suffix
+      || text.slice(suffixStart, suffixStart + anchor.suffix.length) === anchor.suffix;
+    if (prefixMatches && suffixMatches) candidates.push(cursor);
+    cursor = text.indexOf(anchor.exact, cursor + Math.max(anchor.exact.length, 1));
+  }
+  if (candidates.length !== 1) return null;
+  return domRangeFromTextOffsets(
+    root,
+    candidates[0],
+    candidates[0] + anchor.exact.length,
+  );
 }
 
 function RecoveryCodePanel({
@@ -230,6 +297,9 @@ const routeFromLocation = (): AppRoute => {
   }
   if (parts[0] === 'knowledge' && parts.length === 1) return { view: 'knowledge' };
   if (parts[0] === 'review' && parts.length === 1) return { view: 'review' };
+  if (parts[0] === 'shelves' && parts[1] && parts[2] === 'series' && parts[3] === 'new') {
+    return { view: 'series-create', shelfId: parts[1] };
+  }
   if (parts[0] === 'shelves' && parts[1] && parts.length === 2) {
     return { view: 'shelf', shelfId: parts[1] };
   }
@@ -241,6 +311,7 @@ const routeFromLocation = (): AppRoute => {
 };
 
 const shelfPath = (shelfId: string) => `/shelves/${encodeURIComponent(shelfId)}`;
+const seriesCreatePath = (shelfId: string) => `${shelfPath(shelfId)}/series/new`;
 const seriesPath = (seriesId: string, sectionId?: string | null) => (
   sectionId
     ? `/series/${encodeURIComponent(seriesId)}/sections/${encodeURIComponent(sectionId)}`
@@ -536,6 +607,8 @@ export default function App() {
       telemetry.track('home_viewed', { view: 'home' });
     } else if (view === 'shelf' && shelf) {
       telemetry.track('shelf_viewed', { view: 'shelf', entityType: 'shelf', entityId: shelf.id });
+    } else if (view === 'series-create' && shelf) {
+      telemetry.track('series_creation_viewed', { view: 'series-create', entityType: 'shelf', entityId: shelf.id });
     } else if (view === 'learn' && series) {
       telemetry.track('learning_viewed', { view: 'learn', entityType: 'series', entityId: series.id });
     } else if (view === 'profile') {
@@ -747,6 +820,15 @@ export default function App() {
     setSeries(null);
     setSection(null);
     setView('shelf');
+  };
+
+  const openSeriesCreation = (value: Shelf, historyMode: 'push' | 'replace' | 'none' = 'push') => {
+    if (historyMode !== 'none') routeRequestVersion.current += 1;
+    updateBrowserLocation(seriesCreatePath(value.id), historyMode);
+    setShelf(value);
+    setSeries(null);
+    setSection(null);
+    setView('series-create');
   };
 
   const logout = async () => {
@@ -1000,6 +1082,45 @@ export default function App() {
       }
     }
     return completedFallback;
+  };
+
+  const waitForInitialSectionReady = async (value: Series) => {
+    let task = value.initializationTask;
+    if (!task) {
+      throw new Error('学习路线没有返回第一节准备任务，请重新创建。');
+    }
+    for (let poll = 0; poll < 360; poll += 1) {
+      if (!['succeeded', 'failed'].includes(task.status)) {
+        task = await api.learningTask(task.taskId);
+      }
+      if (task.status === 'failed') {
+        throw new Error(generationFailureMessage(task, '第一节内容'));
+      }
+      if (task.status === 'succeeded') {
+        const refreshed = await api.series(value.id);
+        const targetSectionId = typeof task.result?.targetSectionId === 'string'
+          ? task.result.targetSectionId
+          : null;
+        const targetBook = targetSectionId
+          ? refreshed.books.find((book) => bookContainsSection(book, targetSectionId))
+          : null;
+        if (!targetSectionId || !targetBook) {
+          throw new Error('第一节已经准备完成，但学习路线尚未同步，请重新进入书架。');
+        }
+        const readySection = await openAndTrackSection(targetSectionId);
+        if (
+          !readySection.content
+          || readySection.content.publicationStatus !== 'published'
+          || !readySection.quiz
+          || readySection.quiz.publicationStatus !== 'published'
+        ) {
+          throw new Error('第一节正文和验证题尚未完整发布，请稍后重试。');
+        }
+        return { series: refreshed, section: readySection, bookId: targetBook.id };
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+    }
+    throw new Error('第一节仍在准备，可以稍后从书架重新进入本系列。');
   };
 
   const monitorInitialSection = async (value: Series) => {
@@ -1339,7 +1460,7 @@ export default function App() {
         setSection(null);
         return;
       }
-      if (route.view === 'shelf') {
+      if (route.view === 'shelf' || route.view === 'series-create') {
         const targetShelf = data.shelves.find((item) => item.id === route.shelfId);
         if (!targetShelf) {
           updateBrowserLocation('/', 'replace');
@@ -1350,7 +1471,8 @@ export default function App() {
           setError('这个书架不存在，或当前账号无权访问。');
           return;
         }
-        openShelf(targetShelf, 'none');
+        if (route.view === 'series-create') openSeriesCreation(targetShelf, 'none');
+        else openShelf(targetShelf, 'none');
         return;
       }
 
@@ -1815,7 +1937,7 @@ export default function App() {
   );
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell view-${view}`}>
       <header className="app-header">
         <button
           className="brand"
@@ -1865,7 +1987,7 @@ export default function App() {
           )}
           {view === 'learn' && (
             <button
-              className="quiet-button"
+              className="quiet-button learn-back-button"
               aria-label={shelf ? `返回${shelf.name}书架` : '返回全部书架'}
               onClick={returnToShelf}
             >
@@ -1925,7 +2047,7 @@ export default function App() {
         onDismissNotice={() => setNotice('')}
         onDismissProgress={() => setProgressNotice(null)}
       />
-      <main className={view === 'learn' ? 'learn-main' : view === 'profile' ? 'profile-main' : view === 'knowledge' ? 'knowledge-main' : view === 'review' ? 'review-main' : 'marketing-main'}>
+      <main className={view === 'learn' ? 'learn-main' : view === 'profile' ? 'profile-main' : view === 'knowledge' ? 'knowledge-main' : view === 'review' ? 'review-main' : view === 'series-create' ? 'series-create-main' : 'marketing-main'}>
         {view === 'home' && (
           <Home
             data={data}
@@ -1948,8 +2070,8 @@ export default function App() {
         {view === 'shelf' && shelf && (
           <ShelfPage
             shelf={shelf}
-            profile={data!.profile}
             onBack={goHome}
+            onStartCreate={() => openSeriesCreation(shelf)}
             onRename={async (body) => {
               const value = await run('正在重命名书架…', () => api.renameShelf(shelf.id, body));
               setData((current) => current
@@ -1972,18 +2094,32 @@ export default function App() {
               setView('home');
               setNotice('书架及其中的学习系列已删除');
             }}
-            onCreate={async (body, idempotencyKey) => {
-              const value = await run('AI 正在规划系列…', () => api.createPlan({ ...body, shelfId: shelf.id }, idempotencyKey));
-              updateBrowserLocation(seriesPath(value.id), 'push');
-              setSeries(value);
-              setSection(null);
-              setView('learn');
-              void monitorInitialSection(value);
-            }}
             onOpen={(seriesId, sectionId, bookId) => {
               void openSeries(seriesId, sectionId, 'push', bookId);
             }}
             onActivateBook={activateBook}
+            onRenameSeries={async (seriesId, body) => {
+              const value = await run('正在重命名系列…', () => api.renameSeries(seriesId, body));
+              setData((current) => current
+                ? {
+                    ...current,
+                    shelves: current.shelves.map((item) => item.id === shelf.id
+                      ? {
+                          ...item,
+                          series: item.series.map((candidate) => candidate.id === value.id ? value : candidate),
+                        }
+                      : item),
+                  }
+                : current);
+              setShelf((current) => current
+                ? {
+                    ...current,
+                    series: current.series.map((candidate) => candidate.id === value.id ? value : candidate),
+                  }
+                : current);
+              if (series?.id === value.id) setSeries(value);
+              setNotice('系列已重命名');
+            }}
             onDelete={async (seriesId) => {
               await run('正在从书架移除系列…', async () => {
                 await api.deleteSeries(seriesId);
@@ -1996,6 +2132,32 @@ export default function App() {
                   setView('home');
                 }
               });
+            }}
+          />
+        )}
+        {view === 'series-create' && shelf && data && (
+          <SeriesCreationPage
+            shelf={shelf}
+            profile={data.profile}
+            onCancel={() => openShelf(shelf)}
+            onCreate={async (body, idempotencyKey) => {
+              const navigationVersion = routeRequestVersion.current;
+              const ready = await run('正在准备目录和第一节…', async () => {
+                const value = await api.createPlan(
+                  { ...body, shelfId: shelf.id },
+                  idempotencyKey,
+                );
+                return waitForInitialSectionReady(value);
+              });
+              if (navigationVersion !== routeRequestVersion.current) return;
+              setDirectoryBookId(ready.bookId);
+              setSeries(ready.series);
+              setSection(ready.section);
+              setView('learn');
+              updateBrowserLocation(
+                seriesPath(ready.series.id, ready.section.id),
+                'push',
+              );
             }}
           />
         )}
@@ -2148,6 +2310,42 @@ export default function App() {
           </>
         )}
       </main>
+      {!['learn', 'series-create'].includes(view) && (
+        <nav className="mobile-primary-nav" aria-label="移动端主导航">
+          <button
+            type="button"
+            className={view === 'home' || view === 'shelf' ? 'is-active' : ''}
+            aria-current={view === 'home' || view === 'shelf' ? 'page' : undefined}
+            onClick={goHome}
+          >
+            <span aria-hidden="true">书</span><b>书架</b>
+          </button>
+          <button
+            type="button"
+            className={view === 'review' ? 'is-active' : ''}
+            aria-current={view === 'review' ? 'page' : undefined}
+            onClick={openReviewCenter}
+          >
+            <span aria-hidden="true">复</span><b>复习</b>
+          </button>
+          <button
+            type="button"
+            className={view === 'knowledge' ? 'is-active' : ''}
+            aria-current={view === 'knowledge' ? 'page' : undefined}
+            onClick={openKnowledgeMap}
+          >
+            <span aria-hidden="true">图</span><b>版图</b>
+          </button>
+          <button
+            type="button"
+            className={view === 'profile' ? 'is-active' : ''}
+            aria-current={view === 'profile' ? 'page' : undefined}
+            onClick={() => openProfileCenter('profile')}
+          >
+            <span aria-hidden="true">我</span><b>我的</b>
+          </button>
+        </nav>
+      )}
       {bookReplan && (
         <BookReplanDialog
           book={bookReplan.book}
@@ -2560,6 +2758,8 @@ function FeedbackDialog({
   const [repairFeedbackId, setRepairFeedbackId] = useState('');
   const [repairFailed, setRepairFailed] = useState(false);
   const [status, setStatus] = useState('');
+  const updatesLesson = target.scope === 'content_block'
+    && ['unclear', 'poor_example', 'typo', 'layout'].includes(feedbackType);
   const dialogRef = useRef<HTMLElement | null>(null);
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const submittingRef = useRef(submitting);
@@ -2633,7 +2833,7 @@ function FeedbackDialog({
     setSubmitted(true);
     setRepairFailed(false);
     setRepairText('');
-    setStatus('反馈已收到，正在更新这段内容。你可以关闭窗口继续学习。');
+    setStatus('反馈已收到，正在准备本节新版本。你可以关闭窗口继续学习。');
     try {
       await api.streamFeedbackRepair(
         feedbackId,
@@ -2643,7 +2843,7 @@ function FeedbackDialog({
         const updated = await api.section(target.sectionId);
         onSectionChange(updated);
         await onRefreshSeries();
-        setStatus('正文已完成更新。');
+        setStatus('本节新版本已完成更新。');
         if (backgroundedRef.current) onRepairSettledRef.current(true);
       }
     } catch (reason) {
@@ -2699,6 +2899,7 @@ function FeedbackDialog({
         SECTION_CONTENT_MISSING: '这段正文已不可用，请刷新页面后重试。',
         FEEDBACK_ACCURACY_REVIEW_REQUIRED: '已记录。为避免未经核实地改写，原正文保持不变。',
         FEEDBACK_CLASSIFICATION_REQUIRED: '已记录。需先确认问题类型，因此原正文保持不变。',
+        FEEDBACK_ASSESSED_VERSION_FROZEN: '已记录。你已经在这份正文上完成过验证，当前学习记录不会被静默替换。',
       };
       setStatus(
         blockedMessages[receipt.regeneration.reasonCode || '']
@@ -2727,8 +2928,8 @@ function FeedbackDialog({
       >
         <header>
           <div>
-            <p className="eyebrow">{target.scope === 'content_block' ? '正文页边批注' : '告诉我们你的感受'}</p>
-            <h2 id="feedback-title">{target.scope === 'content_block' ? '反馈这一段' : '全局反馈'}</h2>
+            <p className="eyebrow">{target.scope === 'content_block' ? '内容反馈' : '告诉我们你的感受'}</p>
+            <h2 id="feedback-title">{target.scope === 'content_block' ? '报告这一段的问题' : '全局反馈'}</h2>
           </div>
           <button className="dialog-close" type="button" aria-label="关闭反馈" disabled={submitting} onClick={closeDialog}>×</button>
         </header>
@@ -2760,12 +2961,15 @@ function FeedbackDialog({
             />
             <small>请勿填写密码、API Key 或其他敏感信息 · {message.length}/4000</small>
           </label>}
+          {!submitted && updatesLesson && (
+            <p className="feedback-update-impact">发送后会生成并切换到本节新版本，正文与验证题会一起更新；已有标注仍保留在原来的正文版本。</p>
+          )}
           {submitted && target.scope === 'content_block' && (
             <div className={`feedback-repair-answer ${repairFailed ? 'failed' : ''}`} aria-live="polite">
               {repairText ? (
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{repairText}</ReactMarkdown>
               ) : repairing ? (
-                <span className="feedback-repair-listening">正在更新正文<span aria-hidden="true">…</span></span>
+                <span className="feedback-repair-listening">正在准备本节新版本<span aria-hidden="true">…</span></span>
               ) : null}
               {repairing && repairText && <i className="stream-caret" aria-hidden="true" />}
             </div>
@@ -2781,7 +2985,7 @@ function FeedbackDialog({
               </button>
             ) : !submitted ? (
               <button className="primary-button" disabled={submitting || ((target.scope === 'global' || feedbackType === 'other') && message.trim().length < 2)}>
-                {submitting ? '正在送出…' : '发送反馈'}
+                {submitting ? '正在送出…' : updatesLesson ? '发送并更新本节' : '发送反馈'}
               </button>
             ) : null}
           </div>
@@ -3420,12 +3624,19 @@ function ReviewCenterPage({ onBack }: { onBack: () => void }) {
               )}
               {activity.type === 'repair' && (
                 <div className="review-repair-layout">
-                  <div className="review-quick-pass"><span>30 秒快速过</span><p>{activity.payload.content}</p></div>
+                  <div className="review-quick-pass">
+                    <span>30 秒快速过</span>
+                    <div className="review-markdown review-quick-pass-content">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{activity.payload.content || ''}</ReactMarkdown>
+                    </div>
+                  </div>
                   {activity.payload.case && (
                     <div className="review-targeted-case">
                       <header><span>针对刚才断点的案例</span><small>{activity.payload.case.source}</small></header>
                       <h3>{activity.payload.case.heading}</h3>
-                      <p>{activity.payload.case.content}</p>
+                      <div className="review-markdown review-targeted-case-content">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{activity.payload.case.content}</ReactMarkdown>
+                      </div>
                     </div>
                   )}
                   <label className="reinforcement-recall"><span>{activity.payload.prompt}</span><textarea value={reinforcementText} onChange={(event) => setReinforcementText(event.target.value)} placeholder="用你自己的话写一句…" rows={3} /></label>
@@ -4651,6 +4862,93 @@ function ShelfRenameDialog({
   );
 }
 
+function SeriesRenameDialog({
+  series,
+  onClose,
+  onRename,
+}: {
+  series: Series;
+  onClose: () => void;
+  onRename: (body: SeriesRenameInput) => Promise<void>;
+}) {
+  const [name, setName] = useState(series.title);
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState('');
+  const normalizedName = name.trim().replace(/\s+/g, ' ');
+  const dialogRef = useModalFocus<HTMLElement>({
+    open: true,
+    canClose: !submitting,
+    onRequestClose: onClose,
+  });
+
+  const send = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!normalizedName || normalizedName === series.title) return;
+    setSubmitting(true);
+    setFormError('');
+    try {
+      await onRename({ name: normalizedName });
+    } catch (reason) {
+      setFormError(reason instanceof Error ? reason.message : '系列重命名失败，请稍后重试');
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div
+      className="confirm-backdrop shelf-create-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !submitting) onClose();
+      }}
+    >
+      <section
+        ref={dialogRef}
+        className="shelf-create-dialog series-rename-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="series-rename-title"
+        tabIndex={-1}
+      >
+        <div className="shelf-create-heading">
+          <div>
+            <p className="eyebrow">整理学习目标</p>
+            <h2 id="series-rename-title">重命名系列</h2>
+            <p>只会改变书架上的显示名称，学习目标、教材内容和学习记录保持不变。</p>
+          </div>
+          <button className="dialog-close" aria-label="关闭重命名系列" disabled={submitting} onClick={onClose}>×</button>
+        </div>
+        <form className="shelf-create-form" onSubmit={send}>
+          <label>
+            新名称
+            <input
+              data-dialog-initial-focus
+              required
+              maxLength={240}
+              disabled={submitting}
+              value={name}
+              onFocus={(event) => event.currentTarget.select()}
+              onChange={(event) => {
+                setName(event.target.value);
+                setFormError('');
+              }}
+            />
+          </label>
+          {formError && <p className="shelf-create-error" role="alert">{formError}</p>}
+          <div className="dialog-actions">
+            <button type="button" className="quiet-button" disabled={submitting} onClick={onClose}>取消</button>
+            <button
+              className="primary-button"
+              disabled={submitting || !normalizedName || normalizedName === series.title}
+            >
+              {submitting ? '正在保存…' : '保存名称'}
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
+}
+
 function ShelfDeleteDialog({
   shelf,
   onClose,
@@ -4731,28 +5029,28 @@ function ShelfDeleteDialog({
 
 function ShelfPage({
   shelf,
-  profile,
   onBack,
+  onStartCreate,
   onRename,
   onDeleteShelf,
-  onCreate,
   onOpen,
   onActivateBook,
+  onRenameSeries,
   onDelete,
 }: {
   shelf: Shelf;
-  profile: LearningProfile;
   onBack: () => void;
+  onStartCreate: () => void;
   onRename: (body: ShelfRenameInput) => Promise<void>;
   onDeleteShelf: () => Promise<void>;
-  onCreate: (body: object, idempotencyKey: string) => Promise<void>;
   onOpen: (id: string, sectionId?: string | null, bookId?: string | null) => void;
   onActivateBook: (book: Book) => Promise<void>;
+  onRenameSeries: (id: string, body: SeriesRenameInput) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
 }) {
-  const [showPlan, setShowPlan] = useState(false);
   const [showRename, setShowRename] = useState(false);
   const [showDeleteShelf, setShowDeleteShelf] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<Series | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Series | null>(null);
   const [deleting, setDeleting] = useState(false);
   const deleteDialogRef = useModalFocus<HTMLElement>({
@@ -4791,12 +5089,10 @@ function ShelfPage({
           </div>
         </div>
         <button
-          className={showPlan ? 'secondary-button' : 'primary-button'}
-          aria-expanded={showPlan}
-          aria-controls="create-series-form"
-          onClick={() => setShowPlan(!showPlan)}
+          className="primary-button"
+          onClick={onStartCreate}
         >
-          {showPlan ? '取消创建' : '＋ 创建学习系列'}
+          ＋ 创建学习系列
         </button>
       </div>
       {showRename && (
@@ -4813,7 +5109,6 @@ function ShelfPage({
           onDelete={onDeleteShelf}
         />
       )}
-      {showPlan && <PlanForm shelfId={shelf.id} profile={profile} submit={onCreate} onCancel={() => setShowPlan(false)} />}
       <div className="series-shelf-heading">
         <span>书架上的学习系列</span>
         <small>每一排对应一个学习目标</small>
@@ -4834,6 +5129,15 @@ function ShelfPage({
                 </span>
               </div>
               <div className="focused-series-actions">
+                <button
+                  type="button"
+                  className="series-rename-button"
+                  aria-label={`重命名系列：${item.title}`}
+                  title="重命名系列"
+                  onClick={() => setRenameTarget(item)}
+                >
+                  <PencilIcon />
+                </button>
                 <button
                   className="series-delete-button"
                   aria-label={`删除 ${item.title}`}
@@ -4911,6 +5215,16 @@ function ShelfPage({
           </div>
         )}
       </div>
+      {renameTarget && (
+        <SeriesRenameDialog
+          series={renameTarget}
+          onClose={() => setRenameTarget(null)}
+          onRename={async (body) => {
+            await onRenameSeries(renameTarget.id, body);
+            setRenameTarget(null);
+          }}
+        />
+      )}
       {deleteTarget && (
         <div
           className="confirm-backdrop"
@@ -4920,7 +5234,7 @@ function ShelfPage({
         >
           <section
             ref={deleteDialogRef}
-            className="delete-confirm"
+            className="delete-confirm series-delete-confirm"
             role="dialog"
             aria-modal="true"
             aria-labelledby="delete-series-title"
@@ -4929,8 +5243,23 @@ function ShelfPage({
           >
             <span className="delete-confirm-icon"><TrashIcon size={20} /></span>
             <p className="eyebrow">删除学习系列</p>
-            <h2 id="delete-series-title">{deleteTarget.title}</h2>
-            <p id="delete-series-description">该系列及其书、章节会从书架和学习入口中移除。已有学习记录会保留，但当前界面暂不支持恢复。</p>
+            <h2 id="delete-series-title">删除“{deleteTarget.title}”？</h2>
+            <p id="delete-series-description">
+              {deleteTarget.books.length > 0
+                ? `以下 ${deleteTarget.books.length} 本教材及其章节会从书架和学习入口中移除：`
+                : '这个系列目前没有教材，删除后将从书架移除。'}
+            </p>
+            {deleteTarget.books.length > 0 && (
+              <ol className="series-delete-book-list" aria-label="将移除的教材">
+                {deleteTarget.books.map((book) => (
+                  <li key={book.id}>
+                    <small>第 {book.position} 本</small>
+                    <span>{book.title}</span>
+                  </li>
+                ))}
+              </ol>
+            )}
+            <p className="shelf-delete-history-note">已有学习记录会保留，但当前界面暂不支持恢复。</p>
             <div>
               <button data-dialog-initial-focus className="quiet-button" disabled={deleting} onClick={() => setDeleteTarget(null)}>取消</button>
               <button
@@ -4948,7 +5277,11 @@ function ShelfPage({
                   }
                 }}
               >
-                {deleting ? '正在删除…' : '确认删除'}
+                {deleting
+                  ? '正在删除…'
+                  : deleteTarget.books.length > 0
+                    ? `删除系列和 ${deleteTarget.books.length} 本书`
+                    : '确认删除系列'}
               </button>
             </div>
           </section>
@@ -4976,28 +5309,382 @@ function PencilIcon() {
   );
 }
 
-function PlanForm({
-  shelfId,
+type GoalDirection = {
+  id: string;
+  title: string;
+  description: string;
+  purpose: string;
+  success: string;
+  outOfScope: string;
+  depth: 'overview' | 'deep' | 'mastery';
+};
+
+type GoalOutcome = {
+  id: string;
+  title: string;
+  description: string;
+  purpose?: string;
+  success: string;
+  depth: 'overview' | 'deep' | 'mastery';
+};
+
+function isLanguageLearningTopic(topic: string) {
+  return /英语|英文|日语|韩语|法语|德语|西班牙语|俄语|雅思|托福|四六级|口语|听力|外语/.test(topic);
+}
+
+function isSchoolSubjectTopic(topic: string) {
+  return /小学|初一|初二|初三|初中|高一|高二|高三|高中|语文|数学|物理|化学|生物|历史|地理|政治/.test(topic);
+}
+
+function goalDirectionsFor(profile: LearningProfile, topic: string): GoalDirection[] {
+  const subject = topic.trim() || '这个领域';
+  const identity = `${profile.profession} ${profile.purpose} ${profile.domains.join(' ')}`.toLowerCase();
+  if (isLanguageLearningTopic(subject)) {
+    return [
+      {
+        id: 'language-course',
+        title: '跟上当前课程',
+        description: '围绕现阶段教材、作业和考试要求，把最影响学习的能力先补起来。',
+        purpose: `提升${subject}课程中的理解与运用表现，优先解决当前学习任务。`,
+        success: `能够完成一项符合当前阶段要求的${subject}任务，并说明自己的判断依据。`,
+        outOfScope: '暂不追求超出当前阶段的生僻知识和全面语言学理论。',
+        depth: 'deep',
+      },
+      {
+        id: 'language-gap',
+        title: '补一个具体薄弱项',
+        description: '把词汇语法、阅读写作或听说中的主要卡点单独解决。',
+        purpose: `找出并补强${subject}中最影响当前表现的一项具体能力。`,
+        success: `能够在新的${subject}材料或任务中独立使用这项能力。`,
+        outOfScope: '不同时铺开所有语言能力，只围绕当前最关键的薄弱项训练。',
+        depth: 'deep',
+      },
+      {
+        id: 'language-use',
+        title: '建立真实语言能力',
+        description: '不只为了做题，而是逐步形成能读、能表达或能交流的能力。',
+        purpose: `围绕真实使用场景建立${subject}理解与表达能力。`,
+        success: `能够在一个符合当前水平的真实场景中理解或表达完整信息。`,
+        outOfScope: '暂不机械覆盖全部考试题型和低频语言知识。',
+        depth: 'mastery',
+      },
+    ];
+  }
+  if (isSchoolSubjectTopic(subject)) {
+    return [
+      {
+        id: 'course-progress',
+        title: '跟上当前课程',
+        description: '理解正在学的章节，并能独立完成典型学习任务。',
+        purpose: `跟上${subject}当前课程，理解核心概念并解决典型问题。`,
+        success: `能够独立完成一组${subject}典型任务，并解释关键步骤。`,
+        outOfScope: '暂不提前覆盖后续年级内容，也不追求偏题和竞赛技巧。',
+        depth: 'deep',
+      },
+      {
+        id: 'subject-gap',
+        title: '补一个具体薄弱点',
+        description: '找到反复出错的原因，针对一个知识或方法缺口补强。',
+        purpose: `定位并补强${subject}中最影响当前学习的一个具体缺口。`,
+        success: `能够在一道新题或新材料中独立运用补强后的知识与方法。`,
+        outOfScope: '不把整门学科重新学一遍，只处理当前关键缺口及必要前置。',
+        depth: 'deep',
+      },
+      {
+        id: 'subject-framework',
+        title: '建立学科框架',
+        description: '把章节、概念和解题方法连接起来，知道遇到问题该从哪里入手。',
+        purpose: `建立${subject}的知识与方法框架，形成有依据的问题分析能力。`,
+        success: `能够说明${subject}主要知识之间的关系，并为典型问题选择合适方法。`,
+        outOfScope: '不机械覆盖全部知识点，也不以记忆题型代替理解。',
+        depth: 'mastery',
+      },
+    ];
+  }
+  if (/投资|金融|研究员|分析师|基金|证券/.test(identity)) {
+    return [
+      {
+        id: 'industry-map',
+        title: '先建立行业地图',
+        description: '看清参与者、价值链和关键变化，知道机会可能出现在哪里。',
+        purpose: `建立对${subject}的行业全景认识，能够定位值得继续研究的环节与机会。`,
+        success: `能够画出${subject}的主要参与者和价值流，并说明两个值得继续验证的机会方向。`,
+        outOfScope: '不进入底层工程实现，也不直接给出具体投资建议。',
+        depth: 'overview',
+      },
+      {
+        id: 'company-reading',
+        title: '看懂公司与产品',
+        description: '理解必要技术指标，用来判断公司宣传、产品定位与竞争差异。',
+        purpose: `看懂${subject}相关公司的产品与技术材料，形成基本的竞争力比较。`,
+        success: '能够比较两家公司的产品定位，指出优势判断依赖的技术与业务证据。',
+        outOfScope: '不学习芯片设计、模型训练代码和生产系统运维。',
+        depth: 'deep',
+      },
+      {
+        id: 'investment-frame',
+        title: '形成研究框架',
+        description: '把行业、产品、商业模式和风险放进一套可复用的判断框架。',
+        purpose: `围绕${subject}建立一套可复用的公司与行业研究框架。`,
+        success: '能够独立完成一份结构化研究提纲，并明确结论、证据缺口与主要风险。',
+        outOfScope: '不预测短期价格，不替代财务、法律和合规尽调。',
+        depth: 'mastery',
+      },
+    ];
+  }
+  if (/教师|老师|教育|讲师|学生|研究生|本科|学校/.test(identity)) {
+    return [
+      {
+        id: 'field-map',
+        title: '进入一个新领域',
+        description: '建立准确的概念地图，知道核心问题、发展脉络与现实边界。',
+        purpose: `建立对${subject}的整体认识，能够准确解释核心概念与主要问题。`,
+        success: `能够不用术语堆砌，向同学或同事讲清${subject}的核心机制和一个重要边界。`,
+        outOfScope: '不追求专业工程实现，也不机械覆盖所有历史与名词。',
+        depth: 'overview',
+      },
+      {
+        id: 'teaching-frame',
+        title: '形成可讲授框架',
+        description: '把知识组织成能解释、能举例、也能检查理解的教学结构。',
+        purpose: `形成一套可以讲授${subject}的知识框架与案例线索。`,
+        success: '能够设计一段完整讲解，并用问题判断学习者是否真正理解。',
+        outOfScope: '不把教学形式本身扩成新的学习目标。',
+        depth: 'deep',
+      },
+      {
+        id: 'academic-use',
+        title: '用于研究或课程',
+        description: '理解关键机制、证据和争议，为研究或课程设计打基础。',
+        purpose: `系统理解${subject}的机制、证据边界与典型研究问题。`,
+        success: '能够提出一个有边界的研究或课程问题，并说明需要什么证据回答。',
+        outOfScope: '不把未经核实的观点当作学术结论。',
+        depth: 'mastery',
+      },
+    ];
+  }
+  if (/开发|工程|程序|技术|架构|数据|算法|产品经理|设计师/.test(identity)) {
+    return [
+      {
+        id: 'technical-map',
+        title: '建立技术地图',
+        description: '先理解系统由什么组成、关键机制怎样连接、边界在哪里。',
+        purpose: `建立${subject}的技术全景，能够解释核心组件、机制与适用边界。`,
+        success: '能够画出最小系统结构，并解释关键组件为什么这样协作。',
+        outOfScope: '暂不进入大规模生产优化和复杂源码细节。',
+        depth: 'overview',
+      },
+      {
+        id: 'build-something',
+        title: '完成一个实现',
+        description: '围绕真实产出学习必要原理、实现步骤和验证方法。',
+        purpose: `能够使用${subject}完成一个可运行、可验证的实际实现。`,
+        success: '能够独立完成最小实现，记录验证结果，并解释一个失败边界。',
+        outOfScope: '不为追求知识完整而扩展与实现无关的主题。',
+        depth: 'deep',
+      },
+      {
+        id: 'production-judgment',
+        title: '形成工程判断',
+        description: '能够比较方案、识别约束，并为真实系统做出有依据的选择。',
+        purpose: `围绕${subject}形成可迁移的实现、评估与技术选型能力。`,
+        success: '能够针对一个真实约束比较方案，给出选择、验证计划和回退边界。',
+        outOfScope: '不把记忆 API 或命令当成独立掌握。',
+        depth: 'mastery',
+      },
+    ];
+  }
+  return [
+    {
+      id: 'understand',
+      title: '先建立整体认识',
+      description: '抓住核心对象、用途和边界，知道接下来是否值得继续深入。',
+      purpose: `建立对${subject}的基本认识，能够解释它解决什么问题、怎样工作以及何时不适用。`,
+      success: `能够用自己的话讲清${subject}的核心机制，并判断一个典型场景是否适用。`,
+      outOfScope: '不展开专业实现与复杂边缘主题。',
+      depth: 'overview',
+    },
+    {
+      id: 'solve',
+      title: '解决一个实际问题',
+      description: '围绕使用场景理解机制、典型应用与必要边界。',
+      purpose: `理解并使用「${subject}」解决一个真实场景中的问题。`,
+      success: '能够独立分析场景、选择方法并说明验证结果。',
+      outOfScope: '不扩展与当前任务无关的理论和工具。',
+      depth: 'deep',
+    },
+    {
+      id: 'capability',
+      title: '形成可迁移能力',
+      description: '不仅会做一次，还能比较方案、处理边界并迁移到新场景。',
+      purpose: `围绕${subject}形成可以独立判断、实践并迁移的能力。`,
+      success: '能够在新场景中独立完成任务，解释选择依据并处理主要边界。',
+      outOfScope: '不以机械覆盖全部知识为目标。',
+      depth: 'mastery',
+    },
+  ];
+}
+
+function goalOutcomesFor(
+  profile: LearningProfile,
+  topic: string,
+  direction: GoalDirection,
+): GoalOutcome[] {
+  const subject = topic.trim() || '这个主题';
+  const identity = `${profile.profession} ${profile.purpose} ${profile.domains.join(' ')}`.toLowerCase();
+  if (isLanguageLearningTopic(subject)) {
+    if (direction.id === 'language-course') {
+      return [
+        { id: 'language-reading', title: '能读懂当前阶段的材料', description: '抓住主旨、细节和上下文线索，不再只靠逐词翻译。', purpose: `提升${subject}阅读理解能力，学会从当前阶段的材料中提取和判断信息。`, success: `能够读懂一篇符合${subject}当前阶段的材料，指出主旨、关键细节与判断依据。`, depth: 'deep' },
+        { id: 'language-grammar', title: '能把词汇和语法用对', description: '在新句子和题目中正确理解、选择并使用。', purpose: `掌握${subject}当前阶段的核心词汇与语法，并能在新语境中正确运用。`, success: `能够在新的${subject}句子和任务中正确使用本阶段核心词汇与语法，并解释选择依据。`, depth: 'deep' },
+        { id: 'language-writing', title: '能完成当前阶段的写作任务', description: '内容完整、结构清楚，常见语言错误可自行检查。', purpose: `提升${subject}写作能力，能够围绕当前阶段要求组织内容并完成修改。`, success: `能够独立完成一篇符合${subject}当前阶段要求的短文，并根据检查清单完成一次修改。`, depth: 'mastery' },
+      ];
+    }
+    if (direction.id === 'language-gap') {
+      return [
+        { id: 'language-vocabulary-gap', title: '解决词汇与语法卡点', description: '理解规则，并能在新语境中正确使用。', purpose: `补强${subject}中当前最影响表现的词汇或语法能力。`, success: `能够在新的${subject}语境中正确理解和使用当前薄弱的词汇或语法，并解释常见错误。`, depth: 'deep' },
+        { id: 'language-input-gap', title: '提升听力或阅读理解', description: '抓住信息结构，不再被个别生词完全卡住。', purpose: `补强${subject}听力或阅读理解能力，能够抓住材料中的主要信息与线索。`, success: `能够从一段符合当前水平的${subject}听力或阅读材料中提取主旨、关键细节与线索。`, depth: 'deep' },
+        { id: 'language-output-gap', title: '提升口语或写作表达', description: '把想法组织成对方能够理解的完整表达。', purpose: `补强${subject}口语或写作表达能力，把想法组织成完整、可理解的信息。`, success: `能够围绕一个熟悉主题完成一段${subject}口头或书面表达，并自行修正主要问题。`, depth: 'mastery' },
+      ];
+    }
+    return [
+      { id: 'language-read-real', title: '能读懂真实材料', description: '从短文、说明或内容中获得自己需要的信息。', purpose: `建立使用${subject}阅读真实材料和获取信息的能力。`, success: `能够独立读懂一份符合当前水平的${subject}真实材料，并准确提取所需信息。`, depth: 'overview' },
+      { id: 'language-express-real', title: '能清楚表达自己的意思', description: '不追求完美，但能让对方准确理解。', purpose: `建立使用${subject}清楚表达观点与信息的能力。`, success: `能够使用${subject}围绕一个熟悉主题完成结构清楚的口头或书面表达。`, depth: 'deep' },
+      { id: 'language-communicate-real', title: '能完成一次真实沟通', description: '理解对方、回应信息，并处理一次澄清或追问。', purpose: `建立使用${subject}完成真实沟通、回应和澄清的能力。`, success: `能够在一个符合当前水平的场景中使用${subject}完成交流，并处理一次澄清或追问。`, depth: 'mastery' },
+    ];
+  }
+  if (isSchoolSubjectTopic(subject)) {
+    if (direction.id === 'course-progress') {
+      return [
+        { id: 'course-understand', title: '能讲清当前章节', description: '概念、规律和典型例子能够连接起来。', success: `能够用自己的话讲清${subject}当前章节的核心概念、关系与一个典型例子。`, depth: 'overview' },
+        { id: 'course-solve', title: '能独立完成典型问题', description: '知道使用什么方法，也能解释关键步骤。', success: `能够独立完成一组${subject}当前章节的典型问题，并解释方法选择与关键步骤。`, depth: 'deep' },
+        { id: 'course-check', title: '能稳定完成一次综合检验', description: '面对题目变化仍能分析、作答并检查错误。', success: `能够完成一次${subject}当前阶段的综合检验，定位错误并说明改进方法。`, depth: 'mastery' },
+      ];
+    }
+    if (direction.id === 'subject-gap') {
+      return [
+        { id: 'gap-locate', title: '能找到自己错在哪里', description: '区分概念不清、方法不熟和粗心等不同原因。', success: `能够分析三次${subject}相关错误，定位知识、方法或执行层面的主要原因。`, depth: 'overview' },
+        { id: 'gap-practice', title: '能解决这一类问题', description: '补足必要知识，并形成稳定的问题处理步骤。', success: `能够独立解决一组围绕${subject}当前薄弱点的新问题，并解释每一步依据。`, depth: 'deep' },
+        { id: 'gap-transfer', title: '题目变化后仍然会做', description: '不依赖原题记忆，能把方法迁移到新形式。', success: `能够把补强后的${subject}知识或方法迁移到一个新形式的问题，并说明变化在哪里。`, depth: 'mastery' },
+      ];
+    }
+    return [
+      { id: 'framework-connect', title: '能说清知识之间的关系', description: '知道章节不是孤立的，前后概念怎样连接。', success: `能够画出${subject}核心知识之间的关系，并解释三条关键连接。`, depth: 'overview' },
+      { id: 'framework-choose', title: '能为问题选择合适方法', description: '先判断结构，再决定使用哪个知识或工具。', success: `能够针对三类${subject}典型问题选择合适方法，并说明判断依据。`, depth: 'deep' },
+      { id: 'framework-reason', title: '能解决跨章节综合问题', description: '组合多个知识点，完整表达分析过程。', success: `能够独立解决一个${subject}跨章节问题，清楚表达推理链并检查边界条件。`, depth: 'mastery' },
+    ];
+  }
+  if (/投资|金融|研究员|分析师|基金|证券/.test(identity)) {
+    if (direction.id === 'industry-map') {
+      return [
+        { id: 'explain-landscape', title: '能讲清行业怎么运转', description: '说清参与者、价值流和关键变化。', success: `能够画出${subject}的主要参与者与价值流，并讲清它们怎样相互影响。`, depth: 'overview' },
+        { id: 'spot-signals', title: '能找到值得研究的线索', description: '从变化中识别机会，同时知道还缺什么证据。', success: `能够指出${subject}中两个值得继续验证的机会方向，并列出结论成立所需的证据。`, depth: 'deep' },
+        { id: 'write-industry-note', title: '能完成一份行业研究提纲', description: '把格局、变量、风险和待验证问题组织起来。', success: `能够独立完成一份${subject}行业研究提纲，明确核心判断、证据缺口与主要风险。`, depth: 'mastery' },
+      ];
+    }
+    if (direction.id === 'company-reading') {
+      return [
+        { id: 'read-material', title: '能读懂一份产品材料', description: '区分技术事实、产品定位和宣传表达。', success: `能够读懂一份${subject}相关产品材料，标出关键指标、适用场景和仍需核实的说法。`, depth: 'overview' },
+        { id: 'compare-companies', title: '能比较两家公司', description: '找到差异，并说明判断依赖什么证据。', success: direction.success, depth: 'deep' },
+        { id: 'company-thesis', title: '能形成公司研究提纲', description: '把产品、竞争力、商业模式与风险连起来。', success: `能够围绕${subject}完成一份公司研究提纲，给出竞争力判断、证据依据与反例条件。`, depth: 'mastery' },
+      ];
+    }
+    return [
+      { id: 'use-checklist', title: '能使用一套研究清单', description: '面对新公司时知道该看什么、先问什么。', success: `能够使用一套结构化清单分析一个${subject}相关对象，并标出信息缺口。`, depth: 'overview' },
+      { id: 'make-judgment', title: '能形成有依据的判断', description: '结论、证据和风险能够相互对应。', success: direction.success, depth: 'deep' },
+      { id: 'transfer-framework', title: '能把框架迁移到新对象', description: '换一家公司或细分领域仍能独立分析。', success: `能够把${subject}研究框架迁移到一个新对象，解释调整了哪些判断维度及原因。`, depth: 'mastery' },
+    ];
+  }
+  if (/教师|老师|教育|讲师|学生|研究生|本科|学校/.test(identity)) {
+    if (direction.id === 'field-map') {
+      return [
+        { id: 'explain-clearly', title: '能向别人讲清核心机制', description: '不靠术语堆砌，也能回答“为什么”。', success: `能够向同学或学习者讲清${subject}的核心机制，并回答一个常见追问。`, depth: 'overview' },
+        { id: 'spot-misconception', title: '能识别常见误解', description: '知道哪里最容易懂错，以及错在哪里。', success: `能够识别关于${subject}的三个常见误解，并用机制或例子解释为什么不成立。`, depth: 'deep' },
+        { id: 'decide-next-study', title: '能判断下一步是否深入', description: '知道这个领域的核心问题、价值和进入门槛。', success: `能够说明${subject}值得继续深入的两个方向、所需基础和自己的下一步选择。`, depth: 'overview' },
+      ];
+    }
+    if (direction.id === 'teaching-frame') {
+      return [
+        { id: 'organize-explanation', title: '能组织一段清楚的讲解', description: '有顺序、有例子，也有明确边界。', success: `能够围绕${subject}完成一段结构清楚的讲解，包含机制、例子和一个边界。`, depth: 'overview' },
+        { id: 'teach-and-check', title: '能讲，也能检查是否听懂', description: '用问题识别表面记忆和真实理解。', success: direction.success, depth: 'deep' },
+        { id: 'design-mini-lesson', title: '能设计一节可用的小课', description: '目标、讲解、活动和验证彼此一致。', success: `能够设计一节关于${subject}的小课，并说明每个活动怎样服务学习目标。`, depth: 'mastery' },
+      ];
+    }
+    return [
+      { id: 'frame-question', title: '能提出一个有边界的问题', description: '问题不空泛，也知道它为什么值得回答。', success: `能够围绕${subject}提出一个边界清楚的问题，并说明它的研究或课程价值。`, depth: 'overview' },
+      { id: 'evaluate-evidence', title: '能判断证据是否支持结论', description: '区分观点、相关性和真正有力的证据。', success: direction.success, depth: 'deep' },
+      { id: 'design-inquiry', title: '能形成研究或课程方案', description: '问题、材料、方法和判断标准互相对应。', success: `能够围绕${subject}形成一份研究或课程方案，并说明需要的证据与判断标准。`, depth: 'mastery' },
+    ];
+  }
+  if (/开发|工程|程序|技术|架构|数据|算法|产品经理|设计师/.test(identity)) {
+    if (direction.id === 'technical-map') {
+      return [
+        { id: 'read-system', title: '能看懂系统由什么组成', description: '说清组件、数据流和彼此关系。', success: `能够画出${subject}的最小系统结构，并解释关键组件为什么这样协作。`, depth: 'overview' },
+        { id: 'explain-mechanism', title: '能解释关键机制为什么有效', description: '不只知道怎么用，还知道结果怎样产生。', success: `能够解释${subject}的关键机制、可观察结果以及一个失效条件。`, depth: 'deep' },
+        { id: 'judge-fit', title: '能判断它是否适合当前场景', description: '把能力边界和真实约束放在一起比较。', success: `能够根据一个真实约束判断${subject}是否适用，并说明替代方案与验证方法。`, depth: 'deep' },
+      ];
+    }
+    if (direction.id === 'build-something') {
+      return [
+        { id: 'follow-example', title: '能完成一个基础例子', description: '先跑通完整链路，理解每一步在做什么。', success: `能够完成一个${subject}基础例子，并解释关键步骤与输入输出。`, depth: 'overview' },
+        { id: 'build-minimum', title: '能独立做出最小实现', description: '跑得起来，也知道怎样验证是否有效。', success: `能够使用${subject}完成一个最小实现，记录验证结果，并解释一个失败边界。`, depth: 'deep' },
+        { id: 'debug-and-extend', title: '能定位问题并继续扩展', description: '面对变化和失败，不需要重新照抄教程。', success: `能够诊断一个${subject}实现中的问题，完成修复，并把方案扩展到一个新需求。`, depth: 'mastery' },
+      ];
+    }
+    return [
+      { id: 'compare-solutions', title: '能比较两个候选方案', description: '让差异回到约束、成本和风险。', success: `能够针对一个真实约束比较两个${subject}相关方案，并说明关键取舍。`, depth: 'overview' },
+      { id: 'choose-architecture', title: '能给出可验证的技术选择', description: '选择、验证计划和回退条件都说得清。', success: direction.success, depth: 'deep' },
+      { id: 'transfer-judgment', title: '能把判断迁移到新场景', description: '约束变化后，知道哪些结论要重新评估。', success: `能够把${subject}的选型方法迁移到一个新场景，解释约束变化怎样影响结论。`, depth: 'mastery' },
+    ];
+  }
+  if (direction.id === 'understand') {
+    return [
+      { id: 'explain', title: '能用自己的话讲清楚', description: '抓住核心机制，而不是只记住几个名词。', success: `能够用自己的话讲清${subject}解决什么问题、怎样工作以及一个重要边界。`, depth: 'overview' },
+      { id: 'recognize', title: '能识别真实例子与常见误解', description: '遇到案例时知道它属于什么、又不属于什么。', success: `能够判断三个${subject}相关案例是否成立，并解释一个常见误解。`, depth: 'deep' },
+      { id: 'decide-depth', title: '能决定是否值得继续深入', description: '知道价值、限制和下一阶段需要投入什么。', success: `能够说明${subject}的价值、主要限制与继续深入所需的基础，并做出下一步选择。`, depth: 'overview' },
+    ];
+  }
+  if (direction.id === 'solve') {
+    return [
+      { id: 'analyze-problem', title: '能把问题分析清楚', description: '知道关键条件、目标和限制分别是什么。', success: `能够把一个${subject}相关问题拆成目标、条件、限制和验证标准。`, depth: 'overview' },
+      { id: 'choose-method', title: '能选择合适的方法', description: '比较可选方案，并说明为什么这样选。', success: direction.success, depth: 'deep' },
+      { id: 'complete-solution', title: '能完成并验证一个解决方案', description: '结果可检查，也知道失败后怎样调整。', success: `能够使用「${subject}」完成一个真实问题的解决方案，验证结果并分析一个失败边界。`, depth: 'mastery' },
+    ];
+  }
+  return [
+    { id: 'compare', title: '能比较不同做法', description: '知道差异来自哪里，不能只凭熟悉程度选择。', success: `能够比较三种${subject}相关做法，说明各自适用条件与主要代价。`, depth: 'overview' },
+    { id: 'handle-boundary', title: '能处理变化和边界', description: '条件变化后，知道原来的做法为什么可能失效。', success: direction.success, depth: 'deep' },
+    { id: 'transfer', title: '能迁移到一个新场景', description: '不靠照抄，也能重新判断并完成任务。', success: `能够把${subject}相关能力迁移到一个新场景，说明调整依据并验证结果。`, depth: 'mastery' },
+  ];
+}
+
+function SeriesCreationPage({
+  shelf,
   profile,
-  submit,
+  onCreate,
   onCancel,
 }: {
-  shelfId: string;
+  shelf: Shelf;
   profile: LearningProfile;
-  submit: (body: object, idempotencyKey: string) => Promise<void>;
+  onCreate: (body: object, idempotencyKey: string) => Promise<void>;
   onCancel: () => void;
 }) {
-  const depthOptions = [
-    { value: 'overview', label: '快速了解', description: '建立基本认识，抓住核心概念' },
-    { value: 'deep', label: '深入理解', description: '理解原理、边界和典型应用' },
-    { value: 'mastery', label: '掌握运用', description: '能够独立迁移，并通过复习巩固' },
-  ];
+  const [step, setStep] = useState<'intent' | 'clarify' | 'confirm' | 'map'>('intent');
   const [topic, setTopic] = useState('');
-  const [background, setBackground] = useState(profile.profession);
-  const [experience, setExperience] = useState(profile.experience || '暂无直接经验，希望从当前基础开始建立理解。');
-  const [purpose, setPurpose] = useState(profile.purpose);
-  const [depth, setDepth] = useState('');
-  const [step, setStep] = useState<'details' | 'start' | 'map'>('details');
+  const [dailyCommitmentHours, setDailyCommitmentHours] = useState('1');
+  const [completionHorizonValue, setCompletionHorizonValue] = useState('2');
+  const [completionHorizonUnit, setCompletionHorizonUnit] = useState<'day' | 'week' | 'month'>('week');
+  const [experience, setExperience] = useState('');
+  const [interview, setInterview] = useState<LearningGoalInterview | null>(null);
+  const [goalDraft, setGoalDraft] = useState<NonNullable<LearningGoalInterview['brief']> | null>(null);
+  const [interviewAnswers, setInterviewAnswers] = useState<LearningGoalInterviewAnswer[]>([]);
+  const [interviewHistory, setInterviewHistory] = useState<{
+    interview: LearningGoalInterview;
+    answers: LearningGoalInterviewAnswer[];
+  }[]>([]);
+  const [selectedInterviewAnswer, setSelectedInterviewAnswer] = useState('');
+  const [customInterviewAnswer, setCustomInterviewAnswer] = useState('');
+  const [interviewBusy, setInterviewBusy] = useState(false);
   const [preview, setPreview] = useState<LearningStartPreview | null>(null);
   const [selectedConcepts, setSelectedConcepts] = useState<string[]>([]);
   const [learningPreferences, setLearningPreferences] = useState<LearningStartPreference[]>([]);
@@ -5005,19 +5692,118 @@ function PlanForm({
   const [submitting, setSubmitting] = useState(false);
   const [previewing, setPreviewing] = useState(false);
   const idempotencyKey = useRef(crypto.randomUUID());
-  const planDetails = { shelfId, topic, role: background, experience, purpose, depth, details: '' };
-  const continueToStart = (event: FormEvent) => {
-    event.preventDefault();
-    if (submitting || previewing) return;
-    if (!depth) {
-      setFormError('请选择目标深度');
+  const goalBrief = goalDraft || interview?.brief || null;
+  const currentStep = step === 'intent' ? 1 : step === 'clarify' ? 2 : 3;
+  const resolvedDimensionCount = interview?.dimensions.filter((item) => (
+    item.status === 'confirmed' || item.status === 'inferred' || item.status === 'immaterial'
+  )).length || 0;
+
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+  }, [step]);
+
+  const planDetails = {
+    shelfId: shelf.id,
+    topic: goalBrief?.topic || topic.trim(),
+    role: profile.profession,
+    experience: goalBrief?.startingPoint || experience.trim() || profile.experience || '尚未提供相关经验',
+    purpose: goalBrief?.purpose || '',
+    depth: goalBrief?.recommendedDepth || 'deep',
+    details: [
+      goalBrief?.successMarker ? `用户确认的完成标志：${goalBrief.successMarker}` : '',
+      goalBrief?.dailyCommitment ? `每天投入：${goalBrief.dailyCommitment}` : '',
+      goalBrief?.completionHorizon ? `完成周期：${goalBrief.completionHorizon}` : '',
+      goalBrief?.scope ? `本次优先范围：${goalBrief.scope}` : '',
+      goalBrief?.outOfScope ? `本次暂不覆盖：${goalBrief.outOfScope}` : '',
+    ].filter(Boolean).join('\n'),
+  };
+
+  const requestInterview = async (
+    answers: LearningGoalInterviewAnswer[],
+    previous?: LearningGoalInterview,
+  ) => {
+    setInterviewBusy(true);
+    setFormError('');
+    try {
+      const value = await api.learningGoalInterview({
+        shelfId: shelf.id,
+        topic: topic.trim(),
+        dailyCommitmentHours: Number(dailyCommitmentHours),
+        completionHorizonValue: Number(completionHorizonValue),
+        completionHorizonUnit,
+        relatedExperience: experience.trim(),
+        answers,
+      });
+      if (previous) {
+        setInterviewHistory((current) => [...current, { interview: previous, answers: interviewAnswers }]);
+      }
+      setInterviewAnswers(answers);
+      setInterview(value);
+      setSelectedInterviewAnswer('');
+      setCustomInterviewAnswer('');
+      if (value.status === 'ready' && value.brief) {
+        setGoalDraft({ ...value.brief });
+        setStep('confirm');
+      } else {
+        setStep('clarify');
+      }
+    } catch (reason) {
+      setFormError(reason instanceof Error ? reason.message : '暂时无法继续明确目标，请重试');
+    } finally {
+      setInterviewBusy(false);
+    }
+  };
+  const continueInterview = async () => {
+    if (interviewBusy) return;
+    const question = interview?.question;
+    if (!question) return;
+    const selectedOption = question.options.find((item) => item.id === selectedInterviewAnswer);
+    const answer = customInterviewAnswer.trim()
+      || (selectedOption
+        ? `${selectedOption.label}${selectedOption.description ? `：${selectedOption.description}` : ''}`
+        : '');
+    if (!answer) {
+      setFormError('请选择最接近的一项，或直接写下你的答案');
       return;
     }
+    await requestInterview([
+      ...interviewAnswers,
+      {
+        questionId: question.id,
+        dimension: question.dimension,
+        question: question.prompt,
+        answer,
+      },
+    ], interview);
+  };
+  const continueFromIntent = async (event: FormEvent) => {
+    event.preventDefault();
+    if (interviewBusy) return;
+    if (!topic.trim()) {
+      setFormError('先写下这次真正想了解或解决的内容');
+      return;
+    }
+    if (!dailyCommitmentHours.trim() || Number(dailyCommitmentHours) <= 0) {
+      setFormError('请输入每天可以投入的小时数');
+      return;
+    }
+    if (!completionHorizonValue.trim() || Number(completionHorizonValue) <= 0) {
+      setFormError('请先写明每天能投入多久，以及希望多久完成');
+      return;
+    }
+    setInterview(null);
+    setGoalDraft(null);
+    setInterviewAnswers([]);
+    setInterviewHistory([]);
     setFormError('');
-    setStep('start');
+    await requestInterview([]);
   };
   const submitPlan = async (mode: 'direct' | 'guided') => {
     if (submitting) return;
+    if (!goalBrief || [goalBrief.topic, goalBrief.purpose, goalBrief.successMarker, goalBrief.startingPoint, goalBrief.dailyCommitment, goalBrief.completionHorizon, goalBrief.scope, goalBrief.outOfScope].some((item) => !item.trim())) {
+      setFormError('先把目标确认稿补充完整，再创建系列');
+      return;
+    }
     if (mode === 'guided' && !selectedConcepts.length) {
       setFormError('至少点亮一个你愿意投入时间的方向');
       return;
@@ -5025,7 +5811,7 @@ function PlanForm({
     setFormError('');
     setSubmitting(true);
     try {
-      await submit(
+      await onCreate(
         mode === 'guided' && preview
           ? {
               ...planDetails,
@@ -5046,6 +5832,10 @@ function PlanForm({
   };
   const openKnowledgeMap = async () => {
     if (previewing) return;
+    if (!goalBrief || [goalBrief.topic, goalBrief.purpose, goalBrief.successMarker, goalBrief.startingPoint, goalBrief.dailyCommitment, goalBrief.completionHorizon, goalBrief.scope, goalBrief.outOfScope].some((item) => !item.trim())) {
+      setFormError('先把目标确认稿补充完整，再选择重点');
+      return;
+    }
     setPreviewing(true);
     setFormError('');
     try {
@@ -5060,177 +5850,382 @@ function PlanForm({
       setPreviewing(false);
     }
   };
-  const returnToDetails = () => {
-    idempotencyKey.current = crypto.randomUUID();
-    setPreview(null);
-    setSelectedConcepts([]);
-    setLearningPreferences([]);
-    setFormError('');
-    setStep('details');
-  };
-
-  if (step === 'start') {
-    return (
-      <section className="learning-start-flow" id="create-series-form" aria-labelledby="learning-start-title">
-        <header className="learning-start-heading">
-          <div>
-            <p className="eyebrow">最后一步</p>
-            <h2 id="learning-start-title">这次想怎么开始？</h2>
-            <p>课程结构不变，只决定哪些内容多投入，哪些内容先轻一点。</p>
-          </div>
-          <span className="learning-start-topic">{topic}</span>
-        </header>
-        <div className="learning-start-options">
-          <button
-            type="button"
-            disabled={submitting || previewing}
-            onClick={() => void submitPlan('direct')}
-          >
-            <span className="learning-start-option-number">01</span>
-            <small>直接开始</small>
-            <b>让系统从零安排</b>
-            <p>按你的背景和目标生成完整路线，适合还不确定重点的时候。</p>
-            <i aria-hidden="true">→</i>
-          </button>
-          <button
-            type="button"
-            className="featured"
-            disabled={submitting || previewing}
-            onClick={() => void openKnowledgeMap()}
-          >
-            <span className="learning-start-option-number">02</span>
-            <small>先挑重点</small>
-            <b>点亮想学的方向</b>
-            <p>从知识关系中凭直觉点选。没点亮的不会消失，只会降低优先级。</p>
-            <i aria-hidden="true">↗</i>
-          </button>
-        </div>
-        {formError && <p className="plan-form-error" role="alert">{formError}</p>}
-        <footer className="learning-start-footer">
-          <button type="button" className="quiet-button" disabled={submitting || previewing} onClick={returnToDetails}>← 修改学习目标</button>
-          <span>{submitting ? '正在生成学习路线…' : previewing ? '正在展开知识关系…' : '之后每章仍可以选择学习、挑战或暂时略过'}</span>
-        </footer>
-      </section>
-    );
-  }
-
-  if (step === 'map' && preview) {
-    const ready = preview.availability === 'ready' && preview.nodes.length > 0;
-    return (
-      <section className="learning-start-flow knowledge-interest-step" id="create-series-form" aria-labelledby="knowledge-interest-title">
-        <header className="learning-start-heading">
-          <div>
-            <p className="eyebrow">凭直觉选择</p>
-            <h2 id="knowledge-interest-title">点亮你真正关心的内容</h2>
-            <p>{preview.message}</p>
-          </div>
-          <span className="knowledge-selection-count">已点亮 <b>{selectedConcepts.length}</b></span>
-        </header>
-        {ready ? (
-          <KnowledgeInterestGraph
-            preview={preview}
-            selected={selectedConcepts}
-            onToggle={(conceptId) => {
-              setSelectedConcepts((current) => (
-                current.includes(conceptId)
-                  ? current.filter((item) => item !== conceptId)
-                  : [...current, conceptId]
-              ));
-              setFormError('');
-            }}
-          />
-        ) : (
-          <div className="knowledge-interest-empty">
-            <span aria-hidden="true">◌</span>
-            <h3>这个方向暂时没有可选择的知识关系</h3>
-            <p>可以先直接开始，进入每一章时仍然能学习、挑战或略过。</p>
-          </div>
-        )}
-        {ready && (
-          <fieldset className="learning-preference-picks">
-            <legend>再选一两个学习偏好 <small>可选</small></legend>
-            {([
-              ['practical_application', '实际应用'],
-              ['understand_principles', '理解原理'],
-              ['case_based', '案例带入'],
-              ['practice_heavy', '多做练习'],
-            ] as [LearningStartPreference, string][]).map(([value, label]) => {
-              const selected = learningPreferences.includes(value);
-              return (
-                <button
-                  type="button"
-                  key={value}
-                  className={selected ? 'selected' : ''}
-                  aria-pressed={selected}
-                  onClick={() => setLearningPreferences((current) => {
-                    if (selected) return current.filter((item) => item !== value);
-                    return current.length < 2 ? [...current, value] : current;
-                  })}
-                >
-                  <span aria-hidden="true">{selected ? '●' : '○'}</span>{label}
-                </button>
-              );
-            })}
-          </fieldset>
-        )}
-        {formError && <p className="plan-form-error" role="alert">{formError}</p>}
-        <footer className="learning-start-footer">
-          <button type="button" className="quiet-button" disabled={submitting} onClick={() => { setStep('start'); setFormError(''); }}>← 换一种开始方式</button>
-          <button
-            type="button"
-            className="primary-button"
-            disabled={submitting}
-            onClick={() => void submitPlan(ready ? 'guided' : 'direct')}
-          >
-            {submitting ? '正在生成学习路线…' : ready ? '按这些重点开始 →' : '直接开始 →'}
-          </button>
-        </footer>
-      </section>
-    );
-  }
 
   return (
-    <form className="plan-form" id="create-series-form" onSubmit={continueToStart}>
-      <label>
-        学习内容
-        <input required disabled={submitting} value={topic} onChange={(event) => setTopic(event.target.value)} placeholder="输入你想学习的内容" />
-      </label>
-      <label>
-        你的学习背景
-        <input required disabled={submitting} value={background} onChange={(event) => setBackground(event.target.value)} placeholder="输入你的专业、身份或当前背景" />
-      </label>
-      <label>
-        相关经验
-        <textarea required disabled={submitting} value={experience} onChange={(event) => setExperience(event.target.value)} placeholder="描述你已经了解或实践过的内容" />
-      </label>
-      <label>
-        学习目的（可选）
-        <textarea disabled={submitting} value={purpose} onChange={(event) => setPurpose(event.target.value)} placeholder="描述你希望解决的问题或达到的目标" />
-      </label>
-      <fieldset disabled={submitting} aria-describedby={formError ? 'plan-depth-error' : undefined}>
-        <legend>目标深度</legend>
-        {depthOptions.map(({ value, label, description }) => (
-          <button
-            type="button"
-            className={depth === value ? 'selected' : ''}
-            aria-pressed={depth === value}
-            onClick={() => {
-              setDepth(value);
-              setFormError('');
-            }}
-            key={value}
-          >
-            <span>{label}</span>
-            <small>{description}</small>
-          </button>
-        ))}
-        {formError && <p className="plan-form-error" id="plan-depth-error" role="alert">{formError}</p>}
-      </fieldset>
-      <div className="plan-form-actions">
-        <button type="button" className="quiet-button" disabled={submitting} onClick={onCancel}>取消</button>
-        <button className="primary-button" disabled={submitting}>继续选择开始方式 →</button>
-      </div>
-    </form>
+    <section className={`series-creation-page series-creation-${step}`} aria-labelledby="series-creation-title">
+      <header className="series-creation-header">
+        <button type="button" className="shelf-back-button" onClick={onCancel}>← 返回{shelf.name}书架</button>
+        <div className="series-creation-heading">
+          <div>
+            <p className="eyebrow">创建学习系列</p>
+            <h1 id="series-creation-title">这次，<em>想学会什么？</em></h1>
+            <p>先写下主题和可投入时间，再一起把目标说清。</p>
+          </div>
+        </div>
+        <nav className="series-creation-steps" aria-label="创建系列进度">
+          {[
+            ['01', '主题与时间'],
+            ['02', '说清目标'],
+            ['03', '确认开始'],
+          ].map(([number, label], index) => (
+            <span
+              className={currentStep === index + 1 ? 'active current' : currentStep > index + 1 ? 'complete' : ''}
+              key={number}
+            >
+              <b>{number}</b>{label}
+            </span>
+          ))}
+        </nav>
+      </header>
+
+      {step === 'intent' && (
+        <form className="series-intent-sheet" onSubmit={continueFromIntent}>
+          <div className="series-goal-inscription">
+            <span>学习主题</span>
+            <label>
+              <span className="sr-only">想学习的内容</span>
+              <input
+                autoFocus
+                required
+                value={topic}
+                onChange={(event) => { setTopic(event.target.value); setFormError(''); }}
+              />
+            </label>
+          </div>
+          <div className="series-schedule-fields">
+            <label>
+              <span>每天能投入多久？</span>
+              <span className="series-schedule-control">
+                <input
+                  required
+                  type="number"
+                  min="0.25"
+                  max="24"
+                  step="0.25"
+                  inputMode="decimal"
+                  aria-label="每天投入小时数"
+                  value={dailyCommitmentHours}
+                  onChange={(event) => { setDailyCommitmentHours(event.target.value); setFormError(''); }}
+                />
+                <b>小时</b>
+              </span>
+            </label>
+            <label>
+              <span>希望多久完成？</span>
+              <span className="series-schedule-control series-schedule-control-horizon">
+                <input
+                  required
+                  type="number"
+                  min="1"
+                  max="365"
+                  step="1"
+                  inputMode="numeric"
+                  aria-label="完成周期数值"
+                  value={completionHorizonValue}
+                  onChange={(event) => { setCompletionHorizonValue(event.target.value); setFormError(''); }}
+                />
+                <select
+                  aria-label="完成周期单位"
+                  value={completionHorizonUnit}
+                  onChange={(event) => { setCompletionHorizonUnit(event.target.value as 'day' | 'week' | 'month'); setFormError(''); }}
+                >
+                  <option value="day">天</option>
+                  <option value="week">周</option>
+                  <option value="month">月</option>
+                </select>
+              </span>
+            </label>
+          </div>
+          <div className="series-experience-field">
+            <div>
+              <span>已经知道什么？ <small>可选</small></span>
+              <small>写下接触过的内容，或者最容易卡住的地方。</small>
+            </div>
+            <textarea
+              value={experience}
+              onChange={(event) => { setExperience(event.target.value); setFormError(''); }}
+            />
+          </div>
+          {formError && <p className="series-creation-error" role="alert">{formError}</p>}
+          <footer className="series-creation-actions">
+            <button className="primary-button" disabled={interviewBusy}>{interviewBusy ? '正在整理下一步…' : '下一步：说清目标 →'}</button>
+          </footer>
+        </form>
+      )}
+
+      {step === 'clarify' && interview?.question && (
+        <div className={`series-interview-shell ${interviewBusy ? 'is-busy' : ''}`} aria-live="polite" aria-busy={interviewBusy}>
+          <aside className="series-interview-context">
+            <span>学习目标 · 已明确 {resolvedDimensionCount}/{interview.dimensions.length}</span>
+            <strong>{topic}</strong>
+            <div className="series-interview-dimension-groups">
+              {([
+                { title: '目标', keys: ['purpose', 'success_marker'] },
+                { title: '条件', keys: ['starting_point', 'daily_commitment', 'completion_horizon'] },
+                { title: '边界', keys: ['learning_object', 'scope'] },
+              ] as const).map((group) => (
+                <section key={group.title}>
+                  <h3>{group.title}</h3>
+                  <ol className="series-interview-dimensions">
+                    {group.keys.map((key) => {
+                      const item = interview.dimensions.find((dimension) => dimension.key === key);
+                      if (!item) return null;
+                      const labels = {
+                        learning_object: '学习对象',
+                        purpose: '实际目的',
+                        success_marker: '完成标志',
+                        starting_point: '当前起点',
+                        daily_commitment: '每天投入',
+                        completion_horizon: '完成周期',
+                        scope: '范围取舍',
+                      };
+                      const resolved = item.status === 'confirmed' || item.status === 'inferred' || item.status === 'immaterial';
+                      const active = interview.question?.dimension === item.key;
+                      return (
+                        <li className={`${resolved ? 'resolved' : item.status === 'conflict' ? 'conflict' : ''} ${active ? 'active' : ''}`} key={item.key}>
+                          <i aria-hidden="true" />
+                          <b>{labels[item.key]}</b>
+                        </li>
+                      );
+                    })}
+                  </ol>
+                </section>
+              ))}
+            </div>
+            {interview.generationMode === 'demo' && <p className="series-interview-demo">当前是 Demo 访谈，答案由本地规则生成。</p>}
+          </aside>
+          <section className="series-interview-question" key={interview.question.id}>
+            <header>
+              <span>第 {interviewAnswers.length + 1} 问</span>
+              <small>已明确 {resolvedDimensionCount}/{interview.dimensions.length}</small>
+            </header>
+            <p className="eyebrow">继续把目标说清</p>
+            <h2>{interview.question.prompt}</h2>
+            <p>{interview.question.helper}</p>
+            <div className="series-interview-options">
+              {interview.question.options.map((option, index) => (
+                <button
+                  type="button"
+                  className={`series-interview-choice ${selectedInterviewAnswer === option.id ? 'selected' : ''}`}
+                  aria-pressed={selectedInterviewAnswer === option.id}
+                  disabled={interviewBusy}
+                  onClick={() => { setSelectedInterviewAnswer(option.id); setCustomInterviewAnswer(''); setFormError(''); }}
+                  key={option.id}
+                >
+                  <span>{String.fromCharCode(65 + index)}</span>
+                  <b>{option.label}</b>
+                  <small>{option.description}</small>
+                  <i aria-hidden="true">→</i>
+                </button>
+              ))}
+              <label className={`series-interview-choice series-interview-custom-answer ${customInterviewAnswer.trim() ? 'selected' : ''}`}>
+                <span>{String.fromCharCode(65 + interview.question.options.length)}</span>
+                <b>我自己说</b>
+                <input
+                  type="text"
+                  value={customInterviewAnswer}
+                  disabled={interviewBusy}
+                  onChange={(event) => {
+                    setCustomInterviewAnswer(event.target.value);
+                    if (event.target.value) setSelectedInterviewAnswer('');
+                    setFormError('');
+                  }}
+                  placeholder="直接写下你的真实情况"
+                />
+              </label>
+            </div>
+            {formError && <p className="series-creation-error" role="alert">{formError}</p>}
+            <footer>
+              <button
+                type="button"
+                className="quiet-button"
+                disabled={interviewBusy}
+                onClick={() => {
+                  const previous = interviewHistory[interviewHistory.length - 1];
+                  if (previous) {
+                    setInterview(previous.interview);
+                    setInterviewAnswers(previous.answers);
+                    setInterviewHistory((current) => current.slice(0, -1));
+                    setSelectedInterviewAnswer('');
+                    setCustomInterviewAnswer('');
+                  } else {
+                    setStep('intent');
+                  }
+                  setFormError('');
+                }}
+              >
+                ← {interviewHistory.length ? '回到上一问' : '修改主题与经验'}
+              </button>
+              <div>
+                <button
+                  type="button"
+                  className="primary-button"
+                  disabled={interviewBusy || (!selectedInterviewAnswer && !customInterviewAnswer.trim())}
+                  onClick={() => void continueInterview()}
+                >
+                  {interviewBusy ? '正在整理下一问…' : '继续 →'}
+                </button>
+              </div>
+            </footer>
+          </section>
+        </div>
+      )}
+
+      {step === 'confirm' && goalBrief && (
+        <div className="series-confirm-layout">
+          <article className="series-goal-brief series-goal-editor">
+            <header>
+              <span>确认学习目标</span>
+            </header>
+            <section className="series-goal-editor-section">
+              <header><b>目标</b><span>学什么、为什么、做到什么</span></header>
+              <div className="series-goal-editor-grid series-goal-editor-grid-objective">
+                <label>
+                  <span>学习对象</span>
+                  <input
+                    value={goalBrief.topic}
+                    onChange={(event) => { setGoalDraft({ ...goalBrief, topic: event.target.value }); setFormError(''); }}
+                    aria-label="学习对象"
+                  />
+                </label>
+                {([
+                  ['purpose', '实际目的'],
+                  ['successMarker', '完成的标志'],
+                ] as const).map(([field, label]) => (
+                  <label key={field}>
+                    <span>{label}</span>
+                    <textarea
+                      value={goalBrief[field]}
+                      onChange={(event) => { setGoalDraft({ ...goalBrief, [field]: event.target.value }); setFormError(''); }}
+                      aria-label={label}
+                      rows={3}
+                    />
+                  </label>
+                ))}
+              </div>
+            </section>
+            <section className="series-goal-editor-section">
+              <header><b>条件</b><span>起点与学习节奏</span></header>
+              <div className="series-goal-editor-grid series-goal-editor-grid-condition">
+                {([
+                  ['startingPoint', '从哪里开始'],
+                  ['dailyCommitment', '每天投入'],
+                  ['completionHorizon', '完成周期'],
+                ] as const).map(([field, label]) => (
+                  <label key={field}>
+                    <span>{label}</span>
+                    <textarea
+                      value={goalBrief[field]}
+                      onChange={(event) => { setGoalDraft({ ...goalBrief, [field]: event.target.value }); setFormError(''); }}
+                      aria-label={label}
+                      rows={3}
+                    />
+                  </label>
+                ))}
+              </div>
+            </section>
+            <section className="series-goal-editor-section">
+              <header><b>边界</b><span>这次覆盖什么、暂时放下什么</span></header>
+              <div className="series-goal-editor-grid">
+                {([
+                  ['scope', '本次范围'],
+                  ['outOfScope', '这次先不学'],
+                ] as const).map(([field, label]) => (
+                  <label key={field}>
+                    <span>{label}</span>
+                    <textarea
+                      value={goalBrief[field]}
+                      onChange={(event) => { setGoalDraft({ ...goalBrief, [field]: event.target.value }); setFormError(''); }}
+                      aria-label={label}
+                      rows={3}
+                    />
+                  </label>
+                ))}
+              </div>
+            </section>
+            {formError && <p className="series-creation-error" role="alert">{formError}</p>}
+            <footer className="series-confirm-actions">
+              <div>
+                <button type="button" className="quiet-button" disabled={submitting || previewing} onClick={() => void openKnowledgeMap()}>
+                  {previewing ? '正在打开学习重点…' : '选择学习重点'}
+                </button>
+                <button type="button" className="primary-button" disabled={submitting || previewing} onClick={() => void submitPlan('direct')}>
+                  {submitting ? '正在创建学习系列…' : '确认目标，创建系列 →'}
+                </button>
+              </div>
+            </footer>
+          </article>
+        </div>
+      )}
+
+      {step === 'map' && preview && (() => {
+        const ready = preview.availability === 'ready' && preview.nodes.length > 0;
+        return (
+          <section className="learning-start-flow knowledge-interest-step series-creation-map" aria-labelledby="knowledge-interest-title">
+            <header className="learning-start-heading">
+              <div>
+                <p className="eyebrow">目标已经确认</p>
+                <h2 id="knowledge-interest-title">再点亮你真正关心的内容</h2>
+                <p>{preview.message}</p>
+              </div>
+              <span className="knowledge-selection-count">已点亮 <b>{selectedConcepts.length}</b></span>
+            </header>
+            {ready ? (
+              <KnowledgeInterestGraph
+                preview={preview}
+                selected={selectedConcepts}
+                onToggle={(conceptId) => {
+                  setSelectedConcepts((current) => current.includes(conceptId)
+                    ? current.filter((item) => item !== conceptId)
+                    : [...current, conceptId]);
+                  setFormError('');
+                }}
+              />
+            ) : (
+              <div className="knowledge-interest-empty">
+                <span aria-hidden="true">◌</span>
+                <h3>这个方向暂时没有可选择的知识关系</h3>
+                <p>可以直接创建系列，进入每一章时仍然能学习、挑战或略过。</p>
+              </div>
+            )}
+            {ready && (
+              <fieldset className="learning-preference-picks">
+                <legend>再选一两个学习偏好 <small>可选</small></legend>
+                {([
+                  ['practical_application', '实际应用'],
+                  ['understand_principles', '理解原理'],
+                  ['case_based', '案例带入'],
+                  ['practice_heavy', '多做练习'],
+                ] as [LearningStartPreference, string][]).map(([value, label]) => {
+                  const selected = learningPreferences.includes(value);
+                  return (
+                    <button
+                      type="button"
+                      key={value}
+                      className={selected ? 'selected' : ''}
+                      aria-pressed={selected}
+                      onClick={() => setLearningPreferences((current) => {
+                        if (selected) return current.filter((item) => item !== value);
+                        return current.length < 2 ? [...current, value] : current;
+                      })}
+                    >
+                      <span aria-hidden="true">{selected ? '●' : '○'}</span>{label}
+                    </button>
+                  );
+                })}
+              </fieldset>
+            )}
+            {formError && <p className="series-creation-error" role="alert">{formError}</p>}
+            <footer className="learning-start-footer">
+              <button type="button" className="quiet-button" disabled={submitting} onClick={() => { setStep('confirm'); setFormError(''); }}>← 返回目标确认</button>
+              <button type="button" className="primary-button" disabled={submitting} onClick={() => void submitPlan(ready ? 'guided' : 'direct')}>
+                {submitting ? '正在创建学习系列…' : ready ? '按这些重点创建系列 →' : '直接创建系列 →'}
+              </button>
+            </footer>
+          </section>
+        );
+      })()}
+    </section>
   );
 }
 
@@ -6037,7 +7032,7 @@ function LearningWorkspace({
         }}
       />
       <QaPanel
-        key={section?.id || 'empty'}
+        key={section?.content ? `${section.id}:${section.content.id}` : section?.id || 'empty'}
         section={section}
         dailyMode={dailyMode}
         hidden={effectiveQaHidden}
@@ -6907,11 +7902,19 @@ function ReaderPanel({
 }) {
   const [tab, setTab] = useState<ReaderTab>('content');
   const [selectionPopup, setSelectionPopup] = useState<SelectionPopup | null>(null);
+  const [annotations, setAnnotations] = useState<ReadingAnnotation[]>([]);
+  const [annotationsOpen, setAnnotationsOpen] = useState(false);
+  const [annotationComposer, setAnnotationComposer] = useState<AnnotationComposerDraft | null>(null);
+  const [annotationBusy, setAnnotationBusy] = useState(false);
+  const [annotationMessage, setAnnotationMessage] = useState('');
+  const [editingAnnotationId, setEditingAnnotationId] = useState('');
+  const [editingAnnotationBody, setEditingAnnotationBody] = useState('');
   const [regenerationConfirmOpen, setRegenerationConfirmOpen] = useState(false);
   const [regenerating, setRegenerating] = useState(false);
   const [regenerationStartedAt, setRegenerationStartedAt] = useState(0);
   const [regenerationClock, setRegenerationClock] = useState(Date.now());
   const [reviewTargetBlockId, setReviewTargetBlockId] = useState('');
+  const [readerHeaderCondensed, setReaderHeaderCondensed] = useState(false);
   const readerScrollRef = useRef<HTMLDivElement>(null);
   const tabScrollPositionsRef = useRef<Record<ReaderTab, number>>({
     content: 0,
@@ -6924,14 +7927,25 @@ function ReaderPanel({
     canClose: !regenerating,
     onRequestClose: () => setRegenerationConfirmOpen(false),
   });
+  const annotationsDialogRef = useModalFocus<HTMLElement>({
+    open: annotationsOpen,
+    canClose: !annotationBusy,
+    onRequestClose: () => setAnnotationsOpen(false),
+  });
 
   useEffect(() => {
     const initialTab = section?.status === 'completed' && section.note ? 'note' : 'content';
     setTab(initialTab);
     onTabChange(initialTab);
     setSelectionPopup(null);
+    setAnnotationsOpen(false);
+    setAnnotationComposer(null);
+    setAnnotationMessage('');
+    setEditingAnnotationId('');
+    setEditingAnnotationBody('');
     setRegenerationConfirmOpen(false);
     setReviewTargetBlockId('');
+    setReaderHeaderCondensed(false);
     tabScrollPositionsRef.current = { content: 0, quiz: 0, note: 0 };
     if (reviewHighlightTimerRef.current !== null) {
       window.clearTimeout(reviewHighlightTimerRef.current);
@@ -6939,6 +7953,67 @@ function ReaderPanel({
     }
     if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
   }, [section?.id, section?.content?.id]);
+
+  useEffect(() => {
+    let active = true;
+    if (!section?.content) {
+      setAnnotations([]);
+      return () => { active = false; };
+    }
+    api.annotations(section.id)
+      .then((result) => { if (active) setAnnotations(result.items); })
+      .catch((reason) => {
+        if (active) setAnnotationMessage(
+          reason instanceof Error ? reason.message : '暂时无法读取标注。',
+        );
+      });
+    return () => { active = false; };
+  }, [section?.id, section?.content?.id]);
+
+  useEffect(() => {
+    const registry = (CSS as unknown as {
+      highlights?: { set: (name: string, value: unknown) => void; delete: (name: string) => void };
+    }).highlights;
+    const HighlightConstructor = (window as unknown as {
+      Highlight?: new (...ranges: Range[]) => unknown;
+    }).Highlight;
+    if (!registry || !HighlightConstructor || tab !== 'content') return undefined;
+
+    const paint = () => {
+      const highlightRanges: Range[] = [];
+      const commentRanges: Range[] = [];
+      annotations.forEach((annotation) => {
+        if (!annotation.displayBlockId) return;
+        const block = Array.from(
+          readerScrollRef.current?.querySelectorAll<HTMLElement>('[data-block-id]') || [],
+        ).find((element) => element.dataset.blockId === annotation.displayBlockId);
+        const body = block?.querySelector<HTMLElement>('[data-annotation-body]');
+        if (!body) return;
+        const range = annotationRange(body, annotation.anchor);
+        if (!range) return;
+        (annotation.kind === 'comment' ? commentRanges : highlightRanges).push(range);
+      });
+      registry.delete('slow-reading-highlights');
+      registry.delete('slow-reading-comments');
+      if (highlightRanges.length) {
+        registry.set('slow-reading-highlights', new HighlightConstructor(...highlightRanges));
+      }
+      if (commentRanges.length) {
+        registry.set('slow-reading-comments', new HighlightConstructor(...commentRanges));
+      }
+    };
+    const frame = window.requestAnimationFrame(paint);
+    const observer = new MutationObserver(() => window.requestAnimationFrame(paint));
+    if (readerScrollRef.current) {
+      observer.observe(readerScrollRef.current, { childList: true, subtree: true });
+    }
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+      registry.delete('slow-reading-highlights');
+      registry.delete('slow-reading-comments');
+    };
+  }, [annotations, tab, section?.content?.id]);
 
   useEffect(() => () => {
     if (reviewHighlightTimerRef.current !== null) {
@@ -6970,7 +8045,9 @@ function ReaderPanel({
     setTab(nextTab);
     requestAnimationFrame(() => {
       if (readerScrollRef.current) {
-        readerScrollRef.current.scrollTop = tabScrollPositionsRef.current[nextTab];
+        const nextScrollTop = tabScrollPositionsRef.current[nextTab];
+        readerScrollRef.current.scrollTop = nextScrollTop;
+        setReaderHeaderCondensed(nextScrollTop > 28);
       }
     });
   };
@@ -7022,21 +8099,137 @@ function ReaderPanel({
       selection?.anchorNode instanceof Element
         ? selection.anchorNode
         : selection?.anchorNode?.parentElement;
+    const focusElement =
+      selection?.focusNode instanceof Element
+        ? selection.focusNode
+        : selection?.focusNode?.parentElement;
     const blockElement = anchorElement?.closest<HTMLElement>('[data-block-id]');
-    const text = selection?.toString().replace(/\s+/g, ' ').trim() || '';
+    const focusBlock = focusElement?.closest<HTMLElement>('[data-block-id]');
+    const annotationBody = anchorElement?.closest<HTMLElement>('[data-annotation-body]');
+    const focusBody = focusElement?.closest<HTMLElement>('[data-annotation-body]');
+    const rawText = selection?.toString() || '';
+    const text = rawText.replace(/\s+/g, ' ').trim();
 
-    if (!range || range.collapsed || !blockElement || text.length < 2) {
+    if (
+      !range || range.collapsed || !blockElement || blockElement !== focusBlock
+      || !annotationBody || annotationBody !== focusBody || text.length < 2
+    ) {
       setSelectionPopup(null);
       return;
     }
 
+    const exact = rawText.slice(0, 1200);
+    const before = document.createRange();
+    before.selectNodeContents(annotationBody);
+    before.setEnd(range.startContainer, range.startOffset);
+    const startOffset = before.toString().length;
+    const bodyText = annotationBody.textContent || '';
+    const endOffset = startOffset + exact.length;
     const rect = range.getBoundingClientRect();
     setSelectionPopup({
       text: text.slice(0, 600),
       blockId: blockElement.dataset.blockId || '',
+      contentVersionId: section?.content?.id || '',
+      anchor: {
+        exact,
+        prefix: bodyText.slice(Math.max(0, startOffset - 80), startOffset),
+        suffix: bodyText.slice(endOffset, endOffset + 80),
+        startOffset,
+        endOffset,
+      },
       top: Math.min(rect.bottom + 9, window.innerHeight - 48),
       left: Math.min(Math.max(rect.left + rect.width / 2, 54), window.innerWidth - 54),
     });
+  };
+
+  const clearNativeSelection = () => {
+    const currentSelection = window.getSelection();
+    if (typeof currentSelection?.removeAllRanges === 'function') {
+      currentSelection.removeAllRanges();
+    }
+  };
+
+  const reloadAnnotations = async () => {
+    if (!section?.content) return;
+    const result = await api.annotations(section.id);
+    setAnnotations(result.items);
+  };
+
+  const saveAnnotation = async (
+    kind: 'highlight' | 'comment',
+    selection: SelectionPopup,
+    body = '',
+  ) => {
+    if (!section?.content || annotationBusy) return;
+    setAnnotationBusy(true);
+    setAnnotationMessage('');
+    try {
+      await api.createAnnotation(section.id, {
+        contentVersionId: selection.contentVersionId,
+        blockId: selection.blockId,
+        kind,
+        anchor: selection.anchor,
+        body,
+        color: 'amber',
+      }, crypto.randomUUID());
+      await reloadAnnotations();
+      setAnnotationMessage(kind === 'comment' ? '批注已保存。' : '已高亮。');
+      setSelectionPopup(null);
+      setAnnotationComposer(null);
+      clearNativeSelection();
+    } catch (reason) {
+      setAnnotationMessage(reason instanceof Error ? reason.message : '标注没有保存成功。');
+    } finally {
+      setAnnotationBusy(false);
+    }
+  };
+
+  const updateAnnotation = async (annotationId: string) => {
+    if (!editingAnnotationBody.trim() || annotationBusy) return;
+    setAnnotationBusy(true);
+    setAnnotationMessage('');
+    try {
+      await api.updateAnnotation(annotationId, { body: editingAnnotationBody.trim() });
+      await reloadAnnotations();
+      setEditingAnnotationId('');
+      setEditingAnnotationBody('');
+      setAnnotationMessage('批注已更新。');
+    } catch (reason) {
+      setAnnotationMessage(reason instanceof Error ? reason.message : '批注没有更新成功。');
+    } finally {
+      setAnnotationBusy(false);
+    }
+  };
+
+  const deleteAnnotation = async (annotationId: string) => {
+    if (annotationBusy) return;
+    setAnnotationBusy(true);
+    setAnnotationMessage('');
+    try {
+      await api.deleteAnnotation(annotationId);
+      await reloadAnnotations();
+      setAnnotationMessage('标注已删除。');
+    } catch (reason) {
+      setAnnotationMessage(reason instanceof Error ? reason.message : '标注没有删除成功。');
+    } finally {
+      setAnnotationBusy(false);
+    }
+  };
+
+  const focusAnnotation = (annotation: ReadingAnnotation) => {
+    if (!annotation.displayBlockId) return;
+    switchTab('content');
+    onSelectBlock(annotation.displayBlockId);
+    setAnnotationsOpen(false);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const target = Array.from(
+        readerScrollRef.current?.querySelectorAll<HTMLElement>('[data-block-id]') || [],
+      ).find((element) => element.dataset.blockId === annotation.displayBlockId);
+      target?.scrollIntoView({
+        behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+        block: 'center',
+      });
+    }));
   };
 
   const activeGeneration =
@@ -7107,6 +8300,9 @@ function ReaderPanel({
         onReaderTypographyStepChange={onReaderTypographyStepChange}
         onRequestRegenerate={() => setRegenerationConfirmOpen(true)}
         onFeedback={onGlobalFeedback}
+        condensed={readerHeaderCondensed}
+        directoryOpen={!directoryHidden}
+        onToggleDirectory={onToggleDirectory}
       />
 
       <LessonReaderTabs
@@ -7126,12 +8322,18 @@ function ReaderPanel({
           ref={readerScrollRef}
           onMouseUp={captureTextSelection}
           onKeyUp={captureTextSelection}
-          onScroll={() => setSelectionPopup(null)}
+          onScroll={(event) => {
+            setSelectionPopup(null);
+            const condensed = event.currentTarget.scrollTop > 28;
+            setReaderHeaderCondensed((current) => current === condensed ? current : condensed);
+          }}
         >
           {tab === 'content' && (
             <LessonContent
               section={section}
               dailyMode={dailyMode}
+              annotations={annotations}
+              onOpenAnnotations={() => setAnnotationsOpen(true)}
               selectedBlockId={selectedBlockId}
               reviewTargetBlockId={reviewTargetBlockId}
               onGenerate={onGenerate}
@@ -7154,6 +8356,7 @@ function ReaderPanel({
               onFeedback={onGlobalFeedback}
               onSubmissionComplete={() => {
                 tabScrollPositionsRef.current.quiz = 0;
+                setReaderHeaderCondensed(false);
                 if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
               }}
             />
@@ -7223,23 +8426,132 @@ function ReaderPanel({
         </div>
       )}
       {selectionPopup && (
-        <button
-          className="selection-qa-button"
+        <div
+          className="selection-actions"
           style={{ top: selectionPopup.top, left: selectionPopup.left }}
           onMouseDown={(event) => event.preventDefault()}
-          onClick={() => {
-            onQuote({ text: selectionPopup.text, blockId: selectionPopup.blockId });
-            setSelectionPopup(null);
-            const currentSelection = window.getSelection();
-            if (typeof currentSelection?.removeAllRanges === 'function') {
-              currentSelection.removeAllRanges();
-            }
-          }}
         >
-          <span>?</span>
-          答疑
-        </button>
+          <button
+            className="selection-qa-button"
+            onClick={() => {
+              onQuote({ text: selectionPopup.text, blockId: selectionPopup.blockId });
+              setSelectionPopup(null);
+              clearNativeSelection();
+            }}
+          >
+            <span>?</span>
+            Ask AI
+          </button>
+          <span className="selection-actions-divider" aria-hidden="true" />
+          <button
+            className="selection-mark-button"
+            disabled={annotationBusy}
+            onClick={() => void saveAnnotation('highlight', selectionPopup)}
+          >
+            <i aria-hidden="true" />高亮
+          </button>
+          <button
+            className="selection-comment-button"
+            onClick={() => {
+              setAnnotationComposer({ selection: selectionPopup, body: '' });
+              setSelectionPopup(null);
+            }}
+          >
+            批注
+          </button>
+        </div>
       )}
+      {annotationComposer && (
+        <section
+          className="annotation-composer-popover"
+          style={{ top: Math.min(annotationComposer.selection.top, window.innerHeight - 230), left: annotationComposer.selection.left }}
+          aria-label="添加批注"
+        >
+          <header><b>写给自己的批注</b><button aria-label="关闭" onClick={() => setAnnotationComposer(null)}>×</button></header>
+          <blockquote>{annotationComposer.selection.text}</blockquote>
+          <textarea
+            autoFocus
+            maxLength={4000}
+            value={annotationComposer.body}
+            placeholder="记录你的理解、联想或提醒…"
+            onChange={(event) => setAnnotationComposer((current) => current ? { ...current, body: event.target.value } : current)}
+          />
+          <div>
+            <small>{annotationComposer.body.length}/4000</small>
+            <button
+              className="primary-button"
+              disabled={!annotationComposer.body.trim() || annotationBusy}
+              onClick={() => void saveAnnotation('comment', annotationComposer.selection, annotationComposer.body)}
+            >
+              {annotationBusy ? '保存中…' : '保存批注'}
+            </button>
+          </div>
+        </section>
+      )}
+      {annotationsOpen && (
+        <div className="annotation-drawer-backdrop" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setAnnotationsOpen(false);
+        }}>
+          <aside
+            ref={annotationsDialogRef}
+            className="annotation-drawer"
+            role="dialog"
+            aria-modal="true"
+            aria-label="我的标注"
+            tabIndex={-1}
+          >
+            <header>
+              <div><span>阅读标注</span><h2>我的标注</h2></div>
+              <button aria-label="关闭标注" onClick={() => setAnnotationsOpen(false)}>×</button>
+            </header>
+            <p className="annotation-drawer-intro">高亮和批注只记录你的阅读，不会发送给 AI，也不会改变掌握情况。</p>
+            {annotations.length === 0 ? (
+              <div className="annotation-empty"><i aria-hidden="true" /><b>还没有标注</b><p>在正文中选择文字，就可以高亮或写下批注。</p></div>
+            ) : (
+              <div className="annotation-list">
+                {annotations.map((annotation) => (
+                  <article className={`annotation-card is-${annotation.kind} is-${annotation.anchorStatus}`} key={annotation.id}>
+                    <header>
+                      <span>{annotation.kind === 'comment' ? '批注' : '高亮'}</span>
+                      <em>{annotation.anchorStatus === 'old_version'
+                        ? `正文旧版${annotation.contentVersion ? ` v${annotation.contentVersion}` : ''}`
+                        : annotation.anchorStatus === 'unchanged_in_current'
+                          ? '原文未变化'
+                          : '当前正文'}</em>
+                    </header>
+                    <button
+                      type="button"
+                      className="annotation-quote"
+                      disabled={!annotation.displayBlockId}
+                      onClick={() => focusAnnotation(annotation)}
+                    >“{annotation.anchor.exact.replace(/\s+/g, ' ').trim()}”</button>
+                    {annotation.kind === 'comment' && (
+                      editingAnnotationId === annotation.id ? (
+                        <div className="annotation-edit">
+                          <textarea value={editingAnnotationBody} maxLength={4000} onChange={(event) => setEditingAnnotationBody(event.target.value)} />
+                          <div><button onClick={() => setEditingAnnotationId('')}>取消</button><button disabled={annotationBusy || !editingAnnotationBody.trim()} onClick={() => void updateAnnotation(annotation.id)}>保存</button></div>
+                        </div>
+                      ) : <p>{annotation.body}</p>
+                    )}
+                    {annotation.anchorStatus === 'old_version' && <small>原文已经更新，这条记录仍保留在你当时阅读的版本。</small>}
+                    <footer>
+                      <time dateTime={annotation.updatedAt}>{new Date(annotation.updatedAt).toLocaleDateString('zh-CN')}</time>
+                      <div>
+                        {annotation.kind === 'comment' && editingAnnotationId !== annotation.id && (
+                          <button onClick={() => { setEditingAnnotationId(annotation.id); setEditingAnnotationBody(annotation.body); }}>编辑</button>
+                        )}
+                        <button disabled={annotationBusy} onClick={() => void deleteAnnotation(annotation.id)}>删除</button>
+                      </div>
+                    </footer>
+                  </article>
+                ))}
+              </div>
+            )}
+            {annotationMessage && <p className="annotation-drawer-message" role="status">{annotationMessage}</p>}
+          </aside>
+        </div>
+      )}
+      {annotationMessage && !annotationsOpen && <p className="annotation-toast" role="status">{annotationMessage}</p>}
     </main>
   );
 }
@@ -7413,6 +8725,8 @@ function selectFastBlocks(blocks: Block[]) {
 function LessonContent({
   section,
   dailyMode,
+  annotations,
+  onOpenAnnotations,
   selectedBlockId,
   reviewTargetBlockId,
   onGenerate,
@@ -7423,6 +8737,8 @@ function LessonContent({
 }: {
   section: Section;
   dailyMode: DailyMode;
+  annotations: ReadingAnnotation[];
+  onOpenAnnotations: () => void;
   selectedBlockId: string;
   reviewTargetBlockId: string;
   onGenerate: () => void;
@@ -7500,6 +8816,11 @@ function LessonContent({
               ? '历史内容 · 尚未按当前标准重新检查 · 关键事实请结合参考来源判断'
               : `${section.content.aiGenerated ? 'AI 生成' : '授权内容'} · 检查状态未确认 · 关键事实请结合参考来源判断`}
       </p>
+      <button type="button" className="annotation-ledger-trigger" onClick={onOpenAnnotations}>
+        <span><i aria-hidden="true" />我的标注</span>
+        <b>{annotations.length}</b>
+        <small>{annotations.some((item) => item.anchorStatus === 'old_version') ? '含旧版正文记录' : '高亮与批注只属于你'}</small>
+      </button>
       {dailyMode === 'fast' && (
         <aside className="fast-view-notice">
           <div>
@@ -7518,6 +8839,8 @@ function LessonContent({
           selected={block.id === selectedBlockId}
           reviewTarget={block.id === reviewTargetBlockId}
           explanationOptions={explanationOptionsForBlock(block.kind)}
+          annotationCount={annotations.filter((item) => item.displayBlockId === block.id).length}
+          onOpenAnnotations={onOpenAnnotations}
           onFeedback={() => onFeedbackBlock(block)}
           onRestorePersonalPresentation={() => onRestorePersonalPresentation(block)}
           onExplain={(style, customQuestion) => onExplainBlock(block, style, customQuestion)}
@@ -8055,7 +9378,7 @@ function Quiz({
       <div id="quiz-submission-feedback" aria-live="polite">
         {submissionError && <p className="result failure" role="alert">{submissionError}</p>}
       </div>
-      {section.askMeUnlocked && <AskMePanel sectionId={section.id} />}
+      {section.askMeUnlocked && !result && <AskMePanel sectionId={section.id} />}
     </div>
   );
 }
@@ -8421,20 +9744,25 @@ function QuizReview({
                   )}
                 </aside>
               )}
-              <nav className="quiz-next-navigation" aria-label="继续学习">
-                <button
-                  className="quiz-next-section-card"
-                  disabled={openingNextSection}
-                  onClick={onOpenNextSection}
-                >
-                  <small>{openingNextSection ? '正在进入' : '下一节'}</small>
-                  <strong>
-                    {nextSectionNumber && <span>{nextSectionNumber}</span>}
-                    {nextSectionTitle || '继续下一节'}
-                    <i aria-hidden="true">→</i>
-                  </strong>
-                </button>
-              </nav>
+              <div className={`quiz-completion-choices ${section.askMeUnlocked ? 'has-askme' : ''}`}>
+                {section.askMeUnlocked && (
+                  <AskMePanel sectionId={section.id} compactEntry />
+                )}
+                <nav className="quiz-next-navigation" aria-label="继续学习">
+                  <button
+                    className="quiz-next-section-card"
+                    disabled={openingNextSection}
+                    onClick={onOpenNextSection}
+                  >
+                    <small>{openingNextSection ? '正在进入' : '继续学习 · 下一节'}</small>
+                    <strong>
+                      {nextSectionNumber && <span>{nextSectionNumber}</span>}
+                      {nextSectionTitle || '继续下一节'}
+                      <i aria-hidden="true">→</i>
+                    </strong>
+                  </button>
+                </nav>
+              </div>
               <footer className="quiz-review-feedback">
                 <p>这节内容帮你解决问题了吗？</p>
                 <button type="button" onClick={onFeedback}>
@@ -8804,7 +10132,13 @@ function Note({
   );
 }
 
-function AskMePanel({ sectionId }: { sectionId: string }) {
+function AskMePanel({
+  sectionId,
+  compactEntry = false,
+}: {
+  sectionId: string;
+  compactEntry?: boolean;
+}) {
   const [discussion, setDiscussion] = useState<AskMeDiscussion | null>(null);
   const [answer, setAnswer] = useState('');
   const [loading, setLoading] = useState(true);
@@ -8945,8 +10279,8 @@ function AskMePanel({ sectionId }: { sectionId: string }) {
     weak: '需要补强',
   }[value] || value);
   return (
-    <div className="askme-view">
-      {(loading || discussion) && (
+    <div className={`askme-view ${compactEntry ? 'askme-choice-view' : ''} ${discussion ? 'has-discussion' : ''}`}>
+      {(loading || discussion) && (!compactEntry || discussion) && (
         <header className="askme-intro">
           <div>
             <p className="eyebrow">隐藏关卡</p>
@@ -8963,26 +10297,49 @@ function AskMePanel({ sectionId }: { sectionId: string }) {
       )}
 
       {loading ? (
-        <div className="askme-loading" aria-live="polite">正在恢复讨论…</div>
-      ) : !discussion ? (
-        <section className="askme-entry-card" aria-labelledby="askme-entry-title">
-          <div className="askme-entry-copy">
-            <p className="eyebrow">满分已解锁 · 可选挑战</p>
-            <h2 id="askme-entry-title">Grill Me</h2>
-            <p>不是再做一套题。考官会连续追问，确认你能不能把这一节讲清楚、判断边界，并用到新的情境。</p>
-            <div className="askme-entry-actions">
-              <button className="primary-button large" disabled={actioning} onClick={start}>
-                {actioning ? '正在准备…' : '开始口试挑战'}
-              </button>
-              <small>过程中只评估，不继续教学；可以随时暂停。</small>
+        compactEntry ? (
+          <section className="askme-choice-card is-loading" aria-live="polite" aria-busy="true">
+            <div>
+              <p className="eyebrow">满分已解锁 · 可选挑战</p>
+              <h2>Grill Me</h2>
             </div>
-          </div>
-          <ol className="askme-entry-probes" aria-label="口试探测顺序">
-            <li><span>01</span><div><b>机制</b><small>解释为什么成立</small></div></li>
-            <li><span>02</span><div><b>边界</b><small>判断何时不适用</small></div></li>
-            <li><span>03</span><div><b>迁移</b><small>用到新的情境</small></div></li>
-          </ol>
-        </section>
+            <p>正在确认口试状态…</p>
+          </section>
+        ) : (
+          <div className="askme-loading" aria-live="polite">正在恢复讨论…</div>
+        )
+      ) : !discussion ? (
+        compactEntry ? (
+          <section className="askme-choice-card" aria-labelledby="askme-choice-title">
+            <div>
+              <p className="eyebrow">满分已解锁 · 可选挑战</p>
+              <h2 id="askme-choice-title">Grill Me</h2>
+            </div>
+            <p>用连续追问检验机制、边界与迁移；过程中只评估，不继续教学。</p>
+            <button type="button" disabled={actioning} onClick={start}>
+              {actioning ? '正在准备口试…' : '开始口试挑战'}
+            </button>
+          </section>
+        ) : (
+          <section className="askme-entry-card" aria-labelledby="askme-entry-title">
+            <div className="askme-entry-copy">
+              <p className="eyebrow">满分已解锁 · 可选挑战</p>
+              <h2 id="askme-entry-title">Grill Me</h2>
+              <p>不是再做一套题。考官会连续追问，确认你能不能把这一节讲清楚、判断边界，并用到新的情境。</p>
+              <div className="askme-entry-actions">
+                <button className="primary-button large" disabled={actioning} onClick={start}>
+                  {actioning ? '正在准备…' : '开始口试挑战'}
+                </button>
+                <small>过程中只评估，不继续教学；可以随时暂停。</small>
+              </div>
+            </div>
+            <ol className="askme-entry-probes" aria-label="口试探测顺序">
+              <li><span>01</span><div><b>机制</b><small>解释为什么成立</small></div></li>
+              <li><span>02</span><div><b>边界</b><small>判断何时不适用</small></div></li>
+              <li><span>03</span><div><b>迁移</b><small>用到新的情境</small></div></li>
+            </ol>
+          </section>
+        )
       ) : (
         <div className="askme-discussion">
           <nav className="askme-topic-tabs" aria-label="讨论主题">
@@ -9153,6 +10510,7 @@ function QaPanel({
   const [newQuestion, setNewQuestion] = useState(false);
   const [question, setQuestion] = useState('');
   const [messages, setMessages] = useState<QaExchange[]>([]);
+  const [historyView, setHistoryView] = useState<QaHistory | null>(null);
   const [asking, setAsking] = useState(false);
   const [historyStatus, setHistoryStatus] = useState<'idle' | 'loading' | 'loaded' | 'error'>('idle');
   const [historyError, setHistoryError] = useState('');
@@ -9213,15 +10571,22 @@ function QaPanel({
     return () => cancelAnimationFrame(frame);
   }, [messages]);
 
-  const loadHistory = async () => {
+  const loadHistory = async (contentVersionId?: string) => {
     if (!section?.content || historyStatus === 'loading') return;
     setHistoryStatus('loading');
     setHistoryError('');
     try {
-      const history = await api.qaHistory(section.id);
+      const history = await api.qaHistory(section.id, contentVersionId);
+      setHistoryView(history);
       setMessages(qaHistoryExchanges(history));
       setThreadId(history.lastThreadId || undefined);
-      if (!selectedQuote && !explanationRequest && history.lastThreadId) {
+      if (history.readOnly) {
+        setQuestion('');
+        setNewQuestion(false);
+        setDraftExplanation(null);
+        onClearQuote();
+      }
+      if (!history.readOnly && !selectedQuote && !explanationRequest && history.lastThreadId) {
         const lastThread = history.threads.find((item) => item.threadId === history.lastThreadId);
         const lastBlockId = [...(lastThread?.messages || [])]
           .reverse()
@@ -9334,6 +10699,22 @@ function QaPanel({
           <button className="panel-collapse-button" aria-label="收起答疑" onClick={onClose}>收起</button>
         </div>
         <h2>围绕当前小节追问</h2>
+        {historyView && historyView.versions.length > 1 && (
+          <label className="qa-version-select">
+            <span>答疑所属正文</span>
+            <select
+              value={historyView.contentVersionId || historyView.currentContentVersionId || ''}
+              disabled={historyStatus === 'loading' || asking}
+              onChange={(event) => void loadHistory(event.target.value)}
+            >
+              {historyView.versions.map((version) => (
+                <option key={version.contentVersionId} value={version.contentVersionId}>
+                  {version.isCurrent ? '当前正文' : `旧版正文${version.contentVersion ? ` v${version.contentVersion}` : ''}`}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
       {!section?.content ? (
         <div className="qa-empty">
@@ -9342,7 +10723,13 @@ function QaPanel({
         </div>
       ) : (
         <>
-          <div className="qa-context-bar">
+          {historyView?.readOnly && (
+            <div className="qa-version-notice">
+              <b>这是旧版正文上的答疑</b>
+              <p>记录会一直保留，但不能在旧版会话中继续追问。</p>
+            </div>
+          )}
+          {!historyView?.readOnly && <div className="qa-context-bar">
             <span>当前段落</span>
             <select
               aria-label="当前答疑段落"
@@ -9356,8 +10743,8 @@ function QaPanel({
                 <option value={block.id} key={block.id}>{index + 1}. {block.heading}</option>
               ))}
             </select>
-          </div>
-          {selectedQuote && (
+          </div>}
+          {!historyView?.readOnly && selectedQuote && (
             <div className="selected-quote-card">
               <div>
                 <span>已选内容</span>
@@ -9366,7 +10753,7 @@ function QaPanel({
               <blockquote>{selectedQuote.text}</blockquote>
             </div>
           )}
-          {draftExplanation && (
+          {!historyView?.readOnly && draftExplanation && (
             <div className="qa-explanation-request" role="status">
               <span aria-hidden="true">另解</span>
               <div>
@@ -9444,7 +10831,7 @@ function QaPanel({
                 <button type="button" onClick={() => void loadHistory()}>重新读取</button>
               </div>
             )}
-            {historyStatus === 'loaded' && messages.length === 0 && !draftExplanation && !selectedQuote && (
+            {historyStatus === 'loaded' && !historyView?.readOnly && messages.length === 0 && !draftExplanation && !selectedQuote && (
               <div className="qa-suggestion">
                 <span>可以这样问</span>
                 <button onClick={() => { setDraftExplanation(null); setQuestion(dailyMode === 'fast' ? '用一句结论和三个要点解释这段。' : '这个机制最容易被误解的地方是什么？'); }}>{dailyMode === 'fast' ? '用一句结论和三个要点解释这段。' : '这个机制最容易被误解的地方是什么？'}</button>
@@ -9483,7 +10870,7 @@ function QaPanel({
                     {message.status === 'streaming' && message.answer && <span className="stream-caret" />}
                   </div>
                 </div>
-                {message.status === 'error' && (
+                {message.status === 'error' && !historyView?.readOnly && (
                   <div className="qa-error-actions">
                     <span>这次回答没有完成，问题不会重复提交。</span>
                     <button type="button" disabled={asking} onClick={() => {
@@ -9492,7 +10879,7 @@ function QaPanel({
                     }}>重新填写</button>
                   </div>
                 )}
-                {message.status === 'done' && message.explanationStyle && (
+                {message.status === 'done' && message.explanationStyle && !historyView?.readOnly && (
                   <div className="explanation-style-feedback">
                     <span>{message.preferenceRequestEventId ? '这次讲法怎么样？' : '偏好未保存'}</span>
                     {!message.preferenceRequestEventId && <p>本次回答不会计入长期偏好。</p>}
@@ -9621,7 +11008,7 @@ function QaPanel({
               </button>
             )}
           </div>
-          <div className="qa-composer">
+          {!historyView?.readOnly ? <div className="qa-composer">
             <textarea
               ref={composerRef}
               value={question}
@@ -9644,7 +11031,7 @@ function QaPanel({
                 {asking ? '回答中…' : '发送 ↑'}
               </button>
             </div>
-          </div>
+          </div> : <div className="qa-archive-footer">切回“当前正文”后可以继续 Ask AI。</div>}
         </>
       )}
     </aside>

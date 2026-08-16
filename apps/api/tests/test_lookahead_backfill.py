@@ -253,6 +253,34 @@ def test_backfill_queues_book_start_when_available_book_lacks_first_content(db):
     assert backfill_missing_book_start_preloads(db) == 0
 
 
+def test_book_start_backfill_reuses_active_plan_preload(db):
+    seed_active_route(db)
+    db.add(BookProgress(
+        id="book_progress_backfill",
+        learning_run_id="run_backfill",
+        user_id="user_backfill",
+        book_id="book_backfill",
+        status="available",
+    ))
+    db.delete(db.get(QuizSet, "quiz_source"))
+    db.delete(db.get(ContentVersion, "content_source"))
+    db.add(LearningTask(
+        id="task_plan_initial_preload",
+        learning_run_id="run_backfill",
+        user_id="user_backfill",
+        section_id=None,
+        task_type="initial_book_preload",
+        idempotency_key="initial-book:series_backfill",
+        trigger_id="plan_backfill",
+        payload_json=json.dumps({"chapterId": "chapter_backfill"}),
+        status="pending",
+    ))
+    db.commit()
+
+    assert backfill_missing_book_start_preloads(db) == 0
+    assert db.scalar(select(func.count()).select_from(LearningTask)) == 1
+
+
 def test_book_start_backfill_requeues_failed_task_with_remaining_budget(db):
     seed_active_route(db)
     db.add(BookProgress(

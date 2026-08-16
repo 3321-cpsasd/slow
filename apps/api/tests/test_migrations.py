@@ -12,7 +12,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0064_shelf_soft_delete"
+HEAD_REVISION = "0066_reading_annotations"
 
 pytestmark = pytest.mark.migration
 
@@ -205,6 +205,8 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
             "series_learning_start_preferences",
             "chapter_route_decision_events",
             "chapter_challenge_attempts",
+            "reading_annotations",
+            "reading_annotation_revisions",
         }.issubset(trustworthy_tables)
         qa_message_columns = {
             row[1]
@@ -268,6 +270,7 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
             for row in connection.execute("PRAGMA table_info(qa_sessions)")
         }
         assert "daily_mode" in qa_session_columns
+        assert "created_at" in qa_session_columns
         content_columns = {
             row[1]
             for row in connection.execute("PRAGMA table_info(content_versions)")
@@ -321,6 +324,7 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
     }.issubset(qa_message_columns)
     assert "terminal_request_key" in preference_evidence_columns
     assert "continuity_tier" in series_columns
+    assert "display_title" in series_columns
     assert "standard_package_version_id" in content_columns
     assert "diagnosis_snapshot_json" in remediation_columns
     assert {

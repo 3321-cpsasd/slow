@@ -33,6 +33,23 @@ class ShelfRename(ShelfCreate):
     """The only mutable user-facing shelf field is its display name."""
 
 
+class SeriesRename(ApiModel):
+    model_config = ConfigDict(
+        alias_generator=camel,
+        populate_by_name=True,
+        extra="forbid",
+    )
+    name: str = Field(min_length=1, max_length=240)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str):
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("系列名称不能为空")
+        return normalized
+
+
 LearningStartPreferenceKey = Literal[
     "practical_application",
     "understand_principles",
@@ -91,6 +108,44 @@ class LearningStartPreviewCreate(ApiModel):
     purpose: str = Field(default="", max_length=1000)
     depth: Literal["overview", "deep", "mastery"]
     details: str = Field(default="", max_length=3000)
+
+
+LearningGoalDimensionKey = Literal[
+    "learning_object",
+    "purpose",
+    "success_marker",
+    "starting_point",
+    "daily_commitment",
+    "completion_horizon",
+    "scope",
+]
+
+
+class LearningGoalInterviewAnswer(ApiModel):
+    question_id: str = Field(min_length=1, max_length=120)
+    dimension: LearningGoalDimensionKey
+    question: str = Field(min_length=1, max_length=500)
+    answer: str = Field(min_length=1, max_length=1000)
+
+
+class LearningGoalInterviewCreate(ApiModel):
+    shelf_id: str
+    topic: str = Field(min_length=1, max_length=160)
+    daily_commitment_hours: float = Field(gt=0, le=24)
+    completion_horizon_value: int = Field(ge=1, le=365)
+    completion_horizon_unit: Literal["day", "week", "month"]
+    related_experience: str = Field(default="", max_length=1000)
+    answers: list[LearningGoalInterviewAnswer] = Field(
+        default_factory=list,
+        max_length=8,
+    )
+
+    @model_validator(mode="after")
+    def unique_interview_questions(self):
+        question_ids = [item.question_id for item in self.answers]
+        if len(question_ids) != len(set(question_ids)):
+            raise ValueError("同一个访谈问题不能重复回答")
+        return self
 
 
 class MissionCriterionInput(ApiModel):
@@ -476,6 +531,50 @@ class NoteUpdate(ApiModel):
 class NoteReviewSupplementCreate(ApiModel):
     review_episode_id: str = Field(min_length=8, max_length=120)
     content: dict
+
+
+class ReadingAnnotationAnchor(ApiModel):
+    exact: str = Field(min_length=1, max_length=1200)
+    prefix: str = Field(default="", max_length=160)
+    suffix: str = Field(default="", max_length=160)
+    start_offset: int = Field(ge=0, le=200_000)
+    end_offset: int = Field(ge=1, le=200_000)
+
+    @model_validator(mode="after")
+    def valid_range(self):
+        if self.end_offset <= self.start_offset:
+            raise ValueError("标注结束位置必须晚于开始位置")
+        return self
+
+
+class ReadingAnnotationCreate(ApiModel):
+    content_version_id: str = Field(min_length=1, max_length=160)
+    block_id: str = Field(min_length=1, max_length=200)
+    kind: Literal["highlight", "comment"]
+    anchor: ReadingAnnotationAnchor
+    body: str = Field(default="", max_length=4000)
+    color: Literal["amber"] = "amber"
+
+    @model_validator(mode="after")
+    def comment_requires_body(self):
+        normalized = self.body.strip()
+        if self.kind == "comment" and not normalized:
+            raise ValueError("批注内容不能为空")
+        if self.kind == "highlight" and normalized:
+            raise ValueError("高亮不能携带批注正文")
+        self.body = normalized
+        return self
+
+
+class ReadingAnnotationUpdate(ApiModel):
+    body: str | None = Field(default=None, max_length=4000)
+    color: Literal["amber"] | None = None
+
+    @model_validator(mode="after")
+    def has_change(self):
+        if self.body is None and self.color is None:
+            raise ValueError("没有可保存的标注修改")
+        return self
 
 
 class ResumeUpdate(ApiModel):

@@ -930,10 +930,18 @@ class SectionGenerationCoordinator:
                         QuizAttempt.user_id == self.user_id,
                     )
                 ) or 0
-                if assessed_after_generation and not regeneration_feedback:
+                if assessed_after_generation:
                     raise AppError(
-                        "生成期间已产生答题证据，新版本未保存",
-                        code="SECTION_ALREADY_ASSESSED",
+                        (
+                            "反馈对应的正文已经产生答题证据，新版本未保存"
+                            if regeneration_feedback
+                            else "生成期间已产生答题证据，新版本未保存"
+                        ),
+                        code=(
+                            "FEEDBACK_ASSESSED_VERSION_FROZEN"
+                            if regeneration_feedback
+                            else "SECTION_ALREADY_ASSESSED"
+                        ),
                         status=409,
                     )
 

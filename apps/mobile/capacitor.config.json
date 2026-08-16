@@ -1,0 +1,13 @@
+{
+  "appId": "cn.net.slow.app",
+  "appName": "Slow",
+  "webDir": "web",
+  "loggingBehavior": "debug",
+  "backgroundColor": "#fbfcf9",
+  "server": {
+    "url": "https://slow.net.cn",
+    "androidScheme": "https",
+    "cleartext": false,
+    "errorPath": "offline.html"
+  }
+}

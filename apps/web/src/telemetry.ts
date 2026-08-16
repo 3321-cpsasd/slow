@@ -3,6 +3,7 @@ import { api } from './api/client';
 export type ProductEventName =
   | 'home_viewed'
   | 'shelf_viewed'
+  | 'series_creation_viewed'
   | 'learning_viewed'
   | 'profile_viewed'
   | 'review_center_viewed'
@@ -16,7 +17,7 @@ export type ProductEventName =
   | 'frontend_error';
 
 type ProductEventContext = {
-  view?: '' | 'home' | 'shelf' | 'learn' | 'profile' | 'knowledge' | 'review';
+  view?: '' | 'home' | 'shelf' | 'series-create' | 'learn' | 'profile' | 'knowledge' | 'review';
   entityType?: '' | 'shelf' | 'series' | 'book' | 'chapter' | 'section';
   entityId?: string;
   properties?: Record<string, string | number | boolean>;

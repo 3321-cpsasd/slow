@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Slow</string>
+    <string name="title_activity_main">Slow</string>
+    <string name="package_name">cn.net.slow.app</string>
+    <string name="custom_url_scheme">cn.net.slow.app</string>
+</resources>

@@ -52,3 +52,4 @@
 | [ADR-0018](0018-m4-trustworthy-adaptive-learning.md) | Accepted，实现完成，等待真实模型验收 | M4 可信测评、口试职责、跨书适配和生产失败关闭的统一验收合同 |
 | [ADR-0019](0019-learning-start-and-chapter-route-choices.md) | Accepted，MVP 已实现 | 系列启动兴趣选择、章级挑战与显式略过的路线/掌握分离 |
 | [ADR-0020](0020-audited-historical-rank-identity.md) | Accepted，已实现 | 历史学习证据的追加式段位身份决定、确定性画像重放与在线空结算防护 |
+| [ADR-0021](0021-version-bound-reading-annotations.md) | Accepted，MVP 已实现 | 正文版本绑定的高亮、批注、Ask AI 历史与反馈后证据冻结边界 |

@@ -62,6 +62,14 @@ class StubAdapter:
         self.calls.append(("ask_me", request))
         return {"model": self.model}
 
+    async def learning_goal_interview(self, request):
+        self.calls.append(("learning_goal_interview", request))
+        return {"model": self.model}
+
+    async def plan(self, request, memory):
+        self.calls.append(("plan", request, memory))
+        return {"model": self.model}
+
     def structured_trace(self):
         return []
 
@@ -124,6 +132,30 @@ def test_gateway_routes_ask_ai_without_exposing_model_to_caller():
     assert result == {"model": "qwen3.6-flash"}
     assert author.calls == []
     assert tutor.calls == [("answer", {"question": "为什么？"})]
+
+
+def test_gateway_routes_learning_goal_interview_independently_from_curriculum():
+    author = StubAdapter("qwen3.8-max-preview")
+    interviewer = StubAdapter("deepseek-v4-flash")
+    router = gateway(author, interviewer)
+    router.policies[AiPurpose.CURRICULUM.value] = RoutePolicy(
+        AiPurpose.CURRICULUM.value,
+        ("deployment-0",),
+    )
+    router.policies[AiPurpose.LEARNING_GOAL_INTERVIEW.value] = RoutePolicy(
+        AiPurpose.LEARNING_GOAL_INTERVIEW.value,
+        ("deployment-1",),
+    )
+
+    result = asyncio.run(router.learning_goal_interview({"topic": "AI是什么"}))
+    plan = asyncio.run(router.plan({"topic": "AI基础"}, []))
+
+    assert result == {"model": "deepseek-v4-flash"}
+    assert plan == {"model": "qwen3.8-max-preview"}
+    assert author.calls == [("plan", {"topic": "AI基础"}, [])]
+    assert interviewer.calls == [
+        ("learning_goal_interview", {"topic": "AI是什么"})
+    ]
 
 
 def test_gateway_connection_check_covers_each_routed_deployment_once():

@@ -13,7 +13,7 @@ import pytest
 from pydantic import ValidationError
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, event, func, select
-from app.ai.contracts import AskMeDiscussionTurn, AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedChapter, GeneratedContent, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedQuiz, GeneratedSectionOutline, PlanBook, PlanChapter, PlanMilestone, PlanMilestoneCriterion, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
+from app.ai.contracts import AskMeDiscussionTurn, AskMeTurn, ClassifiedAnswer, ContentBlock, GeneratedChapter, GeneratedContent, GeneratedLesson, GeneratedNote, GeneratedPlan, GeneratedQuiz, GeneratedSectionOutline, LearningGoalBrief, LearningGoalDimension, LearningGoalInterviewResult, LearningGoalQuestion, LearningGoalQuestionOption, PlanBook, PlanChapter, PlanMilestone, PlanMilestoneCriterion, ReplannedBook, ReplannedChapter, Source, ChoiceQuestion
 from app.application.service import (
     apply_source_repair_scope,
     source_blacklist_from_generation_traces,
@@ -110,6 +110,71 @@ class FakeAi:
     configured, model = True, "fake-structured"
     allow_legacy_lesson_generation_for_tests = True
     async def close(self): pass
+    async def learning_goal_interview(self, request):
+        answered = bool(request.get("answers"))
+        dimensions = [
+            LearningGoalDimension(
+                key=key,
+                status=(
+                    "confirmed"
+                    if answered or key in {"learning_object", "daily_commitment", "completion_horizon"}
+                    else "missing"
+                ),
+                summary=(
+                    request["topic"]
+                    if key == "learning_object"
+                    else request["dailyCommitment"]
+                    if key == "daily_commitment"
+                    else request["completionHorizon"]
+                    if key == "completion_horizon"
+                    else "已根据回答确认"
+                    if answered
+                    else "还需要确认"
+                ),
+                confidence="high" if answered else "medium",
+            )
+            for key in (
+                "learning_object",
+                "purpose",
+                "success_marker",
+                "starting_point",
+                "daily_commitment",
+                "completion_horizon",
+                "scope",
+            )
+        ]
+        if not answered:
+            return LearningGoalInterviewResult(
+                status="ask",
+                progress_message="还需要确认实际用途。",
+                dimensions=dimensions,
+                question=LearningGoalQuestion(
+                    id="goal_purpose_1",
+                    dimension="purpose",
+                    prompt="这次学习主要准备解决什么问题？",
+                    helper="用途会改变教材采用的视角。",
+                    options=[
+                        LearningGoalQuestionOption(id="work", label="解决工作问题"),
+                        LearningGoalQuestionOption(id="study", label="建立系统认识"),
+                    ],
+                ),
+            )
+        return LearningGoalInterviewResult(
+            status="ready",
+            progress_message="信息已经足以开始规划。",
+            dimensions=dimensions,
+            brief=LearningGoalBrief(
+                topic=request["topic"],
+                purpose="解决一个明确的实际问题",
+                success_marker="能够独立完成任务并说明依据",
+                starting_point=request.get("relatedExperience") or "从基础开始",
+                daily_commitment=request["dailyCommitment"],
+                completion_horizon=request["completionHorizon"],
+                scope="覆盖目标与必要前置",
+                out_of_scope="不扩展无关旁支",
+                recommended_depth="deep",
+            ),
+        )
     async def plan(self, request, memory):
         return GeneratedPlan(
             series_title="K8s 台阶",
@@ -1334,6 +1399,44 @@ def test_new_plan_preloads_first_lesson_in_durable_background_task(client):
     assert completed["result"]["targetSectionId"] == first_section["id"]
 
 
+def test_learning_task_worker_recovers_after_queue_scan_failure(
+    tmp_path,
+    monkeypatch,
+):
+    import app.main as main_module
+
+    real_recoverable_task_ids = main_module.recoverable_task_ids
+    scan_count = 0
+
+    def flaky_recoverable_task_ids(db, *, limit=20):
+        nonlocal scan_count
+        scan_count += 1
+        if scan_count == 1:
+            raise RuntimeError("simulated queue scan failure")
+        return real_recoverable_task_ids(db, limit=limit)
+
+    monkeypatch.setattr(
+        main_module,
+        "recoverable_task_ids",
+        flaky_recoverable_task_ids,
+    )
+    with TestClient(create_app(
+        f"sqlite+pysqlite:///{tmp_path / 'recovering-worker.db'}",
+        FakeAi(),
+        AcceptingSourceVerifier(),
+        LocalAttachmentStorage(tmp_path / "recovering-worker-attachments"),
+    )) as recovering:
+        series = create_series(recovering)
+        completed = wait_for_task(
+            recovering,
+            series["initializationTask"]["taskId"],
+            timeout=5,
+        )
+
+    assert scan_count >= 2
+    assert completed["status"] == "succeeded"
+
+
 def test_quiz_exposes_selection_mode_without_leaking_answers(tmp_path):
     class MixedChoiceAi(FakeAi):
         async def lesson(self, request, memory, prior_questions=None):
@@ -2439,6 +2542,46 @@ def test_series_soft_delete_hides_it_without_destroying_history(client):
     assert repeated.json()["code"] == "SERIES_NOT_FOUND"
 
 
+def test_series_rename_changes_only_its_display_name(client):
+    series = create_series(client)
+    original_book_ids = [book["id"] for book in series["books"]]
+
+    renamed = client.patch(
+        f"/api/series/{series['id']}",
+        json={"name": "  面向实践的   Kubernetes 路线  "},
+    )
+
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "面向实践的 Kubernetes 路线"
+    assert [book["id"] for book in renamed.json()["books"]] == original_book_ids
+    assert next(
+        item
+        for item in client.get("/api/bootstrap").json()["shelves"][0]["series"]
+        if item["id"] == series["id"]
+    )["title"] == "面向实践的 Kubernetes 路线"
+
+    with client.app.state.sessions() as db:
+        stored = db.get(Series, series["id"])
+        assert stored.title == series["title"]
+        assert stored.display_title == "面向实践的 Kubernetes 路线"
+
+
+def test_series_rename_rejects_invalid_payload(client):
+    series = create_series(client)
+
+    blank = client.patch(
+        f"/api/series/{series['id']}",
+        json={"name": "   "},
+    )
+    assert blank.status_code == 400
+
+    semantic_mutation = client.patch(
+        f"/api/series/{series['id']}",
+        json={"name": "新名称", "rationale": "不能修改学习目标"},
+    )
+    assert semantic_mutation.status_code == 400
+
+
 def test_shelf_soft_delete_hides_all_series_without_destroying_history(client):
     create_series(client)
     create_series(client)
@@ -2568,6 +2711,66 @@ def test_deleting_available_book_requires_next_outline_confirmation(client):
 
 def create_series(client):
     return client.post("/api/plans", json={"shelfId":"shelf_technology","topic":"Kubernetes","role":"技术人员","experience":"会 Docker","depth":"deep"}).json()
+
+
+def test_learning_goal_interview_asks_then_returns_a_validated_brief(client):
+    first = client.post(
+        "/api/learning-start/interview",
+        json={
+            "shelfId": "shelf_technology",
+            "topic": "高二英语",
+            "dailyCommitmentHours": 1,
+            "completionHorizonValue": 2,
+            "completionHorizonUnit": "week",
+            "relatedExperience": "阅读长难句容易丢失主干",
+            "answers": [],
+        },
+    )
+    assert first.status_code == 200
+    assert first.json()["status"] == "ask"
+    assert first.json()["question"]["dimension"] == "purpose"
+    assert len(first.json()["dimensions"]) == 7
+    dimensions = {item["key"]: item for item in first.json()["dimensions"]}
+    assert dimensions["daily_commitment"]["status"] == "confirmed"
+    assert dimensions["completion_horizon"]["status"] == "confirmed"
+
+    second = client.post(
+        "/api/learning-start/interview",
+        json={
+            "shelfId": "shelf_technology",
+            "topic": "高二英语",
+            "dailyCommitmentHours": 1,
+            "completionHorizonValue": 2,
+            "completionHorizonUnit": "week",
+            "relatedExperience": "阅读长难句容易丢失主干",
+            "answers": [
+                {
+                    "questionId": first.json()["question"]["id"],
+                    "dimension": first.json()["question"]["dimension"],
+                    "question": first.json()["question"]["prompt"],
+                    "answer": "为校内考试提升阅读理解",
+                }
+            ],
+        },
+    )
+    assert second.status_code == 200
+    assert second.json()["status"] == "ready"
+    assert second.json()["brief"]["topic"] == "高二英语"
+    assert second.json()["brief"]["dailyCommitment"] == "每天1小时"
+    assert second.json()["brief"]["completionHorizon"] == "2周内"
+    assert second.json()["brief"]["recommendedDepth"] == "deep"
+
+    missing_shelf = client.post(
+        "/api/learning-start/interview",
+        json={
+            "shelfId": "missing",
+            "topic": "高二英语",
+            "dailyCommitmentHours": 1,
+            "completionHorizonValue": 2,
+            "completionHorizonUnit": "week",
+        },
+    )
+    assert missing_shelf.status_code == 404
 
 
 def test_learning_start_preview_falls_back_and_direct_choice_is_auditable(client):
@@ -2986,6 +3189,36 @@ def test_plan_creation_is_idempotent(client):
     conflict = client.post("/api/plans", json={**body, "topic": "不同主题"}, headers=headers)
     assert conflict.status_code == 409
     assert conflict.json()["code"] == "IDEMPOTENCY_KEY_REUSED"
+
+
+def test_unsafe_plan_is_blocked_without_creating_a_series(client):
+    with client.app.state.sessions() as db:
+        series_before = db.scalar(select(func.count()).select_from(Series))
+        plans_before = db.scalar(select(func.count()).select_from(LearningPlan))
+
+    response = client.post(
+        "/api/plans",
+        json={
+            "shelfId": "shelf_technology",
+            "topic": "数据库",
+            "role": "技术人员",
+            "experience": "会使用 SQL",
+            "purpose": "学习盗取数据库账号密码的方法",
+            "depth": "deep",
+        },
+    )
+
+    assert response.status_code == 422
+    payload = response.json()
+    assert payload["code"] == "LEARNING_GOAL_SAFETY_BLOCKED"
+    assert payload["message"] == (
+        "这个学习目标涉及可能造成伤害或违法违规的操作性内容，暂时无法生成。"
+        "你可以改为风险识别、合规治理、历史原理或安全防护方向后重试。"
+    )
+    assert payload["retryable"] is False
+    with client.app.state.sessions() as db:
+        assert db.scalar(select(func.count()).select_from(Series)) == series_before
+        assert db.scalar(select(func.count()).select_from(LearningPlan)) == plans_before
 
 
 def test_runtime_ai_settings_never_return_the_key_and_can_switch_to_demo(client):
@@ -4089,6 +4322,233 @@ def test_content_feedback_streams_the_model_repair_and_rebinds_only_content(clie
             .select_from(ContentVersion)
             .where(ContentVersion.section_id == section_id)
         ) == 2
+
+
+def test_reading_annotations_remain_user_owned_across_content_versions(client):
+    series = create_series(client)
+    assert wait_for_task(
+        client,
+        series["initializationTask"]["taskId"],
+    )["status"] == "succeeded"
+    refreshed = client.get(f"/api/series/{series['id']}").json()
+    section_id = refreshed["books"][0]["chapters"][0]["sections"][0]["id"]
+    original = client.post(f"/api/sections/{section_id}/open").json()
+    changed_block, stable_block = original["content"]["blocks"][:2]
+
+    def create_mark(block, kind, body, key):
+        quote = block["content"][:12]
+        return client.post(
+            f"/api/sections/{section_id}/annotations",
+            headers={"Idempotency-Key": key},
+            json={
+                "contentVersionId": original["content"]["id"],
+                "blockId": block["id"],
+                "kind": kind,
+                "anchor": {
+                    "exact": quote,
+                    "prefix": "",
+                    "suffix": block["content"][12:24],
+                    "startOffset": 0,
+                    "endOffset": len(quote),
+                },
+                "body": body,
+                "color": "amber",
+            },
+        )
+
+    changed_mark = create_mark(
+        changed_block,
+        "comment",
+        "这里的因果关系需要再想一遍。",
+        "annotation-changed-version-001",
+    )
+    stable_mark = create_mark(
+        stable_block,
+        "highlight",
+        "",
+        "annotation-stable-version-001",
+    )
+    assert changed_mark.status_code == 201, changed_mark.json()
+    assert stable_mark.status_code == 201, stable_mark.json()
+    replay = create_mark(
+        stable_block,
+        "highlight",
+        "",
+        "annotation-stable-version-001",
+    )
+    assert replay.status_code == 201
+    assert replay.json()["id"] == stable_mark.json()["id"]
+
+    updated = client.patch(
+        f"/api/annotations/{changed_mark.json()['id']}",
+        json={"body": "这里的因果关系已经想清楚一半。"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["version"] == 2
+
+    feedback = client.post(
+        "/api/feedback",
+        headers={"Idempotency-Key": "annotation-feedback-repair-001"},
+        json={
+            "scope": "content_block",
+            "feedbackType": "unclear",
+            "message": "把这一段的中间机制补清楚",
+            "sectionId": section_id,
+            "contentVersionId": original["content"]["id"],
+            "blockId": changed_block["id"],
+        },
+    ).json()
+    repair = client.post(f"/api/feedback/{feedback['id']}/repair/stream")
+    assert any(event == "done" for event, _ in sse_events(repair))
+
+    listing = client.get(f"/api/sections/{section_id}/annotations")
+    assert listing.status_code == 200
+    by_id = {item["id"]: item for item in listing.json()["items"]}
+    assert by_id[changed_mark.json()["id"]]["anchorStatus"] == "old_version"
+    assert by_id[changed_mark.json()["id"]]["displayBlockId"] is None
+    assert by_id[stable_mark.json()["id"]]["anchorStatus"] == "unchanged_in_current"
+    assert by_id[stable_mark.json()["id"]]["displayBlockId"]
+
+    invalid = client.post(
+        f"/api/sections/{section_id}/annotations",
+        headers={"Idempotency-Key": "annotation-invalid-version-001"},
+        json={
+            "contentVersionId": "content_from_another_learning_run",
+            "blockId": stable_block["id"],
+            "kind": "highlight",
+            "anchor": {
+                "exact": "不能绑定",
+                "prefix": "",
+                "suffix": "",
+                "startOffset": 0,
+                "endOffset": 4,
+            },
+            "body": "",
+            "color": "amber",
+        },
+    )
+    assert invalid.status_code == 409
+    assert invalid.json()["code"] == "ANNOTATION_CONTENT_VERSION_INVALID"
+
+    deleted = client.delete(f"/api/annotations/{stable_mark.json()['id']}")
+    assert deleted.status_code == 204
+    remaining = client.get(f"/api/sections/{section_id}/annotations").json()
+    assert [item["id"] for item in remaining["items"]] == [
+        changed_mark.json()["id"]
+    ]
+
+
+def test_ask_ai_history_is_separated_and_archived_by_content_version(client):
+    series = create_series(client)
+    assert wait_for_task(
+        client,
+        series["initializationTask"]["taskId"],
+    )["status"] == "succeeded"
+    refreshed = client.get(f"/api/series/{series['id']}").json()
+    section_id = refreshed["books"][0]["chapters"][0]["sections"][0]["id"]
+    original = client.post(f"/api/sections/{section_id}/open").json()
+    old_block = original["content"]["blocks"][0]
+    first = client.post(
+        f"/api/sections/{section_id}/ask",
+        json={"blockId": old_block["id"], "question": "旧版的机制是什么？"},
+    )
+    assert first.status_code == 200
+
+    feedback = client.post(
+        "/api/feedback",
+        headers={"Idempotency-Key": "qa-version-feedback-repair-001"},
+        json={
+            "scope": "content_block",
+            "feedbackType": "unclear",
+            "message": "重新解释机制",
+            "sectionId": section_id,
+            "contentVersionId": original["content"]["id"],
+            "blockId": old_block["id"],
+        },
+    ).json()
+    client.post(f"/api/feedback/{feedback['id']}/repair/stream")
+    current = client.get(f"/api/sections/{section_id}").json()
+    current_history = client.get(
+        f"/api/sections/{section_id}/qa/history"
+    ).json()
+    assert current_history["contentVersionId"] == current["content"]["id"]
+    assert current_history["threads"] == []
+    assert {item["contentVersionId"] for item in current_history["versions"]} == {
+        original["content"]["id"],
+        current["content"]["id"],
+    }
+    explicit_current = client.get(
+        f"/api/sections/{section_id}/qa/history",
+        params={"contentVersionId": current["content"]["id"]},
+    )
+    assert explicit_current.status_code == 200
+    assert explicit_current.json()["threads"] == []
+
+    second = client.post(
+        f"/api/sections/{section_id}/ask",
+        json={
+            "blockId": current["content"]["blocks"][0]["id"],
+            "question": "当前版的机制是什么？",
+        },
+    )
+    assert second.status_code == 200
+    archived = client.get(
+        f"/api/sections/{section_id}/qa/history",
+        params={"contentVersionId": original["content"]["id"]},
+    )
+    assert archived.status_code == 200
+    assert archived.json()["readOnly"] is True
+    assert archived.json()["threads"][0]["messages"][0]["content"] == (
+        "旧版的机制是什么？"
+    )
+    with client.app.state.sessions() as db:
+        assert db.scalar(select(func.count()).select_from(QaSession)) == 2
+
+
+def test_repairable_feedback_after_assessment_is_recorded_without_rebinding(client):
+    series = create_series(client)
+    assert wait_for_task(
+        client,
+        series["initializationTask"]["taskId"],
+    )["status"] == "succeeded"
+    refreshed = client.get(f"/api/series/{series['id']}").json()
+    section_id = refreshed["books"][0]["chapters"][0]["sections"][0]["id"]
+    section = client.post(f"/api/sections/{section_id}/open").json()
+    assessed = client.post(
+        f"/api/sections/{section_id}/quiz",
+        json={
+            "quizSetId": section["quiz"]["id"],
+            "answers": [[1] for _ in section["quiz"]["questions"]],
+        },
+    )
+    assert assessed.status_code == 200
+
+    submitted = client.post(
+        "/api/feedback",
+        headers={"Idempotency-Key": "feedback-repairable-assessed-001"},
+        json={
+            "scope": "content_block",
+            "feedbackType": "unclear",
+            "message": "验证完成后仍然觉得这里不清楚",
+            "sectionId": section_id,
+            "contentVersionId": section["content"]["id"],
+            "blockId": section["content"]["blocks"][0]["id"],
+        },
+    )
+    assert submitted.status_code == 201
+    assert submitted.json()["regeneration"] == {
+        "status": "recorded_only",
+        "reasonCode": "FEEDBACK_ASSESSED_VERSION_FROZEN",
+        "task": None,
+    }
+    repair = client.post(
+        f"/api/feedback/{submitted.json()['id']}/repair/stream"
+    )
+    error = next(data for event, data in sse_events(repair) if event == "error")
+    assert error["code"] == "FEEDBACK_ASSESSED_VERSION_FROZEN"
+    unchanged = client.get(f"/api/sections/{section_id}").json()
+    assert unchanged["content"]["id"] == section["content"]["id"]
+    assert unchanged["quiz"]["id"] == section["quiz"]["id"]
 
 
 def test_content_feedback_repairs_legacy_contract_bound_content(client):

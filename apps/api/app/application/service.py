@@ -35,6 +35,7 @@ from ..infrastructure.tables import (
     LearningResumePosition,
     KnowledgeStateProjection,
     QuizAttempt,
+    QuizSet,
     Remediation,
     Section,
     SectionAssessmentTarget,
@@ -87,6 +88,7 @@ from ..modules.learning.tasks import (
 from ..modules.tutoring.notes import LearningNoteService
 from ..modules.tutoring.ask_me import AskMeService
 from ..modules.tutoring.qa import QaService
+from ..modules.reading.annotations import ReadingAnnotationService
 from ..read_models.library import LibraryReadModel
 from ..read_models.section import SectionReadModel
 
@@ -144,8 +146,13 @@ class SlowService:
         self.learning_start = LearningStartService(
             db,
             user_id=self.user_id,
+            ai=self.ai,
             baselines=self.curriculum_baselines,
             shelf_provider=self.shelf,
+            profile_provider=lambda: ProfileService(
+                self.db,
+                self.user_id,
+            ).state()["profile"],
         )
         self.chapter_choices = ChapterChoiceService(
             db,
@@ -201,6 +208,12 @@ class SlowService:
             uid=uid,
             dump=dump,
             load=load,
+        )
+        self.reading_annotations = ReadingAnnotationService(
+            db,
+            user_id=self.user_id,
+            contexts=self.contexts,
+            progress=self.progress,
         )
         self.chapter_planning = ChapterPlanningService(
             db,
@@ -486,6 +499,9 @@ class SlowService:
     def learning_start_preview(self, body):
         return self.learning_start.preview(body)
 
+    async def learning_goal_interview(self, body):
+        return await self.learning_start.interview(body)
+
     async def create_plan(self, body, idempotency_key: str | None = None):
         return await self.series_planning.create(body, idempotency_key)
 
@@ -528,6 +544,10 @@ class SlowService:
 
     def delete_series(self, series_id):
         return self.catalog_commands.delete_series(series_id)
+
+    def rename_series(self, series_id, body):
+        self.catalog_commands.rename_series(series_id, body)
+        return self.series(series_id)
 
     def _book_progress(self, book):
         chapters = self.db.scalars(select(Chapter).where(Chapter.book_id == book.id)).all()
@@ -1133,6 +1153,21 @@ class SlowService:
                 "反馈对应的正文版本不存在",
                 code="FEEDBACK_TARGET_NOT_FOUND",
                 status=404,
+            )
+        assessed = self.db.scalar(
+            select(func.count())
+            .select_from(QuizAttempt)
+            .join(QuizSet, QuizSet.id == QuizAttempt.quiz_set_id)
+            .where(
+                QuizAttempt.user_id == task.user_id,
+                QuizSet.content_version_id == content.id,
+            )
+        ) or 0
+        if assessed:
+            raise AppError(
+                "这份正文已经产生学习验证记录，反馈已保留但不会静默替换当前版本",
+                code="FEEDBACK_ASSESSED_VERSION_FROZEN",
+                status=409,
             )
         block = next(
             (
@@ -1887,8 +1922,20 @@ class SlowService:
     def prepare_ask(self, section_id, body):
         return self.qa_service.prepare(section_id, body)
 
-    def qa_history(self, section_id):
-        return self.qa_service.history(section_id)
+    def qa_history(self, section_id, content_version_id=None):
+        return self.qa_service.history(section_id, content_version_id)
+
+    def annotations(self, section_id):
+        return self.reading_annotations.list(section_id)
+
+    def create_annotation(self, section_id, body, idempotency_key):
+        return self.reading_annotations.create(section_id, body, idempotency_key)
+
+    def update_annotation(self, annotation_id, body):
+        return self.reading_annotations.update(annotation_id, body)
+
+    def delete_annotation(self, annotation_id):
+        return self.reading_annotations.delete(annotation_id)
 
     def _save_qa_answer(
         self,
@@ -1945,6 +1992,21 @@ class SlowService:
                 "反馈对应的正文版本不存在",
                 code="FEEDBACK_TARGET_NOT_FOUND",
                 status=404,
+            )
+        assessed = self.db.scalar(
+            select(func.count())
+            .select_from(QuizAttempt)
+            .join(QuizSet, QuizSet.id == QuizAttempt.quiz_set_id)
+            .where(
+                QuizAttempt.user_id == self.user_id,
+                QuizSet.content_version_id == content.id,
+            )
+        ) or 0
+        if assessed:
+            raise AppError(
+                "这份正文已经产生学习验证记录，反馈已保留但不会静默替换当前版本",
+                code="FEEDBACK_ASSESSED_VERSION_FROZEN",
+                status=409,
             )
         blocks = load(content.blocks_json, [])
         target_index = next(
