@@ -1087,7 +1087,10 @@ export default function App() {
     return completedFallback;
   };
 
-  const waitForInitialSectionReady = async (value: Series) => {
+  const waitForInitialSectionReady = async (
+    value: Series,
+    onProgress?: (stage: SeriesCreationStage) => void,
+  ) => {
     let task = value.initializationTask;
     if (!task) {
       throw new Error('学习路线没有返回第一节准备任务，请重新创建。');
@@ -1100,6 +1103,7 @@ export default function App() {
         throw new Error(generationFailureMessage(task, '第一节内容'));
       }
       if (task.status === 'succeeded') {
+        onProgress?.('opening');
         const refreshed = await api.series(value.id);
         const targetSectionId = typeof task.result?.targetSectionId === 'string'
           ? task.result.targetSectionId
@@ -2192,15 +2196,18 @@ export default function App() {
             shelf={shelf}
             profile={data.profile}
             onCancel={() => openShelf(shelf)}
-            onCreate={async (body, idempotencyKey) => {
+            onCreate={async (body, idempotencyKey, onProgress) => {
               const navigationVersion = routeRequestVersion.current;
               const ready = await run('正在准备目录和第一节…', async () => {
                 const value = await api.createPlan(
                   { ...body, shelfId: shelf.id },
                   idempotencyKey,
                 );
-                return waitForInitialSectionReady(value);
+                onProgress('first-section');
+                return waitForInitialSectionReady(value, onProgress);
               });
+              // Keep the completed transition legible when a local/demo task resolves instantly.
+              await new Promise((resolve) => window.setTimeout(resolve, 650));
               if (navigationVersion !== routeRequestVersion.current) return;
               setDirectoryBookId(ready.bookId);
               setSeries(ready.series);
@@ -3255,6 +3262,28 @@ function bookProgressDetails(book: Book) {
   };
 }
 
+function bookProgressCopy(
+  book: Book,
+  currentSectionId?: string | null,
+  showCurrentPosition = book.progress > 0,
+) {
+  const details = bookProgressDetails(book);
+  if (details.totalChapters === 0) return '章节待确认';
+  if (book.status === 'completed') {
+    return `${details.completedChapters}/${details.totalChapters} 章 · ${details.completedSections}/${details.totalSections} 节`;
+  }
+
+  const currentChapter = book.chapters.find((chapter) => (
+    currentSectionId && chapter.sections.some((section) => section.id === currentSectionId)
+  ));
+  const currentSection = currentChapter?.sections.find((section) => section.id === currentSectionId);
+  if (currentChapter && currentSection && showCurrentPosition) {
+    return `读到第 ${currentChapter.position}/${details.totalChapters} 章 · 本章第 ${currentSection.position}/${currentChapter.sections.length} 节`;
+  }
+
+  return `共 ${details.totalChapters} 章`;
+}
+
 function bookProgressLabel(book: Book, isCurrent: boolean) {
   if (book.status === 'completed') return '已完成';
   if (book.status === 'locked') return '未解锁';
@@ -4068,7 +4097,6 @@ function Home({
                     </header>
                     <div className="home-book-grid">
                       {itemSeries.books.map((book, bookIndex) => {
-                        const details = bookProgressDetails(book);
                         const canReviewOutline = bookReadyForOutlineReview(itemSeries, bookIndex);
                         const isTodayBook = Boolean(
                           itemSeries.id === dashboard?.today?.seriesId
@@ -4098,14 +4126,7 @@ function Home({
                             </span>
                             <strong>{book.title}</strong>
                             <span className="home-book-progress-copy">
-                              <span>
-                                {details.totalChapters > 0
-                                  ? `${details.completedChapters}/${details.totalChapters} 章`
-                                  : '章节待确认'}
-                                {details.totalSections > 0
-                                  ? ` · ${details.completedSections}/${details.totalSections} 节`
-                                  : ''}
-                              </span>
+                              <span>{bookProgressCopy(book, nextSection, isTodayBook || book.progress > 0)}</span>
                               <b>{book.progress}%</b>
                             </span>
                             <span
@@ -5354,7 +5375,6 @@ function ShelfPage({
             <div className="focused-series-book-bay">
               <div className="focused-series-books">
                 {item.books.map((book, bookIndex) => {
-                  const details = bookProgressDetails(book);
                   const canReviewOutline = bookReadyForOutlineReview(item, bookIndex);
                   const nextSectionId = nextBookSection(book)?.section.id
                     || book.chapters.flatMap((chapter) => chapter.sections)
@@ -5377,11 +5397,7 @@ function ShelfPage({
                       <strong>{book.title}</strong>
                       <small>{canReviewOutline ? '待确认' : bookProgressLabel(book, false)}</small>
                       <span className="focused-book-progress">
-                        <span>
-                          {details.totalChapters > 0
-                            ? `${details.completedChapters}/${details.totalChapters} 章`
-                            : '章节待确认'}
-                        </span>
+                        <span>{bookProgressCopy(book, nextSectionId)}</span>
                         <b>{book.progress}%</b>
                       </span>
                       <i className="focused-book-progress-track">
@@ -5861,6 +5877,89 @@ function goalOutcomesFor(
   ];
 }
 
+type SeriesCreationStage = 'planning' | 'first-section' | 'opening';
+
+const SERIES_CREATION_STAGES: {
+  id: SeriesCreationStage;
+  title: string;
+  description: string;
+  estimate: string;
+}[] = [
+  {
+    id: 'planning',
+    title: '章节规划中',
+    description: '正在把确认好的目标拆成有顺序的书、章和节。',
+    estimate: '通常 30–90 秒',
+  },
+  {
+    id: 'first-section',
+    title: '首节生成中',
+    description: '正在生成第一节正文和完成后的验证题。',
+    estimate: '通常 1–3 分钟',
+  },
+  {
+    id: 'opening',
+    title: '即将进入第一节',
+    description: '内容已经发布，正在同步目录并打开阅读位置。',
+    estimate: '通常不到 10 秒',
+  },
+];
+
+function formatSeriesCreationElapsed(totalSeconds: number) {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function SeriesCreationProgress({
+  stage,
+  topic,
+  elapsedSeconds,
+}: {
+  stage: SeriesCreationStage;
+  topic: string;
+  elapsedSeconds: number;
+}) {
+  const currentIndex = SERIES_CREATION_STAGES.findIndex((item) => item.id === stage);
+  const current = SERIES_CREATION_STAGES[currentIndex];
+  return (
+    <section className="series-generation-progress" aria-live="polite" aria-busy="true">
+      <div className="series-generation-progress-copy">
+        <p className="eyebrow">正在把目标变成教材</p>
+        <h2>正在生成「{topic}」</h2>
+        <p className="series-generation-current">
+          <span>{String(currentIndex + 1).padStart(2, '0')}</span>
+          <strong>{current.title}</strong>
+        </p>
+        <p className="series-generation-description">{current.description}</p>
+        <div className="series-generation-timing">
+          <span>全程通常需要 2–5 分钟</span>
+          <span>已等待 {formatSeriesCreationElapsed(elapsedSeconds)}</span>
+        </div>
+      </div>
+      <ol className="series-generation-stages" aria-label="教材生成进度">
+        {SERIES_CREATION_STAGES.map((item, index) => {
+          const state = index < currentIndex ? 'complete' : index === currentIndex ? 'current' : 'pending';
+          return (
+            <li className={state} key={item.id} aria-current={state === 'current' ? 'step' : undefined}>
+              <span className="series-generation-marker" aria-hidden="true">{state === 'complete' ? '✓' : index + 1}</span>
+              <div>
+                <strong>{item.title}</strong>
+                <p>{item.description}</p>
+                <small>{state === 'current' ? item.estimate : state === 'complete' ? '已完成' : '等待开始'}</small>
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+      <footer>
+        <span className="series-generation-pulse" aria-hidden="true" />
+        请保持此页面打开，准备好后会自动进入第一节。
+      </footer>
+    </section>
+  );
+}
+
 function SeriesCreationPage({
   shelf,
   profile,
@@ -5869,7 +5968,11 @@ function SeriesCreationPage({
 }: {
   shelf: Shelf;
   profile: LearningProfile;
-  onCreate: (body: object, idempotencyKey: string) => Promise<void>;
+  onCreate: (
+    body: object,
+    idempotencyKey: string,
+    onProgress: (stage: SeriesCreationStage) => void,
+  ) => Promise<void>;
   onCancel: () => void;
 }) {
   const [step, setStep] = useState<'intent' | 'clarify' | 'confirm' | 'map'>('intent');
@@ -5893,6 +5996,9 @@ function SeriesCreationPage({
   const [learningPreferences, setLearningPreferences] = useState<LearningStartPreference[]>([]);
   const [formError, setFormError] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [creationStage, setCreationStage] = useState<SeriesCreationStage>('planning');
+  const [creationStartedAt, setCreationStartedAt] = useState<number | null>(null);
+  const [creationElapsedSeconds, setCreationElapsedSeconds] = useState(0);
   const [previewing, setPreviewing] = useState(false);
   const idempotencyKey = useRef(crypto.randomUUID());
   const goalBrief = goalDraft || interview?.brief || null;
@@ -5904,6 +6010,16 @@ function SeriesCreationPage({
   useEffect(() => {
     window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
   }, [step]);
+
+  useEffect(() => {
+    if (!submitting || creationStartedAt === null) return undefined;
+    const updateElapsed = () => {
+      setCreationElapsedSeconds(Math.max(0, Math.floor((Date.now() - creationStartedAt) / 1000)));
+    };
+    updateElapsed();
+    const timer = window.setInterval(updateElapsed, 1000);
+    return () => window.clearInterval(timer);
+  }, [creationStartedAt, submitting]);
 
   const planDetails = {
     shelfId: shelf.id,
@@ -6012,6 +6128,9 @@ function SeriesCreationPage({
       return;
     }
     setFormError('');
+    setCreationStage('planning');
+    setCreationStartedAt(Date.now());
+    setCreationElapsedSeconds(0);
     setSubmitting(true);
     try {
       await onCreate(
@@ -6027,9 +6146,11 @@ function SeriesCreationPage({
             }
           : { ...planDetails, startMode: 'direct' },
         idempotencyKey.current,
+        setCreationStage,
       );
     } catch (reason) {
       setSubmitting(false);
+      setCreationStartedAt(null);
       setFormError(reason instanceof Error ? reason.message : '学习路线生成失败，请稍后重试');
     }
   };
@@ -6057,7 +6178,7 @@ function SeriesCreationPage({
   return (
     <section className={`series-creation-page series-creation-${step}`} aria-labelledby="series-creation-title">
       <header className="series-creation-header">
-        <button type="button" className="shelf-back-button" onClick={onCancel}>← 返回{shelf.name}书架</button>
+        <button type="button" className="shelf-back-button" disabled={submitting} onClick={onCancel}>← 返回{shelf.name}书架</button>
         <div className="series-creation-heading">
           <div>
             <p className="eyebrow">创建学习系列</p>
@@ -6080,6 +6201,14 @@ function SeriesCreationPage({
           ))}
         </nav>
       </header>
+
+      {submitting && (
+        <SeriesCreationProgress
+          stage={creationStage}
+          topic={goalBrief?.topic || topic.trim()}
+          elapsedSeconds={creationElapsedSeconds}
+        />
+      )}
 
       {step === 'intent' && (
         <form className="series-intent-sheet" onSubmit={continueFromIntent}>
@@ -6274,7 +6403,7 @@ function SeriesCreationPage({
         </div>
       )}
 
-      {step === 'confirm' && goalBrief && (
+      {!submitting && step === 'confirm' && goalBrief && (
         <div className="series-confirm-layout">
           <article className="series-goal-brief series-goal-editor">
             <header>
@@ -6361,7 +6490,7 @@ function SeriesCreationPage({
         </div>
       )}
 
-      {step === 'map' && preview && (() => {
+      {!submitting && step === 'map' && preview && (() => {
         const ready = preview.availability === 'ready' && preview.nodes.length > 0;
         return (
           <section className="learning-start-flow knowledge-interest-step series-creation-map" aria-labelledby="knowledge-interest-title">
