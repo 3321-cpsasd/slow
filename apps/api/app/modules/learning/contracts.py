@@ -26,7 +26,11 @@ from ...infrastructure.tables import (
     Series,
     now,
 )
-from .capabilities import ensure_ask_me_stage_targets, ensure_route_capability
+from .capabilities import (
+    bind_assessment_target_to_capability_subnet,
+    ensure_ask_me_stage_targets,
+    ensure_route_capability,
+)
 
 
 M1_NAMESPACE = "m1_provisional"
@@ -304,6 +308,12 @@ def materialize_route_target(
         target.capability_revision_id = capability_revision.id
         target.capability_stage_criterion_id = bronze_criterion.id
     db.flush()
+    bind_assessment_target_to_capability_subnet(
+        db,
+        assessment_target_id=target.id,
+        capability_revision_id=capability_revision.id,
+        stage_criterion_id=bronze_criterion.id,
+    )
     return target
 
 
@@ -402,6 +412,12 @@ def _ensure_section_targets(
                 target.capability_revision_id = capability_revision.id
                 target.capability_stage_criterion_id = bronze_criterion.id
                 db.flush()
+            bind_assessment_target_to_capability_subnet(
+                db,
+                assessment_target_id=target.id,
+                capability_revision_id=capability_revision.id,
+                stage_criterion_id=bronze_criterion.id,
+            )
             binding = SectionAssessmentTarget(
                 id=_stable_id("section_target_knowledge_graph", section.id, target.id),
                 section_id=section.id,

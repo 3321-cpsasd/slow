@@ -671,6 +671,150 @@ class ConceptRevision(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class KnowledgeNetwork(Base):
+    """Stable identity of a reusable, incrementally published knowledge network."""
+
+    __tablename__ = "knowledge_networks"
+    __table_args__ = (
+        UniqueConstraint(
+            "namespace", "network_key", name="uq_knowledge_network_namespace_key"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    namespace: Mapped[str] = mapped_column(String(120), index=True)
+    network_key: Mapped[str] = mapped_column(String(200))
+    label: Mapped[str] = mapped_column(String(300))
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    origin: Mapped[str] = mapped_column(String(40), default="route_scoped")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class KnowledgeNetworkRevision(Base):
+    """Immutable node-and-relation publication boundary for a knowledge network."""
+
+    __tablename__ = "knowledge_network_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "knowledge_network_id",
+            "revision",
+            name="uq_knowledge_network_revision_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    knowledge_network_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_networks.id"), index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24), default="route_scoped", index=True)
+    provenance_mode: Mapped[str] = mapped_column(
+        String(40), default="route_scoped"
+    )
+    source_release_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    boundary_json: Mapped[str] = mapped_column(Text, default="{}")
+    content_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_network_revisions.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class KnowledgeNetworkConceptBinding(Base):
+    """Exact concept revision included in one immutable network revision."""
+
+    __tablename__ = "knowledge_network_concept_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "knowledge_network_revision_id",
+            "concept_revision_id",
+            name="uq_knowledge_network_concept_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    knowledge_network_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_network_revisions.id"), index=True
+    )
+    concept_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("concept_revisions.id"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class KnowledgeRelation(Base):
+    """Stable identity for a typed semantic relation between knowledge nodes."""
+
+    __tablename__ = "knowledge_relations"
+    __table_args__ = (
+        UniqueConstraint(
+            "namespace", "relation_key", name="uq_knowledge_relation_namespace_key"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    namespace: Mapped[str] = mapped_column(String(120), index=True)
+    relation_key: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    origin: Mapped[str] = mapped_column(String(40), default="route_scoped")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class KnowledgeRelationRevision(Base):
+    """Immutable meaning of a typed relation between exact concept revisions."""
+
+    __tablename__ = "knowledge_relation_revisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "knowledge_relation_id",
+            "revision",
+            name="uq_knowledge_relation_revision_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    knowledge_relation_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_relations.id"), index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer)
+    from_concept_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("concept_revisions.id"), index=True
+    )
+    to_concept_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("concept_revisions.id"), index=True
+    )
+    relation_type: Mapped[str] = mapped_column(String(40), index=True)
+    statement: Mapped[str] = mapped_column(Text)
+    scope_json: Mapped[str] = mapped_column(Text, default="{}")
+    provenance_json: Mapped[str] = mapped_column(Text, default="{}")
+    verification_status: Mapped[str] = mapped_column(
+        String(32), default="route_scoped", index=True
+    )
+    supersedes_id: Mapped[str | None] = mapped_column(
+        ForeignKey("knowledge_relation_revisions.id"), nullable=True
+    )
+    content_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class KnowledgeNetworkRelationBinding(Base):
+    """Exact relation revision included in one immutable network revision."""
+
+    __tablename__ = "knowledge_network_relation_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "knowledge_network_revision_id",
+            "knowledge_relation_revision_id",
+            name="uq_knowledge_network_relation_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    knowledge_network_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_network_revisions.id"), index=True
+    )
+    knowledge_relation_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_relation_revisions.id"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class Capability(Base):
     """Stable identity for an observable ability, independent of lesson wording."""
 
@@ -748,6 +892,55 @@ class CapabilityConceptBinding(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class CapabilitySubnet(Base):
+    """Immutable knowledge-network slice governed by one capability revision."""
+
+    __tablename__ = "capability_subnets"
+    __table_args__ = (
+        UniqueConstraint(
+            "capability_revision_id", name="uq_capability_subnet_revision"
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    capability_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_revisions.id"), index=True
+    )
+    knowledge_network_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_network_revisions.id"), index=True
+    )
+    boundary_json: Mapped[str] = mapped_column(Text, default="{}")
+    context_json: Mapped[str] = mapped_column(Text, default="{}")
+    content_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(24), default="frozen", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class CapabilityRelationRequirement(Base):
+    """Exact network relation a capability must explain or operate."""
+
+    __tablename__ = "capability_relation_requirements"
+    __table_args__ = (
+        UniqueConstraint(
+            "capability_revision_id",
+            "knowledge_relation_revision_id",
+            name="uq_capability_relation_requirement_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    capability_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("capability_revisions.id"), index=True
+    )
+    knowledge_relation_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_relation_revisions.id"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(24), default="required", index=True)
+    required: Mapped[bool] = mapped_column(Boolean, default=True)
+    minimum_stage: Mapped[str] = mapped_column(String(24), default="bronze", index=True)
+    purpose: Mapped[str] = mapped_column(String(40), default="explain")
+    position: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
 class CapabilityStageCriterion(Base):
     """Observable, task-bound criterion in a cumulative four-stage rubric."""
 
@@ -797,7 +990,7 @@ class CapabilityRouteBinding(Base):
     opportunities_json: Mapped[str] = mapped_column(Text, default="[]")
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
     rule_version: Mapped[str] = mapped_column(
-        String(48), default="capability_route_v1"
+        String(48), default="capability_route_v2_subnet"
     )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
@@ -2433,6 +2626,53 @@ class AssessmentTarget(Base):
         String(32), default="legacy_provisional", index=True
     )
     status: Mapped[str] = mapped_column(String(24), default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AssessmentTargetConceptBinding(Base):
+    """Exact capability-subnet node that one assessment target may attribute."""
+
+    __tablename__ = "assessment_target_concept_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "assessment_target_id",
+            "concept_revision_id",
+            name="uq_assessment_target_concept_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    assessment_target_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_targets.id"), index=True
+    )
+    concept_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("concept_revisions.id"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(24), index=True)
+    required: Mapped[bool] = mapped_column(Boolean, default=True)
+    position: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class AssessmentTargetRelationBinding(Base):
+    """Exact capability-subnet relation assessed by one stage target."""
+
+    __tablename__ = "assessment_target_relation_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "assessment_target_id",
+            "knowledge_relation_revision_id",
+            name="uq_assessment_target_relation_identity",
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    assessment_target_id: Mapped[str] = mapped_column(
+        ForeignKey("assessment_targets.id"), index=True
+    )
+    knowledge_relation_revision_id: Mapped[str] = mapped_column(
+        ForeignKey("knowledge_relation_revisions.id"), index=True
+    )
+    required: Mapped[bool] = mapped_column(Boolean, default=True)
+    position: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

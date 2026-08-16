@@ -13,7 +13,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0067_capability_application_tasks"
+HEAD_REVISION = "0068_capability_knowledge_subnets"
 
 pytestmark = pytest.mark.migration
 
@@ -47,6 +47,64 @@ def test_application_task_index_names_fit_postgresql_identifier_limit() -> None:
                 "verdict",
                 "qualification_status",
                 "created_at",
+            ),
+        }.items()
+        for column in columns
+    ]
+    assert len(names) == len(set(names))
+    assert max(map(len, names)) <= 63
+
+
+def test_capability_subnet_index_names_fit_postgresql_identifier_limit() -> None:
+    migration = importlib.import_module(
+        "migrations.versions.0068_capability_knowledge_subnets"
+    )
+    names = [
+        f"ix_{migration._ALIASES[table]}_{column}"
+        for table, columns in {
+            "knowledge_networks": ("namespace", "status"),
+            "knowledge_network_revisions": (
+                "knowledge_network_id",
+                "status",
+                "content_hash",
+            ),
+            "knowledge_network_concept_bindings": (
+                "knowledge_network_revision_id",
+                "concept_revision_id",
+            ),
+            "knowledge_relations": ("namespace", "status"),
+            "knowledge_relation_revisions": (
+                "knowledge_relation_id",
+                "from_concept_revision_id",
+                "to_concept_revision_id",
+                "relation_type",
+                "verification_status",
+                "content_hash",
+            ),
+            "knowledge_network_relation_bindings": (
+                "knowledge_network_revision_id",
+                "knowledge_relation_revision_id",
+            ),
+            "capability_subnets": (
+                "capability_revision_id",
+                "knowledge_network_revision_id",
+                "content_hash",
+                "status",
+            ),
+            "capability_relation_requirements": (
+                "capability_revision_id",
+                "knowledge_relation_revision_id",
+                "role",
+                "minimum_stage",
+            ),
+            "assessment_target_concept_bindings": (
+                "assessment_target_id",
+                "concept_revision_id",
+                "role",
+            ),
+            "assessment_target_relation_bindings": (
+                "assessment_target_id",
+                "knowledge_relation_revision_id",
             ),
         }.items()
         for column in columns

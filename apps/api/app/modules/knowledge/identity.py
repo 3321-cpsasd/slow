@@ -443,7 +443,10 @@ def materialize_candidate_target(
         "target_candidate", revision_id, statement_hash, dimension, "standard"
     )
     target = db.get(AssessmentTarget, target_id)
-    from ..learning.capabilities import ensure_route_capability
+    from ..learning.capabilities import (
+        bind_assessment_target_to_capability_subnet,
+        ensure_route_capability,
+    )
 
     capability_revision, bronze_criterion = ensure_route_capability(
         db,
@@ -472,6 +475,12 @@ def materialize_candidate_target(
         target.capability_revision_id = capability_revision.id
         target.capability_stage_criterion_id = bronze_criterion.id
     db.flush()
+    bind_assessment_target_to_capability_subnet(
+        db,
+        assessment_target_id=target.id,
+        capability_revision_id=capability_revision.id,
+        stage_criterion_id=bronze_criterion.id,
+    )
     return target
 
 
