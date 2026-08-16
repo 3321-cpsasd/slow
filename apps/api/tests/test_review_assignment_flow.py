@@ -174,6 +174,8 @@ def test_review_assignment_materializes_once_and_submits_candidate(tmp_path):
         due = first.json()
         assert due["selectedCount"] == 1
         assert due["items"][0]["status"] == "presented"
+        assert due["items"][0]["reviewReason"] == "这项能力已经到复习时间"
+        assert due["items"][0]["capability"]["currentStage"] == "bronze"
         assignment_id = due["items"][0]["assignmentId"]
 
         repeated = client.get("/api/reviews/due?daily_budget=99").json()

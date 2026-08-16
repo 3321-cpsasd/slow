@@ -20,6 +20,8 @@ from ...domain.learning import grade_choice_quiz
 from ...infrastructure.tables import (
     AssessmentObservation,
     AssessmentTarget,
+    CapabilityRevision,
+    CapabilityStateProjection,
     ContentVersion,
     LearningContractVersion,
     LearningMissionVersion,
@@ -313,6 +315,32 @@ class ReviewAssignmentService:
                     ReviewState.next_due_at.is_not(None),
                 )
             ).all()
+            target_rows = {
+                item.id: item
+                for item in self.db.scalars(
+                    select(AssessmentTarget).where(
+                        AssessmentTarget.id.in_(
+                            [item.assessment_target_id for item in states]
+                        )
+                    )
+                ).all()
+            } if states else {}
+            capability_ids = {
+                item.capability_revision_id
+                for item in target_rows.values()
+                if item.capability_revision_id
+            }
+            capability_states = {
+                item.capability_revision_id: item
+                for item in self.db.scalars(
+                    select(CapabilityStateProjection).where(
+                        CapabilityStateProjection.user_id == self.user_id,
+                        CapabilityStateProjection.capability_revision_id.in_(
+                            capability_ids
+                        ),
+                    )
+                ).all()
+            } if capability_ids else {}
             source_by_target: dict[str, AssessmentObservation] = {}
             candidates = []
             for item in states:
@@ -325,12 +353,43 @@ class ReviewAssignmentService:
                         raise
                     continue
                 source_by_target[item.assessment_target_id] = source
+                target = target_rows.get(item.assessment_target_id)
+                capability = (
+                    capability_states.get(target.capability_revision_id)
+                    if target and target.capability_revision_id
+                    else None
+                )
+                capability_activation = (
+                    "due_for_reactivation"
+                    if capability
+                    and capability.next_due_at is not None
+                    and _utc(capability.next_due_at) <= moment
+                    else capability.activation_state
+                    if capability
+                    else ""
+                )
                 candidates.append(ReviewCandidate(
                     review_state_id=item.id,
                     assessment_target_id=item.assessment_target_id,
                     due_at=_utc(item.next_due_at),
                     priority=item.priority,
                     status=item.status,
+                    need_kind=(
+                        "remediation"
+                        if item.status == "remediation_due"
+                        else "activation_due"
+                    ),
+                    capability_stage=(
+                        capability.current_stage if capability else "unranked"
+                    ),
+                    capability_activation_state=(
+                        capability_activation
+                    ),
+                    capability_revision_id=(
+                        target.capability_revision_id
+                        if target and target.capability_revision_id
+                        else ""
+                    ),
                 ))
             try:
                 selection = select_daily_reviews(
@@ -347,6 +406,12 @@ class ReviewAssignmentService:
                     "dueAt": _utc(item.due_at).isoformat(),
                     "priority": item.priority,
                     "status": item.status,
+                    "needKind": item.need_kind,
+                    "capabilityStage": item.capability_stage,
+                    "capabilityActivationState": (
+                        item.capability_activation_state
+                    ),
+                    "capabilityRevisionId": item.capability_revision_id,
                 }
                 for item in sorted(candidates, key=lambda value: value.assessment_target_id)
             ]).encode()).hexdigest()
@@ -420,6 +485,38 @@ class ReviewAssignmentService:
                 )
             ).all()
         } if assignments else {}
+        review_states = {
+            item.id: item
+            for item in self.db.scalars(
+                select(ReviewState).where(
+                    ReviewState.id.in_([item.review_state_id for item in assignments])
+                )
+            ).all()
+        } if assignments else {}
+        capability_ids = {
+            target.capability_revision_id
+            for target in targets.values()
+            if target.capability_revision_id
+        }
+        capability_states = {
+            item.capability_revision_id: item
+            for item in self.db.scalars(
+                select(CapabilityStateProjection).where(
+                    CapabilityStateProjection.user_id == self.user_id,
+                    CapabilityStateProjection.capability_revision_id.in_(
+                        capability_ids
+                    ),
+                )
+            ).all()
+        } if capability_ids else {}
+        capability_revisions = {
+            item.id: item
+            for item in self.db.scalars(
+                select(CapabilityRevision).where(
+                    CapabilityRevision.id.in_(capability_ids)
+                )
+            ).all()
+        } if capability_ids else {}
         targets_by_contract: dict[str, set[str]] = {}
         for assignment in assignments:
             targets_by_contract.setdefault(
@@ -447,6 +544,27 @@ class ReviewAssignmentService:
             effective_concepts_by_assignment[assignment.id] = (
                 effective.concept_revision_id if effective else None
             )
+
+        def capability_view(assignment: ReviewAssignment) -> dict | None:
+            capability_id = targets[
+                assignment.assessment_target_id
+            ].capability_revision_id
+            state = capability_states.get(capability_id or "")
+            revision = capability_revisions.get(capability_id or "")
+            if state is None or revision is None:
+                return None
+            activation = (
+                "due_for_reactivation"
+                if state.next_due_at is not None
+                and _utc(state.next_due_at) <= _utc(selection.as_of)
+                else state.activation_state
+            )
+            return {
+                "label": revision.label,
+                "currentStage": state.current_stage,
+                "activationState": activation,
+            }
+
         return {
             "selectionRunId": selection.id,
             "asOf": _utc(selection.as_of).isoformat(),
@@ -469,6 +587,13 @@ class ReviewAssignmentService:
                     "knowledgeNode": node_views.get(
                         effective_concepts_by_assignment[item.id] or ""
                     ),
+                    "reviewReason": (
+                        "近期作答暴露了需要补强的部分"
+                        if review_states[item.review_state_id].status
+                        == "remediation_due"
+                        else "这项能力已经到复习时间"
+                    ),
+                    "capability": capability_view(item),
                 }
                 for item in assignments
             ],
