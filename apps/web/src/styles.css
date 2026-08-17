@@ -3803,7 +3803,7 @@ button:disabled { cursor: not-allowed; }
 .qa-toggle { right: -12px; border-radius: 9px 0 0 9px; }
 .reader-directory-trigger, .reader-qa-trigger {
   position: absolute;
-  z-index: 15;
+  z-index: 25;
   border: 1px solid #d5dfd7;
   background: rgba(251, 252, 249, .96);
   color: var(--reader-green);

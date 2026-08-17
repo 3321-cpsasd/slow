@@ -6774,6 +6774,7 @@ function LearningWorkspace({
   const [directoryHidden, setDirectoryHidden] = useState(() => window.matchMedia(workspaceFocusMediaQuery).matches);
   const [qaHidden, setQaHidden] = useState(true);
   const [readerTab, setReaderTab] = useState<ReaderTab>('content');
+  const [quizReviewVisible, setQuizReviewVisible] = useState(false);
   const [readerTypographyStep, setReaderTypographyStep] = useState(() => readReaderTypographyStep(userId));
   const [askAiStreaming, setAskAiStreaming] = useState(false);
   const [layoutRatios, setLayoutRatios] = useState(() => readWorkspaceLayoutRatios(userId));
@@ -6799,7 +6800,10 @@ function LearningWorkspace({
   } | null>(null);
   panelLayoutRef.current = { directoryWidth, qaWidth, directoryHidden, qaHidden, layoutRatios };
 
-  const qaAvailable = readerTab !== 'quiz';
+  // Answering and reviewing are deliberately different states. Ask AI remains
+  // unavailable while a learner is choosing answers, but becomes available
+  // again once the submitted result and its explanations are visible.
+  const qaAvailable = readerTab !== 'quiz' || quizReviewVisible;
   const effectiveQaHidden = qaHidden || !qaAvailable;
   const studyActivityKind = !effectiveQaHidden
     ? 'ask_ai'
@@ -6880,6 +6884,7 @@ function LearningWorkspace({
     setSelectedBlockId(section?.content?.blocks[0]?.id || '');
     setSelectedQuote(null);
     setExplanationRequest(null);
+    setQuizReviewVisible(false);
     if (section?.id) setChapterLaunchAction(null);
   }, [section?.id, section?.content?.id]);
 
@@ -6936,7 +6941,6 @@ function LearningWorkspace({
     setDirectoryHidden((hidden) => !hidden);
   };
   const toggleQa = () => {
-    if (!qaAvailable) return;
     if (focusLayout && qaHidden) setDirectoryHidden(true);
     setQaHidden((hidden) => !hidden);
   };
@@ -7148,10 +7152,16 @@ function LearningWorkspace({
         onReaderTypographyStepChange={changeReaderTypographyStep}
         onToggleDirectory={toggleDirectory}
         onToggleQa={toggleQa}
+        onOpenQa={() => openPanel('qa')}
         onTabChange={(nextTab) => {
           setReaderTab(nextTab);
-          if (nextTab === 'quiz') setQaHidden(true);
+          if (nextTab === 'quiz') {
+            setQaHidden(true);
+          } else {
+            setQuizReviewVisible(false);
+          }
         }}
+        onQuizReviewVisibilityChange={setQuizReviewVisible}
         location={location}
         selectedBlockId={activeBlockId}
         onSelectBlock={selectBlock}
@@ -8053,7 +8063,9 @@ function ReaderPanel({
   onReaderTypographyStepChange,
   onToggleDirectory,
   onToggleQa,
+  onOpenQa,
   onTabChange,
+  onQuizReviewVisibilityChange,
   location,
   selectedBlockId,
   onSelectBlock,
@@ -8088,7 +8100,9 @@ function ReaderPanel({
   onReaderTypographyStepChange: (step: number) => void;
   onToggleDirectory: () => void;
   onToggleQa: () => void;
+  onOpenQa: () => void;
   onTabChange: (tab: ReaderTab) => void;
+  onQuizReviewVisibilityChange: (visible: boolean) => void;
   location: ReturnType<typeof findSectionLocation>;
   selectedBlockId: string;
   onSelectBlock: (blockId: string) => void;
@@ -8476,6 +8490,7 @@ function ReaderPanel({
           qaAvailable={qaAvailable}
           onToggleDirectory={onToggleDirectory}
           onToggleQa={onToggleQa}
+          onOpenQa={onOpenQa}
         />
         {chapter && chapterAction ? (
           <ChapterLaunchPanel
@@ -8499,6 +8514,7 @@ function ReaderPanel({
         qaAvailable={qaAvailable}
         onToggleDirectory={onToggleDirectory}
         onToggleQa={onToggleQa}
+        onOpenQa={onOpenQa}
       />
       <LessonReaderHeader
         bookPosition={location?.book.position}
@@ -8575,6 +8591,8 @@ function ReaderPanel({
               onSelectSection={onSelectSection}
               onReviewContent={reviewContent}
               onFeedback={onGlobalFeedback}
+              onOpenQa={onOpenQa}
+              onReviewVisibilityChange={onQuizReviewVisibilityChange}
               onSubmissionComplete={() => {
                 tabScrollPositionsRef.current.quiz = 0;
                 setReaderHeaderCondensed(false);
@@ -8859,12 +8877,14 @@ function ReaderPanelToggles({
   qaAvailable,
   onToggleDirectory,
   onToggleQa,
+  onOpenQa,
 }: {
   directoryHidden: boolean;
   qaHidden: boolean;
   qaAvailable: boolean;
   onToggleDirectory: () => void;
   onToggleQa: () => void;
+  onOpenQa: () => void;
 }) {
   return (
     <>
@@ -8896,10 +8916,11 @@ function ReaderPanelToggles({
       )}
       {qaAvailable && qaHidden && (
         <button
+          type="button"
           className="reader-qa-trigger"
           aria-controls="section-qa-panel"
           aria-expanded={false}
-          onClick={onToggleQa}
+          onClick={onOpenQa}
         >
           Ask AI
         </button>
@@ -9113,6 +9134,8 @@ function Quiz({
   onSelectSection,
   onReviewContent,
   onFeedback,
+  onOpenQa,
+  onReviewVisibilityChange,
   onSubmissionComplete,
 }: {
   series: Series;
@@ -9123,6 +9146,8 @@ function Quiz({
   onSelectSection: (id: string) => Promise<Section>;
   onReviewContent: (blockId?: string) => void;
   onFeedback: () => void;
+  onOpenQa: () => void;
+  onReviewVisibilityChange: (visible: boolean) => void;
   onSubmissionComplete: () => void;
 }) {
   const quizDraftKey = `slow:quiz-draft:${section.id}:${section.quiz?.id || 'none'}`;
@@ -9221,6 +9246,10 @@ function Quiz({
   const eligibleUnderCurrentPolicy = Boolean(
     result && !result.passed && result.reassessmentEligible,
   );
+
+  useEffect(() => {
+    onReviewVisibilityChange(Boolean(result) && !quizGovernanceBlocked);
+  }, [onReviewVisibilityChange, quizGovernanceBlocked, result]);
 
   useEffect(() => {
     localStorage.setItem(quizDraftKey, JSON.stringify(answers));
@@ -9535,6 +9564,7 @@ function Quiz({
           workflowTasks={workflowTasks}
           retryingTasks={retryingTasks}
           onReviewContent={onReviewContent}
+          onOpenQa={onOpenQa}
           onOpenRemediation={openRemediation}
           onReassess={reassessAttempt}
           onOpenNextSection={openNextSection}
@@ -9754,6 +9784,7 @@ function QuizReview({
   workflowTasks,
   retryingTasks,
   onReviewContent,
+  onOpenQa,
   onOpenRemediation,
   onReassess,
   onOpenNextSection,
@@ -9775,6 +9806,7 @@ function QuizReview({
   workflowTasks: LearningTask[];
   retryingTasks: boolean;
   onReviewContent: (blockId?: string) => void;
+  onOpenQa: () => void;
   onOpenRemediation: () => Promise<void>;
   onReassess: () => Promise<void>;
   onOpenNextSection: () => Promise<void>;
@@ -9845,6 +9877,9 @@ function QuizReview({
         <p>
           {result.passed ? '查看解析或回到正文。' : '先查看下面的错题解析。'}
         </p>
+        <button type="button" className="quiet-button quiz-review-ask-ai" onClick={onOpenQa}>
+          Ask AI 追问解析
+        </button>
       </header>
 
       <KnowledgeSettlementCard settlement={result.knowledgeSettlement} />
@@ -10105,7 +10140,12 @@ function KnowledgeSettlementCard({
       </div>
       <div className="knowledge-settlement-list">
         {updates.map((update) => {
-          const tier = update.after.stageLabel.split(' · ')[0];
+          // Historical/demo evidence predates the display label. Keep a
+          // completed verification readable instead of letting that legacy
+          // projection blank the entire result page.
+          const stageLabel = update.after.stageLabel || '能力记录';
+          const beforeStageLabel = update.before.stageLabel || '尚未分级';
+          const tier = stageLabel.split(' · ')[0];
           const stageChanged = update.change === 'stage_up';
           return (
             <article
@@ -10115,7 +10155,7 @@ function KnowledgeSettlementCard({
             >
               <div
                 className="knowledge-rank-seal"
-                aria-label={`当前能力阶段：${update.after.stageLabel}`}
+                aria-label={`当前能力阶段：${stageLabel}`}
               >
                 <small>{stageChanged ? 'NEW STAGE' : 'CAPABILITY'}</small>
                 <strong>{tier}</strong>
@@ -10128,10 +10168,10 @@ function KnowledgeSettlementCard({
                 </div>
                 <h4>
                   {stageChanged && update.before.stage !== 'unranked' && (
-                    <small>{update.before.stageLabel}</small>
+                    <small>{beforeStageLabel}</small>
                   )}
                   {stageChanged && update.before.stage !== 'unranked' && <i>→</i>}
-                  {update.after.stageLabel}
+                  {stageLabel}
                 </h4>
                 <p>{update.message}</p>
                 <div className="knowledge-capability-scope">
