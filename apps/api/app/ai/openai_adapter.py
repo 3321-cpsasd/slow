@@ -1289,7 +1289,7 @@ dailyCommitment 和 completionHorizon 是用户在进入访谈前已经明确填
 
 当七项信息足以规划，返回 ready 和 brief。brief.topic 要保持用户主题但补足必要边界；purpose、success_marker、starting_point、daily_commitment、completion_horizon、scope、out_of_scope 都必须具体、可执行。recommended_depth 只是入门、熟练、精通三档的建议：overview=入门，deep=熟练，mastery=精通。不要承诺用户已经掌握，也不要把“精通”写成保证结果。
 
-访谈轮数由信息充分度决定，不预设固定题数。通常 4-6 轮；目标具体时可以更短，宽泛或矛盾时可以更长。answers 已达 8 条时不得继续追问：用清晰、保守的推断补足剩余信息并在 scope 或 out_of_scope 中写明假设，然后返回 ready。中文输出。""",
+访谈轮数由信息充分度决定，不预设固定题数。通常 4-6 轮；目标具体时可以更短，宽泛或矛盾时可以更长。新问题的 id 必须与 answers 中全部 questionId 不同。finalizationRequired=true 或 answers 已达 8 条时，这是不可违反的终止条件：不得继续追问，必须用清晰、保守的推断补足剩余信息，在 scope 或 out_of_scope 中写明假设，然后返回 ready。中文输出。""",
             request,
             3500,
             reasoning_mode_override="disabled",

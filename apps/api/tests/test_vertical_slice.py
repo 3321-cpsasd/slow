@@ -2859,6 +2859,72 @@ def test_learning_goal_interview_asks_then_returns_a_validated_brief(client):
     assert missing_shelf.status_code == 404
 
 
+def test_learning_goal_interview_never_returns_a_ninth_question(client, monkeypatch):
+    async def keep_asking(request):
+        return await FakeAi().learning_goal_interview({**request, "answers": []})
+
+    monkeypatch.setattr(
+        client.app.state.ai,
+        "learning_goal_interview",
+        keep_asking,
+    )
+    answers = [
+        {
+            "questionId": f"answered_{index}",
+            "dimension": "purpose",
+            "question": f"第 {index} 个问题是什么？",
+            "answer": f"第 {index} 个回答",
+        }
+        for index in range(1, 9)
+    ]
+
+    response = client.post(
+        "/api/learning-start/interview",
+        json={
+            "shelfId": "shelf_technology",
+            "topic": "Coding Agent",
+            "dailyCommitmentHours": 1,
+            "completionHorizonValue": 2,
+            "completionHorizonUnit": "week",
+            "relatedExperience": "看得懂岗位描述",
+            "answers": answers,
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "LEARNING_GOAL_INTERVIEW_FINALIZATION_INCOMPLETE"
+    assert response.json()["retryable"] is True
+    assert "确认稿" in response.json()["message"]
+
+
+def test_learning_goal_interview_limit_validation_is_actionable(client):
+    response = client.post(
+        "/api/learning-start/interview",
+        json={
+            "shelfId": "shelf_technology",
+            "topic": "Coding Agent",
+            "dailyCommitmentHours": 1,
+            "completionHorizonValue": 2,
+            "completionHorizonUnit": "week",
+            "relatedExperience": "看得懂岗位描述",
+            "answers": [
+                {
+                    "questionId": f"answered_{index}",
+                    "dimension": "purpose",
+                    "question": f"第 {index} 个问题是什么？",
+                    "answer": f"第 {index} 个回答",
+                }
+                for index in range(1, 10)
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "LEARNING_GOAL_INTERVIEW_ANSWERS_INVALID"
+    assert response.json()["retryable"] is True
+    assert response.json()["message"] == "目标信息已经收集完成，请刷新页面后继续整理确认稿"
+
+
 def test_learning_start_preview_falls_back_and_direct_choice_is_auditable(client):
     body = {
         "shelfId": "shelf_technology",

@@ -674,7 +674,7 @@ def create_app(
         )
 
     @app.exception_handler(RequestValidationError)
-    async def validation_error(_request, error):
+    async def validation_error(request, error):
         details = []
         for item in error.errors():
             sanitized = dict(item)
@@ -685,13 +685,30 @@ def create_app(
                     for key, value in sanitized["ctx"].items()
                 }
             details.append(sanitized)
+        interview_limit_error = (
+            request.url.path == "/api/learning-start/interview"
+            and any(
+                item.get("type") == "too_long"
+                and "answers" in item.get("loc", ())
+                for item in details
+            )
+        )
+        message = (
+            "目标信息已经收集完成，请刷新页面后继续整理确认稿"
+            if interview_limit_error
+            else "请求参数无效"
+        )
         return JSONResponse(
             status_code=400,
             content={
-                "code": "INVALID_REQUEST",
-                "message": "请求参数无效",
-                "error": "请求参数无效",
-                "retryable": False,
+                "code": (
+                    "LEARNING_GOAL_INTERVIEW_ANSWERS_INVALID"
+                    if interview_limit_error
+                    else "INVALID_REQUEST"
+                ),
+                "message": message,
+                "error": message,
+                "retryable": interview_limit_error,
                 "operationId": None,
                 "details": details,
             },

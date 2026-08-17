@@ -5975,6 +5975,7 @@ function SeriesCreationPage({
   ) => Promise<void>;
   onCancel: () => void;
 }) {
+  const maxInterviewAnswers = 8;
   const [step, setStep] = useState<'intent' | 'clarify' | 'confirm' | 'map'>('intent');
   const [topic, setTopic] = useState('');
   const [dailyCommitmentHours, setDailyCommitmentHours] = useState('1');
@@ -6076,6 +6077,10 @@ function SeriesCreationPage({
     if (interviewBusy) return;
     const question = interview?.question;
     if (!question) return;
+    if (interviewAnswers.length >= maxInterviewAnswers) {
+      await requestInterview(interviewAnswers, interview);
+      return;
+    }
     const selectedOption = question.options.find((item) => item.id === selectedInterviewAnswer);
     const answer = customInterviewAnswer.trim()
       || (selectedOption
@@ -6392,10 +6397,20 @@ function SeriesCreationPage({
                 <button
                   type="button"
                   className="primary-button"
-                  disabled={interviewBusy || (!selectedInterviewAnswer && !customInterviewAnswer.trim())}
+                  disabled={interviewBusy || (
+                    interviewAnswers.length < maxInterviewAnswers
+                    && !selectedInterviewAnswer
+                    && !customInterviewAnswer.trim()
+                  )}
                   onClick={() => void continueInterview()}
                 >
-                  {interviewBusy ? '正在整理下一问…' : '继续 →'}
+                  {interviewBusy
+                    ? interviewAnswers.length >= maxInterviewAnswers
+                      ? '正在整理目标确认稿…'
+                      : '正在整理下一问…'
+                    : interviewAnswers.length >= maxInterviewAnswers
+                      ? '整理目标确认稿 →'
+                      : '继续 →'}
                 </button>
               </div>
             </footer>

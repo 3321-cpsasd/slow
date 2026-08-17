@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -156,6 +157,68 @@ def test_gateway_routes_learning_goal_interview_independently_from_curriculum():
     assert interviewer.calls == [
         ("learning_goal_interview", {"topic": "AI是什么"})
     ]
+
+
+def test_gateway_falls_back_when_interview_keeps_asking_at_answer_limit():
+    class InterviewAdapter(StubAdapter):
+        def __init__(self, model, result):
+            super().__init__(model)
+            self.result = result
+
+        async def learning_goal_interview(self, request):
+            self.calls.append(("learning_goal_interview", request))
+            return self.result
+
+    still_asking = SimpleNamespace(
+        status="ask",
+        question=SimpleNamespace(id="question_9"),
+    )
+    finalized = SimpleNamespace(status="ready", question=None)
+    primary = InterviewAdapter("deepseek-v4-flash", still_asking)
+    fallback = InterviewAdapter("qwen3.8-max", finalized)
+    router = gateway(primary, fallback)
+    request = {
+        "topic": "Coding Agent",
+        "answers": [
+            {"questionId": f"question_{index}"}
+            for index in range(1, 9)
+        ],
+        "finalizationRequired": True,
+    }
+
+    result = asyncio.run(router.learning_goal_interview(request))
+
+    assert result is finalized
+    assert primary.calls == [("learning_goal_interview", request)]
+    assert fallback.calls == [("learning_goal_interview", request)]
+
+
+def test_gateway_fails_closed_when_every_interviewer_ignores_answer_limit():
+    class AskingAdapter(StubAdapter):
+        async def learning_goal_interview(self, request):
+            self.calls.append(("learning_goal_interview", request))
+            return SimpleNamespace(
+                status="ask",
+                question=SimpleNamespace(id=f"next_{self.model}"),
+            )
+
+    router = gateway(
+        AskingAdapter("deepseek-v4-flash"),
+        AskingAdapter("qwen3.8-max"),
+    )
+    request = {
+        "topic": "Coding Agent",
+        "answers": [
+            {"questionId": f"question_{index}"}
+            for index in range(1, 9)
+        ],
+        "finalizationRequired": True,
+    }
+
+    with pytest.raises(AiError) as caught:
+        asyncio.run(router.learning_goal_interview(request))
+
+    assert caught.value.code == "AI_INTERVIEW_FINALIZATION_REQUIRED"
 
 
 def test_gateway_connection_check_covers_each_routed_deployment_once():

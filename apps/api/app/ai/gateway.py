@@ -815,7 +815,45 @@ class PurposeAiGateway:
         )
 
     async def learning_goal_interview(self, request):
-        return await self._call(
+        answered_question_ids = {
+            str(item.get("questionId") or "")
+            for item in request.get("answers", [])
+        }
+
+        def require_progress(candidate) -> None:
+            status = (
+                candidate.get("status")
+                if isinstance(candidate, dict)
+                else candidate.status
+            )
+            if status != "ask":
+                return
+            question = (
+                candidate.get("question")
+                if isinstance(candidate, dict)
+                else candidate.question
+            )
+            if len(request.get("answers", [])) >= 8:
+                raise AiError(
+                    "目标访谈达到上限后仍返回了下一题",
+                    code="AI_INTERVIEW_FINALIZATION_REQUIRED",
+                    retryable=True,
+                )
+            question_id = (
+                question.get("id")
+                if isinstance(question, dict)
+                else question.id
+                if question
+                else ""
+            )
+            if question_id in answered_question_ids:
+                raise AiError(
+                    "目标访谈重复了已经回答的问题",
+                    code="AI_INTERVIEW_QUESTION_REPEATED",
+                    retryable=True,
+                )
+
+        candidate = await self._call(
             AiTaskEnvelope(
                 AiPurpose.LEARNING_GOAL_INTERVIEW,
                 AuthorityLevel.CANDIDATE_ONLY,
@@ -823,7 +861,10 @@ class PurposeAiGateway:
             ),
             "learning_goal_interview",
             request,
+            candidate_validator=require_progress,
         )
+        require_progress(candidate)
+        return candidate
 
     async def chapter(self, request, memory):
         envelope = AiTaskEnvelope(

@@ -49,6 +49,7 @@ from .progress import best_score_pair
 LEARNING_START_PREVIEW_SCHEMA_VERSION = "learning_start_preview_v1"
 LEARNING_START_SELECTION_RULE_VERSION = "learning_start_selection_v1"
 LEARNING_GOAL_INTERVIEW_RULE_VERSION = "learning_goal_interview_v3"
+LEARNING_GOAL_INTERVIEW_MAX_ANSWERS = 8
 CHAPTER_ROUTE_RULE_VERSION = "chapter_route_choice_v1"
 CHAPTER_CHALLENGE_RULE_VERSION = "chapter_challenge_v1"
 
@@ -143,6 +144,9 @@ class LearningStartService:
             },
             "relatedExperience": body.related_experience.strip(),
             "answers": [item.model_dump(by_alias=True) for item in body.answers],
+            "finalizationRequired": (
+                len(body.answers) >= LEARNING_GOAL_INTERVIEW_MAX_ANSWERS
+            ),
             "profile": profile,
             "shelf": {
                 "name": shelf.name,
@@ -152,6 +156,24 @@ class LearningStartService:
             "interviewRuleVersion": LEARNING_GOAL_INTERVIEW_RULE_VERSION,
         }
         result = await self.ai.learning_goal_interview(request)
+        if result.status == "ask":
+            answered_question_ids = {
+                item.question_id for item in body.answers
+            }
+            if result.question and result.question.id in answered_question_ids:
+                raise AppError(
+                    "这一轮信息没有继续推进，请重试整理目标确认稿",
+                    code="LEARNING_GOAL_INTERVIEW_STALLED",
+                    status=503,
+                    retryable=True,
+                )
+            if len(body.answers) >= LEARNING_GOAL_INTERVIEW_MAX_ANSWERS:
+                raise AppError(
+                    "目标信息已经收集完成，但确认稿暂时没有整理好，请重试",
+                    code="LEARNING_GOAL_INTERVIEW_FINALIZATION_INCOMPLETE",
+                    status=503,
+                    retryable=True,
+                )
         question = None
         if result.question:
             question = {
