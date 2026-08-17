@@ -1,3 +1,4 @@
+import { useRef, useState } from 'react';
 import type { MilestonePath } from '../../model/types';
 
 export function PathDecisionBanner({
@@ -15,10 +16,25 @@ export function PathDecisionBanner({
   onReviewGoal: () => void;
   onDismiss: () => void;
 }) {
+  const confirmationInFlight = useRef(false);
+  const [confirming, setConfirming] = useState(false);
   const goalChanged = !path.goalAligned;
   const title = goalChanged
     ? '这套教材仍按之前的目标编排'
     : '采用这套路径后开始记录里程碑';
+  const blocked = busy || confirming;
+
+  const confirmPath = async () => {
+    if (confirmationInFlight.current || busy) return;
+    confirmationInFlight.current = true;
+    setConfirming(true);
+    try {
+      await onConfirm();
+    } finally {
+      confirmationInFlight.current = false;
+      setConfirming(false);
+    }
+  };
 
   return (
     <section
@@ -48,14 +64,14 @@ export function PathDecisionBanner({
         </div>
       </dl>
       <div className="path-decision-actions">
-        <button type="button" className="quiet-button" disabled={busy} onClick={onDismiss}>
+        <button type="button" className="quiet-button" disabled={blocked} onClick={onDismiss}>
           暂时收起
         </button>
-        <button type="button" className="secondary-button" disabled={busy} onClick={onReviewGoal}>
+        <button type="button" className="secondary-button" disabled={blocked} onClick={onReviewGoal}>
           查看学习目标
         </button>
-        <button type="button" className="primary-button" disabled={busy} onClick={() => void onConfirm()}>
-          {busy ? '正在确认…' : goalChanged ? '教材仍适用' : '采用并开始'}
+        <button type="button" className="primary-button" disabled={blocked} onClick={() => void confirmPath()}>
+          {blocked ? '正在确认…' : goalChanged ? '教材仍适用' : '采用并开始'}
         </button>
       </div>
     </section>

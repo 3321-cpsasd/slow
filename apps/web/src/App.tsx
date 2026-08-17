@@ -2320,8 +2320,10 @@ export default function App() {
                     onDismiss={() => setDismissedPathAlertSeriesId(pathDecisionKey)}
                     onReviewGoal={() => openProfileCenter('profile')}
                     onConfirm={async () => {
-                      await run('正在确认学习路径…', () => api.confirmMilestonePath(series.id));
-                      setData(await api.bootstrap());
+                      await run('正在确认学习路径…', async () => {
+                        await api.confirmMilestonePath(series.id);
+                        setData(await api.bootstrap());
+                      });
                     }}
                   />
                 )}
@@ -8883,7 +8885,7 @@ function ReaderPanel({
               clearNativeSelection();
             }}
           >
-            <span>?</span>
+            <span aria-hidden="true">AI</span>
             Ask AI
           </button>
           <span className="selection-actions-divider" aria-hidden="true" />

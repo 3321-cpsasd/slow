@@ -3239,6 +3239,12 @@ def test_milestone_path_is_proposed_confirmed_and_reconciled_with_goal_version(c
     assert confirmed.status_code == 200
     assert confirmed.json()["status"] == "confirmed"
 
+    duplicate_confirmation = client.post(
+        f"/api/series/{series['id']}/milestone-path/confirm"
+    )
+    assert duplicate_confirmation.status_code == 200
+    assert duplicate_confirmation.json()["version"] == confirmed.json()["version"]
+
     profile = bootstrap["profile"]
     corrected = client.put(
         "/api/profile",

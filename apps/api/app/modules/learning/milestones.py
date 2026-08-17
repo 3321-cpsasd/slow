@@ -91,9 +91,17 @@ class MilestoneService:
             self.db.add(path)
             self.db.flush()
         profile = self.db.get(UserProfile, self.user_id)
+        goal_profile_version = profile.version if profile else 0
+        if path.status == "confirmed" and path.goal_profile_version == goal_profile_version:
+            return {
+                "seriesId": series_id,
+                "status": path.status,
+                "version": path.version,
+                "goalProfileVersion": path.goal_profile_version,
+            }
         path.version += 1
         path.status = "confirmed"
-        path.goal_profile_version = profile.version if profile else 0
+        path.goal_profile_version = goal_profile_version
         path.confirmed_at = now()
         path.updated_at = now()
         self._add_revision(path, source="user_confirmation")
