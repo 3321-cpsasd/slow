@@ -4801,6 +4801,9 @@ button:disabled { cursor: not-allowed; }
   box-shadow: 0 10px 28px rgba(32, 56, 45, .22);
   animation: selection-qa-in .13s ease-out;
 }
+.selection-actions[data-placement='below'] {
+  animation-name: selection-qa-in-below;
+}
 .selection-actions button {
   height: 30px;
   padding: 0 10px;
@@ -4839,6 +4842,10 @@ button:disabled { cursor: not-allowed; }
 .selection-mark-button:hover, .selection-comment-button:hover { background: #fbf0d5 !important; color: #604317; }
 @keyframes selection-qa-in {
   from { opacity: 0; transform: translate(-50%, 3px) scale(.96); }
+  to { opacity: 1; transform: translate(-50%, 0) scale(1); }
+}
+@keyframes selection-qa-in-below {
+  from { opacity: 0; transform: translate(-50%, -3px) scale(.96); }
   to { opacity: 1; transform: translate(-50%, 0) scale(1); }
 }
 ::highlight(slow-reading-highlights) { color: inherit; background: rgba(244, 205, 103, .52); }
@@ -7007,11 +7014,34 @@ button:disabled { cursor: not-allowed; }
   .annotation-ledger-trigger { grid-template-columns: auto 25px; }
   .annotation-ledger-trigger > small { display: none; }
   .annotation-block-count { top: 108px; left: -16px; }
-  .selection-actions { max-width: calc(100vw - 20px); }
+  .selection-actions {
+    top: auto !important;
+    right: 12px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    left: 12px !important;
+    width: auto;
+    max-width: none;
+    justify-content: center;
+    transform: none;
+    border-color: #315b49;
+    box-shadow: 0 12px 32px rgba(24, 49, 39, .25);
+    animation-name: selection-actions-mobile-in;
+  }
   .selection-actions button { padding-right: 8px; padding-left: 8px; }
-  .annotation-composer-popover { left: 50% !important; }
+  .annotation-composer-popover {
+    top: auto !important;
+    right: 12px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
+    left: 12px !important;
+    width: auto;
+    transform: none;
+  }
   .annotation-drawer { width: min(410px, 100vw); padding: 25px 20px 22px; }
   .annotation-toast { right: 16px; bottom: 16px; }
+}
+@keyframes selection-actions-mobile-in {
+  from { opacity: 0; transform: translateY(5px) scale(.98); }
+  to { opacity: 1; transform: none; }
 }
 .chapter-workload-hint {
   display: block;

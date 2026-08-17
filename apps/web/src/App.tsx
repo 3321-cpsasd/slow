@@ -98,6 +98,8 @@ type SelectionPopup = TextQuote & {
   anchor: ReadingAnnotationAnchor;
   top: number;
   left: number;
+  placement: 'above' | 'below';
+  composerTop: number;
 };
 type AnnotationComposerDraft = {
   selection: SelectionPopup;
@@ -8489,6 +8491,19 @@ function ReaderPanel({
     const bodyText = annotationBody.textContent || '';
     const endOffset = startOffset + exact.length;
     const rect = range.getBoundingClientRect();
+    const compactViewport = window.matchMedia('(max-width: 760px)').matches;
+    const toolbarHeight = 40;
+    const toolbarGap = 10;
+    const viewportPadding = 12;
+    const nativeMenuClearance = 66;
+    const placeAbove = !compactViewport
+      && rect.top >= toolbarHeight + toolbarGap + viewportPadding;
+    const toolbarTop = placeAbove
+      ? Math.max(viewportPadding, rect.top - toolbarHeight - toolbarGap)
+      : Math.min(
+        rect.bottom + nativeMenuClearance,
+        window.innerHeight - toolbarHeight - viewportPadding,
+      );
     setSelectionPopup({
       text: text.slice(0, 600),
       blockId: blockElement.dataset.blockId || '',
@@ -8500,8 +8515,10 @@ function ReaderPanel({
         startOffset,
         endOffset,
       },
-      top: Math.min(rect.bottom + 9, window.innerHeight - 48),
-      left: Math.min(Math.max(rect.left + rect.width / 2, 54), window.innerWidth - 54),
+      top: toolbarTop,
+      left: Math.min(Math.max(rect.left + rect.width / 2, 112), window.innerWidth - 112),
+      placement: placeAbove ? 'above' : 'below',
+      composerTop: Math.max(12, Math.min(rect.bottom + 12, window.innerHeight - 230)),
     });
   };
 
@@ -8792,6 +8809,7 @@ function ReaderPanel({
         <div
           className="selection-actions"
           style={{ top: selectionPopup.top, left: selectionPopup.left }}
+          data-placement={selectionPopup.placement}
           onMouseDown={(event) => event.preventDefault()}
         >
           <button
@@ -8818,6 +8836,7 @@ function ReaderPanel({
             onClick={() => {
               setAnnotationComposer({ selection: selectionPopup, body: '' });
               setSelectionPopup(null);
+              clearNativeSelection();
             }}
           >
             批注
@@ -8827,7 +8846,7 @@ function ReaderPanel({
       {annotationComposer && (
         <section
           className="annotation-composer-popover"
-          style={{ top: Math.min(annotationComposer.selection.top, window.innerHeight - 230), left: annotationComposer.selection.left }}
+          style={{ top: annotationComposer.selection.composerTop, left: annotationComposer.selection.left }}
           aria-label="添加批注"
         >
           <header><b>写给自己的批注</b><button aria-label="关闭" onClick={() => setAnnotationComposer(null)}>×</button></header>
