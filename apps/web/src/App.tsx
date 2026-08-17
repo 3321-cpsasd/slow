@@ -2267,8 +2267,10 @@ export default function App() {
                     onDismiss={() => setDismissedPathAlertSeriesId(pathDecisionKey)}
                     onReviewGoal={() => openProfileCenter('profile')}
                     onConfirm={async () => {
-                      await run('正在确认学习路径…', () => api.confirmMilestonePath(series.id));
-                      setData(await api.bootstrap());
+                      await run('正在确认学习路径…', async () => {
+                        await api.confirmMilestonePath(series.id);
+                        setData(await api.bootstrap());
+                      });
                     }}
                   />
                 )}
@@ -8353,7 +8355,10 @@ function ReaderPanel({
         startOffset,
         endOffset,
       },
-      top: Math.min(rect.bottom + 9, window.innerHeight - 48),
+      // Reserve room for the browser's native text-selection controls. The
+      // in-product action can safely cover the following line, but must not
+      // sit beneath the browser's own AI/search menu.
+      top: Math.min(rect.bottom + 84, window.innerHeight - 48),
       left: Math.min(Math.max(rect.left + rect.width / 2, 54), window.innerWidth - 54),
     });
   };
@@ -8655,7 +8660,7 @@ function ReaderPanel({
               clearNativeSelection();
             }}
           >
-            <span>?</span>
+            <span aria-hidden="true">AI</span>
             Ask AI
           </button>
           <span className="selection-actions-divider" aria-hidden="true" />
