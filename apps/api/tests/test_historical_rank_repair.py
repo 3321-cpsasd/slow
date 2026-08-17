@@ -357,7 +357,7 @@ def test_repair_refuses_observed_quiz_without_target_ids() -> None:
         )
 
 
-def test_capability_repair_backfills_audits_and_replays_exact_identity() -> None:
+def test_capability_repair_backfills_audits_and_preserves_learning_evidence() -> None:
     with _session() as db:
         _seed_published_legacy_lesson(db, stable_identity=True)
 
@@ -370,15 +370,22 @@ def test_capability_repair_backfills_audits_and_replays_exact_identity() -> None
             )
         )
         state = db.scalar(select(CapabilityStateProjection))
+        observation = db.scalar(
+            select(AssessmentObservation).where(
+                AssessmentObservation.id == "observation_history"
+            )
+        )
 
         assert report["targetsBackfilled"] == 1
         assert report["auditDecisionsCreated"] == 1
-        assert report["affectedLearners"] == 1
+        assert report["historicalObservationsPreserved"] == 1
+        assert report["learnerProjectionsChanged"] == 0
         assert target.capability_revision_id
         assert target.capability_stage_criterion_id
         assert audit.subject_kind == "target_capability_repair"
         assert audit.resolved_revision_id == target.capability_revision_id
-        assert state.current_stage == "bronze"
+        assert state is None
+        assert observation.assessment_target_id == "target_history"
 
         repeated = repair_published_historical_capability_identities(db)
         assert repeated["targetsBackfilled"] == 0

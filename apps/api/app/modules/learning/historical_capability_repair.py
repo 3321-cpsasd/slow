@@ -22,7 +22,6 @@ from ...infrastructure.tables import (
     QuizSet,
     Section,
 )
-from .assessment import rebuild_assessment_projections
 from .capabilities import (
     bind_assessment_target_to_capability_subnet,
     ensure_capability_route_binding,
@@ -309,22 +308,19 @@ def repair_published_historical_capability_identities(db: Session) -> dict:
             )
         )
 
-    affected_users = {
-        observation.user_id
-        for observation in db.scalars(
-            select(AssessmentObservation).where(
-                AssessmentObservation.assessment_target_id.in_(
-                    repaired_target_ids
+    historical_observation_count = int(
+        len(
+            db.scalars(
+                select(AssessmentObservation).where(
+                    AssessmentObservation.assessment_target_id.in_(
+                        repaired_target_ids
+                    )
                 )
-            )
-        ).all()
-    } if repaired_target_ids else set()
-    replay_totals: defaultdict[str, int] = defaultdict(int)
-    for user_id in sorted(affected_users):
-        replay = rebuild_assessment_projections(db, user_id=user_id)
-        for key, value in replay.items():
-            if isinstance(value, int):
-                replay_totals[key] += value
+            ).all()
+        )
+        if repaired_target_ids
+        else 0
+    )
     db.flush()
 
     return {
@@ -337,6 +333,6 @@ def repair_published_historical_capability_identities(db: Session) -> dict:
         "targetsBackfilled": len(repaired_target_ids),
         "targetsAlreadyBound": len(series_by_target) - len(repaired_target_ids),
         "auditDecisionsCreated": audit_decisions,
-        "affectedLearners": len(affected_users),
-        "replayTotals": dict(replay_totals),
+        "historicalObservationsPreserved": historical_observation_count,
+        "learnerProjectionsChanged": 0,
     }
