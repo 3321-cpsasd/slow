@@ -6339,6 +6339,9 @@ function SeriesCreationPage({
             <p className="eyebrow">继续把目标说清</p>
             <h2>{interview.question.prompt}</h2>
             <p>{interview.question.helper}</p>
+            <p className="series-interview-selection-note">
+              即使多项都符合，也请选择这次最优先的一项；其他情况可以在「我自己说」中补充。
+            </p>
             <div className="series-interview-options">
               {interview.question.options.map((option, index) => (
                 <button

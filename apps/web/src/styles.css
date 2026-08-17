@@ -2994,6 +2994,13 @@ button:disabled { cursor: not-allowed; }
   font-weight: 500;
   line-height: 1.55;
 }
+.series-interview-question .series-interview-selection-note {
+  max-width: 760px;
+  margin: 7px 0 0;
+  color: #7b887f;
+  font-size: 12px;
+  line-height: 1.55;
+}
 .series-interview-options {
   margin-top: 22px;
   display: grid;
