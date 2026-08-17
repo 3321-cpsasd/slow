@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 from contextvars import ContextVar
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 from openai import AsyncOpenAI
 from pydantic import ValidationError
@@ -814,11 +815,19 @@ class OpenAiAdapter:
             attribution_status=attribution_status,
         )
 
-    def _succeed_invocation(self, invocation_id, response, usage):
+    def _succeed_invocation(
+        self,
+        invocation_id,
+        response,
+        usage,
+        *,
+        stream_observation: dict | None = None,
+    ):
         self.usage_recorder.succeed(
             invocation_id,
             normalize_openai_usage(usage),
             provider_response_id=str(getattr(response, "id", "") or ""),
+            stream_observation=stream_observation,
         )
 
     def _operation_for_schema(self, schema) -> tuple[str, str]:
@@ -1142,46 +1151,123 @@ class OpenAiAdapter:
         if reasoning_mode == "disabled":
             completion_options["extra_body"] = {"enable_thinking": False}
         operation, attribution = self._operation_for_schema(schema)
+        should_stream = self.capabilities.streaming and (
+            reasoning_mode == "required"
+            or operation == "chapter_outline_review_v1"
+        )
         invocation_id = self._start_invocation(
             operation,
             attribution_status=attribution,
         )
+        stream_observation = None
         try:
-            if reasoning_mode == "required":
-                completion = await self.client.chat.completions.create(
-                    **{
-                        **completion_options,
-                        "extra_body": {
-                            "enable_thinking": True,
-                            "thinking_budget": 600,
-                        },
-                        "stream": True,
-                        "stream_options": {"include_usage": True},
+            if should_stream:
+                stream_observation = {
+                    "first_event_at": None,
+                    "first_content_at": None,
+                    "last_event_at": None,
+                    "chunk_count": 0,
+                    "content_chars": 0,
+                    "reasoning_chars": 0,
+                    "finish_reason": "",
+                }
+                stream_options = {
+                    **completion_options,
+                    "stream": True,
+                    "stream_options": {"include_usage": True},
+                }
+                if reasoning_mode == "required":
+                    stream_options["extra_body"] = {
+                        "enable_thinking": True,
+                        "thinking_budget": 600,
                     }
+                completion = await self.client.chat.completions.create(
+                    **stream_options
                 )
                 parts, usage = [], None
                 async for chunk in completion:
+                    observed_at = datetime.now(timezone.utc)
+                    stream_observation["chunk_count"] += 1
+                    stream_observation["first_event_at"] = (
+                        stream_observation["first_event_at"] or observed_at
+                    )
+                    stream_observation["last_event_at"] = observed_at
                     if getattr(chunk, "usage", None):
                         usage = chunk.usage
                     if chunk.choices:
-                        delta = getattr(chunk.choices[0].delta, "content", None)
-                        if delta:
-                            parts.append(delta)
+                        choice = chunk.choices[0]
+                        finish_reason = getattr(choice, "finish_reason", None)
+                        if finish_reason:
+                            stream_observation["finish_reason"] = str(finish_reason)
+                        delta = choice.delta
+                        reasoning = getattr(delta, "reasoning_content", None)
+                        if reasoning:
+                            stream_observation["reasoning_chars"] += len(reasoning)
+                        content_delta = getattr(delta, "content", None)
+                        if content_delta:
+                            stream_observation["first_content_at"] = (
+                                stream_observation["first_content_at"] or observed_at
+                            )
+                            stream_observation["content_chars"] += len(content_delta)
+                            parts.append(content_delta)
                 content = "".join(parts)
+                finish_reason = stream_observation["finish_reason"]
+                if finish_reason == "length":
+                    raise AiError(
+                        "AI 输出达到长度上限，结果未完整返回，请稍后重试",
+                        code="AI_STREAM_TRUNCATED",
+                    )
+                if not finish_reason:
+                    raise AiError(
+                        "AI 流式响应未正常结束，请稍后重试",
+                        code="AI_STREAM_INCOMPLETE",
+                    )
             else:
                 completion = await self.client.chat.completions.create(**completion_options)
                 content, usage = completion.choices[0].message.content or "", completion.usage
         except BaseException as error:
-            self.usage_recorder.fail(invocation_id, error)
+            recorded_error = error
+            if stream_observation and not isinstance(error, AiError):
+                timeout_like = isinstance(error, (asyncio.TimeoutError, TimeoutError)) or (
+                    "timeout" in type(error).__name__.lower()
+                )
+                if stream_observation["chunk_count"]:
+                    recorded_error = AiError(
+                        "AI 流式响应中途断开，请稍后重试",
+                        code="AI_STREAM_INTERRUPTED",
+                    )
+                elif timeout_like:
+                    recorded_error = AiError(
+                        "AI 在等待时间内没有返回首个响应事件，请稍后重试",
+                        code="AI_STREAM_FIRST_EVENT_TIMEOUT",
+                    )
+            self.usage_recorder.fail(
+                invocation_id,
+                recorded_error,
+                stream_observation=stream_observation,
+            )
+            if recorded_error is not error:
+                raise recorded_error from error
             raise
-        self._succeed_invocation(invocation_id, completion, usage)
-        self._record_usage(usage)
         content = clean_json_output(content)
         if not content:
-            raise AiError(
+            error = AiError(
                 "AI 请求已完成，但没有返回可用正文；已停止自动修复，请重新生成",
                 code="AI_EMPTY_RESPONSE",
             )
+            self.usage_recorder.fail(
+                invocation_id,
+                error,
+                stream_observation=stream_observation,
+            )
+            raise error
+        self._succeed_invocation(
+            invocation_id,
+            completion,
+            usage,
+            stream_observation=stream_observation,
+        )
+        self._record_usage(usage)
         return content
 
     async def _thinking_stream(self, options):
@@ -1211,6 +1297,10 @@ class OpenAiAdapter:
         if isinstance(error, AiError):
             return error.code in {
                 "AI_EMPTY_RESPONSE",
+                "AI_STREAM_FIRST_EVENT_TIMEOUT",
+                "AI_STREAM_INTERRUPTED",
+                "AI_STREAM_TRUNCATED",
+                "AI_STREAM_INCOMPLETE",
                 "AI_STRUCTURED_OUTPUT_FAILED",
                 "AI_STRUCTURED_OUTPUT_INVALID",
             }

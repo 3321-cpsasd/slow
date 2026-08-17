@@ -13,7 +13,7 @@ from app.infrastructure.tables import Base
 
 
 API_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "0074_merge_capabilities_annotations"
+HEAD_REVISION = "0075_ai_stream_observability"
 
 pytestmark = pytest.mark.migration
 
@@ -652,6 +652,14 @@ def test_fresh_database_migrates_to_combined_head(tmp_path):
         "config_version_id",
         "route_policy_version",
         "fallback_index",
+        "streamed",
+        "first_event_at",
+        "first_content_at",
+        "last_event_at",
+        "stream_chunk_count",
+        "stream_content_chars",
+        "stream_reasoning_chars",
+        "stream_finish_reason",
     }.issubset(invocation_columns)
     assert "uq_ai_usage_measurement_source_version" in measurement_schema
     assert "token_hash" in auth_session_schema

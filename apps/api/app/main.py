@@ -137,18 +137,30 @@ def fallback_model_profiles(config: dict) -> list[dict]:
                 "providerProtocol": "openai",
                 "apiMode": "chat_completions",
                 "reasoningMode": (
-                    "required" if model == "kimi/kimi-k3" else "optional"
+                    "required"
+                    if model == "kimi/kimi-k3"
+                    else "disabled"
+                    if model == "glm-5.2"
+                    else "optional"
                 ),
                 "apiKey": (
                     settings.qwen38_api_key
-                    if model in {"qwen3.8-max", "qwen3.8-max-preview"}
+                    if model in {
+                        "qwen3.8-max",
+                        "qwen3.8-max-preview",
+                        "glm-5.2",
+                    }
                     else settings.kimi_k3_api_key
                     if model == "kimi/kimi-k3"
                     else ""
                 ),
                 "baseUrl": (
                     settings.qwen38_base_url
-                    if model in {"qwen3.8-max", "qwen3.8-max-preview"}
+                    if model in {
+                        "qwen3.8-max",
+                        "qwen3.8-max-preview",
+                        "glm-5.2",
+                    }
                     else settings.kimi_k3_base_url
                     if model == "kimi/kimi-k3"
                     else ""
@@ -160,7 +172,7 @@ def fallback_model_profiles(config: dict) -> list[dict]:
     for profile in profiles:
         model = str(profile.get("model") or "").strip()
         if (
-            model in {"qwen3.8-max", "kimi/kimi-k3"}
+            model in {"qwen3.8-max", "glm-5.2", "kimi/kimi-k3"}
             and model not in enabled_bundled_models
         ):
             continue

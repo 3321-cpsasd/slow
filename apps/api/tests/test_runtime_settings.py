@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.ai.port import ProviderCapabilities
 from app.api.schemas import AiRuntimeUpdate
+from app.core.config import settings
 from app.main import create_app, fallback_model_profiles
 from app.services.attachment_storage import LocalAttachmentStorage
 from app.services.runtime_settings import RuntimeSettingsStore
@@ -200,6 +201,33 @@ def test_fallback_profiles_exclude_disabled_bundled_models_and_normalize_qwen():
     assert [item["model"] for item in profiles] == ["qwen3.8-max-preview"]
     assert profiles[0]["apiMode"] == "chat_completions"
     assert profiles[0]["reasoningMode"] == "required"
+
+
+def test_glm_fallback_reuses_model_studio_credentials_with_thinking_disabled(
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "ai_fallback_models", "glm-5.2")
+    monkeypatch.setattr(settings, "qwen38_api_key", "model-studio-secret")
+    monkeypatch.setattr(
+        settings,
+        "qwen38_base_url",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+
+    profiles = fallback_model_profiles({
+        "provider_model": "deepseek-v4-flash-0731",
+        "provider_protocol": "openai",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    })
+
+    assert profiles == [{
+        "model": "glm-5.2",
+        "providerProtocol": "openai",
+        "apiMode": "chat_completions",
+        "reasoningMode": "disabled",
+        "apiKey": "model-studio-secret",
+        "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    }]
 
 
 def test_app_restores_saved_runtime_without_returning_the_key(tmp_path):

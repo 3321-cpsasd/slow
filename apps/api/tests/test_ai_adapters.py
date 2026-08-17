@@ -9,6 +9,7 @@ from sqlalchemy import select
 
 from app.ai.anthropic_adapter import AnthropicAdapter
 from app.ai.contracts import (
+    ChapterOutlineReviewBatch,
     GeneratedContent,
     GeneratedQuiz,
     GeneratedRemediationContent,
@@ -193,6 +194,35 @@ class FakeChatCompletions:
         content = next(self.outputs)
         if isinstance(content, BaseException):
             raise content
+        if options.get("stream"):
+            async def chunks():
+                yield SimpleNamespace(
+                    id="response-stream",
+                    choices=[SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content=content,
+                            reasoning_content=None,
+                        ),
+                        finish_reason=None,
+                    )],
+                    usage=None,
+                )
+                yield SimpleNamespace(
+                    id="response-stream",
+                    choices=[SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content=None,
+                            reasoning_content=None,
+                        ),
+                        finish_reason="stop",
+                    )],
+                    usage=SimpleNamespace(
+                        prompt_tokens=3,
+                        completion_tokens=2,
+                    ),
+                )
+
+            return chunks()
         return SimpleNamespace(
             choices=[
                 SimpleNamespace(
@@ -222,6 +252,125 @@ async def chat_adapter(outputs, *, reasoning_mode="optional"):
         chat=SimpleNamespace(completions=completions)
     )
     return adapter, completions
+
+
+def chapter_review_json():
+    return json.dumps({
+        "sections": [
+            {"section_slot": "S1", "decision": "accept"},
+            {"section_slot": "S2", "decision": "accept"},
+        ]
+    })
+
+
+def test_chapter_outline_review_streams_and_persists_safe_observations():
+    async def run():
+        engine, sessions = build_database("sqlite+pysqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        adapter, completions = await chat_adapter([chapter_review_json()])
+        adapter.set_usage_recorder(AiUsageRecorder(sessions))
+        content = await adapter._chat_parse_once(
+            ChapterOutlineReviewBatch,
+            "Review the outline.",
+            {},
+            400,
+        )
+        with sessions() as db:
+            invocation = db.scalar(select(AiInvocation))
+        engine.dispose()
+        return content, completions.calls[0], invocation
+
+    content, call, invocation = asyncio.run(run())
+
+    assert ChapterOutlineReviewBatch.model_validate_json(content)
+    assert call["stream"] is True
+    assert call["stream_options"] == {"include_usage": True}
+    assert invocation.status == "succeeded"
+    assert invocation.streamed is True
+    assert invocation.stream_chunk_count == 2
+    assert invocation.stream_content_chars == len(chapter_review_json())
+    assert invocation.stream_reasoning_chars == 0
+    assert invocation.stream_finish_reason == "stop"
+    assert invocation.first_event_at is not None
+    assert invocation.first_content_at is not None
+    assert invocation.last_event_at is not None
+
+
+def test_chapter_outline_review_marks_first_event_timeout():
+    async def run():
+        engine, sessions = build_database("sqlite+pysqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        adapter, _ = await chat_adapter([asyncio.TimeoutError()])
+        adapter.set_usage_recorder(AiUsageRecorder(sessions))
+        with pytest.raises(AiError) as raised:
+            await adapter._chat_parse_once(
+                ChapterOutlineReviewBatch,
+                "Review the outline.",
+                {},
+                400,
+            )
+        with sessions() as db:
+            invocation = db.scalar(select(AiInvocation))
+        engine.dispose()
+        return raised.value, invocation
+
+    error, invocation = asyncio.run(run())
+
+    assert error.code == "AI_STREAM_FIRST_EVENT_TIMEOUT"
+    assert invocation.status == "failed"
+    assert invocation.streamed is True
+    assert invocation.stream_chunk_count == 0
+    assert invocation.first_event_at is None
+    assert invocation.error_code == "AI_STREAM_FIRST_EVENT_TIMEOUT"
+
+
+def test_chapter_outline_review_marks_partial_stream_interruption():
+    class InterruptedCompletions:
+        async def create(self, **_options):
+            async def chunks():
+                yield SimpleNamespace(
+                    choices=[SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content='{"sections":',
+                            reasoning_content="internal",
+                        ),
+                        finish_reason=None,
+                    )],
+                    usage=None,
+                )
+                raise asyncio.TimeoutError()
+
+            return chunks()
+
+    async def run():
+        engine, sessions = build_database("sqlite+pysqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        adapter, _ = await chat_adapter([])
+        adapter.client = SimpleNamespace(
+            chat=SimpleNamespace(completions=InterruptedCompletions())
+        )
+        adapter.set_usage_recorder(AiUsageRecorder(sessions))
+        with pytest.raises(AiError) as raised:
+            await adapter._chat_parse_once(
+                ChapterOutlineReviewBatch,
+                "Review the outline.",
+                {},
+                400,
+            )
+        with sessions() as db:
+            invocation = db.scalar(select(AiInvocation))
+        engine.dispose()
+        return raised.value, invocation
+
+    error, invocation = asyncio.run(run())
+
+    assert error.code == "AI_STREAM_INTERRUPTED"
+    assert invocation.stream_chunk_count == 1
+    assert invocation.stream_content_chars == len('{"sections":')
+    assert invocation.stream_reasoning_chars == len("internal")
+    assert invocation.first_event_at is not None
+    assert invocation.first_content_at is not None
+    assert invocation.error_code == "AI_STREAM_INTERRUPTED"
 
 
 def test_learning_goal_interview_disables_provider_thinking():

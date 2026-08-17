@@ -188,20 +188,29 @@ class AiUsageRecorder:
         usage: NormalizedUsage | None,
         *,
         provider_response_id: str = "",
+        stream_observation: dict | None = None,
     ) -> None:
         self._finish(
             invocation_id,
             status="succeeded",
             usage=usage,
             provider_response_id=provider_response_id,
+            stream_observation=stream_observation,
         )
 
-    def fail(self, invocation_id: str, error: BaseException) -> None:
+    def fail(
+        self,
+        invocation_id: str,
+        error: BaseException,
+        *,
+        stream_observation: dict | None = None,
+    ) -> None:
         self._finish(
             invocation_id,
             status="interrupted" if isinstance(error, asyncio.CancelledError) else "failed",
             usage=None,
             error_code=safe_error_code(error),
+            stream_observation=stream_observation,
         )
 
     def _finish(
@@ -212,6 +221,7 @@ class AiUsageRecorder:
         usage: NormalizedUsage | None,
         provider_response_id: str = "",
         error_code: str = "",
+        stream_observation: dict | None = None,
     ) -> None:
         finished = now()
         with self.sessions() as db:
@@ -229,6 +239,23 @@ class AiUsageRecorder:
             invocation.latency_ms = max(
                 0, int((finished - started).total_seconds() * 1000)
             )
+            if stream_observation:
+                invocation.streamed = True
+                invocation.first_event_at = stream_observation.get("first_event_at")
+                invocation.first_content_at = stream_observation.get("first_content_at")
+                invocation.last_event_at = stream_observation.get("last_event_at")
+                invocation.stream_chunk_count = int(
+                    stream_observation.get("chunk_count") or 0
+                )
+                invocation.stream_content_chars = int(
+                    stream_observation.get("content_chars") or 0
+                )
+                invocation.stream_reasoning_chars = int(
+                    stream_observation.get("reasoning_chars") or 0
+                )
+                invocation.stream_finish_reason = str(
+                    stream_observation.get("finish_reason") or ""
+                )[:40]
             if usage:
                 payload = asdict(usage)
                 raw = payload.pop("raw") or {}
@@ -252,5 +279,5 @@ class NullAiUsageRecorder:
     def succeed(self, _invocation_id, _usage, **_kwargs) -> None:
         return None
 
-    def fail(self, _invocation_id, _error) -> None:
+    def fail(self, _invocation_id, _error, **_kwargs) -> None:
         return None

@@ -2640,6 +2640,14 @@ class AiInvocation(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    streamed: Mapped[bool] = mapped_column(Boolean, default=False)
+    first_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    first_content_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    stream_chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+    stream_content_chars: Mapped[int] = mapped_column(Integer, default=0)
+    stream_reasoning_chars: Mapped[int] = mapped_column(Integer, default=0)
+    stream_finish_reason: Mapped[str] = mapped_column(String(40), default="")
     metering_schema_version: Mapped[str] = mapped_column(String(24), default="v1")
 
 
