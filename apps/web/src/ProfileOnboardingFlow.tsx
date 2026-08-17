@@ -2,6 +2,12 @@ import { FormEvent, useMemo, useState } from 'react';
 import { api } from './api/client';
 import type { LearningProfile, OnboardingState } from './model/types';
 
+export type OnboardingContinuation = {
+  firstShelfId: string | null;
+  topic: string;
+  experience: string;
+};
+
 const STAGES: { value: Exclude<LearningProfile['stage'], ''>; label: string; note: string }[] = [
   { value: 'exploring', label: '正在探索', note: '还在确认方向和问题' },
   { value: 'beginner', label: '刚刚入门', note: '需要建立基础概念' },
@@ -27,7 +33,7 @@ export function ProfileOnboardingFlow({
 }: {
   initial: OnboardingState;
   userName: string;
-  onComplete: () => Promise<void>;
+  onComplete: (continuation: OnboardingContinuation) => Promise<void>;
   onLogout: () => Promise<void>;
 }) {
   const [state, setState] = useState(initial);
@@ -80,15 +86,20 @@ export function ProfileOnboardingFlow({
         await persist(stepIndex + 1);
         return;
       }
-      await api.completeProfile({
+      const completion = await api.completeProfile({
         profession: profession.trim(),
         stage,
         purpose: purpose.trim(),
         domains,
         experience: experience.trim(),
         preferences: initial.profile.preferences,
+        firstShelfName: domains[0],
       });
-      await onComplete();
+      await onComplete({
+        firstShelfId: completion.firstShelfId,
+        topic: domains[0],
+        experience: experience.trim(),
+      });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '画像保存失败，请重试');
     } finally {
@@ -113,7 +124,7 @@ export function ProfileOnboardingFlow({
     <div className="profile-flow-shell">
       <header className="profile-flow-header">
         <span className="brand"><span className="brand-mark"><i /></span><b>slow</b></span>
-        <span>建立你的学习起点</span>
+        <span>建立起点，开始第一本书</span>
         <button className="quiet-button" disabled={busy} onClick={() => void onLogout()}>退出</button>
       </header>
 
@@ -175,7 +186,7 @@ export function ProfileOnboardingFlow({
               <div className="profile-step-fields">
                 <h2>这一次，你想走向哪里？</h2>
                 <label>
-                  目标领域
+                  学习方向
                   <input
                     autoFocus
                     required
@@ -184,7 +195,7 @@ export function ProfileOnboardingFlow({
                     onChange={(event) => { setDomainText(event.target.value); setError(''); }}
                     placeholder="例如：信息可视化，交互设计"
                   />
-                  <small>可填写 1–6 个，用逗号分隔。</small>
+                  <small>第一个方向会成为你的首个书架；可继续填写其他长期方向，用逗号分隔。</small>
                 </label>
                 <label>
                   学习目的
@@ -218,6 +229,17 @@ export function ProfileOnboardingFlow({
                   <div><dt>目的</dt><dd>{purpose}</dd></div>
                   <div><dt>经验</dt><dd>{experience || '暂未填写，之后可以随时补充'}</dd></div>
                 </dl>
+                <section className="profile-first-shelf-preview" aria-label="即将创建的第一个书架">
+                  <div className="profile-first-shelf-mark" aria-hidden="true">
+                    <i /><i /><i />
+                  </div>
+                  <div>
+                    <span>接下来会自动创建</span>
+                    <h3>{domains[0]}</h3>
+                    <p>确认后直接继续设置第一个学习目标，不经过空白书架页。</p>
+                  </div>
+                  <b>首个书架</b>
+                </section>
               </div>
             )}
 
@@ -225,7 +247,9 @@ export function ProfileOnboardingFlow({
             <div className="profile-flow-actions">
               <button type="button" className="quiet-button" disabled={stepIndex === 0 || busy} onClick={() => void back()}>上一步</button>
               <button className="profile-flow-next" disabled={busy}>
-                {busy ? '正在保存…' : step.id === 'review' ? '确认并进入书架' : '保存并继续'} <span>→</span>
+                {busy
+                  ? step.id === 'review' ? '正在创建第一个书架…' : '正在保存…'
+                  : step.id === 'review' ? '创建书架并继续' : '保存并继续'} <span>→</span>
               </button>
             </div>
           </form>

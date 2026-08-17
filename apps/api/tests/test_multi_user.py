@@ -315,6 +315,25 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
     assert invalid_daily_mode_prompt.status_code == 400
     assert invalid_daily_mode_prompt.json()["code"] == "INVALID_REQUEST"
 
+    invalid_first_shelf = client.post(
+        "/api/onboarding/profile/complete",
+        headers={"X-CSRF-Token": me["csrfToken"]},
+        json={
+            "profession": "产品设计师",
+            "stage": "foundation",
+            "purpose": "系统学习信息可视化并用于作品集",
+            "domains": ["信息可视化"],
+            "firstShelfName": "   ",
+        },
+    )
+    assert invalid_first_shelf.status_code == 400
+    assert invalid_first_shelf.json()["code"] == "INVALID_REQUEST"
+    with client.app.state.sessions() as db:
+        assert db.scalar(
+            select(Shelf).where(Shelf.user_id == me["user"]["id"])
+        ) is None
+        assert db.get(UserProfile, me["user"]["id"]).completed_at is None
+
     completed = client.post(
         "/api/onboarding/profile/complete",
         headers={"X-CSRF-Token": me["csrfToken"]},
@@ -323,6 +342,7 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
             "stage": "foundation",
             "purpose": "系统学习信息可视化并用于作品集",
             "domains": ["信息可视化", "交互设计"],
+            "firstShelfName": "信息可视化",
             "experience": "有产品设计基础",
             "preferences": {
                 "openingStyle": "problem_first",
@@ -335,6 +355,8 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
     )
     assert completed.status_code == 200
     assert completed.json()["required"] is False
+    assert completed.json()["firstShelfCreated"] is True
+    assert completed.json()["firstShelfId"]
     assert completed.json()["profile"]["preferences"] == {
         "openingStyle": "problem_first",
         "explanationDensity": "thorough",
@@ -367,7 +389,13 @@ def test_oidc_session_csrf_logout_and_user_isolation(oidc_client):
     bootstrap = client.get("/api/bootstrap")
     assert bootstrap.status_code == 200
     assert bootstrap.json()["user"]["id"] == me["user"]["id"]
-    assert bootstrap.json()["shelves"] == []
+    assert len(bootstrap.json()["shelves"]) == 1
+    assert bootstrap.json()["shelves"][0]["id"] == completed.json()["firstShelfId"]
+    assert bootstrap.json()["shelves"][0]["name"] == "信息可视化"
+    with client.app.state.sessions() as db:
+        first_shelf = db.get(Shelf, completed.json()["firstShelfId"])
+        assert first_shelf.domain == "信息可视化"
+        assert first_shelf.origin == "onboarding"
 
     missing_csrf = client.post(
         "/api/shelves",

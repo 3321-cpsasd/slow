@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     openai_api_mode: Literal["responses", "chat_completions"] = "responses"
     openai_reasoning_mode: Literal["optional", "required", "disabled"] = "optional"
     ai_request_timeout_seconds: int = Field(
-        default=90,
+        default=180,
         ge=15,
         le=300,
         validation_alias="AI_REQUEST_TIMEOUT_SECONDS",

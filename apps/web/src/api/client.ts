@@ -355,7 +355,7 @@ export const api = {
     method:'PATCH',
     body:JSON.stringify(body),
   }),
-  completeProfile:(body:object)=>call<import('../model/types').OnboardingState>('/api/onboarding/profile/complete',{
+  completeProfile:(body:object)=>call<import('../model/types').OnboardingCompletion>('/api/onboarding/profile/complete',{
     method:'POST',
     body:JSON.stringify(body),
   }),

@@ -22,6 +22,7 @@ type LessonReaderHeaderProps = {
   condensed?: boolean;
   directoryOpen: boolean;
   onToggleDirectory: () => void;
+  onReturnHome: () => void;
 };
 
 const statusLabel = (status: string) => {
@@ -52,6 +53,7 @@ export function LessonReaderHeader({
   condensed = false,
   directoryOpen,
   onToggleDirectory,
+  onReturnHome,
 }: LessonReaderHeaderProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -75,6 +77,15 @@ export function LessonReaderHeader({
   return (
     <>
       <div className={`reader-toolbar ${condensed ? 'is-condensed' : ''}`}>
+        <button
+          type="button"
+          className="reader-mobile-home"
+          aria-label="返回书架首页"
+          onClick={onReturnHome}
+        >
+          <span aria-hidden="true">←</span>
+          <small aria-hidden="true">书架</small>
+        </button>
         <div className="reader-title-group">
           <nav className="breadcrumb" aria-label="当前位置">
             <ol>

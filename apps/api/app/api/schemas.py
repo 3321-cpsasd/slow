@@ -476,6 +476,20 @@ class ProfileComplete(ApiModel):
     preferences: LearningPreferences = Field(default_factory=LearningPreferences)
 
 
+class OnboardingProfileComplete(ProfileComplete):
+    first_shelf_name: str | None = Field(default=None, min_length=1, max_length=100)
+
+    @field_validator("first_shelf_name")
+    @classmethod
+    def normalize_first_shelf_name(cls, value: str | None):
+        if value is None:
+            return None
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("首个学习方向不能为空")
+        return normalized
+
+
 class QuizSubmit(ApiModel):
     quiz_set_id: str
     answers: list[list[int]]

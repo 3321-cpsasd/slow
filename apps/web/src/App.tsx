@@ -13,7 +13,10 @@ import remarkGfm from 'remark-gfm';
 import { MermaidDiagram } from './components/MermaidDiagram';
 import { api, ApiError } from './api/client';
 import { telemetry } from './telemetry';
-import { ProfileOnboardingFlow } from './ProfileOnboardingFlow';
+import {
+  ProfileOnboardingFlow,
+  type OnboardingContinuation,
+} from './ProfileOnboardingFlow';
 import { DailyModeDialog, DailyModeHeader } from './DailyMode';
 import {
   LessonReaderHeader,
@@ -111,6 +114,11 @@ type BookReplanState = {
   status: 'preparing' | 'ready' | 'failed';
   feedback: string;
   previousProposalId?: string;
+};
+type FirstSeriesSeed = {
+  shelfId: string;
+  topic: string;
+  experience: string;
 };
 type ExplanationRequest = {
   requestId: string;
@@ -514,6 +522,7 @@ export default function App() {
     new URLSearchParams(window.location.search).get('section') === 'account' ? 'account' : 'profile'
   ));
   const [preparingInitialSection, setPreparingInitialSection] = useState(false);
+  const [firstSeriesSeed, setFirstSeriesSeed] = useState<FirstSeriesSeed | null>(null);
   const [dailyModeDialogOpen, setDailyModeDialogOpen] = useState(false);
   const [dailyModeBusy, setDailyModeBusy] = useState(false);
   const [activityDailyMode, setActivityDailyMode] = useState<DailyMode | null>(null);
@@ -589,6 +598,7 @@ export default function App() {
       setShelf(null);
       setSeries(null);
       setSection(null);
+      setFirstSeriesSeed(null);
       setView('home');
       setRestoringInitialRoute(false);
       setAuthPanel('login');
@@ -824,12 +834,19 @@ export default function App() {
     setShelf(value);
     setSeries(null);
     setSection(null);
+    setFirstSeriesSeed(null);
     setView('shelf');
   };
 
-  const openSeriesCreation = (value: Shelf, historyMode: 'push' | 'replace' | 'none' = 'push') => {
+  const openSeriesCreation = (
+    value: Shelf,
+    historyMode: 'push' | 'replace' | 'none' = 'push',
+    seed?: FirstSeriesSeed,
+  ) => {
     if (historyMode !== 'none') routeRequestVersion.current += 1;
     updateBrowserLocation(seriesCreatePath(value.id), historyMode);
+    if (seed) setFirstSeriesSeed(seed);
+    else if (historyMode !== 'none') setFirstSeriesSeed(null);
     setShelf(value);
     setSeries(null);
     setSection(null);
@@ -846,6 +863,7 @@ export default function App() {
       setShelf(null);
       setSeries(null);
       setSection(null);
+      setFirstSeriesSeed(null);
       setView('home');
       setAuthPanel('login');
       setShowUserMenu(false);
@@ -857,6 +875,31 @@ export default function App() {
     const privacy = await api.acceptPrivacy({ privacyAccepted: true, trialAccepted: true });
     setAuth((current) => current ? { ...current, privacy } : current);
     await loadAuthenticatedState();
+  };
+
+  const continueFromOnboarding = async (continuation: OnboardingContinuation) => {
+    const nextAuth = await api.authMe();
+    const nextData = await api.bootstrap();
+    const firstShelf = nextData.shelves.find((item) => (
+      item.id === continuation.firstShelfId
+    )) || null;
+    setAuth(nextAuth);
+    setData(nextData);
+    if (firstShelf) {
+      openSeriesCreation(firstShelf, 'replace', {
+        shelfId: firstShelf.id,
+        topic: continuation.topic,
+        experience: continuation.experience,
+      });
+      return;
+    }
+    routeRequestVersion.current += 1;
+    updateBrowserLocation('/', 'replace');
+    setShelf(null);
+    setSeries(null);
+    setSection(null);
+    setFirstSeriesSeed(null);
+    setView('home');
   };
 
   const requestAccountExit = async (confirmation: string, reason: string) => {
@@ -1965,7 +2008,7 @@ export default function App() {
       <ProfileOnboardingFlow
         initial={auth.onboarding}
         userName={auth.user.name}
-        onComplete={loadAuthenticatedState}
+        onComplete={continueFromOnboarding}
         onLogout={logout}
       />
     );
@@ -2197,6 +2240,7 @@ export default function App() {
           <SeriesCreationPage
             shelf={shelf}
             profile={data.profile}
+            onboardingSeed={firstSeriesSeed?.shelfId === shelf.id ? firstSeriesSeed : null}
             onCancel={() => openShelf(shelf)}
             onCreate={async (body, idempotencyKey, onProgress) => {
               const navigationVersion = routeRequestVersion.current;
@@ -2371,6 +2415,7 @@ export default function App() {
                 });
               }}
               onGlobalFeedback={() => setFeedbackTarget({ scope: 'global' })}
+              onReturnHome={goHome}
               onQaVisibilityChange={setLearningQaOpen}
             />
           </>
@@ -5965,11 +6010,13 @@ function SeriesCreationProgress({
 function SeriesCreationPage({
   shelf,
   profile,
+  onboardingSeed,
   onCreate,
   onCancel,
 }: {
   shelf: Shelf;
   profile: LearningProfile;
+  onboardingSeed: FirstSeriesSeed | null;
   onCreate: (
     body: object,
     idempotencyKey: string,
@@ -5979,11 +6026,13 @@ function SeriesCreationPage({
 }) {
   const maxInterviewAnswers = 8;
   const [step, setStep] = useState<'intent' | 'clarify' | 'confirm' | 'map'>('intent');
-  const [topic, setTopic] = useState('');
+  const [topic, setTopic] = useState(onboardingSeed?.topic || '');
   const [dailyCommitmentHours, setDailyCommitmentHours] = useState('1');
   const [completionHorizonValue, setCompletionHorizonValue] = useState('2');
   const [completionHorizonUnit, setCompletionHorizonUnit] = useState<'day' | 'week' | 'month'>('week');
-  const [experience, setExperience] = useState('');
+  const [experience, setExperience] = useState(
+    onboardingSeed?.experience || profile.experience || '',
+  );
   const [interview, setInterview] = useState<LearningGoalInterview | null>(null);
   const [goalDraft, setGoalDraft] = useState<NonNullable<LearningGoalInterview['brief']> | null>(null);
   const [interviewAnswers, setInterviewAnswers] = useState<LearningGoalInterviewAnswer[]>([]);
@@ -6185,7 +6234,9 @@ function SeriesCreationPage({
   return (
     <section className={`series-creation-page series-creation-${step}`} aria-labelledby="series-creation-title">
       <header className="series-creation-header">
-        <button type="button" className="shelf-back-button" disabled={submitting} onClick={onCancel}>← 返回{shelf.name}书架</button>
+        <button type="button" className="shelf-back-button" disabled={submitting} onClick={onCancel}>
+          {onboardingSeed ? `← 暂时跳过，先看${shelf.name}书架` : `← 返回${shelf.name}书架`}
+        </button>
         <div className="series-creation-heading">
           <div>
             <p className="eyebrow">创建学习系列</p>
@@ -6219,6 +6270,12 @@ function SeriesCreationPage({
 
       {step === 'intent' && (
         <form className="series-intent-sheet" onSubmit={continueFromIntent}>
+          {onboardingSeed && (
+            <div className="series-onboarding-continuation" role="status">
+              <span aria-hidden="true">✓</span>
+              <p><b>「{shelf.name}」书架已创建</b>接着说清第一个学习目标，Slow 会据此准备第一套教材。</p>
+            </div>
+          )}
           <div className="series-goal-inscription">
             <span>学习主题</span>
             <label>
@@ -6890,6 +6947,7 @@ function LearningWorkspace({
   onDeleteBook,
   onFeedbackBlock,
   onGlobalFeedback,
+  onReturnHome,
   onQaVisibilityChange,
 }: {
   userId: string;
@@ -6910,6 +6968,7 @@ function LearningWorkspace({
   onDeleteBook: (bookId: string) => Promise<void>;
   onFeedbackBlock: (block: Block) => void;
   onGlobalFeedback: () => void;
+  onReturnHome: () => void;
   onQaVisibilityChange: (open: boolean) => void;
 }) {
   const [selectedBlockId, setSelectedBlockId] = useState('');
@@ -7323,6 +7382,7 @@ function LearningWorkspace({
         onRefreshSeries={onRefreshSeries}
         onFeedbackBlock={onFeedbackBlock}
         onGlobalFeedback={onGlobalFeedback}
+        onReturnHome={onReturnHome}
         onRestorePersonalPresentation={async (block) => {
           if (!section?.content || !block.personalPresentation) return;
           await api.restorePersonalPresentation(section.id, block.id, section.content.id);
@@ -8214,6 +8274,7 @@ function ReaderPanel({
   onRefreshSeries,
   onFeedbackBlock,
   onGlobalFeedback,
+  onReturnHome,
   onRestorePersonalPresentation,
   onExplainBlock,
 }: {
@@ -8249,6 +8310,7 @@ function ReaderPanel({
   onRefreshSeries: () => Promise<void>;
   onFeedbackBlock: (block: Block) => void;
   onGlobalFeedback: () => void;
+  onReturnHome: () => void;
   onRestorePersonalPresentation: (block: Block) => Promise<void>;
   onExplainBlock: (block: Block, style: ExplanationStyle, customQuestion?: string) => void;
 }) {
@@ -8683,6 +8745,7 @@ function ReaderPanel({
         condensed={readerHeaderCondensed}
         directoryOpen={!directoryHidden}
         onToggleDirectory={onToggleDirectory}
+        onReturnHome={onReturnHome}
       />
 
       <LessonReaderTabs

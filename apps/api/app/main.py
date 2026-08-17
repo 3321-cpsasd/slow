@@ -35,7 +35,7 @@ from .ai.gateway import (
 from .ai.local_adapter import LocalDemoAdapter
 from .ai.port import ProviderCapabilities
 from .ai.metering import AiUsageRecorder
-from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, BookReplanCreate, CapabilityApplicationSubmit, CapabilityReviewSubmit, ChapterChallengeSubmit, ChapterCreate, ChapterOrder, ChapterSkipCreate, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningGoalInterviewCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, LearningStartPreviewCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ReadingAnnotationCreate, ReadingAnnotationUpdate, RecoveryCodeRotate, ReinforcementRespond, ResumeUpdate, ReviewSubmit, SeriesRename, ShelfCreate, ShelfRename, StudyActivityHeartbeat
+from .api.schemas import AccountExitCreate, AiRuntimeUpdate, AskMeDiscussionAction, AskMeDiscussionTurnCreate, AskMeReply, AskRequest, AttachmentSubmit, BookReplanCreate, CapabilityApplicationSubmit, CapabilityReviewSubmit, ChapterChallengeSubmit, ChapterCreate, ChapterOrder, ChapterSkipCreate, ChapterUpdate, DailyModeUpdate, FeedbackCreate, LearningGoalInterviewCreate, LearningPreferenceDecisionCreate, LearningPreferenceEvidenceCreate, LearningStartPreviewCreate, MissionAdoptionCreate, MissionVersionCreate, NoteReviewSupplementCreate, NoteUpdate, OnboardingProfileComplete, PasswordLogin, PasswordRecoveryReset, PasswordRegistration, PersonalPresentationAdopt, PlanCreate, PrivacyConsentCreate, ProductEventBatch, ProfileComplete, ProfileDraftUpdate, QaClassificationUpdate, QuizSubmit, ReadingAnnotationCreate, ReadingAnnotationUpdate, RecoveryCodeRotate, ReinforcementRespond, ResumeUpdate, ReviewSubmit, SeriesRename, ShelfCreate, ShelfRename, StudyActivityHeartbeat
 from .application.service import DEMO_USER_ID, SlowService
 from .core.config import settings
 from .core.errors import AppError
@@ -1478,13 +1478,42 @@ def create_app(
 
     @app.post("/api/onboarding/profile/complete")
     def complete_onboarding_profile(
-        body: ProfileComplete,
+        body: OnboardingProfileComplete,
         scope: UserScope = Depends(current_scope),
         session: Session = Depends(db),
     ):
-        return ProfileService(session, scope.user_id).complete(
-            body.model_dump()
+        profile_values = body.model_dump(exclude={"first_shelf_name"})
+        ProfileService(session, scope.user_id).complete(
+            profile_values,
+            commit=False,
         )
+        first_shelf = None
+        first_shelf_created = False
+        if body.first_shelf_name:
+            first_shelf = session.scalar(
+                select(Shelf).where(
+                    Shelf.user_id == scope.user_id,
+                    Shelf.deleted_at.is_(None),
+                ).order_by(Shelf.id)
+            )
+            if first_shelf is None:
+                first_shelf = Shelf(
+                    id=f"shelf_{uuid4().hex}",
+                    user_id=scope.user_id,
+                    name=body.first_shelf_name,
+                    domain=body.domains[0],
+                    specialty="",
+                    tags_json="[]",
+                    origin="onboarding",
+                )
+                session.add(first_shelf)
+                first_shelf_created = True
+        session.commit()
+        return {
+            **ProfileService(session, scope.user_id).state(),
+            "firstShelfId": first_shelf.id if first_shelf else None,
+            "firstShelfCreated": first_shelf_created,
+        }
 
     @app.put("/api/profile")
     def update_profile(

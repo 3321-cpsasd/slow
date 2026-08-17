@@ -28,8 +28,8 @@ PROFILE_STEPS = (
     },
     {
         "id": "review",
-        "title": "确认画像",
-        "description": "确认教材生成时使用的基础信息",
+        "title": "准备开始",
+        "description": "确认起点并创建第一个书架",
     },
 )
 PROFILE_STEP_IDS = {item["id"] for item in PROFILE_STEPS}
@@ -118,7 +118,13 @@ class ProfileService:
         self.db.commit()
         return self.state()
 
-    def complete(self, values: dict, *, source: str = "self_report") -> dict:
+    def complete(
+        self,
+        values: dict,
+        *,
+        source: str = "self_report",
+        commit: bool = True,
+    ) -> dict:
         profile = self._profile(create=True)
         self._apply(profile, values)
         domains = self._normalized_domains(profile.domains_json)
@@ -154,7 +160,10 @@ class ProfileService:
         flow.status = "completed"
         flow.completed_at = completed_at
         flow.updated_at = completed_at
-        self.db.commit()
+        if commit:
+            self.db.commit()
+        else:
+            self.db.flush()
         return self.state()
 
     def seed_complete(

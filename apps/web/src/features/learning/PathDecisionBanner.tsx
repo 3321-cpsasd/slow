@@ -16,21 +16,25 @@ export function PathDecisionBanner({
   onDismiss: () => void;
 }) {
   const goalChanged = !path.goalAligned;
-  const title = goalChanged ? '确认这套教材仍符合你的目标' : '确认这套学习路径';
+  const title = goalChanged
+    ? '这套教材仍按之前的目标编排'
+    : '采用这套路径后开始记录里程碑';
 
   return (
     <section
-      className="path-decision"
+      className={`path-decision ${goalChanged ? 'goal-changed' : 'path-proposed'}`}
       role="status"
       aria-labelledby="path-decision-title"
     >
       <div className="path-decision-copy">
-        <span className="path-decision-label">开始学习前确认</span>
+        <span className="path-decision-label">
+          {goalChanged ? '学习目标有变化' : '学习路径待采用'}
+        </span>
         <h2 id="path-decision-title">{title}</h2>
         <p>
           {goalChanged
-            ? '你的学习目标已经更新。先核对目标和当前系列，再决定是否继续。'
-            : '确认后，Slow 会按这套路径记录后续里程碑。'}
+            ? '继续学习不会自动改写教材；如果新目标差异较大，先检查目标。'
+            : '确认后，后续进度会按这套路径记录；教材内容不会因此改变。'}
         </p>
       </div>
       <dl className="path-decision-context">
@@ -45,13 +49,13 @@ export function PathDecisionBanner({
       </dl>
       <div className="path-decision-actions">
         <button type="button" className="quiet-button" disabled={busy} onClick={onDismiss}>
-          稍后处理
+          暂时收起
         </button>
         <button type="button" className="secondary-button" disabled={busy} onClick={onReviewGoal}>
           查看学习目标
         </button>
         <button type="button" className="primary-button" disabled={busy} onClick={() => void onConfirm()}>
-          {busy ? '正在确认…' : goalChanged ? '继续使用这套教材' : '确认学习路径'}
+          {busy ? '正在确认…' : goalChanged ? '教材仍适用' : '采用并开始'}
         </button>
       </div>
     </section>

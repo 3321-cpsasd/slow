@@ -221,6 +221,10 @@ export type OnboardingState = {
   steps:OnboardingStep[];
   profile:LearningProfile;
 };
+export type OnboardingCompletion = OnboardingState & {
+  firstShelfId:string|null;
+  firstShelfCreated:boolean;
+};
 export type AuthState = {
   authenticated:boolean;
   mode:'demo'|'local'|'password'|'oidc';
