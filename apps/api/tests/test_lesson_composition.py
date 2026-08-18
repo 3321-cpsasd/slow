@@ -1,4 +1,5 @@
 from app.ai.contracts import GeneratedLessonSlotCandidate
+from app.ai.openai_adapter import _expand_lesson_slots
 from app.application.lesson_composition import resolve_lesson_composition_policy
 from app.application.lesson_generation import LessonCompositionPolicy
 from app.application.lesson_generation import CandidateValidationFailure, validate_lesson_candidate
@@ -112,6 +113,72 @@ def test_dynamic_candidate_no_longer_requires_fixed_shared_slots():
         }
     )
     assert [block.slot for block in candidate.blocks] == ["T1_CORE", "S1"]
+
+
+def test_provider_extras_are_ignored_and_fixed_slot_metadata_is_server_owned():
+    value = GeneratedLessonSlotCandidate.model_validate(
+        {
+            "unknown_candidate_note": "模型自行补充但服务端不采用",
+            "blocks": [
+                {
+                    "slot": "T1_CORE",
+                    "kind": "unknown_visual_kind",
+                    "primary_role": "not_a_real_role",
+                    "teaching_moves": ["not_a_real_move"],
+                    "unknown_block_note": "不进入正式内容",
+                    "heading": "直接依据",
+                    "content": "- 第一条给出目标成立的判断依据和适用范围。\n- 第二条说明如何利用这些依据完成后续判断。",
+                },
+                {
+                    "slot": "S1",
+                    "primary_role": "mechanism",
+                    "heading": "机制补充",
+                    "content": "这一段补充解释判断依据之间的因果关系，并明确哪些条件改变时原结论不再成立，帮助学习者避免机械套用。",
+                },
+            ],
+            "questions": [
+                {
+                    "target_slot": "T1",
+                    "prompt": f"第 {index} 题：哪一项符合正文依据？",
+                    "options": ["第一项", "第二项", "第三项"],
+                    "correct": [1],
+                    "explanation": "第二项符合正文明确给出的判断依据。",
+                    "unknown_question_note": "同样不采用",
+                }
+                for index in range(1, 5)
+            ],
+        }
+    )
+
+    block_dump = value.blocks[0].model_dump()
+    assert "kind" not in block_dump
+    assert "teaching_moves" not in block_dump
+    assert "unknown_block_note" not in block_dump
+    assert "unknown_candidate_note" not in value.model_dump()
+    assert "unknown_question_note" not in value.questions[0].model_dump()
+
+    expanded = _expand_lesson_slots(
+        value,
+        {
+            "learningContractVersionId": "contract_1",
+            "targets": [
+                {
+                    "assessmentTargetId": "target_1",
+                    "objective": "根据正文依据完成判断",
+                    "required": True,
+                }
+            ],
+            "knowledgeContext": {"status": "not_applicable", "claims": []},
+            "compositionPolicy": {"recommendedRoles": ["mechanism"]},
+            "feedback": {},
+        },
+    )
+
+    assert expanded.blocks[0].kind == "bullet_list"
+    assert expanded.blocks[0].role == "core_instruction"
+    assert expanded.blocks[0].teaching_moves == ["direct_explanation"]
+    assert expanded.blocks[1].role == "mechanism"
+    assert expanded.blocks[1].teaching_moves == ["explain_mechanism"]
 
 
 def test_empirical_case_role_cannot_hide_an_untyped_or_unsourced_case():

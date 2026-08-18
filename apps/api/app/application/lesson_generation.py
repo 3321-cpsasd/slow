@@ -33,9 +33,9 @@ from ..modules.learning.contracts import require_rank_settleable_contract
 
 
 LESSON_GENERATION_PIPELINE_VERSION = "lesson_generation_v3"
-LESSON_GENERATION_SCHEMA_VERSION = "generated_lesson_composition_candidate_v7"
-LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_composition_prompt_v12"
-LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v14"
+LESSON_GENERATION_SCHEMA_VERSION = "generated_lesson_composition_candidate_v8"
+LESSON_GENERATION_PROMPT_VERSION = "lesson_generation_composition_prompt_v13"
+LESSON_GENERATION_RULE_VERSION = "lesson_candidate_gate_v15"
 LESSON_CONTEXT_POLICY_VERSION = "lesson_generation_context_v2"
 AI_CONTENT_LABEL_SCHEMA_VERSION = "ai_content_label_v2"
 
@@ -110,11 +110,11 @@ class LessonGenerationSpec(LessonSpecModel):
         default=LESSON_GENERATION_PIPELINE_VERSION,
         alias="pipelineVersion",
     )
-    schema_version: Literal["generated_lesson_composition_candidate_v7"] = Field(
+    schema_version: Literal["generated_lesson_composition_candidate_v8"] = Field(
         default=LESSON_GENERATION_SCHEMA_VERSION,
         alias="schemaVersion",
     )
-    prompt_version: Literal["lesson_generation_composition_prompt_v12"] = Field(
+    prompt_version: Literal["lesson_generation_composition_prompt_v13"] = Field(
         default=LESSON_GENERATION_PROMPT_VERSION,
         alias="promptVersion",
     )
