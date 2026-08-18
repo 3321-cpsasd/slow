@@ -371,6 +371,16 @@ const generationFailureMessage = (
     : `${subject}本次没有准备完成，未完成的内容不会发布。请稍后重新准备。`
 );
 
+const shouldWaitForInitialSection = (
+  value: Series,
+  requestedSectionId: string | null,
+) => {
+  const task = value.initializationTask;
+  if (!task || task.status === 'failed') return false;
+  return task.status !== 'succeeded'
+    || (!requestedSectionId && value.progress === 0);
+};
+
 const formatElapsed = (milliseconds: number) => {
   const seconds = Math.max(0, Math.floor(milliseconds / 1000));
   if (seconds < 60) return `${seconds} 秒`;
@@ -1269,13 +1279,7 @@ export default function App() {
     const targetShelf = data?.shelves.find((item) => (
       item.series.some((candidate) => candidate.id === seriesId)
     )) || null;
-    if (
-      value.initializationTask
-      && (
-        value.initializationTask.status !== 'succeeded'
-        || (!requestedSectionId && value.progress === 0)
-      )
-    ) {
+    if (shouldWaitForInitialSection(value, requestedSectionId)) {
       let ready: Awaited<ReturnType<typeof waitForInitialSectionReady>>;
       try {
         ready = await run(
@@ -1357,13 +1361,37 @@ export default function App() {
     setSeries(value);
   };
 
-  const retryInitialSection = async () => {
-    const task = series?.initializationTask;
-    if (!series || !task?.retryable) return;
+  const retryInitialSection = async (targetSeries: Series | null = series) => {
+    const task = targetSeries?.initializationTask;
+    if (!targetSeries || !task?.retryable) return;
     setPreparingInitialSection(true);
+    setError('');
     try {
       const retried = await api.retryLearningTask(task.taskId);
-      const updated = { ...series, initializationTask: retried };
+      const updated = { ...targetSeries, initializationTask: retried };
+      const targetShelf = data?.shelves.find((candidate) => (
+        candidate.series.some((item) => item.id === updated.id)
+      )) || shelf;
+      setData((current) => current ? {
+        ...current,
+        shelves: current.shelves.map((candidate) => ({
+          ...candidate,
+          series: candidate.series.map((item) => item.id === updated.id ? updated : item),
+        })),
+      } : current);
+      if (targetShelf) {
+        setShelf({
+          ...targetShelf,
+          series: targetShelf.series.map((item) => item.id === updated.id ? updated : item),
+        });
+      }
+      if (series?.id !== updated.id || view !== 'learn') {
+        ++routeRequestVersion.current;
+        setDirectoryBookId(updated.books[0]?.id || '');
+        setSection(null);
+        setView('learn');
+        updateBrowserLocation(seriesPath(updated.id), 'push');
+      }
       setSeries(updated);
       void monitorInitialSection(updated);
     } catch (reason) {
@@ -1566,13 +1594,7 @@ export default function App() {
       const restoredShelf = data.shelves.find((item) => (
         item.series.some((candidate) => candidate.id === restoredSeries.id)
       )) || null;
-      if (
-        restoredSeries.initializationTask
-        && (
-          restoredSeries.initializationTask.status !== 'succeeded'
-          || (!route.sectionId && restoredSeries.progress === 0)
-        )
-      ) {
+      if (shouldWaitForInitialSection(restoredSeries, route.sectionId)) {
         const ready = await waitForInitialSectionReady(restoredSeries);
         if (requestVersion !== routeRequestVersion.current) return;
         restoredSeries = ready.series;
@@ -2198,6 +2220,7 @@ export default function App() {
             onOpen={(seriesId, sectionId, bookId) => {
               void openSeries(seriesId, sectionId, 'push', bookId);
             }}
+            onRetryInitialSection={(item) => retryInitialSection(item)}
             onActivateBook={activateBook}
             onRenameSeries={async (seriesId, body) => {
               const value = await run('正在重命名系列…', () => api.renameSeries(seriesId, body));
@@ -2334,23 +2357,20 @@ export default function App() {
                 role={series.initializationTask.status === 'failed' ? 'alert' : 'status'}
               >
                 <span>
-                  第一节准备{{
-                    pending: '等待中',
-                    running: '进行中',
-                    failed: '失败',
-                    succeeded: '已完成',
-                  }[series.initializationTask.status]}：
-                  {series.initializationTask.status === 'failed'
-                    ? generationFailureMessage(series.initializationTask, '第一节内容')
-                    : '准备中'}
+                  <b>{series.initializationTask.status === 'failed'
+                    ? '第一节没有生成完成'
+                    : '正在生成第一节'}</b>
+                  <small>{series.initializationTask.status === 'failed'
+                    ? '目录和学习进度已保留，未通过校验的内容没有发布。可以安全地重新生成。'
+                    : '内容完成后会自动打开。'}</small>
                 </span>
                 {series.initializationTask.retryable && (
                   <button
                     className="secondary-button"
                     disabled={preparingInitialSection}
-                    onClick={retryInitialSection}
+                    onClick={() => void retryInitialSection()}
                   >
-                    {preparingInitialSection ? '正在重试…' : '重新准备第一节'}
+                    {preparingInitialSection ? '正在重新生成…' : '重新生成第一节'}
                   </button>
                 )}
               </div>
@@ -5307,6 +5327,7 @@ function ShelfPage({
   onRename,
   onDeleteShelf,
   onOpen,
+  onRetryInitialSection,
   onActivateBook,
   onRenameSeries,
   onDelete,
@@ -5317,6 +5338,7 @@ function ShelfPage({
   onRename: (body: ShelfRenameInput) => Promise<void>;
   onDeleteShelf: () => Promise<void>;
   onOpen: (id: string, sectionId?: string | null, bookId?: string | null) => void;
+  onRetryInitialSection: (series: Series) => Promise<void>;
   onActivateBook: (book: Book) => Promise<void>;
   onRenameSeries: (id: string, body: SeriesRenameInput) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
@@ -5421,6 +5443,23 @@ function ShelfPage({
                 </button>
               </div>
             </header>
+            {item.initializationTask?.status === 'failed' && (
+              <div className="focused-series-recovery" role="alert">
+                <span>
+                  <b>第一节生成失败</b>
+                  <small>目录已保留，可以从原位置重新生成，不会产生重复教材。</small>
+                </span>
+                {item.initializationTask.retryable && (
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => void onRetryInitialSection(item)}
+                  >
+                    重新生成第一节
+                  </button>
+                )}
+              </div>
+            )}
             <div className="focused-series-book-bay">
               <div className="focused-series-books">
                 {item.books.map((book, bookIndex) => {
