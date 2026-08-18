@@ -1466,6 +1466,15 @@ def test_new_plan_preloads_first_lesson_in_durable_background_task(client):
     completed = wait_for_task(client, task["taskId"])
     assert completed["status"] == "succeeded"
 
+    bootstrap_series = next(
+        item
+        for shelf in client.get("/api/bootstrap").json()["shelves"]
+        for item in shelf["series"]
+        if item["id"] == series["id"]
+    )
+    assert bootstrap_series["initializationTask"]["taskId"] == task["taskId"]
+    assert bootstrap_series["initializationTask"]["status"] == "succeeded"
+
     refreshed = client.get(f"/api/series/{series['id']}").json()
     first_chapter = refreshed["books"][0]["chapters"][0]
     assert first_chapter["generated"] is True

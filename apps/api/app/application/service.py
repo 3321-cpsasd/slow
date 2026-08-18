@@ -383,6 +383,25 @@ class SlowService:
 
     def bootstrap(self):
         view = self.library_reads.bootstrap()
+        initialization_tasks = self.db.execute(
+            select(LearningRun.series_id, LearningTask)
+            .join(
+                LearningRun,
+                LearningRun.id == LearningTask.learning_run_id,
+            )
+            .where(
+                LearningTask.user_id == self.user_id,
+                LearningTask.task_type == "initial_book_preload",
+            )
+            .order_by(LearningTask.created_at.desc())
+        ).all()
+        latest_initialization_task = {}
+        for series_id, task in initialization_tasks:
+            latest_initialization_task.setdefault(series_id, task)
+        for shelf in view["shelves"]:
+            for series in shelf["series"]:
+                task = latest_initialization_task.get(series["id"])
+                series["initializationTask"] = task_view(task) if task else None
         profile = ProfileService(
             self.db,
             self.user_id,
