@@ -95,7 +95,7 @@ const pages: DocPage[] = [
         <div className="doc-card-grid docs-path-grid">
           <a href={docsPath('learning-structure')}><span>学习者</span><b>先认识学习书架</b><p>了解书架、系列、书、章与节，再创建第一个真实目标。</p><i aria-hidden="true">→</i></a>
           <a href={docsPath('textbook-not-plan')}><span>理解项目</span><b>从核心概念开始</b><p>理解教材闭环、Learning Contract、学习证据与内容发布边界。</p><i aria-hidden="true">→</i></a>
-          <a href="https://github.com/3321-cpsasd/slow"><span>参与共建</span><b>进入 GitHub 仓库</b><p>查看源码、架构决策、开发方式与当前项目状态。</p><i aria-hidden="true">↗</i></a>
+          <a href="https://github.com/slow-0731/slow"><span>参与共建</span><b>进入 GitHub 仓库</b><p>查看源码、架构决策、开发方式与当前项目状态。</p><i aria-hidden="true">↗</i></a>
         </div>
         <FigureLoop />
         <h2 id="what-you-get">你最终得到什么</h2>
@@ -546,7 +546,7 @@ export default function DocsApp() {
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5" /><path d="m16 16 4 4" /></svg>
             <span>搜索文档</span><kbd>⌘ K</kbd>
           </button>
-          <a href={STANDALONE_DOCS ? 'https://github.com/3321-cpsasd/slow' : `${PUBLIC_BASE || ''}/`}>
+          <a href={STANDALONE_DOCS ? 'https://github.com/slow-0731/slow' : `${PUBLIC_BASE || ''}/`}>
             {STANDALONE_DOCS ? '查看源码' : '打开 Slow'} <span aria-hidden="true">→</span>
           </a>
           <button className="docs-menu-button" type="button" aria-label="打开文档目录" aria-expanded={menuOpen} onClick={() => setMenuOpen((value) => !value)}>
@@ -576,7 +576,7 @@ export default function DocsApp() {
         </nav>
         <footer>
           <span>当前版本</span><b>Alpha 指南</b>
-          <a href="https://github.com/3321-cpsasd/slow" target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
+          <a href="https://github.com/slow-0731/slow" target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
         </footer>
       </aside>
       {menuOpen && <button className="docs-menu-scrim" type="button" aria-label="关闭文档目录" onClick={() => setMenuOpen(false)} />}

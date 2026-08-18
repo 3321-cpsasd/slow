@@ -11,12 +11,12 @@
 
 <p align="center">
   <a href="https://slow.net.cn">体验产品</a> ·
-  <a href="https://3321-cpsasd.github.io/slow/">阅读文档</a> ·
+  <a href="https://slow-0731.github.io/slow/">阅读文档</a> ·
   <a href="mailto:alpha@slow.net.cn">申请 Alpha 测试</a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/3321-cpsasd/slow/actions/workflows/ci.yml"><img src="https://github.com/3321-cpsasd/slow/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="https://github.com/slow-0731/slow/actions/workflows/ci.yml"><img src="https://github.com/slow-0731/slow/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0--only-4f7666" alt="AGPL-3.0-only"></a>
 </p>
 
@@ -67,7 +67,7 @@ Slow 的目录不是普通文件夹，而是学习语义的一部分：
 - **节**锚定一个核心知识点，是最小学习与验证单元，典型投入为 15–20 分钟。
 - **内容块**用于定义、机制、例子、边界或练习，不构成新的目录和解锁层级。
 
-完整定义和不可破坏的粒度规则见 [PRODUCT_DNA.md](PRODUCT_DNA.md)。面向学习者的解释见[官方文档：核心概念](https://3321-cpsasd.github.io/slow/textbook-not-plan)。
+完整定义和不可破坏的粒度规则见 [PRODUCT_DNA.md](PRODUCT_DNA.md)。面向学习者的解释见[官方文档：核心概念](https://slow-0731.github.io/slow/textbook-not-plan)。
 
 ## 当前学习体验
 
@@ -86,10 +86,10 @@ Slow 目前处于邀请制 Alpha 阶段。你可以访问 [slow.net.cn](https://
 
 ### 学习者与首次访问者
 
-- [官方使用指南](https://3321-cpsasd.github.io/slow/)：了解产品、开始第一次学习并查看核心概念。
-- [为什么是教材，而不是计划](https://3321-cpsasd.github.io/slow/textbook-not-plan)：理解 Slow 的基本产品判断。
-- [学习证据与个性化](https://3321-cpsasd.github.io/slow/evidence-and-personalization)：了解后续内容如何适应真实学习结果。
-- [AI、Demo 与可信边界](https://3321-cpsasd.github.io/slow/ai-content)：了解系统能够和不能保证什么。
+- [官方使用指南](https://slow-0731.github.io/slow/)：了解产品、开始第一次学习并查看核心概念。
+- [为什么是教材，而不是计划](https://slow-0731.github.io/slow/textbook-not-plan)：理解 Slow 的基本产品判断。
+- [学习证据与个性化](https://slow-0731.github.io/slow/evidence-and-personalization)：了解后续内容如何适应真实学习结果。
+- [AI、Demo 与可信边界](https://slow-0731.github.io/slow/ai-content)：了解系统能够和不能保证什么。
 
 ### 开发者与贡献者
 
@@ -219,7 +219,7 @@ Slow is an AI-native personal learning system that turns a learning goal into st
 The core loop is: **goal → personalized textbook → section-level study → assessment → remediation or unlock → durable learning evidence**. Later content uses that evidence to avoid unnecessary repetition and provide scaffolding where it is needed.
 
 - Product: [slow.net.cn](https://slow.net.cn)
-- User documentation: [3321-cpsasd.github.io/slow](https://3321-cpsasd.github.io/slow/)
+- User documentation: [slow-0731.github.io/slow](https://slow-0731.github.io/slow/)
 - Alpha access: [alpha@slow.net.cn](mailto:alpha@slow.net.cn)
 - Product contract: [PRODUCT_DNA.md](PRODUCT_DNA.md)
 - Architecture decisions: [docs/decisions](docs/decisions/README.md)
