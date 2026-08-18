@@ -43,6 +43,28 @@ def test_deployments_only_consume_successful_verified_main_commits():
     assert "publish-images" not in demo
 
 
+def test_production_release_uses_restricted_deploy_gateway():
+    production = _workflow("production-release.yml")
+    gateway = (
+        PROJECT_ROOT / "deploy/scripts/ci-gateway.sh"
+    ).read_text(encoding="utf-8")
+
+    assert '"deploy $RELEASE_SHA"' in production
+    assert "scp -P" not in production
+    assert "-o BatchMode=yes" in production
+    assert "-o IdentitiesOnly=yes" in production
+    assert "-o StrictHostKeyChecking=yes" in production
+    assert 'ssh-keygen -F "$known_host"' in production
+
+    assert "SSH_ORIGINAL_COMMAND" in gateway
+    assert 'if [ "$#" -ne 2 ] || [ "$1" != deploy ]' in gateway
+    assert "slow-0731/slow" in gateway
+    assert "repos/$repository/commits/main" in gateway
+    assert "docker login ghcr.io" in gateway
+    assert '"$deploy_root/remote-deploy.sh"' in gateway
+    assert "remote-build-deploy.sh" not in gateway
+
+
 def test_login_rate_limit_uses_path_without_query_string():
     nginx_config = (PROJECT_ROOT / "deploy/nginx/default.conf").read_text(
         encoding="utf-8"

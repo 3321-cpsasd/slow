@@ -83,7 +83,6 @@ jobs:
       ECS_SSH_KEY: ${{ secrets.ECS_SSH_KEY }}
       ECS_KNOWN_HOSTS: ${{ secrets.ECS_KNOWN_HOSTS }}
       GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      WEB_ORIGIN: ${{ vars.WEB_ORIGIN }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -91,35 +90,31 @@ jobs:
       - name: Configure SSH
         shell: bash
         run: |
+          test -n "$ECS_HOST"
+          test -n "$ECS_PORT"
+          test -n "$ECS_USER"
+          test -n "$ECS_SSH_KEY"
+          test -n "$ECS_KNOWN_HOSTS"
           install -m 700 -d "$HOME/.ssh"
           printf '%s\n' "$ECS_SSH_KEY" > "$HOME/.ssh/ecs_key"
           chmod 600 "$HOME/.ssh/ecs_key"
           printf '%s\n' "$ECS_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
           chmod 600 "$HOME/.ssh/known_hosts"
-      - name: Upload deployment definition
-        shell: bash
-        run: |
-          scp -P "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
-            deploy/compose.prod.yml \
-            "$ECS_USER@$ECS_HOST:/opt/slow/compose.prod.yml"
-          scp -P "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
-            deploy/compose.sqlite-rollback.yml \
-            "$ECS_USER@$ECS_HOST:/opt/slow/compose.sqlite-rollback.yml"
-          scp -P "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
-            deploy/scripts/remote-deploy.sh \
-            "$ECS_USER@$ECS_HOST:/opt/slow/remote-deploy.sh"
-          scp -P "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
-            deploy/scripts/create-demo-user.sh \
-            "$ECS_USER@$ECS_HOST:/opt/slow/create-demo-user.sh"
-          scp -P "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
-            deploy/scripts/cutover-sqlite-to-postgres.sh \
-            "$ECS_USER@$ECS_HOST:/opt/slow/cutover-sqlite-to-postgres.sh"
+          ssh-keygen -y -f "$HOME/.ssh/ecs_key" >/dev/null
+          known_host="$ECS_HOST"
+          if [ "$ECS_PORT" != 22 ]; then
+            known_host="[$ECS_HOST]:$ECS_PORT"
+          fi
+          ssh-keygen -F "$known_host" -f "$HOME/.ssh/known_hosts" >/dev/null
       - name: Pull and deploy release
         shell: bash
         run: |
-          printf '%s' "$GHCR_TOKEN" | ssh -p "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
+          {
+            printf '%s\n' "$GITHUB_ACTOR"
+            printf '%s' "$GHCR_TOKEN"
+          } | ssh -p "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
             "$ECS_USER@$ECS_HOST" \
-            "docker login ghcr.io -u '$GITHUB_ACTOR' --password-stdin"
-          ssh -p "$ECS_PORT" -i "$HOME/.ssh/ecs_key" \
-            "$ECS_USER@$ECS_HOST" \
-            "chmod 700 /opt/slow/remote-deploy.sh /opt/slow/create-demo-user.sh /opt/slow/cutover-sqlite-to-postgres.sh && APP_VERSION='$RELEASE_SHA' REGISTRY='ghcr.io' IMAGE_NAME='$GITHUB_REPOSITORY' WEB_ORIGIN='$WEB_ORIGIN' /opt/slow/remote-deploy.sh"
+            "deploy $RELEASE_SHA"
