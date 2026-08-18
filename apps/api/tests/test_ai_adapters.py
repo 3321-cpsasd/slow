@@ -584,8 +584,8 @@ def test_openai_chat_lesson_v2_uses_exactly_one_physical_call():
     assert calls[0]["max_tokens"] == 12000
     request_payload = json.loads(calls[0]["messages"][1]["content"])
     assert "content 始终是可被 GFM 正确解析的 Markdown" in calls[0]["messages"][0]["content"]
-    assert "kind 只是主要展示方式的提示" in calls[0]["messages"][0]["content"]
-    assert "不得为了匹配 kind 或职责人为拆块" in calls[0]["messages"][0]["content"]
+    assert "服务端会从实际内容推导展示方式" in calls[0]["messages"][0]["content"]
+    assert "不得输出 kind、teaching_moves" in calls[0]["messages"][0]["content"]
     assert "若两个以上选项成立" in calls[0]["messages"][0]["content"]
     assert "选项 1/2/3/4" in calls[0]["messages"][0]["content"]
     assert [

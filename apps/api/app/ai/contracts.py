@@ -7,6 +7,18 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class ProviderCandidateModel(BaseModel):
+    """Model-authored candidate data; unknown fields have no authority.
+
+    Provider payloads are projected into an explicit allowlist before they can
+    reach the strict internal publication models. Ignoring an unknown field is
+    therefore safer than making an otherwise valid lesson fail because a model
+    added explanatory metadata that the service never reads.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+
 class PlanChapter(StrictModel):
     title: str
     objective: str
@@ -795,7 +807,7 @@ class GeneratedLessonCandidate(StrictModel):
         return self
 
 
-class GeneratedLessonSlotBlock(StrictModel):
+class GeneratedLessonSlotBlock(ProviderCandidateModel):
     """Minimal model-owned lesson block; authoritative bindings are server-derived."""
 
     slot: str = Field(
@@ -804,9 +816,10 @@ class GeneratedLessonSlotBlock(StrictModel):
             r"PREREQUISITE|TRANSITION|S[1-9][0-9]?)$"
         )
     )
-    kind: LESSON_BLOCK_KINDS
-    primary_role: LESSON_BLOCK_ROLES = "example"
-    teaching_moves: list[LESSON_TEACHING_MOVES] = Field(default_factory=list, max_length=8)
+    # CORE and fixed-slot roles are server-owned. Support blocks still declare
+    # their semantic role because S1/S2 are not role-specific slots; expansion
+    # validates that declaration against the frozen server slot plan.
+    primary_role: str = ""
     case_kind: LESSON_CASE_KINDS = ""
     case_key: str = Field(
         default="", pattern=r"^$|^[A-Za-z][A-Za-z0-9_-]{0,63}$"
@@ -822,7 +835,7 @@ class GeneratedLessonSlotBlock(StrictModel):
         return self
 
 
-class GeneratedLessonSlotContentCandidate(StrictModel):
+class GeneratedLessonSlotContentCandidate(ProviderCandidateModel):
     """Lesson body candidate authored before any assessment item exists."""
 
     decision: Literal["candidate", "replan_required"] = "candidate"
@@ -852,7 +865,7 @@ class GeneratedLessonSlotContentCandidate(StrictModel):
         return self
 
 
-class GeneratedLessonSlotQuestion(StrictModel):
+class GeneratedLessonSlotQuestion(ProviderCandidateModel):
     """Legacy combined-call question; new item authoring uses a narrower schema."""
 
     target_slot: str = Field(pattern=r"^T[1-8]$")
@@ -1005,7 +1018,7 @@ class LessonQuestionAdjudicationBatch(StrictModel):
         return self
 
 
-class GeneratedLessonSlotCandidate(StrictModel):
+class GeneratedLessonSlotCandidate(ProviderCandidateModel):
     """Compact provider contract used before deterministic server expansion."""
 
     decision: Literal["candidate", "replan_required"] = "candidate"

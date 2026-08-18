@@ -178,7 +178,7 @@ def test_option_position_dependent_explanation_is_rejected(explanation):
     assert raised.value.location == {
         "itemKey": "q1",
         "rule": "positional_option_reference",
-        "schemaVersion": "generated_lesson_composition_candidate_v7",
+        "schemaVersion": "generated_lesson_composition_candidate_v8",
     }
 
 
@@ -216,7 +216,7 @@ def test_long_text_requires_authored_paragraph_breaks():
         "blockKey": "b1",
         "kind": "text",
         "rule": "long_single_paragraph",
-        "schemaVersion": "generated_lesson_composition_candidate_v7",
+        "schemaVersion": "generated_lesson_composition_candidate_v8",
         "characterCount": len(value.blocks[0].content),
         "paragraphCount": 1,
     }
@@ -286,7 +286,7 @@ def test_unclosed_markdown_code_fence_is_rejected_before_publication():
         "blockKey": "b1",
         "kind": "code",
         "rule": "unclosed_code_fence",
-        "schemaVersion": "generated_lesson_composition_candidate_v7",
+        "schemaVersion": "generated_lesson_composition_candidate_v8",
     }
 
 
@@ -817,7 +817,7 @@ def test_legacy_content_never_claims_current_boundary_validation():
         legacy = client.get(f"/api/sections/{section_id}").json()
         assert legacy["content"]["boundaryValidation"] == {
             "status": "legacy",
-            "ruleVersion": "lesson_candidate_gate_v14",
+            "ruleVersion": "lesson_candidate_gate_v15",
         }
 
 
