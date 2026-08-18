@@ -4660,6 +4660,15 @@ button:disabled { cursor: not-allowed; }
 .content-markdown th { background: #edf3ef; color: var(--reader-green); font-weight: 750; }
 .content-markdown tbody tr:nth-child(even) { background: #fafbf8; }
 .content-markdown a { color: var(--green); text-underline-offset: 3px; }
+.content-markdown .katex-display {
+  margin: 22px 0;
+  padding: 4px 0 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  text-align: center;
+}
+.content-markdown .katex-display > .katex { min-width: max-content; }
+.content-markdown .katex-error { color: inherit; font-family: var(--font-mono); }
 .content-block pre { margin: 0; white-space: pre-wrap; font: inherit; color: #414741; line-height: 1.95; }
 .content-block .code-block { padding: 18px; border-radius: 9px; background: #17211b; color: #dbe8df; font-family: var(--font-mono); font-size: 12px; line-height: 1.65; overflow-x: auto; }
 .content-block .code-block code { font: inherit; }

@@ -1,5 +1,8 @@
 import ReactMarkdown from 'react-markdown';
+import rehypeKatex from 'rehype-katex';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import 'katex/dist/katex.min.css';
 import type { Block } from '../../model/types';
 import { LessonBlockTools, type ExplanationOption, type ExplanationStyle } from './LessonBlockTools';
 
@@ -82,16 +85,51 @@ export function LessonBlockBody({ block, content = block.content }: { block: Blo
   if (block.kind === 'code' && !hasBalancedCodeFences(content)) {
     return <pre className="code-block" data-annotation-body><code>{content}</code></pre>;
   }
-  const markdown = block.kind === 'table'
+  const normalizedMarkdown = block.kind === 'table'
     ? normalizeTableMarkdown(content)
     : block.kind === 'text'
       ? normalizeLessonTextMarkdown(content)
       : content.replace(/\r\n?/g, '\n').trim();
+  const markdown = normalizeStandaloneDisplayMathMarkdown(normalizedMarkdown);
   return (
     <div className={`content-markdown kind-${block.kind}`} data-annotation-body>
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: 'ignore' }]]}
+      >
+        {markdown}
+      </ReactMarkdown>
     </div>
   );
+}
+
+function normalizeStandaloneDisplayMathMarkdown(content: string): string {
+  const output: string[] = [];
+  let openingFence: { marker: '`' | '~'; length: number } | null = null;
+  for (const line of content.split('\n')) {
+    const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (fenceMatch) {
+      const marker = fenceMatch[1][0] as '`' | '~';
+      if (!openingFence) {
+        openingFence = { marker, length: fenceMatch[1].length };
+      } else if (
+        marker === openingFence.marker
+        && fenceMatch[1].length >= openingFence.length
+        && fenceMatch[2].trim() === ''
+      ) {
+        openingFence = null;
+      }
+      output.push(line);
+      continue;
+    }
+    const standaloneMath = openingFence ? null : line.match(/^\s*\$\$(.+)\$\$\s*$/);
+    if (standaloneMath) {
+      output.push('$$', standaloneMath[1].trim(), '$$');
+    } else {
+      output.push(line);
+    }
+  }
+  return output.join('\n');
 }
 
 function hasBalancedCodeFences(content: string): boolean {
