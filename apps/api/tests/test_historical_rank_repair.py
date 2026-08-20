@@ -11,14 +11,19 @@ from app.infrastructure.tables import (
     AssessmentTargetRankIdentityDecision,
     Base,
     Book,
+    CapabilityStateProjection,
     Chapter,
+    Concept,
+    ConceptRevision,
     ContentVersion,
     EvidenceQualificationEvent,
+    IdentityPublicationDecision,
     KnowledgeNodeStateProjection,
     KnowledgeStateProjection,
     LearningPlan,
     LearningContractAssessmentTarget,
     LearningContractVersion,
+    LearningObjective,
     QuizSet,
     Section,
     SectionAssessmentTarget,
@@ -30,6 +35,10 @@ from app.infrastructure.tables import (
 from app.modules.learning.assessment import QUALIFICATION_RULE_VERSION
 from app.modules.learning.historical_rank_repair import (
     repair_published_historical_rank_identities,
+)
+from app.modules.learning.historical_capability_repair import (
+    HISTORICAL_CAPABILITY_IDENTITY_RULE_VERSION,
+    repair_published_historical_capability_identities,
 )
 from app.modules.learning.knowledge_map import KnowledgeMapService
 
@@ -46,6 +55,7 @@ def _seed_published_legacy_lesson(
     bind_contract: bool = True,
     quiz_has_target: bool = True,
     include_observation: bool = True,
+    stable_identity: bool = False,
 ) -> None:
     db.add(User(id="user_history", name="历史学习者"))
     db.add(
@@ -108,14 +118,57 @@ def _seed_published_legacy_lesson(
             objectives_json='["解释历史证据如何进入段位"]',
         )
     )
+    if stable_identity:
+        db.add(
+            Concept(
+                id="concept_history",
+                namespace="route:series_history",
+                concept_key="history",
+                canonical_name="历史证据",
+                status="active",
+                origin="route_scoped",
+            )
+        )
+        db.add(
+            ConceptRevision(
+                id="concept_revision_history",
+                concept_id="concept_history",
+                revision=1,
+                label="历史证据",
+                definition="历史证据如何进入段位",
+                scope_json="{}",
+                boundaries_json="[]",
+                provenance_mode="route_scoped",
+                verification_status="route_scoped",
+            )
+        )
+        db.add(
+            LearningObjective(
+                id="objective_history",
+                namespace="route:series_history",
+                objective_key="history",
+                statement="解释历史证据如何进入段位",
+                cognitive_verb="explain",
+                outcome_type="knowledge",
+                provenance_mode="route_scoped",
+                verification_status="route_scoped",
+                status="active",
+            )
+        )
     db.add(
         AssessmentTarget(
             id="target_history",
+            concept_revision_id=(
+                "concept_revision_history" if stable_identity else None
+            ),
+            learning_objective_id=("objective_history" if stable_identity else None),
             objective_key="legacy-history",
             objective_statement="解释历史证据如何进入段位",
             dimension="recognition",
             target_depth="standard",
-            identity_status="legacy_provisional",
+            identity_status=(
+                "route_scoped_knowledge" if stable_identity else "legacy_provisional"
+            ),
             status="active",
         )
     )
@@ -213,6 +266,7 @@ def _seed_published_legacy_lesson(
         "mastery": "eligible_grouped",
         "retention": "ineligible",
         "rank": "eligible_grouped",
+        "capability": "eligible_grouped",
     }.items():
         db.add(
             EvidenceQualificationEvent(
@@ -301,3 +355,51 @@ def test_repair_refuses_observed_quiz_without_target_ids() -> None:
         assert error.value.code == (
             "HISTORICAL_RANK_REPAIR_EVIDENCE_QUIZ_INVALID"
         )
+
+
+def test_capability_repair_backfills_audits_and_preserves_learning_evidence() -> None:
+    with _session() as db:
+        _seed_published_legacy_lesson(db, stable_identity=True)
+
+        report = repair_published_historical_capability_identities(db)
+        target = db.get(AssessmentTarget, "target_history")
+        audit = db.scalar(
+            select(IdentityPublicationDecision).where(
+                IdentityPublicationDecision.rule_version
+                == HISTORICAL_CAPABILITY_IDENTITY_RULE_VERSION
+            )
+        )
+        state = db.scalar(select(CapabilityStateProjection))
+        observation = db.scalar(
+            select(AssessmentObservation).where(
+                AssessmentObservation.id == "observation_history"
+            )
+        )
+
+        assert report["targetsBackfilled"] == 1
+        assert report["auditDecisionsCreated"] == 1
+        assert report["historicalObservationsPreserved"] == 1
+        assert report["learnerProjectionsChanged"] == 0
+        assert target.capability_revision_id
+        assert target.capability_stage_criterion_id
+        assert audit.subject_kind == "target_capability_repair"
+        assert audit.resolved_revision_id == target.capability_revision_id
+        assert state is None
+        assert observation.assessment_target_id == "target_history"
+
+        repeated = repair_published_historical_capability_identities(db)
+        assert repeated["targetsBackfilled"] == 0
+        assert repeated["targetsAlreadyBound"] == 1
+        assert repeated["auditDecisionsCreated"] == 0
+        assert len(db.scalars(select(IdentityPublicationDecision)).all()) == 1
+
+
+def test_capability_repair_fails_closed_without_stable_identity() -> None:
+    with _session() as db:
+        _seed_published_legacy_lesson(db)
+
+        with pytest.raises(AppError) as error:
+            repair_published_historical_capability_identities(db)
+
+        assert error.value.code == "HISTORICAL_CAPABILITY_REPAIR_IDENTITY_MISSING"
+        assert db.scalar(select(IdentityPublicationDecision)) is None

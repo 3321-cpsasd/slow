@@ -1341,7 +1341,7 @@ class PublishedCapabilityIdentity(Base):
 
 
 class IdentityPublicationDecision(Base):
-    """Append-only human-reviewed publication, reuse, revision, or conflict decision."""
+    """Append-only reviewed or system-maintained identity decision."""
 
     __tablename__ = "identity_publication_decisions"
     __table_args__ = (
